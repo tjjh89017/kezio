@@ -164,6 +164,13 @@ jobs:
             | INSTALL_K3S_VERSION="${K3S_VERSION}" sh -s - --write-kubeconfig-mode 644
           echo "KUBECONFIG=/etc/rancher/k3s/k3s.yaml" >> "$GITHUB_ENV"
           export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+          # k3s registers its node a moment after the installer returns; wait
+          # for the node object to exist before waiting on its Ready condition,
+          # since `kubectl wait` errors out immediately on zero matches.
+          for _ in $(seq 1 60); do
+            [ "$(kubectl get nodes --no-headers 2>/dev/null | wc -l)" -ge 1 ] && break
+            sleep 2
+          done
           kubectl wait --for=condition=Ready node --all --timeout=120s
           kubectl get nodes -o wide
 
