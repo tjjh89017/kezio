@@ -266,23 +266,29 @@ const (
 	MachineStateError = "Error"
 )
 
-// MachineProvisionedImage records one deployed image and the disk it was
-// written to.
+// MachineProvisionedImage records one image and the disk resolved to
+// receive it: the disk matched from this image's targetDisk hints against
+// the reported hardware inventory. The controller records this before the
+// image is written, so TargetDisk names the intended disk from the start
+// of Provisioning, not only once the deployment finishes.
 type MachineProvisionedImage struct {
-	// ImageRef names the Image that was deployed.
+	// ImageRef names the Image being deployed.
 	ImageRef NameRef `json:"imageRef"`
-	// TargetDisk is the resolved device path the image was written to.
+	// TargetDisk is the resolved device path the image is written to.
 	// +optional
 	TargetDisk string `json:"targetDisk,omitempty"`
 }
 
-// MachineProvisioningStatus records what was actually deployed. A
+// MachineProvisioningStatus records the resolved deployment: which image
+// goes to which disk. The controller writes it once, at the start of the
+// Provisioning phase, after it resolves each image's target-disk hints
+// against the reported hardware inventory and before it attempts any
+// deploy action; a successful deployment reconfirms the same disks. A
 // difference between spec.imageRef and status.provisioning.image (or
 // between spec.dataImages and status.provisioning.dataImages) is the
 // deployment trigger, compared purely by name: an Image is immutable
 // (its spec is create-only), so no generation or content comparison is
-// necessary. The controller only updates this status after a successful
-// deployment.
+// necessary.
 type MachineProvisioningStatus struct {
 	// Image records the deployed OS image and its target disk.
 	// +optional

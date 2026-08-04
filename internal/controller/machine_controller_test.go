@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -278,6 +279,180 @@ var _ = Describe("Machine Controller", func() {
 			Expect(recovered.Status.State).To(Equal(keziov1alpha1.MachineStateInspecting))
 			Expect(recovered.Status.ErrorCount).To(Equal(int32(0)))
 			Expect(recovered.Status.ErrorMessage).To(BeEmpty())
+		})
+	})
+
+	Context("resolving the target disk", func() {
+		// bothSSD gives the machine two same-shaped disks, so a hint
+		// that only says "not spinning" cannot tell them apart.
+		bothSSD := func(machineName string) *keziov1alpha1.MachineHardwareStatus {
+			rotational := false
+			return &keziov1alpha1.MachineHardwareStatus{
+				Disks: []keziov1alpha1.MachineHardwareDisk{
+					{
+						DeviceName:   "/dev/nvme0n1",
+						SerialNumber: fmt.Sprintf("%s-disk0", machineName),
+						Rotational:   &rotational,
+						SizeBytes:    256 * 1024 * 1024 * 1024,
+					},
+					{
+						DeviceName:   "/dev/nvme1n1",
+						SerialNumber: fmt.Sprintf("%s-disk1", machineName),
+						Rotational:   &rotational,
+						SizeBytes:    256 * 1024 * 1024 * 1024,
+					},
+				},
+				Nics: []keziov1alpha1.MachineHardwareNIC{
+					{Name: "eth0", MACAddress: "aa:bb:cc:dd:ee:01"},
+				},
+				MemoryBytes: 16 * 1024 * 1024 * 1024,
+				CPUCount:    4,
+			}
+		}
+
+		It("resolves a serial-number hint and records status.provisioning.targetDisk before Provision runs", func() {
+			const resourceName = "diskmatch-machine"
+			namespace := "default"
+			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+			nn := types.NamespacedName{Namespace: namespace, Name: resourceName}
+
+			image := &keziov1alpha1.Image{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-image", Namespace: namespace},
+				Spec: keziov1alpha1.ImageSpec{
+					Source: keziov1alpha1.ImageSource{Format: keziov1alpha1.ImageFormatQCOW2},
+				},
+			}
+			Expect(k8sClient.Create(ctx, image)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, image)).To(Succeed()) })
+
+			spec := newTestMachineSpec(resourceName)
+			spec.ImageRef = &keziov1alpha1.NameRef{Name: image.Name}
+			spec.TargetDisk = &keziov1alpha1.TargetDiskHints{
+				SerialNumber: fmt.Sprintf("%s-disk1", resourceName),
+			}
+			machine := &keziov1alpha1.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec:       spec,
+			}
+			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+			DeferCleanup(func() {
+				m := &keziov1alpha1.Machine{}
+				if err := k8sClient.Get(ctx, key, m); err == nil {
+					Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+				}
+			})
+
+			// Provision itself is made to fail (an unrelated, injected
+			// failure) so the reconcile stops right after resolution,
+			// letting the test observe status.provisioning.targetDisk
+			// independent of whether the deploy action it names ever
+			// succeeds.
+			provisionFails := true
+			factory := deployer.NewFactory()
+			factory.Fail = func(m types.NamespacedName, phase deployer.Phase) string {
+				if m == nn && phase == deployer.PhaseProvision && provisionFails {
+					return "injected provision failure"
+				}
+				return ""
+			}
+
+			r := &MachineReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				DeployerFactory: factory.New,
+			}
+
+			By("reconciling to Available")
+			result, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateAvailable
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("overriding the fake single-disk inventory with two candidate disks")
+			result.Status.Hardware = bothSSD(resourceName)
+			Expect(k8sClient.Status().Update(ctx, result)).To(Succeed())
+
+			By("reconciling into Provisioning; resolution succeeds and is recorded even though Provision then fails")
+			result, err = reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateError
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Status.State).To(Equal(keziov1alpha1.MachineStateError))
+			Expect(result.Status.ErrorMessage).To(Equal("injected provision failure"))
+			Expect(result.Status.Provisioning).NotTo(BeNil())
+			Expect(result.Status.Provisioning.Image).NotTo(BeNil())
+			Expect(result.Status.Provisioning.Image.TargetDisk).To(Equal("/dev/nvme1n1"))
+
+			By("clearing the injected failure so Provision can complete")
+			provisionFails = false
+			result, err = reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateProvisioned
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Status.State).To(Equal(keziov1alpha1.MachineStateProvisioned))
+		})
+
+		It("moves to Error with a clear message when the hints match more than one disk", func() {
+			const resourceName = "diskmatch-conflict-machine"
+			namespace := "default"
+			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+
+			image := &keziov1alpha1.Image{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-image", Namespace: namespace},
+				Spec: keziov1alpha1.ImageSpec{
+					Source: keziov1alpha1.ImageSource{Format: keziov1alpha1.ImageFormatQCOW2},
+				},
+			}
+			Expect(k8sClient.Create(ctx, image)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, image)).To(Succeed()) })
+
+			spec := newTestMachineSpec(resourceName)
+			spec.ImageRef = &keziov1alpha1.NameRef{Name: image.Name}
+			// No hint at all: with two reported disks this is ambiguous
+			// on its own, exercising the "no hint, multiple disks" rule
+			// as well as the general ambiguous-match error path.
+			machine := &keziov1alpha1.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec:       spec,
+			}
+			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+			DeferCleanup(func() {
+				m := &keziov1alpha1.Machine{}
+				if err := k8sClient.Get(ctx, key, m); err == nil {
+					Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+				}
+			})
+
+			r := &MachineReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				DeployerFactory: deployer.NewFactory().New,
+			}
+
+			By("reconciling to Available")
+			result, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateAvailable
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("overriding the fake single-disk inventory with two indistinguishable disks")
+			result.Status.Hardware = bothSSD(resourceName)
+			Expect(k8sClient.Status().Update(ctx, result)).To(Succeed())
+
+			By("reconciling into Provisioning, which fails to resolve a unique disk")
+			result, err = reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateError
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Status.State).To(Equal(keziov1alpha1.MachineStateError))
+			Expect(result.Status.ErrorMessage).To(ContainSubstring("targetDisk hint is required"))
+			Expect(result.Status.ErrorCount).To(BeNumerically(">=", 1))
+			readyCond := apimeta.FindStatusCondition(result.Status.Conditions, keziov1alpha1.ConditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Reason).To(Equal(reasonProvisionFailed))
+
+			By("never having recorded a resolved target disk, since the match failed before any deploy action")
+			Expect(result.Status.Provisioning).To(BeNil())
 		})
 	})
 })

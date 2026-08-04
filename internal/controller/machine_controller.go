@@ -31,6 +31,7 @@ import (
 
 	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
 	"github.com/tjjh89017/kezio/internal/deployer"
+	"github.com/tjjh89017/kezio/internal/diskmatch"
 )
 
 // Ready condition reasons used while a Machine progresses through its
@@ -180,10 +181,15 @@ func (r *MachineReconciler) reconcileAvailable(ctx context.Context, machine *kez
 	return r.reconcilePower(ctx, machine, dep)
 }
 
-// reconcileProvisioning drives the deployment plan, polling Provision until
-// it completes, then records what was deployed and drives Provisioning ->
-// Provisioned.
+// reconcileProvisioning resolves the target disk for the OS image and every
+// data image against the reported hardware inventory, then drives the
+// deployment plan, polling Provision until it completes, then records what
+// was deployed and drives Provisioning -> Provisioned.
 func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *keziov1alpha1.Machine, dep deployer.Deployer) (ctrl.Result, error) {
+	if err := r.resolveTargetDisks(ctx, machine); err != nil {
+		return r.recordPhaseError(ctx, machine, reasonProvisionFailed, err.Error())
+	}
+
 	data := &deployer.ProvisionData{
 		ImageRef:   machine.Spec.ImageRef,
 		TargetDisk: machine.Spec.TargetDisk,
@@ -353,6 +359,105 @@ func (r *MachineReconciler) needsProvisioning(machine *keziov1alpha1.Machine) bo
 	}
 
 	return false
+}
+
+// resolveTargetDisks matches the machine's reported hardware inventory
+// against the OS image's targetDisk hints and every dataImages[] entry's
+// own hints, requires every resolved disk to be distinct, and records the
+// result into status.provisioning before any deploy action is attempted
+// (before dep.Provision is called). A match or distinct-disk error stops
+// the deployment here; the caller moves the machine to the Error state
+// with the returned message.
+//
+// It is idempotent: once status.provisioning already names the same image
+// references the spec currently asks for, it does nothing, so repeated
+// polls of an in-progress Provision do not re-resolve or rewrite status on
+// every reconcile.
+func (r *MachineReconciler) resolveTargetDisks(ctx context.Context, machine *keziov1alpha1.Machine) error {
+	if r.provisioningStatusResolved(machine) {
+		return nil
+	}
+
+	var disks []keziov1alpha1.MachineHardwareDisk
+	if machine.Status.Hardware != nil {
+		disks = machine.Status.Hardware.Disks
+	}
+
+	var selections []diskmatch.Selection
+
+	var osDisk *keziov1alpha1.MachineHardwareDisk
+	if machine.Spec.ImageRef != nil {
+		resolved, err := diskmatch.Match(disks, machine.Spec.TargetDisk)
+		if err != nil {
+			return fmt.Errorf("resolving target disk for the OS image: %w", err)
+		}
+		osDisk = resolved
+		selections = append(selections, diskmatch.Selection{Label: "OS image", Disk: osDisk})
+	}
+
+	dataDisks := make([]*keziov1alpha1.MachineHardwareDisk, len(machine.Spec.DataImages))
+	for i, dataImage := range machine.Spec.DataImages {
+		resolved, err := diskmatch.Match(disks, dataImage.TargetDisk)
+		if err != nil {
+			return fmt.Errorf("resolving target disk for dataImages[%d] (%s): %w", i, dataImage.ImageRef.Name, err)
+		}
+		dataDisks[i] = resolved
+		selections = append(selections, diskmatch.Selection{Label: fmt.Sprintf("dataImages[%d]", i), Disk: resolved})
+	}
+
+	if err := diskmatch.CheckDistinct(selections); err != nil {
+		return err
+	}
+
+	status := &keziov1alpha1.MachineProvisioningStatus{}
+	if osDisk != nil {
+		status.Image = &keziov1alpha1.MachineProvisionedImage{
+			ImageRef:   *machine.Spec.ImageRef,
+			TargetDisk: osDisk.DeviceName,
+		}
+	}
+	for i, dataImage := range machine.Spec.DataImages {
+		status.DataImages = append(status.DataImages, keziov1alpha1.MachineProvisionedImage{
+			ImageRef:   dataImage.ImageRef,
+			TargetDisk: dataDisks[i].DeviceName,
+		})
+	}
+
+	machine.Status.Provisioning = status
+	return r.Status().Update(ctx, machine)
+}
+
+// provisioningStatusResolved reports whether machine.Status.Provisioning
+// already names the same OS image reference and the same set of
+// dataImages references the spec currently asks for. It does not check
+// the recorded target disks themselves: the hints and the inventory that
+// produced them do not change while a machine sits in Provisioning, so a
+// matching set of image references is enough to know resolution already
+// ran for this deployment attempt.
+func (r *MachineReconciler) provisioningStatusResolved(machine *keziov1alpha1.Machine) bool {
+	status := machine.Status.Provisioning
+	if status == nil {
+		return false
+	}
+
+	if machine.Spec.ImageRef != nil {
+		if status.Image == nil || status.Image.ImageRef != *machine.Spec.ImageRef {
+			return false
+		}
+	} else if status.Image != nil {
+		return false
+	}
+
+	if len(status.DataImages) != len(machine.Spec.DataImages) {
+		return false
+	}
+	for i, dataImage := range machine.Spec.DataImages {
+		if status.DataImages[i].ImageRef != dataImage.ImageRef {
+			return false
+		}
+	}
+
+	return true
 }
 
 // buildProvisioningStatus records what Provision actually deployed: each

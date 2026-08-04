@@ -520,11 +520,14 @@ spec:
                       its target disk.
                     items:
                       description: |-
-                        MachineProvisionedImage records one deployed image and the disk it was
-                        written to.
+                        MachineProvisionedImage records one image and the disk resolved to
+                        receive it: the disk matched from this image's targetDisk hints against
+                        the reported hardware inventory. The controller records this before the
+                        image is written, so TargetDisk names the intended disk from the start
+                        of Provisioning, not only once the deployment finishes.
                       properties:
                         imageRef:
-                          description: ImageRef names the Image that was deployed.
+                          description: ImageRef names the Image being deployed.
                           properties:
                             name:
                               type: string
@@ -535,7 +538,7 @@ spec:
                           type: object
                         targetDisk:
                           description: TargetDisk is the resolved device path the
-                            image was written to.
+                            image is written to.
                           type: string
                       required:
                       - imageRef
@@ -546,7 +549,7 @@ spec:
                       disk.
                     properties:
                       imageRef:
-                        description: ImageRef names the Image that was deployed.
+                        description: ImageRef names the Image being deployed.
                         properties:
                           name:
                             type: string
@@ -557,7 +560,7 @@ spec:
                         type: object
                       targetDisk:
                         description: TargetDisk is the resolved device path the image
-                          was written to.
+                          is written to.
                         type: string
                     required:
                     - imageRef
