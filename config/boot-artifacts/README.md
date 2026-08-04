@@ -40,3 +40,8 @@ Publishing a new release is a maintainer action (push a `v*` tag, or
 dispatch `build-live-image.yml` with `publish: true`); this Component
 only ever consumes what has already been published, never triggers a
 build itself.
+
+`shimx64.efi`/`grubx64.efi` are the signed boot binaries a UEFI Secure
+Boot-enabled machine chainloads through; see `../../docs/secure-boot.md`
+for the signature chain, how the build verifies they are actually
+signed, and the kernel-signing story that chain depends on.

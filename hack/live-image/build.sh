@@ -126,19 +126,48 @@ stage_signed_boot_binaries() {
 		sh -c '
 			set -eu
 			apt-get update
+			# sbsigntool provides sbverify, used below to confirm the
+			# extracted binaries actually carry an Authenticode signature
+			# instead of silently shipping an unsigned fallback.
+			apt-get install -y --no-install-recommends sbsigntool
 			cd /tmp
 			apt-get download shim-signed grub-efi-amd64-signed
 			mkdir -p extracted
 			for deb in *.deb; do
 				dpkg -x "${deb}" extracted
 			done
-			shim_src="$(find extracted -iname "shimx64.efi*" -print -quit)"
-			grub_src="$(find extracted -iname "grubx64.efi*" -print -quit)"
+			# Match the ".signed" suffix explicitly, not a bare
+			# "shimx64.efi*" glob: shim-signed/grub-efi-amd64-signed ship
+			# only the *.signed forms today (verified against Debian sid
+			# package contents), but a bare "*" glob would silently accept
+			# an unsigned shimx64.efi/grubx64.efi too if a future package
+			# revision ever ships one alongside the signed copy. Requiring
+			# the ".signed" suffix keeps this extraction fail-closed
+			# against that layout change instead of relying on find(1)
+			# traversal order to prefer the right file.
+			shim_src="$(find extracted -iname "shimx64.efi.signed" -print -quit)"
+			grub_src="$(find extracted -iname "grubx64.efi.signed" -print -quit)"
 			if [ -z "${shim_src}" ] || [ -z "${grub_src}" ]; then
-				echo "shimx64.efi / grubx64.efi not found under the extracted shim-signed/grub-efi-amd64-signed packages; package layout may have changed." >&2
+				echo "shimx64.efi.signed / grubx64.efi.signed not found under the extracted shim-signed/grub-efi-amd64-signed packages; package layout may have changed." >&2
 				find extracted -iname "*.efi*" >&2
 				exit 1
 			fi
+			# Confirm each binary actually carries an Authenticode
+			# signature (sbverify --list fails on an unsigned PE/COFF
+			# image) before it ever reaches dist/live/ - a silent
+			# unsigned shim/grub would boot fine with Secure Boot off and
+			# only be caught, if at all, by a machine refusing to chainload
+			# it with Secure Boot on.
+			for f in "${shim_src}" "${grub_src}"; do
+				if [ ! -s "${f}" ]; then
+					echo "${f} is empty; refusing to publish an empty boot binary." >&2
+					exit 1
+				fi
+				if ! sbverify --list "${f}"; then
+					echo "${f} failed Authenticode signature verification (sbverify --list); it is not a validly signed boot binary." >&2
+					exit 1
+				fi
+			done
 			# internal/bootd.ShimFilename / GrubFilename are fixed names
 			# with no ".signed" suffix - the packages ship them with
 			# one, so normalize on copy.

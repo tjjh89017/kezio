@@ -72,6 +72,10 @@ test covering both the relayed and non-relayed cases.
    failing before the main container ever starts) leaves the TFTP
    server unable to serve either file - a clean per-request error, not
    a startup crash - see `internal/bootd.TFTPServer`'s doc comment.
+   Both files are the real Debian-signed shim/GRUB binaries, verified as
+   signed when they are built - see `../../docs/secure-boot.md` for the
+   full signature chain and what that means for a machine that keeps
+   UEFI Secure Boot on.
 4. **One replica per boot segment.** `deployment.yaml` is pinned to
    `replicas: 1` - two bootd pods answering the same broadcast domain
    would both reply to every DHCPDISCOVER, and firmware has no way to

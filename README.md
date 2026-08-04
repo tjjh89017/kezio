@@ -21,6 +21,12 @@ make docker-build     # build the manager container image
 
 See `make help` for the full list of targets.
 
+## Documentation
+
+- [`docs/secure-boot.md`](docs/secure-boot.md): the UEFI Secure Boot
+  signature chain the network boot path relies on, the kernel-signing
+  story, and what CI does and does not verify.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
