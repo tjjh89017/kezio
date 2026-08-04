@@ -134,27 +134,27 @@ func (c *Client) Next(ctx context.Context, machineName, sessionToken string) (ag
 	return out, nil
 }
 
-// ReportProgress posts a snapshot of a running deploy's per-partition
-// progress to the controller, authenticating with the session token the
-// same way Next does. It is best-effort from the caller's perspective -
-// internal/agent/deploy.Executor logs (and otherwise ignores) an error
-// returned here rather than failing an in-progress deployment over a
-// missed progress update.
-func (c *Client) ReportProgress(ctx context.Context, machineName, sessionToken string, partitions []agentapi.PartitionProgress) error {
-	body, err := json.Marshal(agentapi.ProgressRequest{Partitions: partitions})
+// ReportProgress posts a snapshot of a running deploy's progress - per-
+// partition detail plus the whole-plan step - to the controller,
+// authenticating with the session token the same way Next does. It is
+// best-effort from the caller's perspective - internal/agent/deploy.
+// Executor logs (and otherwise ignores) an error returned here rather
+// than failing an in-progress deployment over a missed progress update.
+func (c *Client) ReportProgress(ctx context.Context, machineName, sessionToken string, req agentapi.ProgressRequest) error {
+	body, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("encoding progress request: %w", err)
 	}
 
 	path := agentapi.NextPathPrefix + machineName + agentapi.ProgressPathSuffix
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url(path), bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url(path), bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("building progress request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+sessionToken)
-	req.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+sessionToken)
+	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("progress request failed: %w", err)
 	}

@@ -190,8 +190,8 @@ type clientProgressReporter struct {
 	sessionToken string
 }
 
-func (r *clientProgressReporter) ReportProgress(ctx context.Context, partitions []agentapi.PartitionProgress) error {
-	return r.client.ReportProgress(ctx, r.machineName, r.sessionToken, partitions)
+func (r *clientProgressReporter) ReportProgress(ctx context.Context, req agentapi.ProgressRequest) error {
+	return r.client.ReportProgress(ctx, r.machineName, r.sessionToken, req)
 }
 
 // logNextResponse reports what a poll returned: a plain "poll: wait" for

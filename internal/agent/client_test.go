@@ -122,10 +122,12 @@ func TestClient_ReportProgress_SendsSessionTokenAndBody(t *testing.T) {
 	defer server.Close()
 
 	c := NewClient(server.URL)
-	partitions := []agentapi.PartitionProgress{
-		{Disk: "/dev/nvme0n1", Number: 2, Phase: agentapi.PartitionPhaseSeeding, PercentDone: 55},
+	req := agentapi.ProgressRequest{
+		Partitions: []agentapi.PartitionProgress{
+			{Disk: "/dev/nvme0n1", Number: 2, Phase: agentapi.PartitionPhaseSeeding, PercentDone: 55},
+		},
 	}
-	if err := c.ReportProgress(context.Background(), "node-01", "sess-token", partitions); err != nil {
+	if err := c.ReportProgress(context.Background(), "node-01", "sess-token", req); err != nil {
 		t.Fatalf("ReportProgress: %v", err)
 	}
 	if gotMethod != http.MethodPost {
@@ -150,7 +152,7 @@ func TestClient_ReportProgress_NonOKStatusIsError(t *testing.T) {
 	defer server.Close()
 
 	c := NewClient(server.URL)
-	if err := c.ReportProgress(context.Background(), "node-01", "sess-token", nil); err == nil {
+	if err := c.ReportProgress(context.Background(), "node-01", "sess-token", agentapi.ProgressRequest{}); err == nil {
 		t.Fatal("ReportProgress: want an error for a 401 response")
 	}
 }

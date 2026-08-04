@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -26,12 +27,50 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
+	"github.com/tjjh89017/kezio/internal/agentapi"
 	"github.com/tjjh89017/kezio/internal/deployer"
 )
+
+// signalDeployer wraps a fake deployer.Deployer, overriding only
+// Provision to poll MachineConditionProvisioningProgress instead of
+// completing immediately: the same signal internal/agentserver's
+// progress handler sets from an agent's own whole-plan step reports
+// (agentapi.DeployStep* - see agentapi.DeployStepRebootingToDisk's doc
+// comment for why that particular Reason means the deploy succeeded).
+// This models the seam a later work item's real, agent-driven Provision
+// implementation fills in (internal/deployer/agent.go's Provision doc
+// comment), so this package's reconcileProvisioning logic - which is
+// what actually sets status.provisioning.image and drives
+// Provisioning -> Provisioned - is exercised the same way it will be
+// once that real implementation lands, without this test depending on
+// not-yet-implemented production code.
+type signalDeployer struct {
+	deployer.Deployer
+	client ctrlclient.Client
+	key    types.NamespacedName
+}
+
+func (d *signalDeployer) Provision(ctx context.Context, data *deployer.ProvisionData) (deployer.Result, error) {
+	machine := &keziov1alpha1.Machine{}
+	if err := d.client.Get(ctx, d.key, machine); err != nil {
+		return deployer.Result{}, err
+	}
+
+	cond := apimeta.FindStatusCondition(machine.Status.Conditions, keziov1alpha1.MachineConditionProvisioningProgress)
+	if cond == nil || cond.Reason != agentapi.DeployStepRebootingToDisk {
+		return deployer.Result{RequeueAfter: time.Millisecond}, nil
+	}
+
+	if data.ImageRef != nil {
+		data.ResolvedTargetDisk = "/dev/vda"
+	}
+	return deployer.Result{Dirty: true}, nil
+}
 
 // newTestMachineSpec builds a minimal, valid MachineSpec for a test
 // resource named name.
@@ -455,4 +494,100 @@ var _ = Describe("Machine Controller", func() {
 			Expect(result.Status.Provisioning).To(BeNil())
 		})
 	})
+
+	Context("reacting to an agent-reported deploy success", func() {
+		It("stalls in Provisioning while sub-step reasons progress, then records status.provisioning.image and advances to Provisioned once the terminal step lands", func() {
+			const resourceName = "agent-signal-machine"
+			namespace := "default"
+			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+
+			image := &keziov1alpha1.Image{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-image", Namespace: namespace},
+				Spec: keziov1alpha1.ImageSpec{
+					Source: keziov1alpha1.ImageSource{Format: keziov1alpha1.ImageFormatQCOW2},
+				},
+			}
+			Expect(k8sClient.Create(ctx, image)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, image)).To(Succeed()) })
+
+			spec := newTestMachineSpec(resourceName)
+			spec.ImageRef = &keziov1alpha1.NameRef{Name: image.Name}
+			machine := &keziov1alpha1.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec:       spec,
+			}
+			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+			DeferCleanup(func() {
+				m := &keziov1alpha1.Machine{}
+				if err := k8sClient.Get(ctx, key, m); err == nil {
+					Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+				}
+			})
+
+			base := deployer.NewFactory()
+			r := &MachineReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+				DeployerFactory: func(m *keziov1alpha1.Machine) (deployer.Deployer, error) {
+					fake, err := base.New(m)
+					if err != nil {
+						return nil, err
+					}
+					return &signalDeployer{Deployer: fake, client: k8sClient, key: key}, nil
+				},
+			}
+
+			By("reconciling to Provisioning")
+			_, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateProvisioning
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("simulating the agent's WritingContent step report - the reconciler must stay in Provisioning")
+			Expect(setProvisioningProgressReasonForTest(ctx, key, agentapi.DeployStepWritingContent, "42%")).To(Succeed())
+			stalled, err := reconcileUntil(ctx, r, key, 3, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateProvisioned
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(stalled.Status.State).To(Equal(keziov1alpha1.MachineStateProvisioning))
+			cond := apimeta.FindStatusCondition(stalled.Status.Conditions, keziov1alpha1.MachineConditionProvisioningProgress)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Reason).To(Equal(agentapi.DeployStepWritingContent))
+
+			By("simulating the agent's terminal RebootingToDisk report")
+			Expect(setProvisioningProgressReasonForTest(ctx, key, agentapi.DeployStepRebootingToDisk, "deploy finalized; rebooting")).To(Succeed())
+
+			By("reconciling through to Provisioned, with status.provisioning.image recorded")
+			result, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateProvisioned
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Status.State).To(Equal(keziov1alpha1.MachineStateProvisioned))
+			Expect(result.Status.Provisioning).NotTo(BeNil())
+			Expect(result.Status.Provisioning.Image).NotTo(BeNil())
+			Expect(result.Status.Provisioning.Image.ImageRef).To(Equal(*spec.ImageRef))
+			Expect(result.Status.Provisioning.Image.TargetDisk).To(Equal("/dev/vda"))
+		})
+	})
 })
+
+// setProvisioningProgressReasonForTest sets key's
+// MachineConditionProvisioningProgress condition to (reason, message),
+// the same shape internal/agentserver's setProvisioningProgressCondition
+// writes from a real agent's progress report - standing in for that
+// out-of-band HTTP call so this test can drive the reconciler's reaction
+// to it without spinning up an agentserver.Server.
+func setProvisioningProgressReasonForTest(ctx context.Context, key types.NamespacedName, reason, message string) error {
+	m := &keziov1alpha1.Machine{}
+	if err := k8sClient.Get(ctx, key, m); err != nil {
+		return err
+	}
+	apimeta.SetStatusCondition(&m.Status.Conditions, metav1.Condition{
+		Type:               keziov1alpha1.MachineConditionProvisioningProgress,
+		Status:             metav1.ConditionTrue,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: m.Generation,
+	})
+	return k8sClient.Status().Update(ctx, m)
+}

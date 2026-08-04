@@ -46,6 +46,11 @@ type progressTracker struct {
 	order      []partitionKey
 	partitions map[partitionKey]*trackedPartition
 	hashKey    map[string]partitionKey
+	// step is the whole-plan step reported alongside per-partition
+	// detail (see agentapi.ProgressRequest.Step). Empty until setStep is
+	// first called, matching the wire type's "no overall step to report"
+	// zero value.
+	step string
 }
 
 // newProgressTracker builds a tracker with one zero-value entry
@@ -121,18 +126,27 @@ func (t *progressTracker) setTorrentStatus(hash string, torrent seeder.Torrent) 
 	tp.percent = torrentPercent(torrent)
 }
 
-// snapshot returns every tracked partition's current progress, in plan
-// order, ready to send as a ProgressRequest.Partitions payload.
-func (t *progressTracker) snapshot() []agentapi.PartitionProgress {
-	out := make([]agentapi.PartitionProgress, 0, len(t.order))
+// setStep sets the whole-plan step reported alongside every following
+// snapshot, until the next call changes it. See
+// agentapi.ProgressRequest.Step's doc comment for what each DeployStep*
+// value means.
+func (t *progressTracker) setStep(step string) {
+	t.step = step
+}
+
+// snapshot returns a ProgressRequest carrying every tracked partition's
+// current progress (in plan order) and the whole-plan step most recently
+// set by setStep, ready to send as-is.
+func (t *progressTracker) snapshot() agentapi.ProgressRequest {
+	partitions := make([]agentapi.PartitionProgress, 0, len(t.order))
 	for _, k := range t.order {
 		tp := t.partitions[k]
-		out = append(out, agentapi.PartitionProgress{
+		partitions = append(partitions, agentapi.PartitionProgress{
 			Disk:        k.disk,
 			Number:      k.number,
 			Phase:       tp.phase,
 			PercentDone: tp.percent,
 		})
 	}
-	return out
+	return agentapi.ProgressRequest{Partitions: partitions, Step: t.step}
 }

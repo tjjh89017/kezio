@@ -124,6 +124,12 @@ type DeployPlan struct {
 	// been applied: keziov1alpha1.AfterDeployReboot or
 	// AfterDeployPowerOff.
 	AfterDeploy string `json:"afterDeploy"`
+	// MachineName is the Machine this plan deploys to. The agent's
+	// finalize step (internal/agent/deploy) uses it to build a stable
+	// UEFI boot entry label, so a later redeploy to the same machine can
+	// find and replace its own prior entry instead of accumulating
+	// duplicates.
+	MachineName string `json:"machineName"`
 }
 
 // ImageDeployPlan is one Image's deploy plan: the disk it targets, the
@@ -145,6 +151,17 @@ type ImageDeployPlan struct {
 	// Partitions is the ordered list of partitions to restore onto Disk,
 	// one per Image.status.partitions[] entry, in the same order.
 	Partitions []PlanPartition `json:"partitions"`
+	// GrowLastPartition, when true, asks the agent's finalize step to
+	// grow this image's last partition (and its file system, when
+	// FSType names one the agent knows how to resize) to use whatever
+	// extra space Disk has beyond the layout SfdiskJSON itself asks for.
+	// Default false, and nothing in the controller sets this true today
+	// - no spec field wires it yet, a later work item's job - so every
+	// deploy plan built by internal/agentserver leaves the image's own
+	// partition sizes untouched. The field exists now so the agent side
+	// has real, tested behavior the day a controller-side field turns it
+	// on, instead of a silent no-op.
+	GrowLastPartition bool `json:"growLastPartition,omitempty"`
 }
 
 // PlanPartition is one partition to restore, derived from one
@@ -201,7 +218,53 @@ type ProgressRequest struct {
 	// Partitions is one entry per partition the current DeployPlan names,
 	// across the OS image and every dataImages entry.
 	Partitions []PartitionProgress `json:"partitions"`
+	// Step, when non-empty, is the whole-plan step this report reflects -
+	// one of the DeployStep* constants below. It augments the
+	// per-partition Partitions detail with a single overall status the
+	// controller reflects verbatim as the ProvisioningProgress
+	// condition's Reason (internal/agentserver's
+	// setProvisioningProgressCondition), including the terminal
+	// DeployStepRebootingToDisk value that reports the whole deploy
+	// succeeded - see internal/agent/deploy.Executor.Execute, which sends
+	// it as the last report before invoking systemctl reboot/poweroff.
+	// Empty means "no overall step to report"; the controller falls back
+	// to summarizing Partitions the way it always has.
+	Step string `json:"step,omitempty"`
+	// StepMessage augments Step with a short human-readable detail, when
+	// one is more useful than the per-partition summary Step's message
+	// otherwise falls back to (see summarizeProgress).
+	StepMessage string `json:"stepMessage,omitempty"`
 }
+
+// DeployStep values for ProgressRequest.Step: the whole-plan sub-steps a
+// running deploy passes through, reported alongside (never instead of)
+// per-partition Partitions detail. Every one of these is reported before
+// the terminal DeployStepRebootingToDisk value; only that terminal value
+// means the deploy actually succeeded end to end.
+const (
+	// DeployStepPartitioning means every image plan's partition table is
+	// being written and re-read (sfdisk, partprobe) - before any
+	// individual partition's content or file system is touched.
+	DeployStepPartitioning = "WritingPartitionTable"
+	// DeployStepWritingContent means every partition is being made or
+	// restored: mkfs/mkswap for blank and swap partitions, AddTorrent and
+	// the seeding loop for content partitions. Per-partition PercentDone
+	// in Partitions carries the finer-grained detail this step name does
+	// not.
+	DeployStepWritingContent = "WritingContent"
+	// DeployStepFinalizing means every partition is done and the agent is
+	// running finalize actions (efibootmgr, and growLastPartition when a
+	// plan asks for it) - see internal/agent/deploy's package doc comment
+	// for why finalize never chroots or runs update-initramfs.
+	DeployStepFinalizing = "Finalizing"
+	// DeployStepRebootingToDisk is the terminal report: finalize
+	// completed, and the agent is about to invoke systemctl reboot or
+	// poweroff (DeployPlan.AfterDeploy). Reaching this step is the
+	// deploy's success signal - the controller's real, agent-driven
+	// Deployer (a later work item) polls MachineConditionProvisioningProgress's
+	// Reason for exactly this value to know the deployment finished.
+	DeployStepRebootingToDisk = "RebootingToDisk"
+)
 
 // ProgressResponse is the POST /agent/machines/<name>/progress success
 // response. It carries nothing today; its presence keeps the wire

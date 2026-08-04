@@ -146,6 +146,21 @@ func (d *agentDeployer) Inspect(ctx context.Context, data *InspectData) (Result,
 // that reaches Provisioning under this Deployer moves to the Error state
 // with this message and retries with backoff, honestly, instead of
 // fabricating a completed deployment.
+//
+// The seam a later work item wires this through already exists:
+// internal/agent/deploy.Executor drives the actual deploy on the machine
+// and reports its progress to POST /agent/machines/<name>/progress
+// (internal/agentserver), which mirrors the agent's own whole-plan step
+// onto keziov1alpha1.MachineConditionProvisioningProgress's Reason - see
+// agentapi.DeployStepRebootingToDisk's doc comment for why that
+// particular Reason is the deploy's success signal. A real Provision
+// implementation polls that condition the same way Inspect above already
+// polls MachineConditionAgentRegistered, rather than driving the deploy
+// itself: internal/agentserver's GET .../next handler already starts
+// answering ActionDeploy on its own, entirely out of band, the moment
+// status.provisioning names this deployment (already true by the time
+// Provision is called - reconcileProvisioning resolves target disks
+// first).
 func (d *agentDeployer) Provision(_ context.Context, _ *ProvisionData) (Result, error) {
 	return Result{ErrorMessage: "agent deployer: Provision is not implemented yet"}, nil
 }

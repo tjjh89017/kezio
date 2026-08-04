@@ -157,13 +157,14 @@ func TestPollLoop_ExecutesDeployPlanOnceAndReportsProgress(t *testing.T) {
 		t.Fatalf("pollLoop returned %v, want nil (it should run until ctx expires and then return cleanly)", err)
 	}
 
-	// blockdev --getsize64 + sfdisk + partprobe + mkfs.ext4 = 4 Runner
-	// calls for exactly one execution; if the plan were re-executed on a
-	// later poll (the controller keeps answering "deploy" every time in
-	// this stub) the count would be a multiple of 4 - assert the exact
-	// count to catch that regression.
-	if got := runner.calls.Load(); got != 4 {
-		t.Fatalf("Runner was called %d times, want exactly 4 (one deploy execution, not re-applied on later polls)", got)
+	// blockdev --getsize64 + sfdisk + partprobe + mkfs.ext4 + (finalize:
+	// no ESP partition here, so no efibootmgr calls) + systemctl reboot
+	// = 5 Runner calls for exactly one execution; if the plan were
+	// re-executed on a later poll (the controller keeps answering
+	// "deploy" every time in this stub) the count would be a multiple of
+	// 5 - assert the exact count to catch that regression.
+	if got := runner.calls.Load(); got != 5 {
+		t.Fatalf("Runner was called %d times, want exactly 5 (one deploy execution, not re-applied on later polls)", got)
 	}
 	if progressCalls.Load() == 0 {
 		t.Fatal("no progress was ever reported to the controller")

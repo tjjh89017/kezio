@@ -429,6 +429,67 @@ func TestHandleProgress_ValidSessionRecordsCondition(t *testing.T) {
 	}
 }
 
+func TestHandleProgress_StepOverridesReasonWithTerminalSuccess(t *testing.T) {
+	now := time.Now()
+	machine := newTestMachineWithSession(now)
+	s, c := newTestServer(t, now, machine)
+
+	rec := doProgress(t, s.Handler(), testMachineName, testSessionToken, agentapi.ProgressRequest{
+		Partitions: []agentapi.PartitionProgress{
+			{Disk: "/dev/nvme0n1", Number: 1, Phase: agentapi.PartitionPhaseDone, PercentDone: 100},
+		},
+		Step: agentapi.DeployStepRebootingToDisk,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", rec.Code, rec.Body.String())
+	}
+
+	var stored keziov1alpha1.Machine
+	if err := c.Get(context.Background(), types.NamespacedName{Name: testMachineName}, &stored); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	cond := apimeta.FindStatusCondition(stored.Status.Conditions, keziov1alpha1.MachineConditionProvisioningProgress)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Fatalf("ProvisioningProgress condition = %+v, want True", cond)
+	}
+	// Step, when the agent reports one, wins over the per-partition
+	// furthest-phase reason summarizeProgress would otherwise compute -
+	// here that would have been agentapi.PartitionPhaseDone, not the
+	// terminal deploy-succeeded step.
+	if cond.Reason != agentapi.DeployStepRebootingToDisk {
+		t.Fatalf("Reason = %q, want the reported terminal step %q", cond.Reason, agentapi.DeployStepRebootingToDisk)
+	}
+}
+
+func TestHandleProgress_StepMessageOverridesPartitionSummary(t *testing.T) {
+	now := time.Now()
+	machine := newTestMachineWithSession(now)
+	s, c := newTestServer(t, now, machine)
+
+	rec := doProgress(t, s.Handler(), testMachineName, testSessionToken, agentapi.ProgressRequest{
+		Step:        agentapi.DeployStepFinalizing,
+		StepMessage: "creating UEFI boot entry",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", rec.Code, rec.Body.String())
+	}
+
+	var stored keziov1alpha1.Machine
+	if err := c.Get(context.Background(), types.NamespacedName{Name: testMachineName}, &stored); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	cond := apimeta.FindStatusCondition(stored.Status.Conditions, keziov1alpha1.MachineConditionProvisioningProgress)
+	if cond == nil {
+		t.Fatal("ProvisioningProgress condition was not set")
+	}
+	if cond.Reason != agentapi.DeployStepFinalizing {
+		t.Fatalf("Reason = %q, want %q", cond.Reason, agentapi.DeployStepFinalizing)
+	}
+	if cond.Message != "creating UEFI boot entry" {
+		t.Fatalf("Message = %q, want the agent-supplied StepMessage", cond.Message)
+	}
+}
+
 func TestHandleProgress_RejectionsAreConstantShape(t *testing.T) {
 	now := time.Now()
 

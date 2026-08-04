@@ -16,13 +16,21 @@ limitations under the License.
 
 // Package deploy executes a DeployPlan (internal/agentapi) on the
 // machine kezio-agent is running on: it writes each target disk's
-// partition table, makes swap and blank file systems, and drives a
-// locally spawned ezio daemon in raw-device mode (AddTorrent's save_path
-// is a partition device, never a -F content directory) to restore every
-// content partition over BitTorrent. It stops at "every partition
-// written or made, ezio shut down, final progress reported" - finalize
-// (efibootmgr, growing the last partition) and reboot are a later work
-// item.
+// partition table, makes swap and blank file systems, drives a locally
+// spawned ezio daemon in raw-device mode (AddTorrent's save_path is a
+// partition device, never a -F content directory) to restore every
+// content partition over BitTorrent, then finalizes the deploy
+// (efibootmgr, and growing the last partition when a plan asks for it)
+// and hands the machine off to the deployed OS (systemctl reboot or
+// poweroff, per DeployPlan.AfterDeploy).
+//
+// Finalize deliberately never opens or modifies the file systems inside
+// the deployed disks: no chroot, no update-initramfs. The content ezio
+// restored is byte-identical to the source image, so every UUID it
+// carries (root file system, swap - see mkswap --uuid) already matches
+// whatever the image's own fstab and bootloader configuration expects;
+// there is nothing to regenerate. efibootmgr only ever touches firmware
+// NVRAM, never the ESP's own file system content.
 //
 // This is the highest-blast-radius code in kezio: a wrong disk here
 // destroys data with no undo. Every destructive command it issues names
@@ -94,12 +102,13 @@ type EzioLauncher interface {
 	Launch(ctx context.Context, tuning *keziov1alpha1.MachineEzioTuning) (EzioHandle, error)
 }
 
-// ProgressReporter streams a deploy's per-partition progress to the
+// ProgressReporter streams a deploy's progress - per-partition detail
+// plus the whole-plan step (agentapi.ProgressRequest.Step) - to the
 // controller. A failure to report is logged and otherwise ignored - a
 // missed progress update does not itself justify failing an in-progress
 // deployment.
 type ProgressReporter interface {
-	ReportProgress(ctx context.Context, partitions []agentapi.PartitionProgress) error
+	ReportProgress(ctx context.Context, req agentapi.ProgressRequest) error
 }
 
 // Executor runs a DeployPlan against the machine it executes on.
@@ -189,6 +198,7 @@ func (e *Executor) Execute(ctx context.Context, plan *agentapi.DeployPlan) error
 	}
 
 	progress := newProgressTracker(plans)
+	progress.setStep(agentapi.DeployStepPartitioning)
 	e.report(ctx, progress)
 
 	var handle EzioHandle
@@ -207,6 +217,7 @@ func (e *Executor) Execute(ctx context.Context, plan *agentapi.DeployPlan) error
 		}()
 	}
 
+	progress.setStep(agentapi.DeployStepWritingContent)
 	for _, ip := range plans {
 		if err := e.applyImagePlan(ctx, ip, handle, progress); err != nil {
 			return err
@@ -226,7 +237,22 @@ func (e *Executor) Execute(ctx context.Context, plan *agentapi.DeployPlan) error
 		}
 	}
 
+	progress.setStep(agentapi.DeployStepFinalizing)
 	e.report(ctx, progress)
+	if err := e.finalize(ctx, plan, plans); err != nil {
+		return fmt.Errorf("finalizing: %w", err)
+	}
+
+	// The terminal report: everything above completed, so this is the
+	// deploy's success signal (see agentapi.DeployStepRebootingToDisk's
+	// doc comment). It is sent before invoking systemctl below, since
+	// nothing sent after that call is guaranteed to land.
+	progress.setStep(agentapi.DeployStepRebootingToDisk)
+	e.report(ctx, progress)
+
+	if err := e.rebootOrPowerOff(ctx, plan.AfterDeploy); err != nil {
+		return fmt.Errorf("after deploy action: %w", err)
+	}
 	return nil
 }
 

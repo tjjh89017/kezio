@@ -49,6 +49,10 @@ type fakeRunner struct {
 	blockdevSizes  map[string]int64
 	errs           map[string]error // keyed by "name args..."
 	blockdevErrors map[string]error
+	// outputs, keyed by "name args..." (fakeCall.String()), answers a
+	// call with canned stdout instead of the empty-success default -
+	// used to script efibootmgr's listing output for finalize tests.
+	outputs map[string][]byte
 }
 
 func newFakeRunner() *fakeRunner {
@@ -56,6 +60,7 @@ func newFakeRunner() *fakeRunner {
 		blockdevSizes:  map[string]int64{},
 		errs:           map[string]error{},
 		blockdevErrors: map[string]error{},
+		outputs:        map[string][]byte{},
 	}
 }
 
@@ -68,6 +73,9 @@ func (f *fakeRunner) Run(_ context.Context, stdin []byte, name string, args ...s
 	key := call.String()
 	if err, ok := f.errs[key]; ok {
 		return nil, err
+	}
+	if out, ok := f.outputs[key]; ok {
+		return out, nil
 	}
 
 	if name == "blockdev" && len(args) == 2 && args[0] == "--getsize64" {
@@ -160,13 +168,14 @@ func (f *fakeLauncher) Launch(context.Context, *keziov1alpha1.MachineEzioTuning)
 
 type fakeProgressReporter struct {
 	mu     sync.Mutex
-	events [][]agentapi.PartitionProgress
+	events []agentapi.ProgressRequest
 }
 
-func (f *fakeProgressReporter) ReportProgress(_ context.Context, partitions []agentapi.PartitionProgress) error {
+func (f *fakeProgressReporter) ReportProgress(_ context.Context, req agentapi.ProgressRequest) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	cp := append([]agentapi.PartitionProgress(nil), partitions...)
+	cp := req
+	cp.Partitions = append([]agentapi.PartitionProgress(nil), req.Partitions...)
 	f.events = append(f.events, cp)
 	return nil
 }
@@ -177,7 +186,20 @@ func (f *fakeProgressReporter) last() []agentapi.PartitionProgress {
 	if len(f.events) == 0 {
 		return nil
 	}
-	return f.events[len(f.events)-1]
+	return f.events[len(f.events)-1].Partitions
+}
+
+// steps returns the Step value of every report, in order, so a test can
+// assert the whole-plan step machine progressed through the expected
+// sequence and ended on the terminal success step.
+func (f *fakeProgressReporter) steps() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	steps := make([]string, len(f.events))
+	for i, e := range f.events {
+		steps[i] = e.Step
+	}
+	return steps
 }
 
 // samplePlan builds a one-disk plan with one ESP (blank/vfat), one swap
@@ -418,5 +440,195 @@ func TestExecute_StopPolicyPausesBeforeShutdown(t *testing.T) {
 	}
 	if !ezio.shutdownCalled {
 		t.Error("Shutdown was never called")
+	}
+}
+
+// espOnlyPlanDisk is the fixed target disk every espOnlyPlan uses -
+// finalize tests only ever need one disk, so it is a constant rather
+// than a parameter every call site would just repeat.
+const espOnlyPlanDisk = "/dev/nvme0n1"
+
+// espOnlyPlan builds a one-disk, ESP-only plan (no content, no swap) so
+// finalize tests exercise efibootmgr and the terminal reboot/poweroff
+// action without ezio in the picture at all.
+func espOnlyPlan(afterDeploy string, growLastPartition bool) *agentapi.DeployPlan {
+	disk := espOnlyPlanDisk
+	return &agentapi.DeployPlan{
+		MachineName: "node-01",
+		AfterDeploy: afterDeploy,
+		OS: &agentapi.ImageDeployPlan{
+			ImageRef:          keziov1alpha1.NameRef{Name: "os-image"},
+			Disk:              disk,
+			SfdiskJSON:        fixtureSfdiskJSON,
+			GrowLastPartition: growLastPartition,
+			Partitions: []agentapi.PlanPartition{
+				{Number: 1, Device: agentapi.DevicePartitionPath(disk, 1), Role: keziov1alpha1.PartitionRoleESP, FSType: "vfat"},
+			},
+		},
+	}
+}
+
+func TestExecute_FinalizeCreatesUEFIBootEntryAndRemovesPriorOne(t *testing.T) {
+	runner := newFakeRunner()
+	// A prior kezio-created entry for this same machine already exists
+	// (Boot0003), alongside an unrelated entry (Boot0001) that must be
+	// left alone.
+	runner.outputs["efibootmgr "] = []byte(
+		"BootCurrent: 0001\n" +
+			"Boot0001* Windows Boot Manager\n" +
+			"Boot0003* kezio:node-01\n",
+	)
+
+	e := &Executor{Runner: runner, Ezio: &fakeLauncher{}}
+	if err := e.Execute(context.Background(), espOnlyPlan(keziov1alpha1.AfterDeployReboot, false)); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	calls := runner.commandNames()
+	wantInOrder := []string{
+		"efibootmgr ",
+		"efibootmgr --bootnum 0003 --delete-bootnum",
+		"efibootmgr --create --disk /dev/nvme0n1 --part 1 --loader \\EFI\\BOOT\\BOOTX64.EFI --label kezio:node-01",
+		"systemctl reboot",
+	}
+	idx := 0
+	for _, want := range wantInOrder {
+		for idx < len(calls) && calls[idx] != want {
+			idx++
+		}
+		if idx == len(calls) {
+			t.Fatalf("command %q not found in order in %v", want, calls)
+		}
+		idx++
+	}
+	for _, c := range calls {
+		if c == "efibootmgr --bootnum 0001 --delete-bootnum" {
+			t.Fatalf("deleted the unrelated Boot0001 entry, want only the kezio:node-01 entry removed: %v", calls)
+		}
+	}
+}
+
+func TestExecute_GrowLastPartitionFlagOffIssuesNoGrowCommands(t *testing.T) {
+	runner := newFakeRunner()
+
+	e := &Executor{Runner: runner, Ezio: &fakeLauncher{}}
+	if err := e.Execute(context.Background(), espOnlyPlan(keziov1alpha1.AfterDeployReboot, false)); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	for _, c := range runner.commandNames() {
+		if strings.HasPrefix(c, "growpart") || strings.Contains(c, "resize") {
+			t.Fatalf("GrowLastPartition was false but a grow/resize command ran: %q (all calls: %v)", c, runner.commandNames())
+		}
+	}
+}
+
+func TestExecute_GrowLastPartitionFlagOnGrowsPartitionAndFileSystem(t *testing.T) {
+	runner := newFakeRunner()
+
+	plan := espOnlyPlan(keziov1alpha1.AfterDeployReboot, true)
+	// vfat has no known online-resize tool in fsResizeCommand, so switch
+	// the ESP's FSType to ext4 to also exercise the file system resize
+	// half of growLastPartition.
+	plan.OS.Partitions[0].FSType = "ext4"
+
+	e := &Executor{Runner: runner, Ezio: &fakeLauncher{}}
+	if err := e.Execute(context.Background(), plan); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	calls := runner.commandNames()
+	wantInOrder := []string{
+		"growpart /dev/nvme0n1 1",
+		"resize2fs " + agentapi.DevicePartitionPath(espOnlyPlanDisk, 1),
+	}
+	idx := 0
+	for _, want := range wantInOrder {
+		for idx < len(calls) && calls[idx] != want {
+			idx++
+		}
+		if idx == len(calls) {
+			t.Fatalf("command %q not found in order in %v", want, calls)
+		}
+		idx++
+	}
+}
+
+func TestExecute_AfterDeploySelectsRebootOrPowerOff(t *testing.T) {
+	cases := []struct {
+		afterDeploy string
+		wantCommand string
+	}{
+		{keziov1alpha1.AfterDeployReboot, "systemctl reboot"},
+		{keziov1alpha1.AfterDeployPowerOff, "systemctl poweroff"},
+		{"", "systemctl reboot"}, // empty AfterDeploy defaults to reboot
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.afterDeploy, func(t *testing.T) {
+			runner := newFakeRunner()
+			e := &Executor{Runner: runner, Ezio: &fakeLauncher{}}
+			if err := e.Execute(context.Background(), espOnlyPlan(tc.afterDeploy, false)); err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+
+			calls := runner.commandNames()
+			if calls[len(calls)-1] != tc.wantCommand {
+				t.Fatalf("last command = %q, want %q (all calls: %v)", calls[len(calls)-1], tc.wantCommand, calls)
+			}
+			for _, other := range []string{"systemctl reboot", "systemctl poweroff"} {
+				if other == tc.wantCommand {
+					continue
+				}
+				for _, c := range calls {
+					if c == other {
+						t.Fatalf("issued %q in addition to %q", other, tc.wantCommand)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestExecute_NeverChrootsOrRunsUpdateInitramfs(t *testing.T) {
+	runner := newFakeRunner()
+
+	e := &Executor{Runner: runner, Ezio: &fakeLauncher{}}
+	if err := e.Execute(context.Background(), espOnlyPlan(keziov1alpha1.AfterDeployReboot, false)); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	for _, c := range runner.calls {
+		if c.name == "chroot" || c.name == "update-initramfs" {
+			t.Fatalf("finalize ran %q - it must never chroot or regenerate the initramfs (see the package doc comment)", c.name)
+		}
+	}
+}
+
+func TestExecute_ReportsFinalizeAndTerminalSteps(t *testing.T) {
+	runner := newFakeRunner()
+	progress := &fakeProgressReporter{}
+
+	e := &Executor{Runner: runner, Ezio: &fakeLauncher{}, Progress: progress}
+	if err := e.Execute(context.Background(), espOnlyPlan(keziov1alpha1.AfterDeployReboot, false)); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	steps := progress.steps()
+	if len(steps) == 0 {
+		t.Fatal("no progress reports were sent")
+	}
+	if last := steps[len(steps)-1]; last != agentapi.DeployStepRebootingToDisk {
+		t.Fatalf("last reported step = %q, want the terminal %q", last, agentapi.DeployStepRebootingToDisk)
+	}
+
+	sawFinalizing := false
+	for _, s := range steps {
+		if s == agentapi.DeployStepFinalizing {
+			sawFinalizing = true
+		}
+	}
+	if !sawFinalizing {
+		t.Fatalf("never reported %q among steps %v", agentapi.DeployStepFinalizing, steps)
 	}
 }

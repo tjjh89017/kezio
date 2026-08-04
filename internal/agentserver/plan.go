@@ -59,6 +59,7 @@ func buildDeployPlan(ctx context.Context, c client.Client, cfg Config, machine *
 
 	plan := &agentapi.DeployPlan{
 		AfterDeploy: machine.Spec.EffectiveAfterDeploy(),
+		MachineName: machine.Name,
 	}
 	if machine.Spec.Ezio != nil {
 		plan.Ezio = machine.Spec.Ezio.DeepCopy()

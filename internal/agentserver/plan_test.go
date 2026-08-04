@@ -160,6 +160,9 @@ func TestBuildDeployPlan_OSImageWithContentSwapAndBlankPartitions(t *testing.T) 
 	if plan.AfterDeploy != keziov1alpha1.AfterDeployPowerOff {
 		t.Errorf("AfterDeploy = %q, want %q", plan.AfterDeploy, keziov1alpha1.AfterDeployPowerOff)
 	}
+	if plan.MachineName != "node-01" {
+		t.Errorf("MachineName = %q, want %q (the agent's finalize step needs it for a stable UEFI boot entry label)", plan.MachineName, "node-01")
+	}
 	if plan.Ezio == nil || plan.Ezio.CacheSizeMB == nil || *plan.Ezio.CacheSizeMB != 256 {
 		t.Errorf("Ezio = %+v, want CacheSizeMB=256", plan.Ezio)
 	}
