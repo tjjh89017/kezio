@@ -29,13 +29,21 @@ import (
 // ImageSpec.Source.Format's enum (raw/qcow2/vmdk); anything else (including
 // stdin, which has no filename) returns ok=false so the caller can require
 // an explicit --format instead of guessing wrong.
+//
+// ".img" is deliberately excluded from the unambiguous set: by convention
+// it is used both for raw disk dumps and for qcow2 images (e.g. Ubuntu
+// cloud images ship as "*.img" while actually being qcow2). Guessing here
+// would silently create an Image CR with the wrong declared format, which
+// the ingest job's qemu-img format check would then have to catch as a
+// mismatch. Requiring an explicit --format surfaces the ambiguity to the
+// caller instead.
 func DetectFormatFromFilename(name string) (format string, ok bool) {
 	switch strings.ToLower(filepath.Ext(name)) {
 	case ".qcow2":
 		return keziov1alpha1.ImageFormatQCOW2, true
 	case ".vmdk":
 		return keziov1alpha1.ImageFormatVMDK, true
-	case ".raw", ".img":
+	case ".raw":
 		return keziov1alpha1.ImageFormatRaw, true
 	default:
 		return "", false

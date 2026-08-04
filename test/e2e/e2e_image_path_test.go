@@ -171,6 +171,14 @@ func registerImagePathContext() {
 				"--namespace", namespace,
 				"--server", "http://"+imageServiceLocal,
 				"--token", imageServiceToken,
+				// The Ubuntu cloud image is fetched with a ".img"
+				// filename despite actually being qcow2, and
+				// DetectFormatFromFilename now treats ".img" as
+				// ambiguous (see internal/kezioctl/format.go) rather
+				// than guessing raw. Pass the real format explicitly
+				// so the Image CR's declared format matches what
+				// qemu-img reports during ingest.
+				"--format", "qcow2",
 			)
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "kezioctl image upload failed")
