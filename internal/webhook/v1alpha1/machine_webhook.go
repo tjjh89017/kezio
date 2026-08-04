@@ -168,9 +168,11 @@ func validateMachine(machine *keziov1alpha1.Machine) error {
 // driver authenticates to the BMC - an address with no way to resolve
 // credentials is certain to fail at connect time.
 //
-// spec.bmc.address being empty (the MachineBMC zero value) means this
-// Machine has no BMC configured at all, which is valid - not every
-// Machine's lifecycle goes through kezio-driven power control.
+// spec.bmc being absent, or its address being empty (the MachineBMC zero
+// value), means this Machine has no BMC configured at all, which is valid:
+// not every Machine's lifecycle goes through kezio-driven power control -
+// a Machine with no reachable BMC net boot-waits for manual power-on
+// instead.
 //
 // Every error path reports address through (*url.URL).Redacted() where
 // possible, or omits it entirely when it cannot even be parsed enough to
@@ -178,6 +180,9 @@ func validateMachine(machine *keziov1alpha1.Machine) error {
 // example "redfish://user:pass@host/...") must never see them echoed back
 // in an admission rejection message.
 func validateMachineBMC(machine *keziov1alpha1.Machine) error {
+	if machine.Spec.BMC == nil {
+		return nil
+	}
 	address := machine.Spec.BMC.Address
 	if address == "" {
 		return nil

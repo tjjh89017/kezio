@@ -96,8 +96,8 @@ func (f *AgentFactory) New(machine *keziov1alpha1.Machine) (Deployer, error) {
 // to.
 //
 // Register, PowerOn, and PowerOff drive power and boot order through
-// internal/bmc when the Machine names one (bmcSpec.Address is
-// non-empty): see connectBMC. When it does not, they fall back to the
+// internal/bmc when the Machine names one (bmcSpec is non-nil with a
+// non-empty Address): see connectBMC. When it does not, they fall back to the
 // pre-BMC behavior each documents on its own: Register arranges the
 // netboot-wait handoff bootserver's own polling relies on, and
 // PowerOn/PowerOff are no-ops, since without a BMC there is nothing this
@@ -110,9 +110,9 @@ type agentDeployer struct {
 	key    types.NamespacedName
 
 	// bmcSpec is the Machine's spec.bmc, captured at New() time (see its
-	// doc comment). An empty Address means no BMC is configured for this
-	// Machine.
-	bmcSpec keziov1alpha1.MachineBMC
+	// doc comment). Nil (or a non-nil value with an empty Address) means
+	// no BMC is configured for this Machine.
+	bmcSpec *keziov1alpha1.MachineBMC
 	// bmcInsecureSkipVerify is the resolved value of
 	// keziov1alpha1.AnnotationBMCInsecureSkipVerify, captured at New()
 	// time alongside bmcSpec.
@@ -120,8 +120,8 @@ type agentDeployer struct {
 }
 
 // connectBMC resolves and connects to the Machine's BMC, returning (nil,
-// nil) when bmcSpec.Address is empty - the signal every caller uses to
-// take the no-BMC fallback path. It resolves
+// nil) when bmcSpec is nil or its Address is empty - the signal every
+// caller uses to take the no-BMC fallback path. It resolves
 // bmcSpec.CredentialsSecretRef from the same namespace as the Machine
 // itself (BMC credential Secrets are not expected to be shared across
 // namespaces) into a bmc.Credentials value, then hands off to
@@ -132,7 +132,7 @@ type agentDeployer struct {
 // bmc.Connect redacts the address itself before including it in an
 // error.
 func (d *agentDeployer) connectBMC(ctx context.Context) (bmc.BMC, error) {
-	if d.bmcSpec.Address == "" {
+	if d.bmcSpec == nil || d.bmcSpec.Address == "" {
 		return nil, nil
 	}
 
@@ -162,7 +162,7 @@ func (d *agentDeployer) connectBMC(ctx context.Context) (bmc.BMC, error) {
 // by Inspect for a fresh one.
 //
 // What drives the machine to actually net boot depends on whether a BMC
-// is configured (bmcSpec.Address non-empty):
+// is configured (bmcSpec non-nil with a non-empty Address):
 //
 //   - No BMC: there is nothing further to actively do.
 //     internal/bootserver already serves the live-boot GRUB config, with
@@ -333,7 +333,7 @@ func (d *agentDeployer) Deprovision(_ context.Context, _ *DeprovisionData) (Resu
 }
 
 // PowerOn powers the machine on through its BMC when one is configured
-// (bmcSpec.Address non-empty). Without a BMC it is a no-op that reports
+// (bmcSpec non-nil with a non-empty Address). Without a BMC it is a no-op that reports
 // success: reconcilePower's steady-state power matching is background
 // maintenance, not a step in the deployment flow, and without a BMC
 // there is nothing this Deployer can drive - the machine's power state

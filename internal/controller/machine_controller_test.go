@@ -76,7 +76,7 @@ func (d *signalDeployer) Provision(ctx context.Context, data *deployer.Provision
 // resource named name.
 func newTestMachineSpec(name string) keziov1alpha1.MachineSpec {
 	return keziov1alpha1.MachineSpec{
-		BMC: keziov1alpha1.MachineBMC{
+		BMC: &keziov1alpha1.MachineBMC{
 			Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
 			CredentialsSecretRef: keziov1alpha1.SecretReference{Name: name + "-bmc"},
 		},

@@ -150,8 +150,12 @@ const (
 // MachineSpec defines the desired state of Machine.
 type MachineSpec struct {
 	// BMC identifies the board management controller that powers and
-	// boot-orders this machine.
-	BMC MachineBMC `json:"bmc"`
+	// boot-orders this machine. When absent, the machine has no reachable
+	// BMC: it net boot-waits for inspection and deployment, and its power
+	// state is left to whoever operates it (or to the agent's own
+	// systemctl calls).
+	// +optional
+	BMC *MachineBMC `json:"bmc,omitempty"`
 	// BootMACAddress is the MAC address of the NIC the machine network
 	// boots from. The boot config server uses it to find this machine.
 	// +kubebuilder:validation:Pattern=`^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$`
