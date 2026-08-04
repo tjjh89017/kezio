@@ -226,6 +226,20 @@ jobs:
         # in place, and the cache step above must keep the pristine
         # download so a re-run with a cache hit customizes a clean copy,
         # not a copy some previous attempt already stamped a marker into.
+        #
+        # qemu-guest-agent is installed from a .deb fetched by the host's
+        # own apt (real network, no issue) and `dpkg -i`'d into the guest
+        # with --copy-in/--run-command, rather than virt-customize's
+        # `--install` (apt-get run from inside the libguestfs appliance
+        # itself). The first triggered run of this workflow hit exactly
+        # that: `--install` needs the appliance's own outbound network
+        # (a "passt" user-mode NAT libguestfs sets up around the
+        # supermin appliance), which failed hard on this runner
+        # ("libguestfs error: passt exited with status 1") - unrelated to
+        # kvm/qemu access, already confirmed working, and unrelated to
+        # the provisioning bridge this job creates for the VM itself.
+        # Fetching the .deb on the host and installing it offline inside
+        # the guest sidesteps the appliance network path entirely.
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -241,11 +255,16 @@ jobs:
           MARKER_TOKEN="$(openssl rand -hex 16)"
           echo "MARKER_TOKEN=${MARKER_TOKEN}" >> "$GITHUB_ENV"
 
+          qga_deb_dir="$(mktemp -d)"
+          (cd "${qga_deb_dir}" && apt-get download qemu-guest-agent)
+
           sudo --preserve-env=LIBGUESTFS_BACKEND virt-customize \
             -a "${{ runner.temp }}/ubuntu-cloud-marked.img" \
             --run-command "echo ${MARKER_TOKEN} > ${MARKER_PATH}" \
-            --install qemu-guest-agent \
-            --run-command "systemctl enable qemu-guest-agent"
+            --copy-in "${qga_deb_dir}:/tmp" \
+            --run-command 'dpkg -i /tmp/qemu-guest-agent_*.deb' \
+            --run-command "systemctl enable qemu-guest-agent" \
+            --run-command "rm -f /tmp/qemu-guest-agent_*.deb"
 
           echo "UBUNTU_CLOUD_IMAGE_PATH=${{ runner.temp }}/ubuntu-cloud-marked.img" >> "$GITHUB_ENV"
 
