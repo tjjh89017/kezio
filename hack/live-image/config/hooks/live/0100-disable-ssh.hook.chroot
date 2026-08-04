@@ -1,0 +1,11 @@
+#!/bin/sh
+# Runs inside the chroot during `lb build`. openssh-server is installed
+# (see package-lists/kezio.list.chroot) but must not listen by default -
+# a live image that PXE-boots onto arbitrary network segments with an
+# open, default-credentialed sshd would be a standing foothold for
+# whoever else is on that segment. Masking (not just disabling) the
+# systemd unit stops both automatic and accidental manual starts from
+# taking effect during the live boot.
+set -eu
+
+systemctl mask ssh.service

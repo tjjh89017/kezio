@@ -1,0 +1,8 @@
+#!/bin/sh
+# Runs inside the chroot during `lb build`. Enables the placeholder
+# kezio-agent.service (config/includes.chroot.static/lib/systemd/system)
+# so the live OS runs it automatically on every boot, the same way the
+# real kezio-agent binary will once it replaces the stub script.
+set -eu
+
+systemctl enable kezio-agent.service

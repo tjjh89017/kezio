@@ -1,0 +1,68 @@
+name: Build Live Boot Image
+
+# Builds the kezio live boot image (kernel + initrd + squashfs) with
+# hack/live-image/build.sh. Not on every push: `lb build` compiles ezio
+# from source and assembles a Debian sid squashfs, which takes many
+# minutes, and the resulting artifacts are large (the squashfs alone
+# targets 100-300 MiB) - unlike the Go binaries test.yml and lint.yml
+# check on every push, this is deliberately opt-in: workflow_dispatch
+# for an on-demand build, and "v*" tags so a release carries a matching
+# image without anyone having to remember to trigger one by hand.
+on:
+  workflow_dispatch: {}
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    # `lb build` compiles ezio from source (cmake/make, the same as
+    # Dockerfile.seeder's builder stage) and then assembles a full
+    # Debian sid chroot into a squashfs - budget generously.
+    timeout-minutes: 90
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v7
+
+      - name: Build live image
+        # ubuntu-latest's Docker already runs privileged containers -
+        # hack/live-image/build.sh needs that for `lb build`'s own
+        # chroot/mount work; see the script's header for why.
+        run: hack/live-image/build.sh
+
+      - name: Write size summary
+        run: |
+          {
+            echo "## Live boot image artifacts"
+            echo
+            echo "Target squashfs size: 100-300 MiB."
+            echo
+            echo "| artifact | size |"
+            echo "| --- | --- |"
+            for f in dist/live/vmlinuz dist/live/initrd.img dist/live/filesystem.squashfs; do
+              name="$(basename "${f}")"
+              size_bytes="$(stat -c%s "${f}")"
+              size_mib="$(awk -v b="${size_bytes}" 'BEGIN { printf "%.1f", b / 1048576 }')"
+              echo "| ${name} | ${size_mib} MiB |"
+            done
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kezio-live-image
+          path: |
+            dist/live/vmlinuz
+            dist/live/initrd.img
+            dist/live/filesystem.squashfs
+            dist/live/manifest.json
+          if-no-files-found: error

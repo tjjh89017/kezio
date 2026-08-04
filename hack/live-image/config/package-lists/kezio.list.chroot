@@ -1,0 +1,39 @@
+# Packages installed flat into the squashfs chroot. No container payload
+# is packed in - every tool the deploy flow needs runs directly on the
+# live OS. Grouped by why each package is here; sizes are watched
+# against the 100-300 MiB target the CI workflow reports.
+
+# live-boot supplies the initrd scripts that DHCP the NIC, fetch the
+# squashfs over HTTP (the fetch= cmdline parameter kezio's GRUB template
+# emits), overlay a writable tmpfs, and pivot into it - this is why the
+# image is built with live-build rather than a hand-rolled dracut
+# module: live-boot already implements exactly this initrd behavior.
+live-boot
+
+# Disk cloning and partitioning the deploy flow drives directly. sid
+# tracks current partclone releases; a stable release lags too far
+# behind for the file systems the deploy flow needs to clone (the same
+# reason Dockerfile.ingest pins sid, not sid-slim's stable counterpart).
+partclone
+gdisk
+util-linux
+fdisk
+dosfstools
+e2fsprogs
+efibootmgr
+
+# qemu-guest-agent lets the e2e KubeVirt VM be queried/controlled by the
+# hypervisor side once the live OS is up, independent of the kezio
+# control plane under test.
+qemu-guest-agent
+
+# systemd-networkd (part of the systemd package, already pulled in by
+# live-boot's own dependencies) brings up DHCP on every NIC - see
+# config/includes.chroot.static's networkd .network file.
+
+# openssh-server ships installed but disabled by default - see
+# hooks/live/0100-disable-ssh.hook.chroot. It stays available so a
+# machine can be entered for debugging without rebuilding the image, but
+# emitting an ssh-enabled live image out of the CI build alone must
+# never happen.
+openssh-server

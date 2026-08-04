@@ -48,19 +48,23 @@ exit
 
 // renderNetBootConfig builds the GRUB config for a machine that needs to
 // load the live boot environment: HTTP URLs for the kernel and initrd
-// artifacts, and a cmdline carrying kezio.server (so the agent knows
-// where to register) and kezio.token (the freshly minted, single-use
-// credential it registers with). token is the only per-request value
-// that ever appears in this output; everything else comes from Config,
-// which the operator controls, not the requesting firmware.
+// artifacts, and a cmdline carrying boot=live plus fetch=<squashfs URL>
+// (the parameters live-boot's initrd reads to fetch the root file
+// system over HTTP instead of a local disk), kezio.server (so the agent
+// knows where to register), and kezio.token (the freshly minted,
+// single-use credential it registers with). token is the only
+// per-request value that ever appears in this output; everything else
+// comes from Config, which the operator controls, not the requesting
+// firmware.
 func renderNetBootConfig(cfg Config, token string) string {
 	base := strings.TrimRight(cfg.ServerURL, "/")
 	kernelURL := fmt.Sprintf("%s/boot/artifacts/%s", base, cfg.KernelPath)
 	initrdURL := fmt.Sprintf("%s/boot/artifacts/%s", base, cfg.InitrdPath)
+	squashfsURL := fmt.Sprintf("%s/boot/artifacts/%s", base, cfg.SquashfsPath)
 
 	return fmt.Sprintf(`set timeout=5
-linux %s kezio.server=%s kezio.token=%s
+linux %s boot=live fetch=%s kezio.server=%s kezio.token=%s
 initrd %s
 boot
-`, kernelURL, cfg.ServerURL, token, initrdURL)
+`, kernelURL, squashfsURL, cfg.ServerURL, token, initrdURL)
 }

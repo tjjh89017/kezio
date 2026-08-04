@@ -1,0 +1,21 @@
+#!/bin/sh
+# live-build reads this script's `lb config` invocation as the recorded,
+# reproducible definition of the image: every flag lives here in the
+# repository, not typed at a shell prompt, so a rebuild from the same
+# commit reproduces the same configuration. hack/live-image/build.sh
+# runs `lb config` with no extra flags of its own for that reason - this
+# file is the single source of truth.
+set -e
+
+lb config noauto \
+	--architectures amd64 \
+	--distribution sid \
+	--archive-areas "main" \
+	--binary-images iso-hybrid \
+	--linux-packages "linux-image" \
+	--debian-installer none \
+	--apt-recommends false \
+	--firmware-chroot false \
+	--memtest none \
+	--win32-loader false \
+	"${@}"

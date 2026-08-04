@@ -18,14 +18,17 @@ package bootserver
 
 import "time"
 
-// DefaultKernelPath and DefaultInitrdPath name the live boot artifacts
-// under Config.ArtifactsDir when Config.KernelPath / Config.InitrdPath
-// are left empty. Placing artifacts under these names is a convention
-// this package sets, not a requirement the artifact build has to follow -
-// override them if the build produces different names.
+// DefaultKernelPath, DefaultInitrdPath, and DefaultSquashfsPath name the
+// live boot artifacts under Config.ArtifactsDir when Config.KernelPath /
+// Config.InitrdPath / Config.SquashfsPath are left empty. Placing
+// artifacts under these names is a convention this package sets, not a
+// requirement the artifact build has to follow - override them if the
+// build produces different names. They match the filenames the live
+// image build writes to dist/live/ (hack/live-image/build.sh).
 const (
-	DefaultKernelPath = "vmlinuz"
-	DefaultInitrdPath = "initrd.img"
+	DefaultKernelPath   = "vmlinuz"
+	DefaultInitrdPath   = "initrd.img"
+	DefaultSquashfsPath = "filesystem.squashfs"
 )
 
 // DefaultTokenTTL bounds how long a minted boot token is accepted. It
@@ -50,10 +53,15 @@ type Config struct {
 	// kernel/initrd HTTP URLs GRUB fetches and as the kezio.server=
 	// cmdline value the agent reads its registration endpoint from.
 	ServerURL string
-	// KernelPath and InitrdPath name the live boot artifacts under
-	// ArtifactsDir. Empty means DefaultKernelPath / DefaultInitrdPath.
-	KernelPath string
-	InitrdPath string
+	// KernelPath, InitrdPath, and SquashfsPath name the live boot
+	// artifacts under ArtifactsDir. Empty means DefaultKernelPath /
+	// DefaultInitrdPath / DefaultSquashfsPath. SquashfsPath is not served
+	// through the linux/initrd GRUB directives; it is only referenced in
+	// the kernel cmdline's fetch= value, which live-boot's initrd reads
+	// to download the root file system over HTTP.
+	KernelPath   string
+	InitrdPath   string
+	SquashfsPath string
 	// TokenTTL bounds how long a minted boot token is accepted. Zero
 	// means DefaultTokenTTL.
 	TokenTTL time.Duration
@@ -67,6 +75,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.InitrdPath == "" {
 		c.InitrdPath = DefaultInitrdPath
+	}
+	if c.SquashfsPath == "" {
+		c.SquashfsPath = DefaultSquashfsPath
 	}
 	if c.TokenTTL <= 0 {
 		c.TokenTTL = DefaultTokenTTL

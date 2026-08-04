@@ -1,0 +1,13 @@
+# DHCP every NIC the live OS finds (Name=en* covers predictable
+# interface names; Name=eth* covers the legacy naming a virtio-net NIC
+# under an emulated e2e VM can still get). The deploy flow has no prior
+# knowledge of which NIC on a given machine reaches the controller, so
+# every NIC tries DHCP rather than one hardcoded name.
+[Match]
+Name=en* eth*
+
+[Network]
+DHCP=yes
+
+[DHCPv4]
+UseDNS=yes

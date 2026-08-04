@@ -1,0 +1,11 @@
+#!/bin/sh
+# Runs inside the chroot during `lb build`. Enables systemd-networkd (and
+# its DHCP-relevant resolver companion) so every NIC on the live machine
+# comes up with DHCP the moment the live OS starts, without a login
+# session or manual step - the deploy flow needs working outbound
+# network before kezio-agent can register with the controller.
+set -eu
+
+systemctl enable systemd-networkd.service
+systemctl enable systemd-networkd-wait-online.service
+systemctl enable systemd-resolved.service
