@@ -84,6 +84,32 @@ test covering both the relayed and non-relayed cases.
    attachment and, if the segments are on different subnets, its own
    overlay), not by raising this replica count.
 
+## UEFI HTTP Boot (optional, alternative to PXE+TFTP)
+
+Some UEFI firmware can fetch its boot loader directly over HTTP(S)
+instead of PXE+TFTP - useful mainly on a routed L3 boot network, where
+TFTP's broadcast-friendly assumptions are more awkward than a plain
+HTTP fetch. Set `BOOTD_HTTP_BOOT_URL` to the full URL of the EFI binary
+firmware should fetch (for example
+`http://10.0.0.5/boot/http/shimx64.efi`) to enable it. Leaving it unset
+(the default) disables HTTP Boot entirely and leaves the PXE+TFTP path
+above completely unaffected - the two are independent, not a
+replacement of one by the other.
+
+Not every UEFI implementation supports HTTP Boot, so PXE+TFTP remains
+the path every deployment can rely on; enable HTTP Boot as an addition
+for machines/firmware that support it, not as a substitute. See
+`internal/bootd`'s package doc comment for the option 60 (Vendor Class
+Identifier) negotiation this relies on.
+
+**Setting `BOOTD_HTTP_BOOT_URL` does not, by itself, serve anything at
+that URL.** bootd only decides which URL to hand out in the DHCP reply;
+nothing in this kustomization currently serves the EFI binary over
+HTTP. Point it at an HTTP endpoint you have separately stood up to
+serve `shimx64.efi` (or extend `internal/bootserver`'s existing
+artifact-serving path to also serve it) before relying on this in
+production.
+
 ## MAC gating: fail-secure by default
 
 bootd only answers a client whose MAC address matches an enrolled

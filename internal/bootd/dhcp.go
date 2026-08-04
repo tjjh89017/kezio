@@ -18,6 +18,7 @@ package bootd
 
 import (
 	"net"
+	"strings"
 
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/iana"
@@ -29,6 +30,22 @@ import (
 // (an ordinary DHCP client sharing the same broadcast domain, for
 // example), and answering it would be pure noise at best.
 const pxeVendorClass = "PXEClient"
+
+// httpClientVendorClass is the option 60 value UEFI firmware sends when
+// it wants HTTP Boot instead of PXE+TFTP: a full HTTP(S) URL as the boot
+// filename, fetched directly, no TFTP round trip. The UEFI spec allows
+// firmware to suffix it with its architecture, for example
+// "HTTPClient:Arch:00016" - bootd matches by prefix so both the bare
+// form and any suffixed form are recognized the same way.
+const httpClientVendorClass = "HTTPClient"
+
+// isHTTPBootClass reports whether classID (option 60, as read off the
+// wire) marks the request as a UEFI HTTP Boot attempt rather than a PXE
+// one. See httpClientVendorClass's doc comment for the prefix form this
+// matches.
+func isHTTPBootClass(classID string) bool {
+	return classID == httpClientVendorClass || strings.HasPrefix(classID, httpClientVendorClass+":")
+}
 
 // supportedArchs are the RFC 4578 client system architectures
 // (DHCP option 93) this deployment ships a loader for: x86-64 UEFI
@@ -72,12 +89,19 @@ type Outcome string
 const (
 	// OutcomeAnswered means resp is non-nil and should be sent to dst.
 	OutcomeAnswered Outcome = "answered"
-	// OutcomeNotPXE means the request carried no PXEClient vendor
-	// class option (option 60): not a PXE boot attempt.
+	// OutcomeNotPXE means the request carried neither the PXEClient
+	// nor the HTTPClient vendor class option (option 60): not a boot
+	// attempt bootd recognizes at all.
 	OutcomeNotPXE Outcome = "not-pxe-client"
 	// OutcomeUnsupportedArch means option 93 named an architecture
-	// this deployment has no loader for.
+	// this deployment has no loader for. Applies to both the PXE and
+	// HTTP Boot paths - both hand out the same x86-64 UEFI shim.
 	OutcomeUnsupportedArch Outcome = "unsupported-arch"
+	// OutcomeHTTPBootUnconfigured means the request advertised the
+	// HTTPClient vendor class but Config.HTTPBootURL is unset: HTTP
+	// Boot is opt-in, so bootd declines rather than hand an HTTP
+	// client a TFTP filename it cannot use.
+	OutcomeHTTPBootUnconfigured Outcome = "http-boot-unconfigured"
 	// OutcomeUnknownMAC means the MACGate declined the client's MAC.
 	OutcomeUnknownMAC Outcome = "unknown-mac"
 	// OutcomeWrongMessageType means the request's DHCP message type is
@@ -93,6 +117,18 @@ const (
 // builds the exact response packet and the UDP address to send it to.
 // It opens no socket and has no side effects, so every decision branch
 // is directly unit-testable.
+//
+// Two vendor classes (option 60) are recognized, side by side:
+//
+//   - PXEClient: the default PXE+TFTP flow. The reply echoes
+//     "PXEClient" and hands back cfg.BootFilename (the TFTP shim).
+//   - HTTPClient (or "HTTPClient:..." per the UEFI spec's suffixed
+//     form): UEFI HTTP Boot. The reply echoes "HTTPClient" back -
+//     firmware requires this exact echo to accept the offer - and
+//     hands back cfg.HTTPBootURL, a full HTTP(S) URL, as the boot
+//     filename instead of a TFTP-relative one. This path only answers
+//     when Config.HTTPBootURL is set (see OutcomeHTTPBootUnconfigured);
+//     it is opt-in and does not change the PXEClient path at all.
 //
 // role distinguishes the two roles a proxyDHCP setup plays:
 //
@@ -134,12 +170,23 @@ func BuildResponse(req *dhcpv4.DHCPv4, role Role, srcAddr *net.UDPAddr, cfg Conf
 		return nil, nil, OutcomeWrongMessageType
 	}
 
-	if req.ClassIdentifier() != pxeVendorClass {
+	classID := req.ClassIdentifier()
+	httpBoot := isHTTPBootClass(classID)
+	if classID != pxeVendorClass && !httpBoot {
 		return nil, nil, OutcomeNotPXE
 	}
 
 	if !archSupported(req.ClientArch()) {
 		return nil, nil, OutcomeUnsupportedArch
+	}
+
+	// HTTP Boot is opt-in (Config.HTTPBootURL unset means disabled): an
+	// HTTPClient request with nothing configured to hand back is
+	// declined here, before ever consulting the MAC gate, rather than
+	// falling through to the PXE reply below with a TFTP filename the
+	// requesting firmware did not ask for and cannot use.
+	if httpBoot && cfg.HTTPBootURL == "" {
+		return nil, nil, OutcomeHTTPBootUnconfigured
 	}
 
 	if !gate.Allow(req.ClientHWAddr) {
@@ -151,6 +198,19 @@ func BuildResponse(req *dhcpv4.DHCPv4, role Role, srcAddr *net.UDPAddr, cfg Conf
 		respType = dhcpv4.MessageTypeAck
 	}
 
+	// respClass and bootFilename branch on which vendor class the
+	// client advertised: a PXE client gets pxeVendorClass echoed back
+	// and the TFTP shim filename; an HTTP Boot client gets
+	// httpClientVendorClass echoed back (firmware requires this exact
+	// echo to accept the offer) and the configured HTTP(S) URL in its
+	// place.
+	respClass := pxeVendorClass
+	bootFilename := cfg.BootFilename
+	if httpBoot {
+		respClass = httpClientVendorClass
+		bootFilename = cfg.HTTPBootURL
+	}
+
 	modifiers := []dhcpv4.Modifier{
 		dhcpv4.WithMessageType(respType),
 		// No lease: this is the one invariant every response this
@@ -159,8 +219,8 @@ func BuildResponse(req *dhcpv4.DHCPv4, role Role, srcAddr *net.UDPAddr, cfg Conf
 		dhcpv4.WithYourIP(net.IPv4zero),
 		dhcpv4.WithServerIP(cfg.NextServerIP),
 		dhcpv4.WithOption(dhcpv4.OptServerIdentifier(cfg.ServerIP)),
-		dhcpv4.WithOption(dhcpv4.OptClassIdentifier(pxeVendorClass)),
-		dhcpv4.WithOption(dhcpv4.OptBootFileName(cfg.BootFilename)),
+		dhcpv4.WithOption(dhcpv4.OptClassIdentifier(respClass)),
+		dhcpv4.WithOption(dhcpv4.OptBootFileName(bootFilename)),
 	}
 	resp, err := dhcpv4.NewReplyFromRequest(req, modifiers...)
 	if err != nil {
@@ -173,8 +233,10 @@ func BuildResponse(req *dhcpv4.DHCPv4, role Role, srcAddr *net.UDPAddr, cfg Conf
 	}
 	// PXE firmware conventionally also reads the legacy BOOTP "file"
 	// field, not only option 67 (OptBootFileName above); set both so
-	// firmware that only looks at one of them still boots.
-	resp.BootFileName = cfg.BootFilename
+	// firmware that only looks at one of them still boots. HTTP Boot
+	// firmware reads the same field, now holding the full URL instead
+	// of a TFTP-relative filename.
+	resp.BootFileName = bootFilename
 
 	return resp, destinationFor(req, role, srcAddr), OutcomeAnswered
 }

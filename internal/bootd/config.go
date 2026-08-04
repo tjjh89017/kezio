@@ -62,6 +62,19 @@ type Config struct {
 	// client. Empty means DefaultBootFilename.
 	BootFilename string
 
+	// HTTPBootURL is the full HTTP(S) URL handed out, as the boot
+	// filename, to a gated client that advertises the HTTPClient
+	// vendor class (UEFI HTTP Boot) instead of PXEClient - for example
+	// "http://10.0.0.5/boot/http/shimx64.efi". There is no default:
+	// empty means HTTP Boot is disabled entirely, and an HTTPClient
+	// request is declined (see OutcomeHTTPBootUnconfigured) rather than
+	// answered with a TFTP-relative filename it cannot fetch. Setting
+	// it does not change the PXEClient path in any way - both coexist.
+	//
+	// Nothing in this package serves the artifact at that URL; see the
+	// package doc comment's HTTP Boot section for what has to.
+	HTTPBootURL string
+
 	// TFTPDir is the local filesystem directory the TFTP server (see
 	// tftp.go) serves shimx64.efi and grubx64.efi from.
 	TFTPDir string

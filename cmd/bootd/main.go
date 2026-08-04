@@ -146,6 +146,13 @@ type bootdConfig struct {
 //   - BOOTD_BOOT_FILENAME: optional override for the PXE boot filename
 //     handed out (default internal/bootd.DefaultBootFilename,
 //     "shimx64.efi").
+//   - BOOTD_HTTP_BOOT_URL: optional full HTTP(S) URL handed out to a
+//     client advertising UEFI HTTP Boot (option 60 "HTTPClient")
+//     instead of PXE, for example
+//     "http://10.0.0.5/boot/http/shimx64.efi". Unset (the default)
+//     disables HTTP Boot entirely and does not affect the PXE path;
+//     see internal/bootd's package doc comment for what must serve the
+//     artifact at that URL before this is set.
 //   - BOOTD_ANSWER_ALL: set to "true" to disable the MAC gate (see
 //     internal/bootd's package doc comment and MACCache) and answer
 //     every architecture-matching client regardless of Machine
@@ -181,6 +188,7 @@ func bootdConfigFromEnv() (bootdConfig, error) {
 			ServerIP:     serverIP,
 			NextServerIP: nextServerIP,
 			BootFilename: os.Getenv("BOOTD_BOOT_FILENAME"),
+			HTTPBootURL:  os.Getenv("BOOTD_HTTP_BOOT_URL"),
 			TFTPDir:      tftpDir,
 			AnswerAll:    os.Getenv("BOOTD_ANSWER_ALL") == "true",
 		},

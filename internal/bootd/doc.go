@@ -62,4 +62,31 @@ limitations under the License.
 // exactly shimx64.efi and grubx64.efi from a configured directory and
 // accepts no writes and no other filename, including any path-traversal
 // attempt - see ReadHandler's doc comment.
+//
+// # UEFI HTTP Boot (alternative to PXE+TFTP)
+//
+// Some UEFI firmware supports fetching its boot loader directly over
+// HTTP(S) instead of PXE+TFTP: it advertises option 60 as "HTTPClient"
+// (rather than "PXEClient", optionally suffixed per the UEFI spec, for
+// example "HTTPClient:Arch:00016") and expects the DHCP reply's boot
+// filename to be a full HTTP(S) URL, with option 60 echoing "HTTPClient"
+// back - firmware requires that exact echo to accept the offer at all.
+// BuildResponse recognizes this alongside PXEClient (see its doc
+// comment); it is enabled per-deployment by setting Config.HTTPBootURL,
+// and is otherwise off - an unset HTTPBootURL leaves the PXEClient path
+// completely unaffected, and any HTTPClient request is declined rather
+// than answered with a TFTP filename that firmware asking for HTTP Boot
+// cannot use.
+//
+// Not every UEFI implementation supports HTTP Boot, and it generally
+// requires a routed L3 network to be worth enabling (PXE+TFTP works on
+// a flat L2 segment without any routing consideration); PXE+TFTP remains
+// the default and the one every deployment can rely on. Where HTTP Boot
+// is enabled, this package still only decides *which URL to hand out* -
+// it does not itself serve the EFI binary at that URL. Wire
+// Config.HTTPBootURL at whatever HTTP endpoint actually serves
+// shimx64.efi (or the deployment's HTTP-Boot-specific artifact); as of
+// this package, no such endpoint exists yet, so enabling HTTP Boot
+// without one first stood up leaves firmware unable to fetch what the
+// URL points at even though the DHCP exchange itself succeeds.
 package bootd
