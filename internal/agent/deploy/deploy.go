@@ -82,7 +82,7 @@ const DefaultPollInterval = 2 * time.Second
 // EzioClient is the subset of *seeder.Client the Executor drives the
 // local ezio daemon through.
 type EzioClient interface {
-	AddTorrent(ctx context.Context, torrent []byte, savePath string, seedMode bool) error
+	AddTorrent(ctx context.Context, torrent []byte, savePath string, seedMode bool, maxUploads, maxConnections int32) error
 	GetTorrentStatus(ctx context.Context, hashes []string) (map[string]seeder.Torrent, error)
 	PauseTorrent(ctx context.Context, hash string) error
 	Shutdown(ctx context.Context) error
@@ -241,7 +241,7 @@ func (e *Executor) Execute(ctx context.Context, plan *agentapi.DeployPlan) (err 
 
 	progress.setStep(agentapi.DeployStepWritingContent)
 	for _, ip := range plans {
-		if err := e.applyImagePlan(ctx, ip, handle, progress); err != nil {
+		if err := e.applyImagePlan(ctx, ip, handle, progress, plan.Ezio); err != nil {
 			return err
 		}
 	}
@@ -367,7 +367,7 @@ func (e *Executor) checkDiskSize(ctx context.Context, ip agentapi.ImageDeployPla
 // torrent to handle.Client (a zero EzioHandle when ip has no content
 // partitions - applyImagePlan never dereferences handle.Client in that
 // case).
-func (e *Executor) applyImagePlan(ctx context.Context, ip agentapi.ImageDeployPlan, handle EzioHandle, progress *progressTracker) error {
+func (e *Executor) applyImagePlan(ctx context.Context, ip agentapi.ImageDeployPlan, handle EzioHandle, progress *progressTracker, tuning *keziov1alpha1.MachineEzioTuning) error {
 	script, err := SfdiskScript(ip.SfdiskJSON, ip.Disk)
 	if err != nil {
 		return fmt.Errorf("image %s: %w", ip.ImageRef.Name, err)
@@ -387,7 +387,7 @@ func (e *Executor) applyImagePlan(ctx context.Context, ip agentapi.ImageDeployPl
 	}
 
 	for _, p := range ip.Partitions {
-		if err := e.applyPartition(ctx, ip, p, handle, progress); err != nil {
+		if err := e.applyPartition(ctx, ip, p, handle, progress, tuning); err != nil {
 			return err
 		}
 	}
@@ -397,8 +397,12 @@ func (e *Executor) applyImagePlan(ctx context.Context, ip agentapi.ImageDeployPl
 // applyPartition applies one partition's content: mkswap for a swap
 // partition, mkfs for a blank partition with a file system to create (a
 // blank partition with no FSType, for example an msr partition, is left
-// unformatted), or AddTorrent for a content partition.
-func (e *Executor) applyPartition(ctx context.Context, ip agentapi.ImageDeployPlan, p agentapi.PlanPartition, handle EzioHandle, progress *progressTracker) error {
+// unformatted), or AddTorrent for a content partition. tuning is the
+// plan's already-resolved EZIO tuning (cluster default merged with any
+// Machine.spec.ezio override, see internal/agentserver.buildDeployPlan);
+// it may be nil, in which case AddTorrent falls back to
+// seeder.DefaultMaxUploads/DefaultMaxConnections.
+func (e *Executor) applyPartition(ctx context.Context, ip agentapi.ImageDeployPlan, p agentapi.PlanPartition, handle EzioHandle, progress *progressTracker, tuning *keziov1alpha1.MachineEzioTuning) error {
 	switch classify(p) {
 	case kindSwap:
 		if err := e.runMkswap(ctx, ip, p); err != nil {
@@ -408,7 +412,9 @@ func (e *Executor) applyPartition(ctx context.Context, ip agentapi.ImageDeployPl
 
 	case kindContent:
 		e.log("adding torrent for %s (info hash %s)", p.Device, p.InfoHash)
-		if err := handle.Client.AddTorrent(ctx, p.Torrent, p.Device, false); err != nil {
+		maxUploads := seeder.ResolveMaxUploads(tuning)
+		maxConnections := seeder.ResolveMaxConnections(tuning)
+		if err := handle.Client.AddTorrent(ctx, p.Torrent, p.Device, false, maxUploads, maxConnections); err != nil {
 			return fmt.Errorf("image %s partition %d: AddTorrent %s: %w", ip.ImageRef.Name, p.Number, p.Device, err)
 		}
 		progress.setPhase(ip.Disk, p.Number, agentapi.PartitionPhaseSeeding, 0)

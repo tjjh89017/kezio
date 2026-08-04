@@ -24,6 +24,8 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/utils/ptr"
+
 	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 	"github.com/tjjh89017/kezio/internal/seeder"
@@ -108,6 +110,7 @@ func (f *fakeRunner) commandNames() []string {
 type fakeEzioClient struct {
 	mu             sync.Mutex
 	added          map[string]string // hash -> save_path
+	addedTuning    map[string][2]int32
 	statusSequence []map[string]seeder.Torrent
 	statusCalls    int
 	paused         []string
@@ -115,13 +118,14 @@ type fakeEzioClient struct {
 }
 
 func newFakeEzioClient(statusSequence []map[string]seeder.Torrent) *fakeEzioClient {
-	return &fakeEzioClient{added: map[string]string{}, statusSequence: statusSequence}
+	return &fakeEzioClient{added: map[string]string{}, addedTuning: map[string][2]int32{}, statusSequence: statusSequence}
 }
 
-func (f *fakeEzioClient) AddTorrent(_ context.Context, torrent []byte, savePath string, _ bool) error {
+func (f *fakeEzioClient) AddTorrent(_ context.Context, torrent []byte, savePath string, _ bool, maxUploads, maxConnections int32) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.added[string(torrent)] = savePath
+	f.addedTuning[string(torrent)] = [2]int32{maxUploads, maxConnections}
 	return nil
 }
 
@@ -260,6 +264,9 @@ func TestExecute_CommandSequenceForMixedPartitionTypes(t *testing.T) {
 	if got, want := ezio.added["torrent-bytes"], agentapi.DevicePartitionPath(disk, 2); got != want {
 		t.Errorf("AddTorrent save_path = %q, want %q (the raw partition device, not a -F content directory)", got, want)
 	}
+	if got, want := ezio.addedTuning["torrent-bytes"], [2]int32{seeder.DefaultMaxUploads, seeder.DefaultMaxConnections}; got != want {
+		t.Errorf("AddTorrent (max_uploads, max_connections) = %v, want %v (plan.Ezio was nil, so the built-in defaults apply)", got, want)
+	}
 	if !ezio.shutdownCalled {
 		t.Error("Shutdown was never called once every torrent finished and paused")
 	}
@@ -275,6 +282,35 @@ func TestExecute_CommandSequenceForMixedPartitionTypes(t *testing.T) {
 		if p.Phase != agentapi.PartitionPhaseDone || p.PercentDone != 100 {
 			t.Errorf("final progress for partition %d = %+v, want done/100", p.Number, p)
 		}
+	}
+}
+
+// TestExecute_PlanEzioTuningReachesAddTorrent verifies that
+// plan.Ezio's MaxUploads/MaxConnections (already resolved by
+// internal/agentserver's buildDeployPlan - cluster default merged with
+// any Machine.spec.ezio override) are the exact values applyPartition
+// hands to AddTorrent, not the package's own built-in defaults.
+func TestExecute_PlanEzioTuningReachesAddTorrent(t *testing.T) {
+	disk := "/dev/nvme0n1"
+	runner := newFakeRunner()
+	ezio := newFakeEzioClient([]map[string]seeder.Torrent{
+		{"deadbeef": {IsFinished: true, IsPaused: true, TotalDone: 100, Total: 100}},
+	})
+	launcher := &fakeLauncher{client: ezio}
+
+	plan := samplePlan(disk)
+	plan.Ezio = &keziov1alpha1.MachineEzioTuning{
+		MaxUploads:     ptr.To(int32(7)),
+		MaxConnections: ptr.To(int32(9)),
+	}
+
+	e := &Executor{Runner: runner, Ezio: launcher, PollInterval: time.Millisecond}
+	if err := e.Execute(context.Background(), plan); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	if got, want := ezio.addedTuning["torrent-bytes"], [2]int32{7, 9}; got != want {
+		t.Errorf("AddTorrent (max_uploads, max_connections) = %v, want %v (plan.Ezio's own values)", got, want)
 	}
 }
 

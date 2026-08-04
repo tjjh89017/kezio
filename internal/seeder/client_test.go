@@ -25,7 +25,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
+	"k8s.io/utils/ptr"
 
+	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
 	"github.com/tjjh89017/kezio/internal/seeder/ezioapi"
 )
 
@@ -128,7 +130,7 @@ func TestClient_AddTorrent(t *testing.T) {
 	c := startFakeEZIO(t, fake)
 
 	torrentBytes := []byte("fake-torrent-bytes")
-	if err := c.AddTorrent(context.Background(), torrentBytes, "/store/contents/deadbeef", true); err != nil {
+	if err := c.AddTorrent(context.Background(), torrentBytes, "/store/contents/deadbeef", true, 4, 12); err != nil {
 		t.Fatalf("AddTorrent: %v", err)
 	}
 
@@ -147,6 +149,12 @@ func TestClient_AddTorrent(t *testing.T) {
 	if !got.GetSeedingMode() {
 		t.Error("seeding_mode = false, want true")
 	}
+	if got.GetMaxUploads() != 4 {
+		t.Errorf("max_uploads = %d, want 4", got.GetMaxUploads())
+	}
+	if got.GetMaxConnections() != 12 {
+		t.Errorf("max_connections = %d, want 12", got.GetMaxConnections())
+	}
 }
 
 func TestClient_AddTorrent_DaemonFailure(t *testing.T) {
@@ -154,7 +162,7 @@ func TestClient_AddTorrent_DaemonFailure(t *testing.T) {
 	c := startFakeEZIO(t, fake)
 
 	fake.addErr = context.DeadlineExceeded
-	if err := c.AddTorrent(context.Background(), []byte("x"), "/store/contents/x", true); err == nil {
+	if err := c.AddTorrent(context.Background(), []byte("x"), "/store/contents/x", true, DefaultMaxUploads, DefaultMaxConnections); err == nil {
 		t.Fatal("AddTorrent: got nil error, want one from the daemon's failure")
 	}
 }
@@ -227,5 +235,31 @@ func TestClient_Healthy_Unreachable(t *testing.T) {
 
 	if err := c.Healthy(context.Background()); err == nil {
 		t.Fatal("Healthy: got nil error, want one reflecting daemon failure")
+	}
+}
+
+func TestResolveMaxUploads(t *testing.T) {
+	if got := ResolveMaxUploads(nil); got != DefaultMaxUploads {
+		t.Errorf("ResolveMaxUploads(nil) = %d, want %d", got, DefaultMaxUploads)
+	}
+	if got := ResolveMaxUploads(&keziov1alpha1.MachineEzioTuning{}); got != DefaultMaxUploads {
+		t.Errorf("ResolveMaxUploads(no override) = %d, want %d", got, DefaultMaxUploads)
+	}
+	tuning := &keziov1alpha1.MachineEzioTuning{MaxUploads: ptr.To(int32(7))}
+	if got := ResolveMaxUploads(tuning); got != 7 {
+		t.Errorf("ResolveMaxUploads(override 7) = %d, want 7", got)
+	}
+}
+
+func TestResolveMaxConnections(t *testing.T) {
+	if got := ResolveMaxConnections(nil); got != DefaultMaxConnections {
+		t.Errorf("ResolveMaxConnections(nil) = %d, want %d", got, DefaultMaxConnections)
+	}
+	if got := ResolveMaxConnections(&keziov1alpha1.MachineEzioTuning{}); got != DefaultMaxConnections {
+		t.Errorf("ResolveMaxConnections(no override) = %d, want %d", got, DefaultMaxConnections)
+	}
+	tuning := &keziov1alpha1.MachineEzioTuning{MaxConnections: ptr.To(int32(8))}
+	if got := ResolveMaxConnections(tuning); got != 8 {
+		t.Errorf("ResolveMaxConnections(override 8) = %d, want 8", got)
 	}
 }

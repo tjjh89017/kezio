@@ -62,9 +62,7 @@ func buildDeployPlan(ctx context.Context, c client.Client, cfg Config, machine *
 		AfterDeploy: machine.Spec.EffectiveAfterDeploy(),
 		MachineName: machine.Name,
 	}
-	if machine.Spec.Ezio != nil {
-		plan.Ezio = machine.Spec.Ezio.DeepCopy()
-	}
+	plan.Ezio = keziov1alpha1.MergeEzioTuning(cfg.EzioDefaults, machine.Spec.Ezio)
 
 	var osImage *keziov1alpha1.Image
 	if machine.Spec.ImageRef != nil {

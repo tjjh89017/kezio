@@ -16,7 +16,11 @@ limitations under the License.
 
 package v1alpha1
 
-import "testing"
+import (
+	"testing"
+
+	"k8s.io/utils/ptr"
+)
 
 func TestMachineSpecEffectiveOnline(t *testing.T) {
 	if got := (MachineSpec{}).EffectiveOnline(); !got {
@@ -50,4 +54,57 @@ func TestMachineSpecEffectiveAfterDeploy(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMergeEzioTuning(t *testing.T) {
+	t.Run("both nil returns nil", func(t *testing.T) {
+		if got := MergeEzioTuning(nil, nil); got != nil {
+			t.Errorf("MergeEzioTuning(nil, nil) = %+v, want nil", got)
+		}
+	})
+
+	t.Run("nil base, override only", func(t *testing.T) {
+		override := &MachineEzioTuning{MaxConnections: ptr.To(int32(9))}
+		got := MergeEzioTuning(nil, override)
+		if got == nil || got.MaxConnections == nil || *got.MaxConnections != 9 {
+			t.Errorf("MergeEzioTuning(nil, override) = %+v, want MaxConnections=9", got)
+		}
+	})
+
+	t.Run("base only, nil override", func(t *testing.T) {
+		base := &MachineEzioTuning{MaxUploads: ptr.To(int32(4))}
+		got := MergeEzioTuning(base, nil)
+		if got == nil || got.MaxUploads == nil || *got.MaxUploads != 4 {
+			t.Errorf("MergeEzioTuning(base, nil) = %+v, want MaxUploads=4", got)
+		}
+	})
+
+	t.Run("per-field override wins, unset fields fall back to base", func(t *testing.T) {
+		base := &MachineEzioTuning{
+			CacheSizeMB:    ptr.To(int32(512)),
+			AioThreads:     ptr.To(int32(16)),
+			MaxUploads:     ptr.To(int32(3)),
+			MaxConnections: ptr.To(int32(10)),
+			Port:           ptr.To(int32(50051)),
+		}
+		override := &MachineEzioTuning{
+			MaxConnections: ptr.To(int32(20)),
+		}
+		got := MergeEzioTuning(base, override)
+		if got.CacheSizeMB == nil || *got.CacheSizeMB != 512 {
+			t.Errorf("CacheSizeMB = %v, want base's 512 (override left it unset)", got.CacheSizeMB)
+		}
+		if got.AioThreads == nil || *got.AioThreads != 16 {
+			t.Errorf("AioThreads = %v, want base's 16 (override left it unset)", got.AioThreads)
+		}
+		if got.MaxUploads == nil || *got.MaxUploads != 3 {
+			t.Errorf("MaxUploads = %v, want base's 3 (override left it unset)", got.MaxUploads)
+		}
+		if got.MaxConnections == nil || *got.MaxConnections != 20 {
+			t.Errorf("MaxConnections = %v, want override's 20", got.MaxConnections)
+		}
+		if got.Port == nil || *got.Port != 50051 {
+			t.Errorf("Port = %v, want base's 50051 (override left it unset)", got.Port)
+		}
+	})
 }

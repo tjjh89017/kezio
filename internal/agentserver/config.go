@@ -16,7 +16,11 @@ limitations under the License.
 
 package agentserver
 
-import "time"
+import (
+	"time"
+
+	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
+)
 
 // DefaultSessionTTL bounds how long a session token minted at
 // registration (RegisterResponse.SessionToken) is accepted on GET
@@ -52,6 +56,14 @@ type Config struct {
 	// SessionTTL bounds how long a minted session token is accepted on
 	// GET .../next. Zero means DefaultSessionTTL.
 	SessionTTL time.Duration
+	// EzioDefaults is the cluster-wide default EZIO tuning applied to
+	// every DeployPlan this server builds, before any Machine.spec.ezio
+	// override (see buildDeployPlan and
+	// keziov1alpha1.MergeEzioTuning). Nil means every value falls back
+	// further, to the agent's own local built-in default (see
+	// internal/agent/deploy and cmd/agent's launcher/AddTorrent
+	// defaults) - the same as if a Machine set no override at all.
+	EzioDefaults *keziov1alpha1.MachineEzioTuning
 }
 
 // sessionTTL returns c.SessionTTL, or DefaultSessionTTL when unset.

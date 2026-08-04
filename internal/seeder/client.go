@@ -29,17 +29,54 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
 	"github.com/tjjh89017/kezio/internal/seeder/ezioapi"
 )
 
-// defaultMaxUploads and defaultMaxConnections mirror ezio's own
-// add_torrent default arguments, applied here because AddRequest has no
-// "unset" sentinel of its own; passing 0 through would tell ezio to allow
-// zero peers.
-const (
-	defaultMaxUploads     = 3
-	defaultMaxConnections = 5
-)
+// DefaultMaxUploads is KEZIO's own default for AddTorrent's max_uploads
+// when neither the cluster-wide operator default nor a per-Machine
+// override sets one. It matches ezio's own add_torrent default argument
+// (tmp/ezio/ezio_cli.py) - unlike DefaultMaxConnections, there is no WAN
+// reason to raise it.
+const DefaultMaxUploads = 3
+
+// DefaultMaxConnections is KEZIO's own default for AddTorrent's
+// max_connections, applied when neither the cluster-wide operator
+// default nor a per-Machine override sets one. This is deliberately
+// higher than ezio's own default of 5: a routed, cross-site swarm needs
+// enough per-torrent connections to reach a peer at every site through
+// the tracker, and a small handful of sites plus one central seeder can
+// exceed 5 distinct peers on its own. It stays well below a LAN-style
+// large fan-out, since more connections do not find more useful peers
+// once every reachable site is already connected - they just add idle
+// connections across routed links. See config/seeder/README.md's "WAN
+// swarm tuning" section.
+const DefaultMaxConnections = 10
+
+// AddRequest has no "unset" sentinel of its own: passing 0 through for
+// either max_uploads or max_connections tells ezio to allow zero peers,
+// not "use ezio's default". ResolveMaxUploads/ResolveMaxConnections
+// exist so every AddTorrent caller in KEZIO resolves a real positive
+// value the same way, instead of each caller re-deriving its own
+// fallback.
+
+// ResolveMaxUploads returns tuning's MaxUploads when set, else
+// DefaultMaxUploads. tuning may be nil.
+func ResolveMaxUploads(tuning *keziov1alpha1.MachineEzioTuning) int32 {
+	if tuning != nil && tuning.MaxUploads != nil {
+		return *tuning.MaxUploads
+	}
+	return DefaultMaxUploads
+}
+
+// ResolveMaxConnections returns tuning's MaxConnections when set, else
+// DefaultMaxConnections. tuning may be nil.
+func ResolveMaxConnections(tuning *keziov1alpha1.MachineEzioTuning) int32 {
+	if tuning != nil && tuning.MaxConnections != nil {
+		return *tuning.MaxConnections
+	}
+	return DefaultMaxConnections
+}
 
 // Torrent is one torrent's status, trimmed from ezioapi.Torrent to the
 // fields callers need. Hash is lowercase hex, matching both ezio's wire
@@ -110,13 +147,21 @@ func (c *Client) Close() error {
 // save_path is a content-addressed, immutable store directory (see
 // internal/store's InfoHash contract): if the files did not match, they
 // would not be filed under that hash to begin with.
-func (c *Client) AddTorrent(ctx context.Context, torrent []byte, savePath string, seedMode bool) error {
+//
+// maxUploads and maxConnections are the per-torrent AddTorrent tuning
+// values (ezio's max_uploads/max_connections); callers resolve these
+// ahead of time (see ResolveMaxUploads/ResolveMaxConnections) rather
+// than this method applying a fallback of its own, so the same
+// operator-default-then-Machine-override precedence holds regardless of
+// which caller (the seeder reconciler or the agent's leecher) is adding
+// the torrent.
+func (c *Client) AddTorrent(ctx context.Context, torrent []byte, savePath string, seedMode bool, maxUploads, maxConnections int32) error {
 	resp, err := c.rpc.AddTorrent(ctx, &ezioapi.AddRequest{
 		Torrent:            torrent,
 		SavePath:           savePath,
 		SeedingMode:        seedMode,
-		MaxUploads:         defaultMaxUploads,
-		MaxConnections:     defaultMaxConnections,
+		MaxUploads:         maxUploads,
+		MaxConnections:     maxConnections,
 		SequentialDownload: false,
 	})
 	if err != nil {

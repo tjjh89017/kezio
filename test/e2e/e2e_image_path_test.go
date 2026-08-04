@@ -286,7 +286,8 @@ spec:
 			leecherClient, err := seeder.Dial(leecherGRPCLocal)
 			Expect(err).NotTo(HaveOccurred())
 			defer func() { _ = leecherClient.Close() }()
-			Expect(leecherClient.AddTorrent(context.Background(), torrentBytes, "/leech", false)).To(Succeed())
+			Expect(leecherClient.AddTorrent(context.Background(), torrentBytes, "/leech", false,
+				seeder.DefaultMaxUploads, seeder.DefaultMaxConnections)).To(Succeed())
 
 			By("waiting for the leecher to report the torrent finished")
 			// Completion itself is already the integrity proof: ezio

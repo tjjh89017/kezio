@@ -256,7 +256,9 @@ type benchmarkLeechResult struct {
 func leechOneTorrent(
 	name string, client *seeder.Client, torrentBytes []byte, infoHash string, start time.Time,
 ) benchmarkLeechResult {
-	if err := client.AddTorrent(context.Background(), torrentBytes, "/leech", false); err != nil {
+	err := client.AddTorrent(context.Background(), torrentBytes, "/leech", false,
+		seeder.DefaultMaxUploads, seeder.DefaultMaxConnections)
+	if err != nil {
 		return benchmarkLeechResult{name: name, err: fmt.Errorf("AddTorrent: %w", err)}
 	}
 

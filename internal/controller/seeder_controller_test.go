@@ -44,9 +44,16 @@ import (
 // simulate a seeder pod restart by replacing a target's daemon with a
 // fresh (empty) one.
 type fakeDaemon struct {
-	mu       sync.Mutex
-	torrents map[string]seeder.Torrent
-	addCount int
+	mu          sync.Mutex
+	torrents    map[string]seeder.Torrent
+	addCount    int
+	pauseCount  int
+	resumeCount int
+	// addedTuning records the (maxUploads, maxConnections) pair each
+	// AddTorrent call for a hash was given, so tests can assert the
+	// resolved cluster-default/per-Machine tuning actually reached the
+	// daemon.
+	addedTuning map[string][2]int32
 }
 
 func newFakeDaemon() *fakeDaemon {
@@ -55,7 +62,7 @@ func newFakeDaemon() *fakeDaemon {
 
 type fakeSeederClient struct{ d *fakeDaemon }
 
-func (c fakeSeederClient) AddTorrent(_ context.Context, _ []byte, savePath string, _ bool) error {
+func (c fakeSeederClient) AddTorrent(_ context.Context, _ []byte, savePath string, _ bool, maxUploads, maxConnections int32) error {
 	c.d.mu.Lock()
 	defer c.d.mu.Unlock()
 	c.d.addCount++
@@ -63,6 +70,36 @@ func (c fakeSeederClient) AddTorrent(_ context.Context, _ []byte, savePath strin
 	// addContent: save_path is store.ContentDir(root, hash)).
 	hash := filepath.Base(savePath)
 	c.d.torrents[hash] = seeder.Torrent{Hash: hash}
+	if c.d.addedTuning == nil {
+		c.d.addedTuning = make(map[string][2]int32)
+	}
+	c.d.addedTuning[hash] = [2]int32{maxUploads, maxConnections}
+	return nil
+}
+
+func (c fakeSeederClient) PauseTorrent(_ context.Context, hash string) error {
+	c.d.mu.Lock()
+	defer c.d.mu.Unlock()
+	t, ok := c.d.torrents[hash]
+	if !ok {
+		return fmt.Errorf("pause: unknown hash %s", hash)
+	}
+	t.IsPaused = true
+	c.d.torrents[hash] = t
+	c.d.pauseCount++
+	return nil
+}
+
+func (c fakeSeederClient) ResumeTorrent(_ context.Context, hash string) error {
+	c.d.mu.Lock()
+	defer c.d.mu.Unlock()
+	t, ok := c.d.torrents[hash]
+	if !ok {
+		return fmt.Errorf("resume: unknown hash %s", hash)
+	}
+	t.IsPaused = false
+	c.d.torrents[hash] = t
+	c.d.resumeCount++
 	return nil
 }
 
@@ -376,6 +413,97 @@ var _ = Describe("Seeder Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
 			Expect(registry.daemons).To(BeEmpty())
+		})
+
+		It("adds content with the built-in default max_uploads/max_connections when EzioTuning is unset", func() {
+			fixtureRoot, hash := writeFixtureContent()
+			r.Seeder.StoreRoot = fixtureRoot
+
+			image := createReadyImage(ctx, hash)
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, image) })
+
+			target := createSeederEndpointSlice(ctx, namespace, r.Seeder.ServiceName, "seeder-eps-defaults", "10.0.0.5")
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: "seeder-sync"}})
+			Expect(err).NotTo(HaveOccurred())
+
+			got := registry.daemons[target].addedTuning[hash.String()]
+			Expect(got).To(Equal([2]int32{seeder.DefaultMaxUploads, seeder.DefaultMaxConnections}))
+		})
+
+		It("uses SeederConfig.EzioTuning as the cluster-wide default max_uploads/max_connections", func() {
+			fixtureRoot, hash := writeFixtureContent()
+			r.Seeder.StoreRoot = fixtureRoot
+			r.Seeder.EzioTuning = &keziov1alpha1.MachineEzioTuning{
+				MaxUploads:     ptr.To(int32(6)),
+				MaxConnections: ptr.To(int32(9)),
+			}
+
+			image := createReadyImage(ctx, hash)
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, image) })
+
+			target := createSeederEndpointSlice(ctx, namespace, r.Seeder.ServiceName, "seeder-eps-override", "10.0.0.6")
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: "seeder-sync"}})
+			Expect(err).NotTo(HaveOccurred())
+
+			got := registry.daemons[target].addedTuning[hash.String()]
+			Expect(got).To(Equal([2]int32{6, 9}))
+		})
+
+		It("pauses a torrent whose Image is no longer Ready, without removing it", func() {
+			fixtureRoot, hash := writeFixtureContent()
+			r.Seeder.StoreRoot = fixtureRoot
+
+			image := createReadyImage(ctx, hash)
+			target := createSeederEndpointSlice(ctx, namespace, r.Seeder.ServiceName, "seeder-eps-pause", "10.0.0.7")
+
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "seeder-sync"}}
+			_, err := r.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry.daemons[target].torrents).To(HaveKey(hash.String()))
+
+			// The Image leaves the Ready set (deleted here; going to a
+			// different state has the same effect on readyContentHashes).
+			Expect(k8sClient.Delete(ctx, image)).To(Succeed())
+
+			_, err = r.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+
+			daemon := registry.daemons[target]
+			Expect(daemon.torrents).To(HaveKey(hash.String()), "PauseTorrent must not remove the torrent - ezio has no RemoveTorrent RPC")
+			Expect(daemon.torrents[hash.String()].IsPaused).To(BeTrue())
+			Expect(daemon.pauseCount).To(Equal(1))
+		})
+
+		It("resumes a paused torrent once its Image is Ready again", func() {
+			fixtureRoot, hash := writeFixtureContent()
+			r.Seeder.StoreRoot = fixtureRoot
+
+			image := createReadyImage(ctx, hash)
+			target := createSeederEndpointSlice(ctx, namespace, r.Seeder.ServiceName, "seeder-eps-resume", "10.0.0.8")
+
+			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "seeder-sync"}}
+			_, err := r.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+
+			image.Status.State = keziov1alpha1.ImageStateIngesting
+			Expect(k8sClient.Status().Update(ctx, image)).To(Succeed())
+			_, err = r.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(registry.daemons[target].torrents[hash.String()].IsPaused).To(BeTrue())
+
+			image.Status.State = keziov1alpha1.ImageStateReady
+			Expect(k8sClient.Status().Update(ctx, image)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, image) })
+
+			_, err = r.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+
+			daemon := registry.daemons[target]
+			Expect(daemon.torrents[hash.String()].IsPaused).To(BeFalse())
+			Expect(daemon.resumeCount).To(Equal(1))
+			Expect(daemon.addCount).To(Equal(1), "the still-present torrent must be resumed, not re-added")
 		})
 	})
 })

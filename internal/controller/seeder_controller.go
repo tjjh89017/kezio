@@ -60,8 +60,10 @@ const defaultGRPCPortName = "grpc"
 // reconcile loop against an in-memory ezio double without a network
 // connection.
 type SeederEZIOClient interface {
-	AddTorrent(ctx context.Context, torrent []byte, savePath string, seedMode bool) error
+	AddTorrent(ctx context.Context, torrent []byte, savePath string, seedMode bool, maxUploads, maxConnections int32) error
 	GetTorrentStatus(ctx context.Context, hashes []string) (map[string]seeder.Torrent, error)
+	PauseTorrent(ctx context.Context, hash string) error
+	ResumeTorrent(ctx context.Context, hash string) error
 	Close() error
 }
 
@@ -92,6 +94,17 @@ type SeederConfig struct {
 	// GRPCPortName is the EndpointPort name carrying the seeder's gRPC
 	// port. Defaults to "grpc" when empty.
 	GRPCPortName string
+	// EzioTuning carries the cluster-wide default AddTorrent tuning
+	// (MaxUploads/MaxConnections) applied to every content torrent this
+	// reconciler adds. Nil (the default) falls back to
+	// seeder.DefaultMaxUploads/seeder.DefaultMaxConnections - see
+	// config/seeder/README.md's "WAN swarm tuning" section for how an
+	// operator overrides it (SEEDER_MAX_UPLOADS/SEEDER_MAX_CONNECTIONS).
+	// Only these two fields are consumed here: the seeder Deployment's
+	// own daemon-level tuning (cache size, aio threads, port) is plain
+	// container config (see config/seeder/ezio-seeder-deployment.yaml), not
+	// per-torrent AddTorrent state this reconciler manages.
+	EzioTuning *keziov1alpha1.MachineEzioTuning
 	// Dial opens a client to one seeder endpoint's gRPC target
 	// (host:port). Defaults to wrapping seeder.Dial when nil; tests
 	// override it to hand back a fake.
@@ -117,14 +130,20 @@ func (c SeederConfig) portName() string {
 }
 
 // SeederReconciler ensures every Ready Image's partition-content torrents
-// are added, with seed_mode set, on every Ready seeder endpoint. It is
-// level-triggered and singleton-keyed: every Reconcile call (regardless
-// of which Image or EndpointSlice triggered it) performs a full sync of
-// "every Ready Image's content hashes" against "every seeder endpoint's
-// current torrent set" via GetTorrentStatus, adding whatever is missing.
-// This makes a seeder pod restart (which comes back with an empty torrent
-// set) self-heal on the next reconcile without any special-casing: the
-// diff against GetTorrentStatus naturally re-adds everything.
+// are added, with seed_mode set, on every Ready seeder endpoint, and that
+// every other torrent a seeder endpoint already knows about is paused
+// (never removed - ezio has no RemoveTorrent RPC). It is level-triggered
+// and singleton-keyed: every Reconcile call (regardless of which Image
+// or EndpointSlice triggered it) performs a full sync of "every Ready
+// Image's content hashes" (the demand set) against "every seeder
+// endpoint's current torrent set" via GetTorrentStatus - adding or
+// resuming whatever the demand set wants and pausing whatever it does
+// not - via syncTarget. This makes a seeder pod restart (which comes
+// back with an empty torrent set) self-heal on the next reconcile
+// without any special-casing: the diff against GetTorrentStatus
+// naturally re-adds everything. See config/seeder/README.md's
+// "Demand-driven torrent lifecycle" section for the scope and limits of
+// this demand signal.
 type SeederReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -146,9 +165,6 @@ func (r *SeederReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (
 	hashes, err := r.readyContentHashes(ctx)
 	if err != nil {
 		return reconcile.Result{}, fmt.Errorf("list ready images: %w", err)
-	}
-	if len(hashes) == 0 {
-		return reconcile.Result{}, nil
 	}
 
 	targets, err := r.seederTargets(ctx)
@@ -238,13 +254,26 @@ func (r *SeederReconciler) seederTargets(ctx context.Context) ([]string, error) 
 	return targets, nil
 }
 
-// syncTarget adds whatever hash in hashes is missing from target's
-// current torrent set (per GetTorrentStatus) via AddTorrent with
-// seed_mode set. Content already present (any status - finished, still
-// hashing, paused) is left alone: presence in GetTorrentStatus is the
-// only signal this reconciler uses to decide "already added", matching
-// the level-triggered contract - a torrent AddTorrent already accepted
-// should not be re-submitted just because its download is not finished.
+// syncTarget reconciles target's current torrent set (per
+// GetTorrentStatus) against hashes, the demand set of every distinct
+// content hash a Ready Image currently needs seeded:
+//
+//   - a hash in hashes missing from target gets added via AddTorrent
+//     with seed_mode set;
+//   - a hash in hashes present but paused gets resumed - closing the
+//     loop on the pause below for an Image that goes Ready again after
+//     having gone away;
+//   - a hash present on target but no longer in hashes (its owning
+//     Image is no longer Ready - deleted, or moved out of the Ready
+//     state) gets paused, not removed: ezio has no RemoveTorrent RPC,
+//     so a torrent's already-verified pieces simply stop being served
+//     until (if ever) their content becomes Ready again.
+//
+// This is a coarse, Image-readiness-driven demand signal, not per-site
+// or per-Machine demand tracking (whether some machine somewhere is
+// actually still leeching a given hash right now); see
+// config/seeder/README.md's "Demand-driven torrent lifecycle" section
+// for what is and is not implemented here.
 func (r *SeederReconciler) syncTarget(ctx context.Context, target string, hashes map[string]struct{}) error {
 	c, err := r.Seeder.dial(target)
 	if err != nil {
@@ -258,11 +287,29 @@ func (r *SeederReconciler) syncTarget(ctx context.Context, target string, hashes
 	}
 
 	for hash := range hashes {
-		if _, ok := existing[hash]; ok {
+		t, ok := existing[hash]
+		if !ok {
+			if err := r.addContent(ctx, c, hash); err != nil {
+				return fmt.Errorf("add content %s: %w", hash, err)
+			}
 			continue
 		}
-		if err := r.addContent(ctx, c, hash); err != nil {
-			return fmt.Errorf("add content %s: %w", hash, err)
+		if t.IsPaused {
+			if err := c.ResumeTorrent(ctx, hash); err != nil {
+				return fmt.Errorf("resume content %s: %w", hash, err)
+			}
+		}
+	}
+
+	for hash, t := range existing {
+		if _, wanted := hashes[hash]; wanted {
+			continue
+		}
+		if t.IsPaused {
+			continue
+		}
+		if err := c.PauseTorrent(ctx, hash); err != nil {
+			return fmt.Errorf("pause content %s: %w", hash, err)
 		}
 	}
 	return nil
@@ -299,7 +346,8 @@ func (r *SeederReconciler) addContent(ctx context.Context, c SeederEZIOClient, h
 	if err != nil {
 		return fmt.Errorf("build torrent file: %w", err)
 	}
-	return c.AddTorrent(ctx, torrentBytes, contentDir, true)
+	return c.AddTorrent(ctx, torrentBytes, contentDir, true,
+		seeder.ResolveMaxUploads(r.Seeder.EzioTuning), seeder.ResolveMaxConnections(r.Seeder.EzioTuning))
 }
 
 // alwaysSyncRequest is the fixed reconcile.Request every watched event

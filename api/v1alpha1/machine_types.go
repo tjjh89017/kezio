@@ -108,8 +108,15 @@ type MachineDataImage struct {
 
 // MachineEzioTuning overrides the operator's cluster-wide default EZIO
 // tuning for this machine's leecher. All fields are optional; an absent
-// field falls back to the operator default. Use cases: small-RAM
-// machines, CI, or a machine behind a slow link.
+// field falls back to the operator default (see ResolveEzioTuning). Use
+// cases: small-RAM machines, CI, or a machine behind a slow link.
+//
+// EZIO's BitTorrent transport is plain TCP with no peer connection
+// encryption and no uTP: that is fixed by ezio's own contract (it has no
+// gRPC field to toggle either), not a tuning choice KEZIO makes, so
+// there is no field here for it. Operators who need encrypted transport
+// between sites provide it at the network layer instead (see
+// config/seeder/README.md's cross-network section).
 type MachineEzioTuning struct {
 	// CacheSizeMB overrides the EZIO daemon's unified cache size, in
 	// megabytes.
@@ -120,13 +127,24 @@ type MachineEzioTuning struct {
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	AioThreads *int32 `json:"aioThreads,omitempty"`
-	// MaxUploads overrides the per-torrent maximum upload slot count.
+	// MaxUploads overrides the per-torrent maximum upload slot count
+	// (ezio's AddTorrent max_uploads). The operator default is tuned for
+	// a routed, cross-site swarm rather than one LAN segment; see
+	// config/seeder/README.md's "WAN swarm tuning" section.
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1024
 	// +optional
 	MaxUploads *int32 `json:"maxUploads,omitempty"`
 	// MaxConnections overrides the per-torrent maximum peer connection
-	// count.
+	// count (ezio's AddTorrent max_connections). A WAN-routed swarm
+	// stays healthy with a small per-torrent cap (around 8-10): unlike a
+	// single LAN segment, a large fan-out here does not find more useful
+	// peers, only more idle connections across the routed links. The
+	// operator default already reflects this; raise it only for a
+	// same-LAN deployment with many machines that benefit from wider
+	// fan-out.
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1024
 	// +optional
 	MaxConnections *int32 `json:"maxConnections,omitempty"`
 	// Port overrides the EZIO daemon's listen port.
@@ -218,6 +236,46 @@ type MachineSpec struct {
 	// +kubebuilder:default=Reboot
 	// +optional
 	AfterDeploy string `json:"afterDeploy,omitempty"`
+}
+
+// MergeEzioTuning resolves the EZIO tuning precedence: cluster-wide
+// default first, then this machine's own spec.ezio override. Every field
+// override sets falls back to the matching field in base; a field
+// neither sets stays nil, meaning "use ezio's/the launcher's own
+// built-in default" at the point that consumes it (see
+// internal/seeder.ResolveMaxUploads/ResolveMaxConnections for the
+// per-torrent knobs). Either argument may be nil; a nil base with a nil
+// override returns nil, meaning nothing to apply.
+func MergeEzioTuning(base, override *MachineEzioTuning) *MachineEzioTuning {
+	if base == nil && override == nil {
+		return nil
+	}
+	merged := &MachineEzioTuning{}
+	if base != nil {
+		merged.CacheSizeMB = base.CacheSizeMB
+		merged.AioThreads = base.AioThreads
+		merged.MaxUploads = base.MaxUploads
+		merged.MaxConnections = base.MaxConnections
+		merged.Port = base.Port
+	}
+	if override != nil {
+		if override.CacheSizeMB != nil {
+			merged.CacheSizeMB = override.CacheSizeMB
+		}
+		if override.AioThreads != nil {
+			merged.AioThreads = override.AioThreads
+		}
+		if override.MaxUploads != nil {
+			merged.MaxUploads = override.MaxUploads
+		}
+		if override.MaxConnections != nil {
+			merged.MaxConnections = override.MaxConnections
+		}
+		if override.Port != nil {
+			merged.Port = override.Port
+		}
+	}
+	return merged
 }
 
 // EffectiveOnline returns the machine's desired power state, treating a

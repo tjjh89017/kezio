@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -246,7 +247,11 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "Machine")
 		os.Exit(1)
 	}
-	seederCfg := seederConfigFromEnv()
+	seederCfg, err := seederConfigFromEnv()
+	if err != nil {
+		setupLog.Error(err, "invalid seeder configuration")
+		os.Exit(1)
+	}
 	if err := (&controller.SeederReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
@@ -290,7 +295,11 @@ func main() {
 		}
 	}
 
-	agentConfig := agentServerConfigFromEnv(seederCfg)
+	agentConfig, err := agentServerConfigFromEnv(seederCfg)
+	if err != nil {
+		setupLog.Error(err, "invalid agent server configuration")
+		os.Exit(1)
+	}
 	if agentConfig != nil {
 		if err := agentserver.SetupFieldIndexer(context.Background(), mgr); err != nil {
 			setupLog.Error(err, "unable to set up agent token field indexer")
@@ -404,10 +413,19 @@ func ingestConfigFromEnv() (controller.IngestConfig, error) {
 //     it to individual Ready backends via EndpointSlices.
 //   - SEEDER_GRPC_PORT_NAME optionally overrides the EndpointPort name
 //     carrying the seeder's gRPC port (default "grpc").
-func seederConfigFromEnv() controller.SeederConfig {
+//   - SEEDER_MAX_UPLOADS / SEEDER_MAX_CONNECTIONS optionally override
+//     the cluster-wide default per-torrent AddTorrent tuning this
+//     reconciler applies to every content torrent it adds (see
+//     config/seeder/README.md's "WAN swarm tuning" section). Unset
+//     leaves seeder.DefaultMaxUploads/DefaultMaxConnections in effect.
+func seederConfigFromEnv() (controller.SeederConfig, error) {
 	trackerURL := os.Getenv("SEEDER_TRACKER_URL")
 	if trackerURL == "" {
-		return controller.SeederConfig{}
+		return controller.SeederConfig{}, nil
+	}
+	ezioTuning, err := ezioTuningFromEnv("SEEDER_MAX_UPLOADS", "SEEDER_MAX_CONNECTIONS")
+	if err != nil {
+		return controller.SeederConfig{}, err
 	}
 	return controller.SeederConfig{
 		TrackerURL:       trackerURL,
@@ -415,7 +433,42 @@ func seederConfigFromEnv() controller.SeederConfig {
 		ServiceNamespace: os.Getenv("SEEDER_SERVICE_NAMESPACE"),
 		ServiceName:      os.Getenv("SEEDER_SERVICE_NAME"),
 		GRPCPortName:     os.Getenv("SEEDER_GRPC_PORT_NAME"),
+		EzioTuning:       ezioTuning,
+	}, nil
+}
+
+// ezioTuningFromEnv reads a cluster-wide default MaxUploads/MaxConnections
+// override from the two named environment variables, returning nil when
+// neither is set (meaning "no cluster-wide override; fall back further",
+// exactly like an absent Machine.spec.ezio field - see
+// keziov1alpha1.MergeEzioTuning and internal/seeder's
+// ResolveMaxUploads/ResolveMaxConnections). An unparsable non-empty
+// value is a startup-time configuration error, not silently ignored.
+func ezioTuningFromEnv(maxUploadsVar, maxConnectionsVar string) (*keziov1alpha1.MachineEzioTuning, error) {
+	var tuning keziov1alpha1.MachineEzioTuning
+	var set bool
+	if v := os.Getenv(maxUploadsVar); v != "" {
+		n, err := strconv.ParseInt(v, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid %s: %w", maxUploadsVar, err)
+		}
+		n32 := int32(n)
+		tuning.MaxUploads = &n32
+		set = true
 	}
+	if v := os.Getenv(maxConnectionsVar); v != "" {
+		n, err := strconv.ParseInt(v, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid %s: %w", maxConnectionsVar, err)
+		}
+		n32 := int32(n)
+		tuning.MaxConnections = &n32
+		set = true
+	}
+	if !set {
+		return nil, nil
+	}
+	return &tuning, nil
 }
 
 // bootServerConfigFromEnv builds the boot config server's
@@ -493,16 +546,31 @@ func bootServerConfigFromEnv() (*bootserver.Config, error) {
 // an Image with a content partition, and answers ActionWait forever
 // instead of failing outright, the same graceful degradation
 // buildDeployPlan gives an unexpected build error.
-func agentServerConfigFromEnv(seeder controller.SeederConfig) *agentserver.Config {
+//
+// EZIO_DEFAULT_MAX_UPLOADS / EZIO_DEFAULT_MAX_CONNECTIONS optionally set
+// the cluster-wide default per-torrent AddTorrent tuning applied to
+// every DeployPlan this server builds, before any Machine.spec.ezio
+// override (see keziov1alpha1.MergeEzioTuning). These are intentionally
+// separate from SEEDER_MAX_UPLOADS/SEEDER_MAX_CONNECTIONS: the seeder
+// pods and each machine's leecher can reasonably want different
+// defaults (a seeder serves every site at once; a leecher serves only
+// itself), so this reuses SeederConfig for the tracker/store settings
+// alone, not its tuning.
+func agentServerConfigFromEnv(seeder controller.SeederConfig) (*agentserver.Config, error) {
 	addr := os.Getenv("AGENT_SERVER_ADDR")
 	if addr == "" {
-		return nil
+		return nil, nil
+	}
+	ezioDefaults, err := ezioTuningFromEnv("EZIO_DEFAULT_MAX_UPLOADS", "EZIO_DEFAULT_MAX_CONNECTIONS")
+	if err != nil {
+		return nil, err
 	}
 	return &agentserver.Config{
-		Addr:       addr,
-		StoreRoot:  seeder.StoreRoot,
-		TrackerURL: seeder.TrackerURL,
-	}
+		Addr:         addr,
+		StoreRoot:    seeder.StoreRoot,
+		TrackerURL:   seeder.TrackerURL,
+		EzioDefaults: ezioDefaults,
+	}, nil
 }
 
 // deployerFactoryFromEnv selects the Deployer implementation the Machine

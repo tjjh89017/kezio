@@ -213,14 +213,25 @@ spec:
                   maxConnections:
                     description: |-
                       MaxConnections overrides the per-torrent maximum peer connection
-                      count.
+                      count (ezio's AddTorrent max_connections). A WAN-routed swarm
+                      stays healthy with a small per-torrent cap (around 8-10): unlike a
+                      single LAN segment, a large fan-out here does not find more useful
+                      peers, only more idle connections across the routed links. The
+                      operator default already reflects this; raise it only for a
+                      same-LAN deployment with many machines that benefit from wider
+                      fan-out.
                     format: int32
+                    maximum: 1024
                     minimum: 1
                     type: integer
                   maxUploads:
-                    description: MaxUploads overrides the per-torrent maximum upload
-                      slot count.
+                    description: |-
+                      MaxUploads overrides the per-torrent maximum upload slot count
+                      (ezio's AddTorrent max_uploads). The operator default is tuned for
+                      a routed, cross-site swarm rather than one LAN segment; see
+                      config/seeder/README.md's "WAN swarm tuning" section.
                     format: int32
+                    maximum: 1024
                     minimum: 1
                     type: integer
                   port:
