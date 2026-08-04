@@ -57,7 +57,7 @@ func efibootLabel(machineName string) string {
 // this never chroots or runs update-initramfs.
 func (e *Executor) finalize(ctx context.Context, plan *agentapi.DeployPlan, plans []agentapi.ImageDeployPlan) error {
 	for _, ip := range plans {
-		if err := e.growLastPartition(ctx, ip); err != nil {
+		if err := e.growLastPartition(ctx, ip, false); err != nil {
 			return err
 		}
 
@@ -138,12 +138,15 @@ func parseEFIBootEntries(listing, label string) []string {
 // growLastPartition grows ip's last partition and, when it has a file
 // system finalize knows how to resize, that file system too - filling
 // whatever extra space ip.Disk has beyond what ip.SfdiskJSON's layout
-// itself asks for. It is a no-op unless ip.GrowLastPartition is true;
-// see that field's doc comment for why every plan the controller builds
-// today leaves it false, making this path unreachable in production
-// until a later work item wires a spec field to it.
-func (e *Executor) growLastPartition(ctx context.Context, ip agentapi.ImageDeployPlan) error {
-	if !ip.GrowLastPartition || len(ip.Partitions) == 0 {
+// itself asks for. It is a no-op unless ip.GrowLastPartition is true or
+// force is true; see ip.GrowLastPartition's field comment for why every
+// plan the controller builds today leaves it false, making the
+// force=false path unreachable in production until a later work item
+// wires a spec field to it. force is set by the "growLastPartition"
+// builtin post hook step (runHooks.go's builtin registry), which grows
+// on explicit request regardless of ip.GrowLastPartition.
+func (e *Executor) growLastPartition(ctx context.Context, ip agentapi.ImageDeployPlan, force bool) error {
+	if (!force && !ip.GrowLastPartition) || len(ip.Partitions) == 0 {
 		return nil
 	}
 	last := ip.Partitions[len(ip.Partitions)-1]

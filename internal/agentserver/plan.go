@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -65,11 +66,12 @@ func buildDeployPlan(ctx context.Context, c client.Client, cfg Config, machine *
 		plan.Ezio = machine.Spec.Ezio.DeepCopy()
 	}
 
+	var osImage *keziov1alpha1.Image
 	if machine.Spec.ImageRef != nil {
 		if provisioning.Image == nil || provisioning.Image.TargetDisk == "" {
 			return nil, nil
 		}
-		osPlan, ready, err := buildImagePlan(ctx, c, cfg, machine.Namespace, provisioning.Image.ImageRef, provisioning.Image.TargetDisk)
+		osPlan, image, ready, err := buildImagePlan(ctx, c, cfg, machine.Namespace, provisioning.Image.ImageRef, provisioning.Image.TargetDisk)
 		if err != nil {
 			return nil, fmt.Errorf("building OS image plan: %w", err)
 		}
@@ -77,6 +79,7 @@ func buildDeployPlan(ctx context.Context, c client.Client, cfg Config, machine *
 			return nil, nil
 		}
 		plan.OS = osPlan
+		osImage = image
 	}
 
 	if len(machine.Spec.DataImages) != len(provisioning.DataImages) {
@@ -89,7 +92,7 @@ func buildDeployPlan(ctx context.Context, c client.Client, cfg Config, machine *
 		if rec.ImageRef != dataImage.ImageRef || rec.TargetDisk == "" {
 			return nil, nil
 		}
-		dataPlan, ready, err := buildImagePlan(ctx, c, cfg, machine.Namespace, rec.ImageRef, rec.TargetDisk)
+		dataPlan, _, ready, err := buildImagePlan(ctx, c, cfg, machine.Namespace, rec.ImageRef, rec.TargetDisk)
 		if err != nil {
 			return nil, fmt.Errorf("building dataImages[%d] plan: %w", i, err)
 		}
@@ -105,6 +108,26 @@ func buildDeployPlan(ctx context.Context, c client.Client, cfg Config, machine *
 		return nil, nil
 	}
 
+	// Hooks attach only to the OS Image and the Machine (see
+	// keziov1alpha1.ImageSpec.PostHookRefs and
+	// MachineSpec.PostHookRefs' doc comments) - never to a dataImages
+	// entry - so only osImage (nil when the Machine deploys no OS image)
+	// contributes an image side to the merge.
+	var imageRefs []keziov1alpha1.NameRef
+	var imageParams *apiextensionsv1.JSON
+	var imageName, targetDisk string
+	if osImage != nil {
+		imageRefs = osImage.Spec.PostHookRefs
+		imageParams = osImage.Spec.Params
+		imageName = osImage.Name
+		targetDisk = provisioning.Image.TargetDisk
+	}
+	hooks, err := resolveHooks(ctx, c, machine.Namespace, imageRefs, machine.Spec.PostHookRefs, imageParams, machine.Spec.Params, machine.Name, imageName, targetDisk)
+	if err != nil {
+		return nil, fmt.Errorf("resolving post hooks: %w", err)
+	}
+	plan.Hooks = hooks
+
 	return plan, nil
 }
 
@@ -115,35 +138,39 @@ func buildDeployPlan(ctx context.Context, c client.Client, cfg Config, machine *
 // takes the same not-ready path in every case, so this distinguishes
 // "keep waiting" (ready=false) from "something is actually wrong"
 // (err != nil) for its caller.
-func buildImagePlan(ctx context.Context, c client.Client, cfg Config, defaultNS string, imageRef keziov1alpha1.NameRef, targetDisk string) (*agentapi.ImageDeployPlan, bool, error) {
+// buildImagePlan also returns the fetched Image object itself (nil when
+// ready is false), so buildDeployPlan can read the OS image's own
+// spec.postHookRefs/spec.params for hook resolution without a second
+// fetch of the same object.
+func buildImagePlan(ctx context.Context, c client.Client, cfg Config, defaultNS string, imageRef keziov1alpha1.NameRef, targetDisk string) (*agentapi.ImageDeployPlan, *keziov1alpha1.Image, bool, error) {
 	ns := keziov1alpha1.ResolveNamespace(imageRef, defaultNS)
 
 	image := &keziov1alpha1.Image{}
 	if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: imageRef.Name}, image); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, false, nil
+			return nil, nil, false, nil
 		}
-		return nil, false, fmt.Errorf("get image %s/%s: %w", ns, imageRef.Name, err)
+		return nil, nil, false, fmt.Errorf("get image %s/%s: %w", ns, imageRef.Name, err)
 	}
 	if image.Status.State != keziov1alpha1.ImageStateReady || image.Status.Disk == nil || image.Status.Disk.LayoutRef == nil {
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 
 	cmName := image.Status.Disk.LayoutRef.Name
 	cm := &corev1.ConfigMap{}
 	if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: cmName}, cm); err != nil {
-		return nil, false, fmt.Errorf("get layout configmap %s/%s: %w", ns, cmName, err)
+		return nil, nil, false, fmt.Errorf("get layout configmap %s/%s: %w", ns, cmName, err)
 	}
 	sfdiskJSON, ok := cm.Data[sfdiskJSONKey]
 	if !ok {
-		return nil, false, fmt.Errorf("layout configmap %s/%s missing key %q", ns, cmName, sfdiskJSONKey)
+		return nil, nil, false, fmt.Errorf("layout configmap %s/%s missing key %q", ns, cmName, sfdiskJSONKey)
 	}
 
 	partitions := make([]agentapi.PlanPartition, 0, len(image.Status.Partitions))
 	for _, p := range image.Status.Partitions {
 		part, err := buildPlanPartition(cfg, ns, image.Name, targetDisk, p)
 		if err != nil {
-			return nil, false, err
+			return nil, nil, false, err
 		}
 		partitions = append(partitions, part)
 	}
@@ -153,7 +180,7 @@ func buildImagePlan(ctx context.Context, c client.Client, cfg Config, defaultNS 
 		Disk:       targetDisk,
 		SfdiskJSON: sfdiskJSON,
 		Partitions: partitions,
-	}, true, nil
+	}, image, true, nil
 }
 
 // buildPlanPartition builds one PlanPartition from an

@@ -32,6 +32,15 @@ limitations under the License.
 // there is nothing to regenerate. efibootmgr only ever touches firmware
 // NVRAM, never the ESP's own file system content.
 //
+// Between content writing and finalize, Execute runs plan.Hooks
+// (runHooks, in hooks.go): every PostHook internal/agentserver resolved
+// into the plan, already carrying each step's templated script content.
+// This is the one place finalize's own "never chroots" rule does not
+// apply - a chrootScript step deliberately mounts and chroots into the
+// deployed root file system - but only on the cluster operator's own
+// explicit request through a PostHook's steps, never automatically.
+//
+
 // This is the highest-blast-radius code in kezio: a wrong disk here
 // destroys data with no undo. Every destructive command it issues names
 // a device the DeployPlan itself supplied (never a glob, never a
@@ -237,6 +246,18 @@ func (e *Executor) Execute(ctx context.Context, plan *agentapi.DeployPlan) error
 		}
 	}
 
+	// Hooks run once every partition across the whole plan is fully
+	// written (content, mkfs/mkswap, and - for a content partition - the
+	// torrent finished and paused above) and before finalize, so a
+	// chrootScript step sees a complete, mountable root file system and
+	// a script step (or a "growLastPartition"/"efibootmgr" builtin) can
+	// still run before finalize's own unconditional actions.
+	progress.setStep(agentapi.DeployStepRunningPostHook)
+	e.report(ctx, progress)
+	if err := e.runHooks(ctx, plan); err != nil {
+		return fmt.Errorf("running post hooks: %w", err)
+	}
+
 	progress.setStep(agentapi.DeployStepFinalizing)
 	e.report(ctx, progress)
 	if err := e.finalize(ctx, plan, plans); err != nil {
@@ -367,9 +388,8 @@ func (e *Executor) applyImagePlan(ctx context.Context, ip agentapi.ImageDeployPl
 func (e *Executor) applyPartition(ctx context.Context, ip agentapi.ImageDeployPlan, p agentapi.PlanPartition, handle EzioHandle, progress *progressTracker) error {
 	switch classify(p) {
 	case kindSwap:
-		e.log("mkswap %s (uuid %s)", p.Device, p.SwapUUID)
-		if _, err := e.Runner.Run(ctx, nil, "mkswap", "--uuid", p.SwapUUID, p.Device); err != nil {
-			return fmt.Errorf("image %s partition %d: mkswap %s: %w", ip.ImageRef.Name, p.Number, p.Device, err)
+		if err := e.runMkswap(ctx, ip, p); err != nil {
+			return err
 		}
 		progress.setPhase(ip.Disk, p.Number, agentapi.PartitionPhaseDone, 100)
 
@@ -393,6 +413,19 @@ func (e *Executor) applyPartition(ctx context.Context, ip agentapi.ImageDeployPl
 	}
 
 	e.report(ctx, progress)
+	return nil
+}
+
+// runMkswap runs mkswap against p (a swap partition, p.SwapUUID set),
+// restoring its source UUID exactly. Extracted from applyPartition's own
+// kindSwap case so the "mkswap" builtin post hook step (runHooks.go) can
+// run the same command against every swap partition in plan, on
+// explicit request, without duplicating it.
+func (e *Executor) runMkswap(ctx context.Context, ip agentapi.ImageDeployPlan, p agentapi.PlanPartition) error {
+	e.log("mkswap %s (uuid %s)", p.Device, p.SwapUUID)
+	if _, err := e.Runner.Run(ctx, nil, "mkswap", "--uuid", p.SwapUUID, p.Device); err != nil {
+		return fmt.Errorf("image %s partition %d: mkswap %s: %w", ip.ImageRef.Name, p.Number, p.Device, err)
+	}
 	return nil
 }
 

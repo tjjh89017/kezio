@@ -130,6 +130,70 @@ type DeployPlan struct {
 	// find and replace its own prior entry instead of accumulating
 	// duplicates.
 	MachineName string `json:"machineName"`
+	// Hooks is every PostHook attached to this deploy, fully resolved:
+	// the OS Image's own postHookRefs first, then the Machine's own
+	// postHookRefs, each in the order its spec lists them (see
+	// keziov1alpha1.ImageSpec.PostHookRefs and
+	// keziov1alpha1.MachineSpec.PostHookRefs' doc comments for why that
+	// order). internal/agentserver builds every entry here - fetching
+	// each PostHook CR plus any configMapRef/secretRef script content and
+	// templating it with the merged params - so the agent
+	// (internal/agent/deploy) can run every step without ever reading a
+	// PostHook, ConfigMap, or Secret from the cluster itself.
+	Hooks []ResolvedHook `json:"hooks,omitempty"`
+}
+
+// Hook step type values for ResolvedHookStep.Type, mirroring
+// keziov1alpha1.PostHookStepType* (the CRD-side step kind constants).
+const (
+	// HookStepTypeBuiltin means Builtin names the step to run.
+	HookStepTypeBuiltin = "builtin"
+	// HookStepTypeScript means Content runs in the live OS, nothing
+	// mounted.
+	HookStepTypeScript = "script"
+	// HookStepTypeChrootScript means Content runs inside a chroot of the
+	// deployed OS image's root partition.
+	HookStepTypeChrootScript = "chrootScript"
+)
+
+// ResolvedHook is one PostHook attached to a deploy, fully resolved: its
+// steps in order, each already carrying whatever content it needs to run
+// with no further cluster access.
+type ResolvedHook struct {
+	// Name is the PostHook's name, carried through for progress messages
+	// and diagnostics only - the agent never looks it up.
+	Name string `json:"name"`
+	// Steps run in list order, mirroring the PostHook's own
+	// spec.steps order.
+	Steps []ResolvedHookStep `json:"steps"`
+}
+
+// ResolvedHookStep is one PostHook step, resolved for the agent to run
+// with no cluster access: a script step's content is already fetched
+// from its configMapRef/secretRef (or copied from an inline script) and
+// templated with the deploy's merged params.
+type ResolvedHookStep struct {
+	// Type is one of the HookStepType* constants.
+	Type string `json:"type"`
+	// Builtin is the builtin step name (see keziov1alpha1.BuiltinStep*
+	// constants, for example "mkswap"), set iff Type is
+	// HookStepTypeBuiltin.
+	Builtin string `json:"builtin,omitempty"`
+	// Content is the already-templated script to run, set iff Type is
+	// HookStepTypeScript or HookStepTypeChrootScript.
+	Content string `json:"content,omitempty"`
+	// FromSecret reports whether Content was sourced from a Secret
+	// (keziov1alpha1.PostHookScriptSourceSecretRef). The agent must never
+	// write Content to a log line - regardless of FromSecret - but this
+	// flag lets it also skip echoing the step in any other
+	// human-readable output that isn't already scrubbed the same way.
+	FromSecret bool `json:"fromSecret,omitempty"`
+	// TimeoutSeconds bounds how long the step may run before the agent
+	// treats it as failed and aborts the deploy. Always positive: the
+	// resolver copies it from the step's own
+	// EffectiveTimeoutSeconds(), which already substitutes
+	// keziov1alpha1.PostHookDefaultTimeoutSeconds for an unset value.
+	TimeoutSeconds int32 `json:"timeoutSeconds"`
 }
 
 // ImageDeployPlan is one Image's deploy plan: the disk it targets, the
@@ -252,6 +316,11 @@ const (
 	// in Partitions carries the finer-grained detail this step name does
 	// not.
 	DeployStepWritingContent = "WritingContent"
+	// DeployStepRunningPostHook means every partition's content and file
+	// system is in place and the agent is running the plan's Hooks, in
+	// order - see internal/agent/deploy's package doc comment for where
+	// this slots between content writing and finalize.
+	DeployStepRunningPostHook = "RunningPostHook"
 	// DeployStepFinalizing means every partition is done and the agent is
 	// running finalize actions (efibootmgr, and growLastPartition when a
 	// plan asks for it) - see internal/agent/deploy's package doc comment
