@@ -1,0 +1,26 @@
+# Adds the store volume, mounted read-only, to the controller-manager
+# container: SEEDER_STORE_ROOT (set with `kubectl set env`, see
+# kustomization.yaml's header comment) points here. The manager reads
+# contents/<hash>/torrent.info directly from this mount to build the
+# .torrent bytes it hands to the seeder over AddTorrent (see
+# internal/controller/seeder_controller.go's addContent and
+# config/seeder/README.md's "Wire the operator side" section, which this
+# overlay automates for e2e).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kezio-controller-manager
+  namespace: kezio-system
+spec:
+  template:
+    spec:
+      containers:
+        - name: manager
+          volumeMounts:
+            - name: store
+              mountPath: /store
+              readOnly: true
+      volumes:
+        - name: store
+          persistentVolumeClaim:
+            claimName: kezio-store

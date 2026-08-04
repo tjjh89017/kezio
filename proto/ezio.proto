@@ -1,0 +1,120 @@
+// This file mirrors the gRPC contract upstream ezio serves. It is copied
+// rather than referenced so that kezio's stub generation does not depend
+// on checking out ezio's source tree. Keep it byte-for-byte in sync with
+// upstream except for the go_package option added below; upstream owns
+// the wire contract.
+syntax = "proto3";
+package ezio;
+
+option go_package = "github.com/tjjh89017/kezio/internal/seeder/ezioapi;ezioapi";
+
+message Empty {
+
+}
+
+// Same as libtorrent torrent_status
+message Torrent {
+	// hex sha1 hash lowercase
+	string hash = 1;
+	// torrent name
+	string name = 2;
+	// float point number bewteen [0, 1]
+	double progress = 3;
+	// download rate byte per second
+	int64 download_rate = 4;
+	// upload rate byte per second
+	int64 upload_rate = 5;
+	// active time
+	int64 active_time = 6;
+	// is_finished
+	bool is_finished = 7;
+	// num_peers connected to
+	int64 num_peers = 8;
+	// state
+	int64 state = 9;
+	// total done byte
+	int64 total_done = 10;
+	// total byte
+	int64 total = 11;
+	// finished piece num
+	int64 num_pieces = 12;
+	// finished time
+	int64 finished_time = 13;
+	// seeding time
+	int64 seeding_time = 14;
+	// total download
+	int64 total_payload_download = 15;
+	// total upload
+	int64 total_payload_upload = 16;
+	// is paused
+	bool is_paused = 17;
+	// save_path
+	string save_path = 18;
+	// last_upload
+	int64 last_upload = 19;
+	// last_download
+	int64 last_download = 20;
+}
+
+message AddRequest {
+	// torrent file
+	bytes torrent = 1;
+	// save path, here is disk or partition path
+	string save_path = 2;
+	// force seed mode
+	bool seeding_mode = 3;
+	// max upload connection
+	int32 max_uploads = 4;
+	// max total connection
+	int32 max_connections = 5;
+	// force sequential download
+	bool sequential_download = 6;
+}
+
+message AddResponse {
+	bool result = 1;
+}
+
+message UpdateRequest {
+	// update status only in hashs, if empty update all
+	// lowercase hex sha1 hash
+	repeated string hashes = 1;
+}
+
+message UpdateStatus {
+	// lowercase hex sha1 hash
+	repeated string hashes = 1;
+	map<string, Torrent> torrents = 2;
+}
+
+message PauseTorrentRequest {
+	// lowercase hex sha1 hash
+	string hash = 1;
+}
+
+message PauseTorrentResponse {
+
+}
+
+message ResumeTorrentRequest {
+	// lowercase hex sha1 hash
+	string hash = 1;
+}
+
+message ResumeTorrentResponse {
+
+}
+
+message VersionResponse {
+	// version
+	string version = 1;
+}
+
+service EZIO {
+	rpc Shutdown(Empty) returns (Empty) {}
+	rpc GetTorrentStatus(UpdateRequest) returns (UpdateStatus) {}
+	rpc AddTorrent(AddRequest) returns (AddResponse) {}
+	rpc PauseTorrent(PauseTorrentRequest) returns (PauseTorrentResponse) {}
+	rpc ResumeTorrent(ResumeTorrentRequest) returns (ResumeTorrentResponse) {}
+	rpc GetVersion(Empty) returns (VersionResponse) {}
+}

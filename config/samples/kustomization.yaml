@@ -1,0 +1,6 @@
+## Append samples of your project ##
+resources:
+- kezio_v1alpha1_image.yaml
+- kezio_v1alpha1_posthook.yaml
+- kezio_v1alpha1_machine.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

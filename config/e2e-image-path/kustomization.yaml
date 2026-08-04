@@ -1,0 +1,39 @@
+# Overlay used only by the e2e image-path stage (test/e2e's "Image ingest
+# and seeding" Context, gated by E2E_IMAGE_PATH=true - see that file and
+# .github/workflows/test-e2e.yml's "image-path" job). It aggregates the
+# base deployment plus the two standalone kustomizations that are
+# normally left for a cluster operator to opt into by hand
+# (config/image-service, config/seeder), and adds what a real deployment
+# would otherwise assemble out of band: a store PVC both the ingest Job
+# and the seeder mount, and a store mount on the controller-manager
+# itself (see manager-store-patch.yaml).
+#
+# This is not a template for a production deployment: it exists purely
+# so the e2e suite can exercise the real ingest+seed+leech path end to
+# end on a disposable single-node k3s cluster. In particular:
+#   - the store and staging PVCs are patched to ReadWriteOnce with the
+#     "local-path" StorageClass, since a single-node k3s cluster has no
+#     ReadWriteMany-capable provisioner by default and every consumer
+#     (ingest Job, seeder, image-service) runs on that same one node
+#     anyway;
+#   - INGEST_IMAGE and the SEEDER_* environment variables on the
+#     controller-manager Deployment are NOT set here (they need the
+#     locally built, per-run image tags, which kustomize's static YAML
+#     cannot express) - the e2e suite sets them with `kubectl set env`
+#     after applying this overlay; see the "Image ingest and seeding"
+#     Context's BeforeAll.
+resources:
+  - ../default
+  - ../image-service
+  - ../seeder
+  - store-pvc.yaml
+
+patches:
+  - path: manager-store-patch.yaml
+    target:
+      kind: Deployment
+      name: kezio-controller-manager
+  - path: staging-pvc-patch.yaml
+    target:
+      kind: PersistentVolumeClaim
+      name: kezio-image-service-staging

@@ -1,0 +1,351 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: images.kezio.kojuro.date
+spec:
+  group: kezio.kojuro.date
+  names:
+    kind: Image
+    listKind: ImageList
+    plural: images
+    shortNames:
+    - ezi
+    - image
+    singular: image
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.state
+      name: State
+      type: string
+    - jsonPath: .spec.bootable
+      name: Bootable
+      type: boolean
+    - jsonPath: .spec.osFamily
+      name: OSFamily
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Image is the Schema for the images API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ImageSpec defines the desired state of Image. It is create-only: the
+              apiserver rejects any update to it. An Image's partitions are
+              distributed by BitTorrent, and a torrent's info hash binds to fixed
+              content; allowing spec to change after creation would let an in-use
+              info hash silently point at different content and break every swarm
+              seeding it. To publish new content, create an Image with a new name;
+              to retry a failed ingest, delete the Image and create it again.
+
+              Immutability is enforced per field below (self == oldSelf on each of
+              Source, Bootable, OSFamily, PostHookRefs, and Params) rather than once
+              on the whole struct. A single whole-object rule here previously read
+              "self == oldSelf" directly on ImageSpec; it is deliberately not used
+              because Params is schemaless (x-kubernetes-preserve-unknown-fields):
+              CEL's equality over a struct that embeds an unstructured/schemaless
+              field is markedly more fragile across apiserver versions and object
+              shapes than equality over that struct's individually-typed fields, and
+              a spurious inequality anywhere in the struct fails the whole update.
+              Splitting the rule per field means a quirk isolated to Params cannot
+              block updates that never touch Source, Bootable, OSFamily, or
+              PostHookRefs, and vice versa.
+            properties:
+              bootable:
+                default: true
+                description: |-
+                  Bootable marks this image as a bootable OS image: ingest expects an
+                  ESP and finalize creates a boot entry. Set to false for a
+                  non-bootable image (a data disk, a scratch layout, a pre-formatted
+                  store), for which ingest does not require an ESP and finalize skips
+                  the boot loader step. Defaults to true.
+                type: boolean
+                x-kubernetes-validations:
+                - message: spec.bootable is immutable once the Image is created; create
+                    a new Image to publish different content
+                  rule: self == oldSelf
+              osFamily:
+                default: Linux
+                description: |-
+                  OSFamily gates OS-specific validation and builtins (for example
+                  mkswap, which only applies to Linux). Defaults to Linux.
+                enum:
+                - Linux
+                - Windows
+                - FreeBSD
+                - Other
+                type: string
+                x-kubernetes-validations:
+                - message: spec.osFamily is immutable once the Image is created; create
+                    a new Image to publish different content
+                  rule: self == oldSelf
+              params:
+                description: |-
+                  Params is schemaless input for the attached hooks' templating. Merge
+                  order: this field first, then the deploying Machine's own params;
+                  later entries override earlier ones.
+
+                  This is a pointer, not a value: apiextensionsv1.JSON.MarshalJSON
+                  always emits a literal "null" for its zero value, and Go's
+                  encoding/json "omitempty" does not suppress a zero-value struct (it
+                  only suppresses nil pointers, nil maps/slices, and empty
+                  strings/numbers). A value field would therefore round-trip an absent
+                  Params as an explicit JSON null on every re-marshal - notably inside
+                  the defaulting webhook, which re-marshals the whole object to
+                  compute its mutation patch even when Default is a no-op, turning
+                  "params never set" into a stray "add /spec/params null" patch on
+                  every Image create or update. A pointer field is nil (and correctly
+                  omitted) until something actually sets Params.
+
+                  No XValidation transition rule guards this field: a schemaless
+                  (x-kubernetes-preserve-unknown-fields) value has no structural
+                  schema for CEL to key equality off, which is the same fragility
+                  this type's doc comment describes for the whole-struct rule this
+                  replaced. Params immutability is instead enforced in Go, by
+                  ImageCustomValidator.ValidateUpdate (see internal/webhook/v1alpha1),
+                  which can compare the raw JSON directly.
+                x-kubernetes-preserve-unknown-fields: true
+              postHookRefs:
+                description: |-
+                  PostHookRefs is an ordered list of PostHook resources attached to
+                  this image. Execution order: this list runs before the attaching
+                  Machine's own postHookRefs; within this list, the given order holds.
+                items:
+                  description: |-
+                    NameRef is a reference to a resource by name, optionally in another
+                    namespace. When Namespace is empty, the namespace of the referencing
+                    resource is used. Field names that hold a NameRef end in "Ref"; ordered
+                    lists of NameRef end in "Refs".
+                  properties:
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-validations:
+                - message: spec.postHookRefs is immutable once the Image is created;
+                    create a new Image to publish different content
+                  rule: self == oldSelf
+              source:
+                description: |-
+                  Source describes where the source disk image comes from and how to
+                  verify it.
+                properties:
+                  checksum:
+                    description: |-
+                      Checksum verifies the fetched or uploaded source image before ingest
+                      converts it. The expected form is "<algorithm>:<hex digest>", for
+                      example "sha256:...".
+                    type: string
+                  format:
+                    description: Format is the on-disk format of the source image.
+                    enum:
+                    - raw
+                    - qcow2
+                    - vmdk
+                    type: string
+                  url:
+                    description: |-
+                      URL is the location the ingest job fetches the source image from. It
+                      may be absent when the image is uploaded directly (for example
+                      through kezioctl), in which case the ingest job waits for the upload
+                      instead of fetching a URL.
+                    type: string
+                required:
+                - format
+                type: object
+                x-kubernetes-validations:
+                - message: spec.source is immutable once the Image is created; create
+                    a new Image to publish different content
+                  rule: self == oldSelf
+            required:
+            - source
+            type: object
+          status:
+            description: ImageStatus defines the observed state of Image.
+            properties:
+              conditions:
+                description: |-
+                  Conditions report the current state of the image, including
+                  ConditionReady.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              disk:
+                description: Disk records the disk-level layout captured during ingest.
+                properties:
+                  layoutRef:
+                    description: |-
+                      LayoutRef names the ConfigMap holding the sfdisk JSON dump of the
+                      disk layout. This dump carries the GPT disk GUID and partition type
+                      GUIDs so a restored disk matches the source exactly.
+                    properties:
+                      name:
+                        type: string
+                      namespace:
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  partitionTable:
+                    description: PartitionTable is the partition table type found
+                      on the source disk.
+                    enum:
+                    - gpt
+                    - mbr
+                    type: string
+                  sizeBytes:
+                    description: SizeBytes is the total size of the source disk image.
+                    format: int64
+                    type: integer
+                type: object
+              partitions:
+                description: Partitions records each partition captured during ingest.
+                items:
+                  description: ImagePartitionStatus records one partition captured
+                    during ingest.
+                  properties:
+                    fsType:
+                      description: |-
+                        FSType is the file system found on this partition, when applicable
+                        (for example "vfat", "ext4"). Empty for roles without a file system
+                        (msr) or handled without one (a swap partition restored by UUID).
+                      type: string
+                    infoHash:
+                      description: |-
+                        InfoHash is the BitTorrent v1 info hash of this partition's content,
+                        present once ingest has produced torrent metadata for it.
+                      type: string
+                    number:
+                      description: Number is the partition number on the source disk.
+                      format: int32
+                      type: integer
+                    role:
+                      description: Role is the OS-neutral role of this partition.
+                      enum:
+                      - esp
+                      - data
+                      - swap
+                      - msr
+                      type: string
+                    torrentInfoRef:
+                      description: |-
+                        TorrentInfoRef names the small metadata artifact (the canonical
+                        "torrent.info") ingest produced for this partition.
+                      properties:
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    usedBytes:
+                      description: UsedBytes is the amount of data ingest captured
+                        for this partition.
+                      format: int64
+                      type: integer
+                    uuid:
+                      description: |-
+                        UUID is the source partition's file-system UUID, recorded for
+                        partitions (such as swap) that are restored by UUID instead of by
+                        torrent content.
+                      type: string
+                  required:
+                  - number
+                  - role
+                  type: object
+                type: array
+              state:
+                description: State is the ingest state machine position.
+                enum:
+                - Pending
+                - Ingesting
+                - Ready
+                - Failed
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -1,0 +1,30 @@
+# The store PVC the ingest Job writes into and the seeder (and, for this
+# overlay, the controller-manager - see manager-store-patch.yaml) mount
+# read-only. Named "kezio-store" to match the literal placeholder
+# ezio-seeder-deployment.yaml's claimName already expects (see
+# config/seeder/README.md) and the INGEST_STORE_PVC value the e2e suite
+# sets on the controller-manager with `kubectl set env`.
+#
+# ReadWriteOnce + the "local-path" StorageClass: this overlay only ever
+# runs against a disposable single-node k3s cluster (see
+# kustomization.yaml's header comment), which has no ReadWriteMany
+# provisioner by default and only one node for every consumer to share
+# anyway.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kezio-store
+  namespace: kezio-system
+  labels:
+    app.kubernetes.io/name: kezio
+    app.kubernetes.io/component: store
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      # A cloud-image-sized source (hundreds of MiB to a few GiB) leaves
+      # plenty of headroom here; generous but not wasteful for a
+      # throwaway CI volume.
+      storage: 10Gi

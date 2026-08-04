@@ -1,0 +1,98 @@
+# EXAMPLE / PLACEHOLDER - not applied by this kustomization (note the
+# ".example.yaml" suffix; it is not listed in kustomization.yaml's
+# resources). A real NetworkAttachmentDefinition depends on the cluster's
+# CNI, VLAN/subnet layout, and IPAM allocator, none of which this
+# repository can know in advance. Copy this file, strip the ".example"
+# suffix, fill in the site-specific values marked below, and add it to
+# kustomization.yaml's resources - then uncomment the
+# k8s.v1.cni.cncf.io/networks annotation on the seeder and opentracker
+# Deployments to actually attach it.
+#
+# Requires the Multus CNI meta-plugin
+# (https://github.com/k8snetworkplumbingwg/multus-cni) and its
+# NetworkAttachmentDefinition CRD to already be installed cluster-wide;
+# neither is installed by this kustomization.
+#
+# === Why this exists (the no-NAT rule) ===
+#
+# BitTorrent is not NAT-friendly: a peer connects directly to the IP:port
+# a torrent's tracker announce advertised. If a seeder's actual listening
+# IP:port differs from what it announces (because something between it
+# and the swarm rewrites the source address - a Service's ClusterIP DNAT,
+# a NAT gateway, ...), remote peers try to connect to an address that
+# either does not answer or answers as a different pod entirely. The
+# hard requirement this repository's design settled on is: announce
+# IP:port == reachable IP:port, with no NAT/SNAT anywhere on that path.
+#
+# A pod's default cluster-CNI interface (eth0) is exactly the kind of
+# address that requirement rules out for most cluster CNIs (Calico-style
+# overlays SNAT egress, ClusterIPs DNAT ingress). Hence: a second,
+# routable interface (net1, this attachment) dedicated to BitTorrent
+# traffic, while eth0 stays for cluster-internal traffic (kube-apiserver,
+# kubelet, and the operator's gRPC control connection to ezio).
+#
+# === Routing: specific routes via net1, not a default-route flip ===
+#
+# Do not make net1 the pod's default route. Most cluster CNIs (Calico
+# included) rely on eth0 for the cluster's own pod/service CIDRs; flipping
+# the default route to net1 breaks the return path for that traffic
+# unless every cluster CIDR is *also* explicitly routed back over eth0,
+# which is fragile to get right and easy to regress.
+#
+# Instead, give net1 specific static routes scoped to the data network(s)
+# peers actually live on, via this NetworkAttachmentDefinition's own
+# config (the "routes" key in a CNI plugin config that supports it, or a
+# static-routes IPAM addon such as whereabouts' "routes" field). eth0
+# keeps the pod's default route and the cluster CIDRs; net1 only carries
+# what is explicitly routed to it. This is additive and does not touch
+# the CNI's own routing decisions on eth0 at all.
+#
+# === IPAM: static or whereabouts, not DHCP ===
+#
+# The announce IP has to be stable for as long as a seeder is seeding
+# (BitTorrent peers cache it from the tracker response and keep
+# reconnecting to it) and known ahead of time is convenient but not
+# required. Two IPAM choices satisfy "stable for the pod's lifetime":
+#
+#   - type: static - the simplest option when the data-network address
+#     plan is managed by hand or by a separate system; set the address
+#     directly in this NAD's ipam block (or via
+#     k8s.v1.cni.cncf.io/networks' per-pod ips override).
+#   - type: whereabouts - a cluster-wide IPAM allocator
+#     (https://github.com/k8snetworkplumbingwg/whereabouts) when
+#     addresses should come from a shared pool instead of being hand
+#     assigned per pod; still stable for the pod's lifetime once
+#     allocated.
+#
+# DHCP IPAM is deliberately not recommended here: it works too, but pulls
+# in a cluster-wide DHCP daemon dependency (cni-dhcp) purely to solve a
+# problem static/whereabouts already solve without one.
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: kezio-data-network
+  namespace: system
+spec:
+  # SITE-SPECIFIC: replace this config with whatever CNI plugin this
+  # cluster's data network actually uses (macvlan, ipvlan, a Multus
+  # bridge onto a VLAN-tagged host interface, ...); this "bridge" example
+  # is illustrative only, not a recommendation.
+  config: |
+    {
+      "cniVersion": "0.3.1",
+      "type": "bridge",
+      "bridge": "REPLACE_WITH_DATA_NETWORK_BRIDGE",
+      "ipam": {
+        "type": "static",
+        "addresses": [
+          {
+            "address": "REPLACE_WITH_STATIC_CIDR/32"
+          }
+        ],
+        "routes": [
+          {
+            "dst": "REPLACE_WITH_DATA_NETWORK_CIDR"
+          }
+        ]
+      }
+    }

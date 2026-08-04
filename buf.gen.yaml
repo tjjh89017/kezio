@@ -1,0 +1,12 @@
+# Generates the seeder gRPC client stubs from proto/ezio/ezio.proto into
+# internal/seeder/ezioapi. Run `make proto` after editing the .proto file;
+# the generated output is committed, so running this is not required for a
+# normal build (see Makefile).
+version: v2
+plugins:
+  - local: protoc-gen-go
+    out: internal/seeder/ezioapi
+    opt: paths=source_relative
+  - local: protoc-gen-go-grpc
+    out: internal/seeder/ezioapi
+    opt: paths=source_relative

@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: image-service-staging
+  namespace: system
+  labels:
+    app.kubernetes.io/name: kezio
+    app.kubernetes.io/component: image-service
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # ReadWriteMany: the ingest job that consumes a staged upload (resolving
+  # an Image.spec.source.url of the form kezio-staged://<name>) mounts the
+  # same volume the image-service Pod wrote it to. A storage class that
+  # only supports RWO forces image-service and the ingest job onto the
+  # same node; that is a valid deployment choice for a single-node or
+  # small cluster, but is not assumed here.
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      # Sized for source disk images (Image.spec.source: raw/qcow2/vmdk)
+      # in flight before ingest converts and slices them. The cluster
+      # operator should size this to the largest expected concurrent
+      # upload volume; overlay this manifest to change it.
+      storage: 100Gi

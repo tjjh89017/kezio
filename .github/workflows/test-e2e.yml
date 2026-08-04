@@ -1,0 +1,289 @@
+name: E2E Tests
+
+# Runs the e2e suite against a real k3s cluster (not Kind): the suite itself
+# (test/e2e, driven by `make test-e2e E2E_CLUSTER=k3s`) installs cert-manager
+# (always "latest", never pinned - see test/utils.InstallCertManager), builds
+# the operator image, imports it into the k3s node's containerd with `k3s ctr
+# images import`, deploys the operator with `make deploy` (kustomize), and
+# then drives an Image and a Machine through the reconcilers against this
+# cluster. Keeping that sequence inside the suite (instead of duplicating it
+# as separate workflow steps) means the same steps run identically for a
+# developer's local `make test-e2e E2E_CLUSTER=k3s` and for this workflow.
+#
+# cert-manager is required from here on: every kezio CRD carries a
+# defaulting and a validating webhook, and the controller-manager cannot
+# serve admission requests until cert-manager has minted its serving
+# certificate.
+
+on:
+  push:
+  pull_request:
+
+# Supersede an in-flight run when a newer commit is pushed to the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # k3s version the job installs. Pinned so the e2e cluster doesn't shift
+  # under us on a stable branch; bump deliberately.
+  K3S_VERSION: "v1.33.13+k3s1"
+
+jobs:
+  test-e2e:
+    # Fast lane: the fake-deployer, stub-ingest Image/Machine lifecycle
+    # from test/e2e/e2e_test.go. Never touches image-service, ingest, or
+    # the seeder - see the image-path job below, which is additive and
+    # runs on its own runner so this job's timing never regresses because
+    # of it.
+    name: Run against k3s
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Resource check (fail fast if the runner is under-resourced)
+        run: |
+          set -euo pipefail
+          echo "===== CPU ====="
+          nproc
+          echo "===== Memory ====="
+          free -h
+          echo "===== Disk ====="
+          df -h
+
+          cpus="$(nproc)"
+          mem_mb="$(free -m | awk '/^Mem:/{print $2}')"
+
+          # GitHub-hosted ubuntu-latest runners give 4 vCPUs / 16 GiB RAM.
+          # These thresholds only catch a runner that is clearly the wrong
+          # class (e.g. a misconfigured self-hosted runner), not normal
+          # variance on the hosted fleet.
+          if [ "$cpus" -lt 2 ]; then
+            echo "::error::Runner has only ${cpus} CPU(s); kezio e2e needs at least 2." >&2
+            exit 1
+          fi
+          if [ "$mem_mb" -lt 6000 ]; then
+            echo "::error::Runner has only ${mem_mb} MiB RAM; kezio e2e needs at least 6000 MiB." >&2
+            exit 1
+          fi
+
+      - name: Install k3s (pinned)
+        run: |
+          set -euo pipefail
+          curl -sfL https://get.k3s.io \
+            | INSTALL_K3S_VERSION="${K3S_VERSION}" sh -s - --write-kubeconfig-mode 644
+          echo "KUBECONFIG=/etc/rancher/k3s/k3s.yaml" >> "$GITHUB_ENV"
+          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+          kubectl wait --for=condition=Ready node --all --timeout=120s
+          kubectl get nodes -o wide
+
+      - name: Running Test e2e
+        run: |
+          set -euo pipefail
+          go mod tidy
+          make test-e2e E2E_CLUSTER=k3s
+
+      - name: Dump operator logs on failure
+        if: failure()
+        run: |
+          set +e
+          echo "===== kezio-system pods ====="
+          kubectl get pods -n kezio-system -o wide
+          echo "===== controller-manager logs ====="
+          kubectl -n kezio-system logs deployment/kezio-controller-manager --all-containers --tail=500
+          echo "===== kezio CRs ====="
+          kubectl get machines,images,posthooks -A -o wide
+          echo "===== events ====="
+          kubectl get events -n kezio-system --sort-by=.lastTimestamp
+
+  test-e2e-image-path:
+    # Slow lane: test/e2e's "Image ingest and seeding (image-path)"
+    # Context (test/e2e/e2e_image_path_test.go), gated on E2E_IMAGE_PATH=true
+    # below. It deploys image-service + seeder + opentracker on top of the
+    # same base config/default the fast job exercises, uploads a real
+    # Ubuntu cloud image through kezioctl, and drives it through real
+    # qemu-img/sfdisk/partclone ingest, real seeding, and a real BitTorrent
+    # leech - see that file's doc comments for the full flow. This is a
+    # separate job (own runner, own k3s, own timeout) precisely so none of
+    # that weight lands on the test-e2e job above.
+    name: Run image-path against k3s
+    runs-on: ubuntu-latest
+    # Honest budget, not a guess: k3s + cert-manager install (~1-2m),
+    # building+importing the manager/image-service/ingest images (~2-3m,
+    # small Go binaries), the seeder image (compiles ezio/libtorrent-rasterbar/
+    # grpc from source on debian:sid - the dominant cost, ~10-20m without a
+    # warm cache), downloading the Ubuntu cloud image (cached after the
+    # first run, see the cache step below), then real ingest (qemu-img
+    # convert + sfdisk + partclone over a several-hundred-MiB image, a few
+    # minutes) and a same-cluster BitTorrent leech (seconds). 60 minutes
+    # leaves headroom for a cold seeder build on an otherwise-busy runner.
+    timeout-minutes: 60
+    env:
+      # Ubuntu's "minimal" cloud image, not the full one: honestly, a
+      # bare GPT+ESP+rootfs disk with an ext4 root is all this stage
+      # needs to exercise ingest's partition/filesystem handling, and the
+      # minimal image is roughly half the download + qemu-img-convert +
+      # partclone time of the full cloud image for the same coverage.
+      # /releases/noble/release/ always serves the latest 24.04 LTS point
+      # build, so this stays "latest-minor" without needing a version
+      # bump here. Pinned in one place (not inlined below) so a future
+      # bump (or a fallback to the full cloud image, if the minimal image
+      # ever turns out to lack something ingest needs) is a one-line change.
+      UBUNTU_CLOUD_IMAGE_URL: "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img"
+      INGEST_IMG: "example.com/kezio-ingest:e2e"
+      SEEDER_IMG: "example.com/kezio-seeder:e2e"
+      IMAGE_SERVICE_IMG: "example.com/kezio-image-service:e2e"
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Reclaim runner disk space
+        # ubuntu-latest ships several large SDK/toolchain preinstalls this
+        # job never uses (Android, .NET, GHC); removing them is a common,
+        # well-known way to buy back the headroom a multi-GiB-of-images
+        # stage like this one actually needs, without resorting to a
+        # bigger (paid) runner class.
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Resource check (fail fast if the runner is under-resourced)
+        run: |
+          set -euo pipefail
+          echo "===== CPU ====="
+          nproc
+          echo "===== Memory ====="
+          free -h
+          echo "===== Disk ====="
+          df -h
+
+          cpus="$(nproc)"
+          mem_mb="$(free -m | awk '/^Mem:/{print $2}')"
+          disk_avail_gb="$(df -BG --output=avail / | tail -1 | tr -dc '0-9')"
+
+          # Same CPU/RAM floor as the fast job (see test-e2e's own
+          # resource-check step). Disk gets its own, higher floor: this
+          # job builds four local images (one of them a from-source
+          # debian:sid C++ build) and downloads and converts a
+          # several-hundred-MiB cloud image, on top of everything the
+          # fast job already needs.
+          if [ "$cpus" -lt 2 ]; then
+            echo "::error::Runner has only ${cpus} CPU(s); kezio e2e needs at least 2." >&2
+            exit 1
+          fi
+          if [ "$mem_mb" -lt 6000 ]; then
+            echo "::error::Runner has only ${mem_mb} MiB RAM; kezio e2e needs at least 6000 MiB." >&2
+            exit 1
+          fi
+          if [ "$disk_avail_gb" -lt 20 ]; then
+            echo "::error::Runner has only ${disk_avail_gb} GiB free disk; kezio's image-path e2e needs at least 20 GiB." >&2
+            exit 1
+          fi
+
+      - name: Cache the Ubuntu cloud image
+        id: cache-cloud-image
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ubuntu-cloud.img
+          # Keyed on the pinned URL (env, above): bumping that env var
+          # (a version/URL change) naturally misses the old cache instead
+          # of serving a stale image under a reused key.
+          key: ubuntu-cloud-image-${{ env.UBUNTU_CLOUD_IMAGE_URL }}
+
+      - name: Download the Ubuntu cloud image
+        if: steps.cache-cloud-image.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -sfL -o "${{ runner.temp }}/ubuntu-cloud.img" "${UBUNTU_CLOUD_IMAGE_URL}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Warm the ingest/seeder/image-service image caches
+        # Builds (and loads into the local docker daemon, never pushes -
+        # this stage never depends on ghcr, see this job's own doc
+        # comment) the same three images `make docker-build-ingest`/
+        # `docker-build-seeder`/`docker-build-image-service` build later,
+        # under the same tags, with GitHub Actions' layer cache. The
+        # scope names match publish.yml's matrix exactly, so a push to
+        # main (which does depend on ghcr, unlike this job) and this job
+        # share one warm cache: whichever ran more recently pays the
+        # from-source debian:sid seeder build cost, not both.
+        run: |
+          set -euo pipefail
+          for spec in "ingest:Dockerfile.ingest:${INGEST_IMG}" "seeder:Dockerfile.seeder:${SEEDER_IMG}" "image-service:Dockerfile.image-service:${IMAGE_SERVICE_IMG}"; do
+            IFS=: read -r scope dockerfile tag <<< "${spec}"
+            docker buildx build \
+              --file "${dockerfile}" \
+              --tag "${tag}" \
+              --cache-from "type=gha,scope=${scope}" \
+              --cache-to "type=gha,mode=max,scope=${scope}" \
+              --load \
+              .
+          done
+
+      - name: Install k3s (pinned)
+        run: |
+          set -euo pipefail
+          curl -sfL https://get.k3s.io \
+            | INSTALL_K3S_VERSION="${K3S_VERSION}" sh -s - --write-kubeconfig-mode 644
+          echo "KUBECONFIG=/etc/rancher/k3s/k3s.yaml" >> "$GITHUB_ENV"
+          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+          kubectl wait --for=condition=Ready node --all --timeout=120s
+          kubectl get nodes -o wide
+
+      - name: Running Test e2e (image-path)
+        run: |
+          set -euo pipefail
+          go mod tidy
+          # Mirrors `make test-e2e`'s own prerequisites (manifests/
+          # generate/fmt/vet - see the Makefile's test-e2e target) since
+          # this step calls `go test` directly instead of going through
+          # that target, needed only to raise -timeout past its fixed 15m
+          # for this much slower stage.
+          make manifests generate fmt vet
+          E2E_IMAGE_PATH=true \
+          E2E_UBUNTU_QCOW2_PATH="${{ runner.temp }}/ubuntu-cloud.img" \
+          INGEST_IMG="${INGEST_IMG}" \
+          SEEDER_IMG="${SEEDER_IMG}" \
+          IMAGE_SERVICE_IMG="${IMAGE_SERVICE_IMG}" \
+          E2E_CLUSTER=k3s go test ./test/e2e/ -v -ginkgo.v -timeout 50m
+
+      - name: Dump operator, ingest, and seeder logs on failure
+        if: failure()
+        run: |
+          set +e
+          echo "===== kezio-system pods ====="
+          kubectl get pods -n kezio-system -o wide
+          echo "===== controller-manager logs ====="
+          kubectl -n kezio-system logs deployment/kezio-controller-manager --all-containers --tail=500
+          echo "===== ingest Job(s) ====="
+          kubectl get jobs -n kezio-system -l kezio.kojuro.date/image -o wide
+          echo "===== ingest Job logs ====="
+          kubectl logs -n kezio-system -l kezio.kojuro.date/image --all-containers --tail=500
+          echo "===== seeder logs ====="
+          kubectl logs -n kezio-system deploy/kezio-ezio-seeder --tail=500
+          echo "===== opentracker logs ====="
+          kubectl logs -n kezio-system deploy/kezio-opentracker --tail=500
+          echo "===== image-service logs ====="
+          kubectl logs -n kezio-system deploy/kezio-image-service --tail=500
+          echo "===== leecher Pod ====="
+          kubectl describe pod kezio-e2e-leecher -n kezio-system
+          kubectl logs -n kezio-system kezio-e2e-leecher --tail=500
+          echo "===== kezio Images ====="
+          kubectl get images -A -o wide
+          echo "===== events ====="
+          kubectl get events -n kezio-system --sort-by=.lastTimestamp

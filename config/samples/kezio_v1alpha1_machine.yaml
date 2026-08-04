@@ -1,0 +1,23 @@
+apiVersion: kezio.kojuro.date/v1alpha1
+kind: Machine
+metadata:
+  labels:
+    app.kubernetes.io/name: kezio
+    app.kubernetes.io/managed-by: kustomize
+  name: machine-sample
+spec:
+  bmc:
+    address: redfish://10.0.0.10/redfish/v1/Systems/1
+    credentialsSecretRef:
+      name: machine-sample-bmc
+  bootMACAddress: "aa:bb:cc:dd:ee:01"
+  online: true
+  imageRef:
+    name: image-sample
+  targetDisk:
+    serialNumber: S6XANJ0T123456
+  networkSite: site-a
+  postHookRefs:
+    - name: posthook-sample
+  params:
+    kernelArg: "console=ttyS0"

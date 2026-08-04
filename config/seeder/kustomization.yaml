@@ -1,0 +1,33 @@
+# Standalone kustomization for the seeding data plane: opentracker (the
+# BitTorrent tracker) and the ezio seeder Deployment. It is deliberately
+# not one of config/default's resources, the same reasoning as
+# config/image-service: this component scales and is deployed
+# independently, and it needs cluster-specific inputs (a Multus data
+# network, a store PVC name, a real image tag) config/default has no way
+# to guess. Deploy it as an addition once config/default is applied:
+#
+#   kustomize build config/seeder | kubectl apply -f -
+#
+# Before applying, read README.md in this directory - in particular the
+# no-NAT rule and the store PVC / SEEDER_* wiring the operator side
+# needs, neither of which a kustomize apply alone can satisfy.
+namespace: kezio-system
+namePrefix: kezio-
+
+labels:
+  - includeSelectors: true
+    pairs:
+      app.kubernetes.io/part-of: kezio
+
+resources:
+  - opentracker-deployment.yaml
+  - opentracker-service.yaml
+  - ezio-seeder-deployment.yaml
+  - ezio-seeder-service.yaml
+  # networkattachmentdefinition.example.yaml is NOT listed here on
+  # purpose - see that file's header comment.
+
+images:
+  - name: seeder
+    newName: ghcr.io/tjjh89017/kezio-seeder
+    newTag: latest

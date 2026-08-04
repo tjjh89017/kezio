@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opentracker
+  namespace: system
+  labels:
+    app.kubernetes.io/name: kezio
+    app.kubernetes.io/component: opentracker
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kezio
+      app.kubernetes.io/component: opentracker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kezio
+        app.kubernetes.io/component: opentracker
+      # annotations:
+      #   # Attaches a routable data-network interface via Multus, the
+      #   # same as the ezio seeder Deployment (see
+      #   # ezio-seeder-deployment.yaml's identical annotation and
+      #   # networkattachmentdefinition.example.yaml for the full
+      #   # explanation). The tracker needs this too: an HTTP announce
+      #   # response is only useful to a leecher at another site if the
+      #   # tracker itself is reachable from that site, which the
+      #   # cluster-internal Service below is not by design (see
+      #   # service.yaml). Uncomment once a real
+      #   # NetworkAttachmentDefinition exists in this namespace.
+      #   k8s.v1.cni.cncf.io/networks: kezio-data-network
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: opentracker
+          # opentracker (https://erdgeist.org/arts/software/opentracker/)
+          # has no first-party container image; this is a maintained,
+          # community-built one. Alternative if this image ever goes
+          # stale: build opentracker from its own source (a small,
+          # dependency-light C project) into a from-scratch image
+          # following the same pattern as this repository's other
+          # Dockerfiles (see Dockerfile.seeder for the two-stage shape).
+          image: ghcr.io/tunisiano187/opentracker-docker:master
+          # The image's own CMD is a shell wrapper (`/bin/sh -c "opentracker
+          # -f /etc/opentracker/opentracker.conf"`) and it sets no
+          # ENTRYPOINT, so a Kubernetes `args` field with no `command`
+          # would replace that CMD outright rather than appending to it -
+          # the container would exec "-p" as its argv[0] and fail
+          # immediately with "executable file not found in $PATH". Setting
+          # `command` here to the opentracker binary itself (verified
+          # present at this path in the image) avoids relying on the
+          # image's shell CMD, and lets `args` pass flags straight to it.
+          command:
+            - /bin/opentracker
+          args:
+            - -p
+            - "6969"
+          ports:
+            - name: announce-tcp
+              containerPort: 6969
+              protocol: TCP
+            - name: announce-udp
+              containerPort: 6969
+              protocol: UDP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            # ghcr.io/tunisiano187/opentracker-docker ships no USER
+            # metadata, so it defaults to root; the pod's runAsNonRoot: true
+            # then makes kubelet refuse to start it (it will not infer a
+            # non-root uid from an image that never declares one -
+            # CreateContainerConfigError: "container has runAsNonRoot and
+            # image will run as root"). opentracker itself needs no
+            # privilege: it only binds the unprivileged announce port set
+            # via `-p` above (6969), so an explicit arbitrary non-root
+            # uid/gid here (65534, "nobody" - not one of kezio's own
+            # 65532 images since this container's filesystem/ownership
+            # was never built expecting that uid) satisfies
+            # runAsNonRoot without trusting the image's own metadata.
+            runAsUser: 65534
+            runAsGroup: 65534
+            capabilities:
+              drop:
+                - "ALL"
+          resources:
+            limits:
+              cpu: 250m
+              memory: 128Mi
+            requests:
+              cpu: 50m
+              memory: 32Mi
