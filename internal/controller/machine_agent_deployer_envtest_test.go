@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -154,12 +155,24 @@ func TestMachineReconciler_AgentFactory_EnvtestWalk(t *testing.T) {
 	// integration, which starts from a Machine that already carries a
 	// live token, the same as bootserver.Server.rotateToken leaves one),
 	// then POST it through agentserver's real handler.
+	// The reconciler (driven synchronously below, and again inside
+	// byReconcilingUntil) writes status concurrently with this seeding
+	// write, and the manager's cache can also lag the API server's true
+	// resourceVersion; RetryOnConflict re-Gets a fresh copy (bypassing
+	// the cache via rawClient) and reapplies the mutation whenever a 409
+	// lands, instead of failing the test on the first collision.
 	const token = "test-agent-registration-token-0123456789abcdef"
-	stalled.Status.NetBoot = &keziov1alpha1.MachineNetBootStatus{
-		TokenHash: bootserver.HashToken(token),
-		ExpiresAt: metav1.NewTime(time.Now().Add(30 * time.Minute)),
-	}
-	if err := mgr.GetClient().Status().Update(ctx, stalled); err != nil {
+	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		m := &keziov1alpha1.Machine{}
+		if err := rawClient.Get(ctx, key, m); err != nil {
+			return err
+		}
+		m.Status.NetBoot = &keziov1alpha1.MachineNetBootStatus{
+			TokenHash: bootserver.HashToken(token),
+			ExpiresAt: metav1.NewTime(time.Now().Add(30 * time.Minute)),
+		}
+		return rawClient.Status().Update(ctx, m)
+	}); err != nil {
 		t.Fatalf("seeding a live token: %v", err)
 	}
 
@@ -184,9 +197,18 @@ func TestMachineReconciler_AgentFactory_EnvtestWalk(t *testing.T) {
 	// Provision/Deprovision are honestly not implemented yet by this
 	// Deployer: driving to Provisioning must land in Error, not a
 	// fabricated success.
-	spec := available.DeepCopy()
-	spec.Spec.ImageRef = &keziov1alpha1.NameRef{Name: "does-not-need-to-exist-for-this-assertion"}
-	if err := mgr.GetClient().Update(ctx, spec); err != nil {
+	// Same cached-read/direct-write skew as the token seeding above: the
+	// reconciler's own status writes (e.g. reconcilePower's PoweredOn
+	// update) can land between the Get behind `available` and this
+	// Update, so retry against a fresh Get instead of failing outright.
+	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		m := &keziov1alpha1.Machine{}
+		if err := rawClient.Get(ctx, key, m); err != nil {
+			return err
+		}
+		m.Spec.ImageRef = &keziov1alpha1.NameRef{Name: "does-not-need-to-exist-for-this-assertion"}
+		return rawClient.Update(ctx, m)
+	}); err != nil {
 		t.Fatalf("requesting a deployment: %v", err)
 	}
 	byReconcilingUntil(t, ctx, r, key, "Error", func(m *keziov1alpha1.Machine) bool {
