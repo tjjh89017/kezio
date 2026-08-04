@@ -26,6 +26,10 @@ See `make help` for the full list of targets.
 - [`docs/secure-boot.md`](docs/secure-boot.md): the UEFI Secure Boot
   signature chain the network boot path relies on, the kernel-signing
   story, and what CI does and does not verify.
+- [`docs/e2e-kubevirt-reusable.md`](docs/e2e-kubevirt-reusable.md): how
+  to reuse kezio's KubeVirt BT-transfer e2e test as a `workflow_call`
+  from another repository (the ezio repository in particular), including
+  the input list and defaults.
 
 ## License
 
