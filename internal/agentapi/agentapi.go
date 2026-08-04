@@ -330,9 +330,18 @@ const (
 	// completed, and the agent is about to invoke systemctl reboot or
 	// poweroff (DeployPlan.AfterDeploy). Reaching this step is the
 	// deploy's success signal - the controller's real, agent-driven
-	// Deployer (a later work item) polls MachineConditionProvisioningProgress's
-	// Reason for exactly this value to know the deployment finished.
+	// Deployer polls MachineConditionProvisioningProgress's Reason for
+	// exactly this value to know the deployment finished.
 	DeployStepRebootingToDisk = "RebootingToDisk"
+	// DeployStepFailed is the terminal failure report: Execute is
+	// returning a non-nil error before ever reaching
+	// DeployStepRebootingToDisk (validation, a Runner command, a hook, or
+	// finalize failed - see internal/agent/deploy.Executor.Execute's
+	// defer). StepMessage carries the failing error's detail. The
+	// controller's real, agent-driven Deployer treats this Reason as the
+	// deployment having failed outright (Result.ErrorMessage), rather
+	// than continuing to poll for RebootingToDisk.
+	DeployStepFailed = "Failed"
 )
 
 // ProgressResponse is the POST /agent/machines/<name>/progress success

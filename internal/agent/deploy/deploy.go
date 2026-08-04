@@ -195,18 +195,31 @@ func imagePlans(plan *agentapi.DeployPlan) []agentapi.ImageDeployPlan {
 // e.Progress as it goes and returns once the whole plan has been
 // applied, or the first error - which may leave some disks fully written
 // and others untouched, but never a disk partially written by a command
-// that was itself refused (see validate).
-func (e *Executor) Execute(ctx context.Context, plan *agentapi.DeployPlan) error {
+// that was itself refused (see validate). Whenever it returns a non-nil
+// error, the deferred reportFailure call below sends one last progress
+// report carrying agentapi.DeployStepFailed with the error as
+// StepMessage, before Execute itself returns: without it, the
+// controller's real Deployer (which polls
+// MachineConditionProvisioningProgress for either the terminal success
+// step or a failure) would poll forever after a failed deploy that
+// silently stopped reporting, instead of recognizing it failed.
+func (e *Executor) Execute(ctx context.Context, plan *agentapi.DeployPlan) (err error) {
 	plans := imagePlans(plan)
 	if len(plans) == 0 {
 		return nil
 	}
 
-	if err := e.validate(ctx, plans); err != nil {
-		return fmt.Errorf("refusing to deploy: %w", err)
+	progress := newProgressTracker(plans)
+	defer func() {
+		if err != nil {
+			e.reportFailure(ctx, progress, err)
+		}
+	}()
+
+	if verr := e.validate(ctx, plans); verr != nil {
+		return fmt.Errorf("refusing to deploy: %w", verr)
 	}
 
-	progress := newProgressTracker(plans)
 	progress.setStep(agentapi.DeployStepPartitioning)
 	e.report(ctx, progress)
 
@@ -480,5 +493,25 @@ func (e *Executor) report(ctx context.Context, progress *progressTracker) {
 	}
 	if err := e.Progress.ReportProgress(ctx, progress.snapshot()); err != nil {
 		e.log("reporting progress failed: %v", err)
+	}
+}
+
+// reportFailure posts progress's current snapshot with Step forced to
+// agentapi.DeployStepFailed and StepMessage set to cause's error text -
+// Execute's terminal report on any failing return (see Execute's doc
+// comment). It uses ctx as given even when the failure was itself a
+// context cancellation: a best-effort delivery attempt costs nothing
+// more than the report call already made throughout Execute, and
+// ReportProgress's own error is logged, not propagated, the same as
+// report above.
+func (e *Executor) reportFailure(ctx context.Context, progress *progressTracker, cause error) {
+	if e.Progress == nil {
+		return
+	}
+	progress.setStep(agentapi.DeployStepFailed)
+	req := progress.snapshot()
+	req.StepMessage = cause.Error()
+	if err := e.Progress.ReportProgress(ctx, req); err != nil {
+		e.log("reporting failure step failed: %v", err)
 	}
 }

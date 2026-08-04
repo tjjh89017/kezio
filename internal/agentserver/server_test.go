@@ -54,6 +54,7 @@ func newTestServer(t *testing.T, now time.Time, machines ...*keziov1alpha1.Machi
 	builder := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithIndex(&keziov1alpha1.Machine{}, MachineTokenHashIndexField, IndexMachineTokenHash).
+		WithIndex(&keziov1alpha1.Machine{}, MachineNameIndexField, IndexMachineName).
 		WithStatusSubresource(&keziov1alpha1.Machine{})
 	for _, m := range machines {
 		builder = builder.WithObjects(m)

@@ -49,10 +49,37 @@ func IndexMachineTokenHash(obj client.Object) []string {
 	return []string{machine.Status.NetBoot.TokenHash}
 }
 
-// SetupFieldIndexer registers MachineTokenHashIndexField on mgr's cache.
-// Call it once before the manager starts, alongside
-// internal/bootserver's own SetupFieldIndexer, and before adding a
-// Server that depends on it.
+// MachineNameIndexField is the field index name Server resolves a poll or
+// progress report's URL path against: agentapi.NextPathPrefix +
+// <machine name> + (NextPathSuffix | ProgressPathSuffix) carries only
+// the Machine's bare name, never its namespace - RegisterResponse's own
+// MachineName field is machine.Name alone, by the same constraint - so
+// handleNext and handleProgress cannot look a Machine up with
+// client.ObjectKey{Name: name} (Namespace ""): the Machine CRD is
+// namespace-scoped, and a Get with an empty namespace never matches an
+// object actually stored in a real namespace. Indexing by name and
+// listing, the same shape MachineTokenHashIndexField already
+// establishes for a presented token, sidesteps that without requiring
+// the wire protocol to start carrying a namespace.
+const MachineNameIndexField = "metadata.name"
+
+// IndexMachineName is the client.IndexerFunc for MachineNameIndexField:
+// every Machine indexes under its own bare name.
+func IndexMachineName(obj client.Object) []string {
+	machine, ok := obj.(*keziov1alpha1.Machine)
+	if !ok {
+		return nil
+	}
+	return []string{machine.Name}
+}
+
+// SetupFieldIndexer registers MachineTokenHashIndexField and
+// MachineNameIndexField on mgr's cache. Call it once before the manager
+// starts, alongside internal/bootserver's own SetupFieldIndexer, and
+// before adding a Server that depends on it.
 func SetupFieldIndexer(ctx context.Context, mgr ctrl.Manager) error {
-	return mgr.GetFieldIndexer().IndexField(ctx, &keziov1alpha1.Machine{}, MachineTokenHashIndexField, IndexMachineTokenHash)
+	if err := mgr.GetFieldIndexer().IndexField(ctx, &keziov1alpha1.Machine{}, MachineTokenHashIndexField, IndexMachineTokenHash); err != nil {
+		return err
+	}
+	return mgr.GetFieldIndexer().IndexField(ctx, &keziov1alpha1.Machine{}, MachineNameIndexField, IndexMachineName)
 }

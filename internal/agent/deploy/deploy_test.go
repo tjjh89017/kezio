@@ -632,3 +632,64 @@ func TestExecute_ReportsFinalizeAndTerminalSteps(t *testing.T) {
 		t.Fatalf("never reported %q among steps %v", agentapi.DeployStepFinalizing, steps)
 	}
 }
+
+// TestExecute_ReportsFailedStepOnError exercises Execute failing partway
+// through (a Runner command returning an error), the case that matters to
+// the controller: without a terminal step report, the controller's
+// agent-driven Provision would poll MachineConditionProvisioningProgress
+// forever, never reaching an intermediate step it also does not
+// recognize as failure. Execute must report DeployStepFailed with the
+// error detail as its last progress event before returning the error.
+func TestExecute_ReportsFailedStepOnError(t *testing.T) {
+	runner := newFakeRunner()
+	runner.errs["sfdisk /dev/nvme0n1"] = fmt.Errorf("injected sfdisk failure")
+	progress := &fakeProgressReporter{}
+
+	e := &Executor{Runner: runner, Ezio: &fakeLauncher{}, Progress: progress}
+	err := e.Execute(context.Background(), espOnlyPlan(keziov1alpha1.AfterDeployReboot, false))
+	if err == nil {
+		t.Fatal("Execute: got nil error, want the injected sfdisk failure")
+	}
+
+	steps := progress.steps()
+	if len(steps) == 0 {
+		t.Fatal("no progress reports were sent")
+	}
+	if last := steps[len(steps)-1]; last != agentapi.DeployStepFailed {
+		t.Fatalf("last reported step = %q, want the terminal failure step %q", last, agentapi.DeployStepFailed)
+	}
+	lastMsg := progress.events[len(progress.events)-1].StepMessage
+	if !strings.Contains(lastMsg, "injected sfdisk failure") {
+		t.Fatalf("StepMessage = %q, want it to mention the underlying failure", lastMsg)
+	}
+}
+
+// TestExecute_ReportsFailedStepOnValidationRefusal exercises the case
+// where Execute never gets past validate: even then, Execute must report
+// DeployStepFailed so the controller does not poll forever waiting for a
+// deploy that was refused before writing a single byte.
+func TestExecute_ReportsFailedStepOnValidationRefusal(t *testing.T) {
+	disk := "/dev/nvme0n1"
+	runner := newFakeRunner()
+	plan := &agentapi.DeployPlan{
+		OS: &agentapi.ImageDeployPlan{
+			ImageRef:   keziov1alpha1.NameRef{Name: "os-image"},
+			Disk:       disk,
+			SfdiskJSON: fixtureSfdiskJSON,
+			Partitions: []agentapi.PlanPartition{
+				{Number: 1, Device: "/dev/sdX99", Role: keziov1alpha1.PartitionRoleESP, FSType: "vfat"},
+			},
+		},
+	}
+	progress := &fakeProgressReporter{}
+
+	e := &Executor{Runner: runner, Ezio: &fakeLauncher{}, Progress: progress}
+	if err := e.Execute(context.Background(), plan); err == nil {
+		t.Fatal("Execute: got nil error, want a validation refusal")
+	}
+
+	steps := progress.steps()
+	if len(steps) == 0 || steps[len(steps)-1] != agentapi.DeployStepFailed {
+		t.Fatalf("steps = %v, want the last one to be %q", steps, agentapi.DeployStepFailed)
+	}
+}

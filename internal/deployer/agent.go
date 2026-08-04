@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
+	"github.com/tjjh89017/kezio/internal/agentapi"
 )
 
 // agentInspectPollInterval is how long Inspect asks the reconciler to
@@ -36,6 +37,15 @@ import (
 // hammer the API server while a machine spends minutes booting the live
 // environment over the network.
 const agentInspectPollInterval = 5 * time.Second
+
+// agentProvisionPollInterval is how long Provision asks the reconciler to
+// wait before calling it again while a deploy is in progress but has not
+// yet reached a terminal step. It matches agentInspectPollInterval's
+// reasoning: short enough that a deploy which just finished (or just
+// failed) is reflected within one or two reconciler ticks, long enough
+// not to hammer the API server while a deploy runs for however long
+// writing every partition's content over BitTorrent takes.
+const agentProvisionPollInterval = 5 * time.Second
 
 // AgentFactory builds Deployers whose Register and Inspect phases are
 // driven by a real kezio-agent's registration (internal/agentserver),
@@ -61,31 +71,32 @@ func (f *AgentFactory) New(machine *keziov1alpha1.Machine) (Deployer, error) {
 	}, nil
 }
 
-// agentDeployer is the real deployer for the registration and inspection
-// phases of the state machine. It has nothing of its own to poll or
-// drive proactively for Register and Inspect: the actual work (the
-// machine booting the live environment and kezio-agent registering) is
-// something internal/bootserver and internal/agentserver already handle
-// out of band, triggered by the Machine's status.state reaching
-// Inspecting (see internal/bootserver's needsNetBoot) - not by anything
-// this Deployer calls. Its job is to read back what that out-of-band
-// work has recorded on Machine.status and translate it into Result
-// values the reconciler understands.
+// agentDeployer is the real deployer for the registration, inspection,
+// and provisioning phases of the state machine. It has nothing of its
+// own to poll or drive proactively for Register, Inspect, or Provision:
+// the actual work (the machine booting the live environment,
+// kezio-agent registering, and kezio-agent executing a deploy plan) is
+// something internal/bootserver, internal/agentserver, and
+// internal/agent/deploy already handle out of band, triggered by the
+// Machine's status reaching the right state (Inspecting for netboot,
+// Provisioning with resolved disks and Ready images for a deploy plan) -
+// not by anything this Deployer calls. Its job is to read back what
+// that out-of-band work has recorded on Machine.status and translate it
+// into Result values the reconciler understands, the same shape for all
+// three: Register and Provision arrange or confirm the out-of-band work
+// should proceed, Inspect and Provision poll a condition it writes to.
 //
-// Provision, Deprovision, PowerOn, and PowerOff are not implemented by
-// this milestone's work: writing a disk image and controlling a BMC are
-// separate, later work items. Provision and Deprovision report that
-// honestly with an ErrorMessage - a Machine that reaches Provisioning
-// under this Deployer moves to the Error state and stays there,
-// retrying with backoff, rather than silently pretending to succeed.
-// PowerOn and PowerOff, by contrast, report success and do nothing: no
-// BMC driver exists yet to actually call, and unlike Provision/
-// Deprovision there is no unsafe fabricated side effect to avoid
-// reporting - reconcilePower's steady-state power matching is
+// PowerOn and PowerOff report success and do nothing: no BMC driver
+// exists yet to actually call (a later milestone's work), and unlike
+// Provision/Deprovision there is no unsafe fabricated side effect to
+// avoid reporting - reconcilePower's steady-state power matching is
 // background maintenance, not a step in the deployment flow, so letting
-// it succeed as a no-op is what lets a Machine settle in Available
-// (or Provisioned) instead of spinning on power-management retries this
-// milestone was never asked to implement.
+// it succeed as a no-op is what lets a Machine settle in Available (or
+// Provisioned) instead of spinning on power-management retries this
+// milestone was never asked to implement. Deprovision, for the same
+// missing-BMC reason, is likewise a no-op that reports success - see its
+// own doc comment for why that is the honest choice rather than an
+// ErrorMessage.
 type agentDeployer struct {
 	client client.Client
 	key    types.NamespacedName
@@ -141,36 +152,89 @@ func (d *agentDeployer) Inspect(ctx context.Context, data *InspectData) (Result,
 	return Result{Dirty: true}, nil
 }
 
-// Provision is not implemented yet: writing the deployment plan to disk
-// (sfdisk, EZIO AddTorrent, finalize) is separate, later work. A Machine
-// that reaches Provisioning under this Deployer moves to the Error state
-// with this message and retries with backoff, honestly, instead of
-// fabricating a completed deployment.
-//
-// The seam a later work item wires this through already exists:
-// internal/agent/deploy.Executor drives the actual deploy on the machine
-// and reports its progress to POST /agent/machines/<name>/progress
+// Provision drives (by polling) the deploy internal/agentserver's GET
+// .../next handler already started answering ActionDeploy for, entirely
+// out of band, the moment status.provisioning names this deployment -
+// already true by the time Provision is called, since
+// reconcileProvisioning resolves target disks (recording them into
+// status.provisioning) before ever calling Provision. There is nothing
+// for Provision itself to drive: internal/agent/deploy.Executor is what
+// actually writes partition tables and content on the machine, and it
+// reports its progress to POST /agent/machines/<name>/progress
 // (internal/agentserver), which mirrors the agent's own whole-plan step
-// onto keziov1alpha1.MachineConditionProvisioningProgress's Reason - see
-// agentapi.DeployStepRebootingToDisk's doc comment for why that
-// particular Reason is the deploy's success signal. A real Provision
-// implementation polls that condition the same way Inspect above already
-// polls MachineConditionAgentRegistered, rather than driving the deploy
-// itself: internal/agentserver's GET .../next handler already starts
-// answering ActionDeploy on its own, entirely out of band, the moment
-// status.provisioning names this deployment (already true by the time
-// Provision is called - reconcileProvisioning resolves target disks
-// first).
-func (d *agentDeployer) Provision(_ context.Context, _ *ProvisionData) (Result, error) {
-	return Result{ErrorMessage: "agent deployer: Provision is not implemented yet"}, nil
+// onto keziov1alpha1.MachineConditionProvisioningProgress's Reason. So,
+// the same shape as Inspect polling MachineConditionAgentRegistered,
+// Provision polls that condition:
+//
+//   - No condition yet, or one whose ObservedGeneration lags
+//     machine.Generation (a stale report from a previous deployment to
+//     this same Machine - see the condition's own doc comment for why
+//     nothing proactively resets it between deploys): the current
+//     deployment has not reported anything yet. Keep waiting.
+//   - Reason is one of agentapi.DeployStepPartitioning,
+//     DeployStepWritingContent, DeployStepRunningPostHook, or
+//     DeployStepFinalizing (or, from an agent too old to report a
+//     whole-plan step at all, one of the agentapi.PartitionPhase*
+//     fallback values, or the summarizer's own "Unknown"): the deploy is
+//     still running. Keep waiting.
+//   - Reason is agentapi.DeployStepRebootingToDisk: the deploy finished.
+//     Fill in ResolvedTargetDisk/ResolvedDataImageDisks by reading them
+//     back from status.provisioning - the same disks resolveTargetDisks
+//     already resolved and recorded before Provision was ever called -
+//     rather than re-deriving them, so buildProvisioningStatus's own
+//     write afterwards can never disagree with what diskmatch resolved.
+//   - Reason is agentapi.DeployStepFailed: the deploy failed. Report
+//     Result.ErrorMessage with the condition's Message (the agent's own
+//     failure detail - see agentapi.DeployStepFailed's doc comment).
+func (d *agentDeployer) Provision(ctx context.Context, data *ProvisionData) (Result, error) {
+	machine := &keziov1alpha1.Machine{}
+	if err := d.client.Get(ctx, d.key, machine); err != nil {
+		return Result{}, fmt.Errorf("agent deployer: getting machine for Provision: %w", err)
+	}
+
+	cond := apimeta.FindStatusCondition(machine.Status.Conditions, keziov1alpha1.MachineConditionProvisioningProgress)
+	if cond == nil || cond.ObservedGeneration != machine.Generation {
+		return Result{RequeueAfter: agentProvisionPollInterval}, nil
+	}
+
+	switch cond.Reason {
+	case agentapi.DeployStepRebootingToDisk:
+		if provisioning := machine.Status.Provisioning; provisioning != nil {
+			if provisioning.Image != nil {
+				data.ResolvedTargetDisk = provisioning.Image.TargetDisk
+			}
+			if len(provisioning.DataImages) > 0 {
+				data.ResolvedDataImageDisks = make([]string, len(provisioning.DataImages))
+				for i, rec := range provisioning.DataImages {
+					data.ResolvedDataImageDisks[i] = rec.TargetDisk
+				}
+			}
+		}
+		return Result{Dirty: true}, nil
+	case agentapi.DeployStepFailed:
+		return Result{ErrorMessage: fmt.Sprintf("agent deployer: kezio-agent reported a failed deploy: %s", cond.Message)}, nil
+	default:
+		return Result{RequeueAfter: agentProvisionPollInterval}, nil
+	}
 }
 
-// Deprovision is not implemented yet, for the same reason as Provision.
-// A Machine deletion that reaches this call retries with backoff and its
-// finalizer is never removed, until a real implementation lands; this is
-// an accepted, documented limit of this milestone, not a bug.
+// Deprovision releases a deployed machine ahead of its deletion (onDelete
+// calls it, then removes the finalizer once it reports success). Its
+// honest scope today is a no-op that reports success, for two reasons
+// together: first, this Deployer holds no live session or lease outside
+// the Machine object itself worth releasing - no BMC driver exists yet
+// to power the machine off (a later milestone's work, the same limit
+// PowerOn/PowerOff document), and the netboot token Register mints is
+// either already consumed or left to expire on its own, never worth
+// revoking early. Second, clearing status.provisioning would be
+// pointless work: onDelete removes the finalizer and lets the API server
+// delete the whole object immediately after this call succeeds, so
+// nothing is ever left around to read a cleared status.provisioning
+// back from. Reporting success unconditionally is what lets a Machine
+// deletion complete instead of wedging behind BMC work this milestone
+// does not do.
 func (d *agentDeployer) Deprovision(_ context.Context, _ *DeprovisionData) (Result, error) {
-	return Result{ErrorMessage: "agent deployer: Deprovision is not implemented yet"}, nil
+	return Result{Dirty: true}, nil
 }
 
 // PowerOn is a no-op that reports success: see agentDeployer's doc

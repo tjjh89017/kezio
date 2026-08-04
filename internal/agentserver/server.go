@@ -265,8 +265,13 @@ func (s *Server) handleNext(w http.ResponseWriter, r *http.Request) {
 	}
 
 	name := r.PathValue("name")
-	machine := &keziov1alpha1.Machine{}
-	if err := s.Client.Get(ctx, client.ObjectKey{Name: name}, machine); err != nil {
+	machine, err := s.lookupMachineByName(ctx, name)
+	if err != nil {
+		log.Error(err, "looking up machine by name failed")
+		writeUnauthorized(w)
+		return
+	}
+	if machine == nil {
 		writeUnauthorized(w)
 		return
 	}
@@ -311,8 +316,13 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 	}
 
 	name := r.PathValue("name")
-	machine := &keziov1alpha1.Machine{}
-	if err := s.Client.Get(ctx, client.ObjectKey{Name: name}, machine); err != nil {
+	machine, err := s.lookupMachineByName(ctx, name)
+	if err != nil {
+		log.Error(err, "looking up machine by name failed")
+		writeUnauthorized(w)
+		return
+	}
+	if machine == nil {
 		writeUnauthorized(w)
 		return
 	}
@@ -367,6 +377,26 @@ func (s *Server) lookupMachineByToken(ctx context.Context, token string) (*kezio
 		return nil, nil
 	}
 	return machine, nil
+}
+
+// lookupMachineByName resolves name - the bare Machine name a poll or
+// progress report's URL path carries (see MachineNameIndexField's doc
+// comment for why a namespaced Get cannot do this) - to the one Machine
+// with that name. It returns (nil, nil), not an error, for both zero
+// matches (no such Machine) and more than one (the name is ambiguous
+// across namespaces; Server has no namespace in the request to
+// disambiguate with) - handleNext and handleProgress answer the
+// identical undifferentiated 401 either way, the same anti-enumeration
+// shape lookupMachineByToken's own doc comment describes.
+func (s *Server) lookupMachineByName(ctx context.Context, name string) (*keziov1alpha1.Machine, error) {
+	var list keziov1alpha1.MachineList
+	if err := s.Client.List(ctx, &list, client.MatchingFields{MachineNameIndexField: name}); err != nil {
+		return nil, err
+	}
+	if len(list.Items) != 1 {
+		return nil, nil
+	}
+	return &list.Items[0], nil
 }
 
 // writeUnauthorized writes the fixed 401 response every rejection path

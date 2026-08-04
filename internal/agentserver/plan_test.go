@@ -46,7 +46,11 @@ func newPlanTestClient(t *testing.T, objs ...client.Object) client.Client {
 	if err := keziov1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme (kezio): %v", err)
 	}
-	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+	return fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&keziov1alpha1.Machine{}, MachineNameIndexField, IndexMachineName).
+		WithObjects(objs...).
+		Build()
 }
 
 // writeFixtureContent writes a minimal, valid content directory (a
