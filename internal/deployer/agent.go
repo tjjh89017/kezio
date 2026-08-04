@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -28,6 +29,7 @@ import (
 
 	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
 	"github.com/tjjh89017/kezio/internal/agentapi"
+	"github.com/tjjh89017/kezio/internal/bmc"
 )
 
 // agentInspectPollInterval is how long Inspect asks the reconciler to
@@ -63,55 +65,122 @@ func NewAgentFactory(c client.Client) *AgentFactory {
 	return &AgentFactory{Client: c}
 }
 
-// New implements the Factory function type.
+// New implements the Factory function type. It captures machine.Spec.BMC
+// and the insecure-skip-verify annotation (see
+// keziov1alpha1.AnnotationBMCInsecureSkipVerify) at build time: every
+// phase call for the returned Deployer happens within the same reconcile
+// that built it, so this is always the same BMC configuration Register's
+// own RegisterData.BMC carries for that reconcile - capturing it here is
+// what lets PowerOn/PowerOff (which take no per-call data) reach it too.
 func (f *AgentFactory) New(machine *keziov1alpha1.Machine) (Deployer, error) {
 	return &agentDeployer{
-		client: f.Client,
-		key:    types.NamespacedName{Namespace: machine.Namespace, Name: machine.Name},
+		client:                f.Client,
+		key:                   types.NamespacedName{Namespace: machine.Namespace, Name: machine.Name},
+		bmcSpec:               machine.Spec.BMC,
+		bmcInsecureSkipVerify: machine.Annotations[keziov1alpha1.AnnotationBMCInsecureSkipVerify] == "true",
 	}, nil
 }
 
 // agentDeployer is the real deployer for the registration, inspection,
 // and provisioning phases of the state machine. It has nothing of its
-// own to poll or drive proactively for Register, Inspect, or Provision:
-// the actual work (the machine booting the live environment,
-// kezio-agent registering, and kezio-agent executing a deploy plan) is
-// something internal/bootserver, internal/agentserver, and
-// internal/agent/deploy already handle out of band, triggered by the
-// Machine's status reaching the right state (Inspecting for netboot,
-// Provisioning with resolved disks and Ready images for a deploy plan) -
-// not by anything this Deployer calls. Its job is to read back what
-// that out-of-band work has recorded on Machine.status and translate it
-// into Result values the reconciler understands, the same shape for all
-// three: Register and Provision arrange or confirm the out-of-band work
-// should proceed, Inspect and Provision poll a condition it writes to.
+// own to poll or drive proactively for Inspect or Provision: the actual
+// work (the machine booting the live environment, kezio-agent
+// registering, and kezio-agent executing a deploy plan) is something
+// internal/bootserver, internal/agentserver, and internal/agent/deploy
+// already handle out of band, triggered by the Machine's status reaching
+// the right state (Inspecting for netboot, Provisioning with resolved
+// disks and Ready images for a deploy plan) - not by anything this
+// Deployer calls. Inspect and Provision read back what that out-of-band
+// work has recorded on Machine.status and translate it into Result
+// values the reconciler understands, by polling a condition each writes
+// to.
 //
-// PowerOn and PowerOff report success and do nothing: no BMC driver
-// exists yet to actually call (a later milestone's work), and unlike
-// Provision/Deprovision there is no unsafe fabricated side effect to
-// avoid reporting - reconcilePower's steady-state power matching is
-// background maintenance, not a step in the deployment flow, so letting
-// it succeed as a no-op is what lets a Machine settle in Available (or
-// Provisioned) instead of spinning on power-management retries this
-// milestone was never asked to implement. Deprovision, for the same
-// missing-BMC reason, is likewise a no-op that reports success - see its
-// own doc comment for why that is the honest choice rather than an
-// ErrorMessage.
+// Register, PowerOn, and PowerOff drive power and boot order through
+// internal/bmc when the Machine names one (bmcSpec.Address is
+// non-empty): see connectBMC. When it does not, they fall back to the
+// pre-BMC behavior each documents on its own: Register arranges the
+// netboot-wait handoff bootserver's own polling relies on, and
+// PowerOn/PowerOff are no-ops, since without a BMC there is nothing this
+// Deployer can drive - the machine's power state is either
+// human-operated or left to the agent's own systemctl calls. Deprovision
+// stays a no-op regardless of a configured BMC; see its own doc comment
+// for why.
 type agentDeployer struct {
 	client client.Client
 	key    types.NamespacedName
+
+	// bmcSpec is the Machine's spec.bmc, captured at New() time (see its
+	// doc comment). An empty Address means no BMC is configured for this
+	// Machine.
+	bmcSpec keziov1alpha1.MachineBMC
+	// bmcInsecureSkipVerify is the resolved value of
+	// keziov1alpha1.AnnotationBMCInsecureSkipVerify, captured at New()
+	// time alongside bmcSpec.
+	bmcInsecureSkipVerify bool
 }
 
-// Register arranges the netboot intent for inspection: there is nothing
-// to actively do here. internal/bootserver already serves the live-boot
-// GRUB config, with a fresh single-use token, to any machine whose
-// status.state is Inspecting (see needsNetBoot); reaching that state is
-// exactly what the reconciler does immediately after this call returns
-// success. What Register does do is reset the bookkeeping from any
-// previous inspection cycle: it clears status.hardware and resets the
-// AgentRegistered condition to False, so a stale registration from a
-// prior cycle (for example, a machine re-enrolled after already having
-// deployed once) can never be mistaken by Inspect for a fresh one.
+// connectBMC resolves and connects to the Machine's BMC, returning (nil,
+// nil) when bmcSpec.Address is empty - the signal every caller uses to
+// take the no-BMC fallback path. It resolves
+// bmcSpec.CredentialsSecretRef from the same namespace as the Machine
+// itself (BMC credential Secrets are not expected to be shared across
+// namespaces) into a bmc.Credentials value, then hands off to
+// bmc.Connect. Neither the Secret's contents nor the resolved
+// Credentials are ever included in a returned error: the Secret lookup
+// error names only the Secret (namespace/name), CredentialsFromSecretData
+// already redacts its own errors down to which key is missing, and
+// bmc.Connect redacts the address itself before including it in an
+// error.
+func (d *agentDeployer) connectBMC(ctx context.Context) (bmc.BMC, error) {
+	if d.bmcSpec.Address == "" {
+		return nil, nil
+	}
+
+	secretKey := types.NamespacedName{Namespace: d.key.Namespace, Name: d.bmcSpec.CredentialsSecretRef.Name}
+	secret := &corev1.Secret{}
+	if err := d.client.Get(ctx, secretKey, secret); err != nil {
+		return nil, fmt.Errorf("agent deployer: getting BMC credentials secret %s: %w", secretKey, err)
+	}
+
+	creds, err := bmc.CredentialsFromSecretData(secret.Data)
+	if err != nil {
+		return nil, fmt.Errorf("agent deployer: resolving BMC credentials: %w", err)
+	}
+
+	bmcClient, err := bmc.Connect(ctx, d.bmcSpec.Address, creds, bmc.Options{InsecureSkipVerify: d.bmcInsecureSkipVerify})
+	if err != nil {
+		return nil, fmt.Errorf("agent deployer: connecting to BMC: %w", err)
+	}
+	return bmcClient, nil
+}
+
+// Register arranges the netboot intent for inspection. It always resets
+// the bookkeeping from any previous inspection cycle first: it clears
+// status.hardware and resets the AgentRegistered condition to False, so
+// a stale registration from a prior cycle (for example, a machine
+// re-enrolled after already having deployed once) can never be mistaken
+// by Inspect for a fresh one.
+//
+// What drives the machine to actually net boot depends on whether a BMC
+// is configured (bmcSpec.Address non-empty):
+//
+//   - No BMC: there is nothing further to actively do.
+//     internal/bootserver already serves the live-boot GRUB config, with
+//     a fresh single-use token, to any machine whose status.state is
+//     Inspecting (see needsNetBoot); reaching that state is exactly what
+//     the reconciler does immediately after this call returns success.
+//     Powering the machine on and pointing it at PXE is left to whoever
+//     operates it - the same netboot-wait behavior this Deployer has
+//     always had.
+//   - A BMC is configured: Register connects to it, arranges a one-time
+//     PXE boot (SetOneTimePXEBoot), then reads the machine's current
+//     power state to decide how to bring it up for that boot -
+//     PowerCycle if it is already on (forcing a clean reset instead of
+//     leaving whatever OS is running to ignore the PXE override),
+//     PowerOn otherwise. A failure at any BMC step reports
+//     Result.ErrorMessage instead of completing Register, so the
+//     reconciler moves the machine to Error rather than advancing it to
+//     Inspecting behind a machine that was never actually told to boot.
 func (d *agentDeployer) Register(ctx context.Context, _ *RegisterData) (Result, error) {
 	machine := &keziov1alpha1.Machine{}
 	if err := d.client.Get(ctx, d.key, machine); err != nil {
@@ -128,6 +197,32 @@ func (d *agentDeployer) Register(ctx context.Context, _ *RegisterData) (Result, 
 	})
 	if err := d.client.Status().Update(ctx, machine); err != nil {
 		return Result{}, fmt.Errorf("agent deployer: clearing registration state for Register: %w", err)
+	}
+
+	bmcClient, err := d.connectBMC(ctx)
+	if err != nil {
+		return Result{ErrorMessage: err.Error()}, nil
+	}
+	if bmcClient == nil {
+		return Result{}, nil
+	}
+
+	if err := bmcClient.SetOneTimePXEBoot(ctx); err != nil {
+		return Result{ErrorMessage: fmt.Sprintf("agent deployer: setting one-time PXE boot: %v", err)}, nil
+	}
+
+	state, err := bmcClient.GetPowerState(ctx)
+	if err != nil {
+		return Result{ErrorMessage: fmt.Sprintf("agent deployer: reading BMC power state: %v", err)}, nil
+	}
+
+	if state == bmc.PowerStateOn {
+		err = bmcClient.PowerCycle(ctx)
+	} else {
+		err = bmcClient.PowerOn(ctx)
+	}
+	if err != nil {
+		return Result{ErrorMessage: fmt.Sprintf("agent deployer: powering on machine for net boot: %v", err)}, nil
 	}
 
 	return Result{}, nil
@@ -220,31 +315,62 @@ func (d *agentDeployer) Provision(ctx context.Context, data *ProvisionData) (Res
 
 // Deprovision releases a deployed machine ahead of its deletion (onDelete
 // calls it, then removes the finalizer once it reports success). Its
-// honest scope today is a no-op that reports success, for two reasons
-// together: first, this Deployer holds no live session or lease outside
-// the Machine object itself worth releasing - no BMC driver exists yet
-// to power the machine off (a later milestone's work, the same limit
-// PowerOn/PowerOff document), and the netboot token Register mints is
-// either already consumed or left to expire on its own, never worth
-// revoking early. Second, clearing status.provisioning would be
-// pointless work: onDelete removes the finalizer and lets the API server
-// delete the whole object immediately after this call succeeds, so
-// nothing is ever left around to read a cleared status.provisioning
-// back from. Reporting success unconditionally is what lets a Machine
-// deletion complete instead of wedging behind BMC work this milestone
-// does not do.
+// honest scope today is a no-op that reports success regardless of
+// whether a BMC is configured, for two reasons together: first, this
+// Deployer holds no live session or lease outside the Machine object
+// itself worth releasing - powering the machine off is not part of
+// releasing it (Deprovision undoes Provision, not Online), and the
+// netboot token Register mints is either already consumed or left to
+// expire on its own, never worth revoking early. Second, clearing
+// status.provisioning would be pointless work: onDelete removes the
+// finalizer and lets the API server delete the whole object immediately
+// after this call succeeds, so nothing is ever left around to read a
+// cleared status.provisioning back from. Reporting success
+// unconditionally is what lets a Machine deletion complete without
+// waiting on BMC work that would not change the outcome anyway.
 func (d *agentDeployer) Deprovision(_ context.Context, _ *DeprovisionData) (Result, error) {
 	return Result{Dirty: true}, nil
 }
 
-// PowerOn is a no-op that reports success: see agentDeployer's doc
-// comment for why, unlike Provision/Deprovision, this is the honest
-// choice here rather than an ErrorMessage.
-func (d *agentDeployer) PowerOn(_ context.Context) (Result, error) {
+// PowerOn powers the machine on through its BMC when one is configured
+// (bmcSpec.Address non-empty). Without a BMC it is a no-op that reports
+// success: reconcilePower's steady-state power matching is background
+// maintenance, not a step in the deployment flow, and without a BMC
+// there is nothing this Deployer can drive - the machine's power state
+// is either human-operated or left to the agent's own systemctl calls -
+// so letting it succeed as a no-op is what lets a Machine settle in
+// Available (or Provisioned) instead of spinning on power-management
+// retries it has no way to act on.
+func (d *agentDeployer) PowerOn(ctx context.Context) (Result, error) {
+	bmcClient, err := d.connectBMC(ctx)
+	if err != nil {
+		return Result{ErrorMessage: err.Error()}, nil
+	}
+	if bmcClient == nil {
+		return Result{Dirty: true}, nil
+	}
+	if err := bmcClient.PowerOn(ctx); err != nil {
+		return Result{ErrorMessage: fmt.Sprintf("agent deployer: powering on machine: %v", err)}, nil
+	}
 	return Result{Dirty: true}, nil
 }
 
-// PowerOff is a no-op that reports success; see PowerOn.
-func (d *agentDeployer) PowerOff(_ context.Context) (Result, error) {
+// PowerOff powers the machine off through its BMC when one is configured;
+// see PowerOn for the no-BMC fallback and why it is the honest choice
+// there. BMC.PowerOff is a graceful (orderly OS shutdown) power-down, the
+// same as an agent-issued "systemctl poweroff" would be - see
+// reconcileProvisioning's afterDeploy=PowerOff handling for how this
+// interacts with the agent's own shutdown path.
+func (d *agentDeployer) PowerOff(ctx context.Context) (Result, error) {
+	bmcClient, err := d.connectBMC(ctx)
+	if err != nil {
+		return Result{ErrorMessage: err.Error()}, nil
+	}
+	if bmcClient == nil {
+		return Result{Dirty: true}, nil
+	}
+	if err := bmcClient.PowerOff(ctx); err != nil {
+		return Result{ErrorMessage: fmt.Sprintf("agent deployer: powering off machine: %v", err)}, nil
+	}
 	return Result{Dirty: true}, nil
 }

@@ -30,3 +30,15 @@ const (
 	// Status=False while work is in progress or after a failure.
 	ConditionReady = "Ready"
 )
+
+// AnnotationBMCInsecureSkipVerify, when set to "true" on a Machine, opts
+// that Machine's BMC connection out of TLS certificate verification (see
+// internal/bmc.Options.InsecureSkipVerify's doc comment for why this
+// exists as an explicit, per-Machine opt-out rather than a default): real
+// BMCs commonly ship a self-signed certificate, and this is deliberately
+// an annotation rather than a spec field - it is a transport-trust
+// decision about reaching the BMC, not part of the machine's deployment
+// intent, and does not warrant a CRD schema change for what is otherwise
+// a narrow, environment-specific escape hatch. Any value other than
+// exactly "true" (including absent) means verify.
+const AnnotationBMCInsecureSkipVerify = "kezio.kojuro.date/bmc-insecure-skip-verify"

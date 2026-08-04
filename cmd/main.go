@@ -45,6 +45,13 @@ import (
 	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
 	"github.com/tjjh89017/kezio/internal/agentserver"
 	"github.com/tjjh89017/kezio/internal/bootserver"
+
+	// Blank-imported for their init() side effect: each registers its
+	// URL scheme with internal/bmc's driver registry (see
+	// internal/bmc/registry.go's Register), which deployerFactoryFromEnv's
+	// AgentFactory path resolves Machine.spec.bmc.address against.
+	_ "github.com/tjjh89017/kezio/internal/bmc/ipmi"
+	_ "github.com/tjjh89017/kezio/internal/bmc/redfish"
 	"github.com/tjjh89017/kezio/internal/controller"
 	"github.com/tjjh89017/kezio/internal/deployer"
 	webhookv1alpha1 "github.com/tjjh89017/kezio/internal/webhook/v1alpha1"

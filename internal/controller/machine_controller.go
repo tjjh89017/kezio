@@ -185,6 +185,25 @@ func (r *MachineReconciler) reconcileAvailable(ctx context.Context, machine *kez
 // data image against the reported hardware inventory, then drives the
 // deployment plan, polling Provision until it completes, then records what
 // was deployed and drives Provisioning -> Provisioned.
+//
+// Reboot handoff: AfterDeploy only applies when the deployment carries no
+// OS image (see EffectiveAfterDeploy's doc comment) - a deployment that
+// does carry one always reboots into it, and that reboot is the agent's
+// own doing (a self-issued "systemctl reboot" once it finishes writing
+// content), never anything this method drives. For the no-OS-image case,
+// AfterDeployReboot likewise stays agent-driven (it reboots the machine
+// back to its already-running OS, which the agent can do itself); only
+// AfterDeployPowerOff is handled here, because powering off is not
+// something the agent can safely leave itself to do after reporting
+// success. dep.PowerOff is the same Deployer method reconcilePower calls
+// for steady-state power matching - when the Machine has a BMC
+// configured, that call is BMC-driven (a graceful shutdown, the BMC
+// equivalent of "systemctl poweroff"); without one it is a no-op
+// documented on agentDeployer.PowerOff, deliberately leaving that case to
+// an operator or a future agent-driven poweroff rather than this method
+// guessing at one. Either way, this call never races the agent's own
+// reboot: it only ever fires for the no-OS-image path the agent's reboot
+// does not touch.
 func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *keziov1alpha1.Machine, dep deployer.Deployer) (ctrl.Result, error) {
 	if err := r.resolveTargetDisks(ctx, machine); err != nil {
 		return r.recordPhaseError(ctx, machine, reasonProvisionFailed, err.Error())

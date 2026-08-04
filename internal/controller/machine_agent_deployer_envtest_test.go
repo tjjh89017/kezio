@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -172,9 +173,34 @@ func registerAndReachAvailable(t *testing.T, env agentWalkEnv, name string) (typ
 	t.Helper()
 	ctx := env.ctx
 	key := types.NamespacedName{Name: name, Namespace: "default"}
+
+	// newTestMachineSpec's default BMC address points at a real (but
+	// unreachable in this test) redfish endpoint - fine for the Ginkgo
+	// suite's FakeFactory-backed tests, which never resolve it, but this
+	// walk drives the real AgentFactory, whose Register now actually
+	// connects to the configured BMC (see agentDeployer.Register). Point
+	// it at controllerTestBMCScheme instead (a fast, in-memory fake - see
+	// machine_bmc_testdriver_test.go) and seed the credentials Secret it
+	// names, so Register's BMC steps succeed the same way this walk's
+	// pre-BMC-wiring behavior did.
+	spec := newTestMachineSpec(name)
+	bmcSecretName := name + "-bmc"
+	spec.BMC.Address = controllerTestBMCScheme + "://" + name
+	spec.BMC.CredentialsSecretRef.Name = bmcSecretName
+	bmcSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: bmcSecretName, Namespace: "default"},
+		Data: map[string][]byte{
+			"username": []byte("admin"),
+			"password": []byte("test-password"),
+		},
+	}
+	if err := env.rawClient.Create(ctx, bmcSecret); err != nil {
+		t.Fatalf("creating BMC credentials secret: %v", err)
+	}
+
 	machine := &keziov1alpha1.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-		Spec:       newTestMachineSpec(name),
+		Spec:       spec,
 	}
 	if err := env.rawClient.Create(ctx, machine); err != nil {
 		t.Fatalf("Create: %v", err)
