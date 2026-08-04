@@ -134,15 +134,11 @@ metadata:
   name: %s
   namespace: %s
 spec:
-  bmc:
-    address: redfish://198.51.100.20/redfish/v1/Systems/1
-    credentialsSecretRef:
-      name: %s-bmc
   bootMACAddress: %q
   online: true
   targetDisk:
     serialNumber: %s
-`, bootPathMachineName, namespace, bootPathMachineName, bootPathMAC, bootPathDiskSerial))
+`, bootPathMachineName, namespace, bootPathMAC, bootPathDiskSerial))
 
 			By("waiting for the Machine to reach state Inspecting (needs a net boot)")
 			Eventually(func(g Gomega) {

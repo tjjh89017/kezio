@@ -518,10 +518,6 @@ jobs:
             name: e2e-deploy-vm
             namespace: kezio-system
           spec:
-            bmc:
-              address: redfish://198.51.100.31/redfish/v1/Systems/1
-              credentialsSecretRef:
-                name: e2e-deploy-vm-bmc
             bootMACAddress: "${TARGET_VM_MAC}"
             online: true
             targetDisk:
