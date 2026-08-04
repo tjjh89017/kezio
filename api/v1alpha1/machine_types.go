@@ -341,6 +341,25 @@ type MachineHardwareStatus struct {
 	CPUCount int32 `json:"cpuCount,omitempty"`
 }
 
+// MachineNetBootStatus records the live-boot token most recently minted
+// for this machine by the boot config server (see
+// GET /boot/grub.cfg-<mac>). The token itself is never stored, only its
+// SHA-256 hash and expiry: a leaked status object (or an etcd backup)
+// then cannot be replayed to impersonate the machine when it registers.
+// Each grub.cfg fetch for a machine that currently needs to net boot
+// mints a fresh token and overwrites this field, invalidating whatever
+// token was here before - firmware PXE/HTTP fetches retry on their own,
+// and only the token embedded in the config the firmware actually used
+// needs to stay valid.
+type MachineNetBootStatus struct {
+	// TokenHash is the SHA-256 hex digest of the current boot token.
+	// +optional
+	TokenHash string `json:"tokenHash,omitempty"`
+	// ExpiresAt is when the current boot token stops being accepted.
+	// +optional
+	ExpiresAt metav1.Time `json:"expiresAt,omitempty"`
+}
+
 // MachineStatus defines the observed state of Machine.
 type MachineStatus struct {
 	// Conditions report the current state of the machine.
@@ -353,6 +372,10 @@ type MachineStatus struct {
 	// Provisioning records what was actually deployed.
 	// +optional
 	Provisioning *MachineProvisioningStatus `json:"provisioning,omitempty"`
+	// NetBoot records the live-boot token most recently minted for this
+	// machine by the boot config server.
+	// +optional
+	NetBoot *MachineNetBootStatus `json:"netBoot,omitempty"`
 	// Hardware is the inventory the agent reported at registration.
 	// +optional
 	Hardware *MachineHardwareStatus `json:"hardware,omitempty"`

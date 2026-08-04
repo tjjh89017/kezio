@@ -1,0 +1,23 @@
+# Adds the boot config server's Service, and the containerPort it needs,
+# on top of config/default. It is deliberately not one of config/default's
+# own resources: the boot config server is off by default (BOOT_SERVER_ADDR
+# unset, see cmd/main.go's bootServerConfigFromEnv), and turning it on
+# needs cluster-specific inputs (an externally reachable BOOT_SERVER_URL, a
+# mounted BOOT_ARTIFACTS_DIR volume) config/default has no way to guess -
+# the same reasoning config/image-service and config/seeder already use.
+# Deploy it as an addition once config/default is applied:
+#
+#   kustomize build config/bootserver | kubectl apply -f -
+#
+# Before applying, read README.md in this directory: the BOOT_* variables
+# to set on the controller-manager Deployment, and the artifacts volume it
+# needs mounted.
+resources:
+  - ../default
+  - service.yaml
+
+patches:
+  - path: manager-port-patch.yaml
+    target:
+      kind: Deployment
+      name: kezio-controller-manager

@@ -494,6 +494,21 @@ spec:
                       type: object
                     type: array
                 type: object
+              netBoot:
+                description: |-
+                  NetBoot records the live-boot token most recently minted for this
+                  machine by the boot config server.
+                properties:
+                  expiresAt:
+                    description: ExpiresAt is when the current boot token stops being
+                      accepted.
+                    format: date-time
+                    type: string
+                  tokenHash:
+                    description: TokenHash is the SHA-256 hex digest of the current
+                      boot token.
+                    type: string
+                type: object
               poweredOn:
                 description: PoweredOn reports the machine's last observed power state.
                 type: boolean

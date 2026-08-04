@@ -17,11 +17,13 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -40,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
+	"github.com/tjjh89017/kezio/internal/bootserver"
 	"github.com/tjjh89017/kezio/internal/controller"
 	"github.com/tjjh89017/kezio/internal/deployer"
 	webhookv1alpha1 "github.com/tjjh89017/kezio/internal/webhook/v1alpha1"
@@ -264,6 +267,22 @@ func main() {
 			os.Exit(1)
 		}
 	}
+
+	bootConfig, err := bootServerConfigFromEnv()
+	if err != nil {
+		setupLog.Error(err, "invalid boot server configuration")
+		os.Exit(1)
+	}
+	if bootConfig != nil {
+		if err := bootserver.SetupFieldIndexer(context.Background(), mgr); err != nil {
+			setupLog.Error(err, "unable to set up boot MAC field indexer")
+			os.Exit(1)
+		}
+		if err := mgr.Add(bootserver.New(mgr.GetClient(), *bootConfig)); err != nil {
+			setupLog.Error(err, "unable to add boot config server")
+			os.Exit(1)
+		}
+	}
 	// +kubebuilder:scaffold:builder
 
 	if metricsCertWatcher != nil {
@@ -379,4 +398,59 @@ func seederConfigFromEnv() controller.SeederConfig {
 		ServiceName:      os.Getenv("SEEDER_SERVICE_NAME"),
 		GRPCPortName:     os.Getenv("SEEDER_GRPC_PORT_NAME"),
 	}
+}
+
+// bootServerConfigFromEnv builds the boot config server's
+// bootserver.Config from the environment. Leaving BOOT_SERVER_ADDR unset
+// (the default for every existing deployment and the e2e suite) returns
+// a nil Config, and main does not add the server to the manager at all -
+// the same inert-by-default gating shape INGEST_IMAGE and
+// SEEDER_TRACKER_URL use. Setting BOOT_SERVER_ADDR opts in;
+// BOOT_ARTIFACTS_DIR and BOOT_SERVER_URL must then also be set:
+//
+//   - BOOT_SERVER_ADDR is the address the boot HTTP server listens on,
+//     for example ":8090".
+//   - BOOT_ARTIFACTS_DIR is the local filesystem directory GET
+//     /boot/artifacts/... serves from - a volume mounted into the
+//     manager container out of band (see config/bootserver's README).
+//   - BOOT_SERVER_URL is this server's own externally reachable base
+//     URL, for example "http://10.0.0.5:8090": GRUB and the live agent
+//     both need to reach it from the target machine's network, which is
+//     never something this process can discover on its own.
+//   - BOOT_KERNEL_PATH / BOOT_INITRD_PATH optionally override the
+//     artifact file names under BOOT_ARTIFACTS_DIR (default "vmlinuz" /
+//     "initrd.img").
+//   - BOOT_TOKEN_TTL optionally overrides how long a minted boot token
+//     is accepted (a Go duration string, for example "30m"; default
+//     bootserver.DefaultTokenTTL).
+func bootServerConfigFromEnv() (*bootserver.Config, error) {
+	addr := os.Getenv("BOOT_SERVER_ADDR")
+	if addr == "" {
+		return nil, nil
+	}
+
+	artifactsDir := os.Getenv("BOOT_ARTIFACTS_DIR")
+	if artifactsDir == "" {
+		return nil, fmt.Errorf("BOOT_SERVER_ADDR is set but BOOT_ARTIFACTS_DIR is not")
+	}
+	serverURL := os.Getenv("BOOT_SERVER_URL")
+	if serverURL == "" {
+		return nil, fmt.Errorf("BOOT_SERVER_ADDR is set but BOOT_SERVER_URL is not")
+	}
+
+	cfg := &bootserver.Config{
+		Addr:         addr,
+		ArtifactsDir: artifactsDir,
+		ServerURL:    serverURL,
+		KernelPath:   os.Getenv("BOOT_KERNEL_PATH"),
+		InitrdPath:   os.Getenv("BOOT_INITRD_PATH"),
+	}
+	if ttl := os.Getenv("BOOT_TOKEN_TTL"); ttl != "" {
+		d, err := time.ParseDuration(ttl)
+		if err != nil {
+			return nil, fmt.Errorf("invalid BOOT_TOKEN_TTL: %w", err)
+		}
+		cfg.TokenTTL = d
+	}
+	return cfg, nil
 }
