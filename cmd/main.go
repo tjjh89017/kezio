@@ -35,6 +35,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -42,6 +43,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
+	"github.com/tjjh89017/kezio/internal/agentserver"
 	"github.com/tjjh89017/kezio/internal/bootserver"
 	"github.com/tjjh89017/kezio/internal/controller"
 	"github.com/tjjh89017/kezio/internal/deployer"
@@ -229,14 +231,10 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "PostHook")
 		os.Exit(1)
 	}
-	// No real hardware deployer exists yet (BMC power/boot control,
-	// inspection, and image write are separate future work). Wire the
-	// fake deployer so the Machine state machine runs end to end today;
-	// swap this for a real deployer.Factory once one exists.
 	if err := (&controller.MachineReconciler{
 		Client:          mgr.GetClient(),
 		Scheme:          mgr.GetScheme(),
-		DeployerFactory: deployer.NewFactory().New,
+		DeployerFactory: deployerFactoryFromEnv(mgr.GetClient()),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Machine")
 		os.Exit(1)
@@ -280,6 +278,18 @@ func main() {
 		}
 		if err := mgr.Add(bootserver.New(mgr.GetClient(), *bootConfig)); err != nil {
 			setupLog.Error(err, "unable to add boot config server")
+			os.Exit(1)
+		}
+	}
+
+	agentConfig := agentServerConfigFromEnv()
+	if agentConfig != nil {
+		if err := agentserver.SetupFieldIndexer(context.Background(), mgr); err != nil {
+			setupLog.Error(err, "unable to set up agent token field indexer")
+			os.Exit(1)
+		}
+		if err := mgr.Add(agentserver.New(mgr.GetClient(), *agentConfig)); err != nil {
+			setupLog.Error(err, "unable to add agent registration server")
 			os.Exit(1)
 		}
 	}
@@ -453,4 +463,35 @@ func bootServerConfigFromEnv() (*bootserver.Config, error) {
 		cfg.TokenTTL = d
 	}
 	return cfg, nil
+}
+
+// agentServerConfigFromEnv builds the agent registration server's
+// agentserver.Config from the environment, mirroring
+// bootServerConfigFromEnv's inert-by-default shape: leaving
+// AGENT_SERVER_ADDR unset returns a nil Config, and main does not add
+// the server to the manager at all. Setting AGENT_SERVER_ADDR (for
+// example ":8091") opts in. Unlike bootServerConfigFromEnv, there is no
+// second required variable to validate, so this returns no error.
+func agentServerConfigFromEnv() *agentserver.Config {
+	addr := os.Getenv("AGENT_SERVER_ADDR")
+	if addr == "" {
+		return nil
+	}
+	return &agentserver.Config{Addr: addr}
+}
+
+// deployerFactoryFromEnv selects the Deployer implementation the Machine
+// reconciler drives, controlled by DEPLOYER: "agent" wires
+// deployer.AgentFactory (registration- and inspection-driven, backed by
+// the real kezio-agent flow); anything else, including unset, wires
+// deployer.FakeFactory, which fabricates plausible results for every
+// phase so the state machine runs end to end with no live hardware or
+// agent - the existing default, kept as the default so every existing
+// deployment and the fast-lane e2e suite are unaffected by this
+// function's addition.
+func deployerFactoryFromEnv(c client.Client) deployer.Factory {
+	if os.Getenv("DEPLOYER") == "agent" {
+		return deployer.NewAgentFactory(c).New
+	}
+	return deployer.NewFactory().New
 }

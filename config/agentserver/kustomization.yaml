@@ -1,0 +1,22 @@
+# Adds the agent registration server's Service, and the containerPort it
+# needs, on top of config/default. It is deliberately not one of
+# config/default's own resources: the agent server is off by default
+# (AGENT_SERVER_ADDR unset, see cmd/main.go's agentServerConfigFromEnv),
+# the same reasoning config/bootserver, config/image-service, and
+# config/seeder already use. Deploy it as an addition once config/default
+# (and, ordinarily, config/bootserver - a machine has nothing to register
+# with if it can never net boot) is applied:
+#
+#   kustomize build config/agentserver | kubectl apply -f -
+#
+# Before applying, read README.md in this directory for the AGENT_*
+# variable to set on the controller-manager Deployment.
+resources:
+  - ../default
+  - service.yaml
+
+patches:
+  - path: manager-port-patch.yaml
+    target:
+      kind: Deployment
+      name: kezio-controller-manager

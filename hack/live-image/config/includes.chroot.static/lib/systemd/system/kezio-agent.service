@@ -1,14 +1,13 @@
 [Unit]
-Description=kezio-agent (placeholder stub)
+Description=kezio-agent
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=oneshot
-# TODO(kezio-agent): swap for the real binary; see the stub script's own
-# TODO for what that binary must do.
-ExecStart=/usr/local/bin/kezio-agent-stub
-RemainAfterExit=yes
+Type=simple
+ExecStart=/usr/local/bin/kezio-agent
+Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

@@ -266,6 +266,16 @@ docker-push-bootd: ## Push docker image for kezio-bootd.
 build-kezioctl: fmt vet ## Build the kezioctl binary (the operator-side CLI client; no container image, it runs on an operator's workstation).
 	go build -o bin/kezioctl ./cmd/kezioctl
 
+# build-agent is for local development only (a native-arch build to run
+# internal/agent's own tests or poke at the binary by hand). The live
+# image itself never uses this target - hack/live-image/build.sh cross-
+# compiles cmd/agent to linux/amd64 in its own containerized step
+# (build_agent), the same way it resolves the ezio binary, so the live
+# image build has no dependency on the host's Go toolchain or arch.
+.PHONY: build-agent
+build-agent: fmt vet ## Build the kezio-agent binary for the host's own OS/arch (see hack/live-image/build.sh for the live-image cross-compile).
+	go build -o bin/agent ./cmd/agent
+
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/

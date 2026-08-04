@@ -50,3 +50,12 @@ func hashToken(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
 }
+
+// HashToken is the exported form of hashToken. It exists so a consumer
+// that validates a presented token against status.netBoot.tokenHash (the
+// agent registration endpoint in internal/agentserver) hashes it exactly
+// the same way this package minted it, instead of re-implementing the
+// same handful of lines and risking the two drifting apart.
+func HashToken(token string) string {
+	return hashToken(token)
+}

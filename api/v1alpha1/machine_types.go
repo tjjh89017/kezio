@@ -228,6 +228,18 @@ func (s MachineSpec) EffectiveAfterDeploy() string {
 	return s.AfterDeploy
 }
 
+// MachineConditionAgentRegistered reports whether the kezio-agent running
+// on the machine's live boot environment has registered for the current
+// inspection cycle and delivered its hardware inventory. Status=True once
+// a registration has landed since the machine most recently entered the
+// Inspecting state; Status=False (or the condition being absent) means no
+// registration has landed yet for this cycle, which is the signal the
+// agent-driven Deployer's Inspect phase polls on. A real Deployer's
+// Register phase resets this condition to False (and clears
+// status.hardware) every time it runs, so a stale registration from a
+// previous inspection cycle can never be mistaken for a fresh one.
+const MachineConditionAgentRegistered = "AgentRegistered"
+
 // Machine state enum values for MachineStatus.State. These are the
 // top-level states only; provisioning sub-steps (powering on, net
 // booting, writing the image, and so on) are reported through a

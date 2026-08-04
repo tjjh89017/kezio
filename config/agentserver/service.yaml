@@ -1,0 +1,32 @@
+# Exposes the agent registration server's port. As with
+# config/bootserver, there is no separate Deployment here: the server
+# runs embedded in the controller-manager process (see
+# internal/agentserver and cmd/main.go's AGENT_SERVER_ADDR gate), so
+# this Service selects controller-manager's own pods.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kezio-agent-server
+  namespace: kezio-system
+  labels:
+    app.kubernetes.io/name: kezio
+    app.kubernetes.io/component: agent-server
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # kezio-agent, running on a target machine's live boot environment,
+  # reaches this port directly - the value it was told at boot time is
+  # exactly whatever internal/bootserver's Config.ServerURL names (the
+  # kezio.server= cmdline value), which must be this Service's address
+  # as reachable from the boot network, the same operator-chosen
+  # reachability path config/bootserver's service.yaml documents (and,
+  # ordinarily, the very same address: one controller-manager process
+  # serves both the boot config and the agent registration endpoints).
+  type: ClusterIP
+  selector:
+    control-plane: controller-manager
+    app.kubernetes.io/name: kezio
+  ports:
+    - name: agent-http
+      port: 8091
+      targetPort: agent-http
+      protocol: TCP

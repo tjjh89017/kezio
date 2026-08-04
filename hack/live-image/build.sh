@@ -94,6 +94,28 @@ build_ezio() {
 	trap - RETURN
 }
 
+build_agent() {
+	log "building kezio-agent (CGO_ENABLED=0, static, matches go.mod's toolchain)"
+	local out_dir="${live_dir}/config/includes.chroot/usr/local/bin"
+	mkdir -p "${out_dir}"
+
+	# A plain golang:1.26 container, not a Dockerfile target: cmd/agent
+	# has no build-time inputs beyond the module itself (unlike build_ezio,
+	# there is no upstream source tree or shared-library closure to
+	# resolve), so a one-off `go build` run is the whole job. GOCACHE/
+	# GOPATH point at a writable path inside the container since the
+	# repo itself is bind-mounted read-only - go build must never write
+	# into the source tree it is building from.
+	docker run --rm \
+		-v "${repo_root}:/workspace:ro" \
+		-v "${out_dir}:/out" \
+		-w /workspace \
+		-e CGO_ENABLED=0 -e GOOS=linux -e GOARCH=amd64 \
+		-e GOCACHE=/tmp/go-build -e GOPATH=/tmp/go \
+		golang:1.26 \
+		go build -o /out/kezio-agent ./cmd/agent
+}
+
 run_live_build() {
 	log "running live-build inside debian:sid (--privileged: lb build chroots and mounts pseudo-filesystems)"
 	cat >"${live_dir}/.build-in-container.sh" <<'INNER'
@@ -150,6 +172,7 @@ main() {
 	mkdir -p "${dist_dir}"
 	cleanup_includes
 	build_ezio
+	build_agent
 	run_live_build
 	collect_artifacts
 }
