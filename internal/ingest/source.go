@@ -58,6 +58,22 @@ func ResolveSource(ctx context.Context, sourceURL string, downloader Downloader,
 		return destPath, false, nil
 
 	case strings.HasPrefix(sourceURL, imageservice.StagedURLScheme+"://"):
+		if staging == nil {
+			// Staging is an optional Dependency (see Dependencies' doc
+			// comment): cmd/ingest only wires it when STAGING_ROOT is
+			// set, which in turn only happens when the Image controller
+			// was configured with a staging volume (IngestConfig.
+			// StagingVolume / INGEST_STAGING_PVC). A kezio-staged://
+			// source with no staging resolver wired is a deployment
+			// configuration gap, not a bug in this Image - fail with an
+			// actionable message instead of dereferencing a nil
+			// interface, since this becomes the Job pod's termination
+			// message.
+			return "", false, fmt.Errorf(
+				"source %s requires a staging resolver, but none is configured: "+
+					"set STAGING_ROOT on the ingest Job (INGEST_STAGING_PVC on the controller-manager)",
+				sourceURL)
+		}
 		name := strings.TrimPrefix(sourceURL, imageservice.StagedURLScheme+"://")
 		p, err := staging.ResolveUpload(name)
 		if err != nil {

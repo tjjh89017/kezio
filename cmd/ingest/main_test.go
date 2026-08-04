@@ -16,7 +16,13 @@ limitations under the License.
 
 package main
 
-import "testing"
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/tjjh89017/kezio/internal/ingest"
+)
 
 func TestBuildFromEnv_MissingRequired(t *testing.T) {
 	t.Setenv("IMAGE_NAME", "")
@@ -70,6 +76,50 @@ func TestBuildFromEnv_WithStaging(t *testing.T) {
 	}
 	if deps.Staging == nil || deps.StagedRemover == nil {
 		t.Errorf("expected staging dependencies when STAGING_ROOT is set")
+	}
+}
+
+// TestRealWiring_StagedSourceWithoutStagingRoot exercises the exact call
+// chain the ingest Job's kezio-ingest binary runs: buildFromEnv's real,
+// exec-backed Dependencies fed straight into ingest.Run, the same as
+// cmd/ingest/main.go's run(). It reproduces the deployment configuration
+// gap that crashed the image-path e2e's ingest Job: a SOURCE_URL of
+// kezio-staged://... reaching ResolveSource with a nil Staging
+// dependency because STAGING_ROOT (from INGEST_STAGING_PVC on the
+// controller-manager - see Makefile's deploy-image-path target) was
+// never set. buildFromEnv itself is correct here - leaving Staging nil
+// when STAGING_ROOT is unset is by design, since Staging is optional for
+// http(s):// sources (see TestBuildFromEnv_Minimal). The bug was that
+// nothing downstream validated the combination "staged source + nil
+// Staging" before dereferencing it.
+//
+// Before the fix, ingest.Run panics with a nil pointer dereference
+// inside internal/ingest.ResolveSource; after the fix it returns a
+// Result carrying an actionable error instead of crashing the process.
+func TestRealWiring_StagedSourceWithoutStagingRoot(t *testing.T) {
+	storeRoot := t.TempDir()
+	workDir := t.TempDir()
+	t.Setenv("IMAGE_NAME", "golden")
+	t.Setenv("SOURCE_URL", "kezio-staged://golden")
+	t.Setenv("SOURCE_FORMAT", "qcow2")
+	t.Setenv("STORE_ROOT", storeRoot)
+	t.Setenv("WORK_DIR", workDir)
+	t.Setenv("STAGING_ROOT", "")
+
+	cfg, deps, err := buildFromEnv()
+	if err != nil {
+		t.Fatalf("buildFromEnv: %v", err)
+	}
+	if deps.Staging != nil {
+		t.Fatalf("test setup invalid: expected deps.Staging to be nil without STAGING_ROOT, got %v", deps.Staging)
+	}
+
+	result := ingest.Run(context.Background(), cfg, deps)
+	if result.Success {
+		t.Fatal("expected ingest.Run to fail for a staged source with no staging resolver wired")
+	}
+	if !strings.Contains(result.Error, "staging") {
+		t.Errorf("result.Error = %q, want a message mentioning the missing staging resolver", result.Error)
 	}
 }
 
