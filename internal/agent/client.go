@@ -134,6 +134,38 @@ func (c *Client) Next(ctx context.Context, machineName, sessionToken string) (ag
 	return out, nil
 }
 
+// ReportProgress posts a snapshot of a running deploy's per-partition
+// progress to the controller, authenticating with the session token the
+// same way Next does. It is best-effort from the caller's perspective -
+// internal/agent/deploy.Executor logs (and otherwise ignores) an error
+// returned here rather than failing an in-progress deployment over a
+// missed progress update.
+func (c *Client) ReportProgress(ctx context.Context, machineName, sessionToken string, partitions []agentapi.PartitionProgress) error {
+	body, err := json.Marshal(agentapi.ProgressRequest{Partitions: partitions})
+	if err != nil {
+		return fmt.Errorf("encoding progress request: %w", err)
+	}
+
+	path := agentapi.NextPathPrefix + machineName + agentapi.ProgressPathSuffix
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url(path), bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("building progress request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("progress request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("progress report rejected: %s", statusSummary(resp))
+	}
+	return nil
+}
+
 func (c *Client) url(path string) string {
 	return strings.TrimRight(c.BaseURL, "/") + path
 }

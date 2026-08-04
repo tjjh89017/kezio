@@ -240,6 +240,21 @@ func (s MachineSpec) EffectiveAfterDeploy() string {
 // previous inspection cycle can never be mistaken for a fresh one.
 const MachineConditionAgentRegistered = "AgentRegistered"
 
+// MachineConditionProvisioningProgress reports the live status of a
+// deploy in progress: kezio-agent posts a snapshot of it to
+// POST /agent/machines/<name>/progress (internal/agentserver,
+// internal/agentapi.ProgressRequest) as it writes each partition, and the
+// controller mirrors the latest snapshot here as Reason/Message rather
+// than a structured per-partition field, to keep this cheap to store and
+// to watch with `kubectl get -w`. Reason is one of the
+// agentapi.PartitionPhase* values describing the furthest-along partition
+// currently being worked; Message is a short per-partition summary.
+// Status is True while a deploy is in progress and is otherwise left
+// alone (there is nothing meaningful to reset it to between deploys; the
+// next deploy's first progress report overwrites Message and Reason
+// anyway).
+const MachineConditionProvisioningProgress = "ProvisioningProgress"
+
 // Machine state enum values for MachineStatus.State. These are the
 // top-level states only; provisioning sub-steps (powering on, net
 // booting, writing the image, and so on) are reported through a

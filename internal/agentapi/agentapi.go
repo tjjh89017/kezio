@@ -39,6 +39,9 @@ const (
 	RegisterPath   = "/agent/register"
 	NextPathPrefix = "/agent/machines/"
 	NextPathSuffix = "/next"
+	// ProgressPathSuffix follows NextPathPrefix + <machine name>, the same
+	// way NextPathSuffix does: "/agent/machines/node-01/progress".
+	ProgressPathSuffix = "/progress"
 )
 
 // RegisterRequest is the POST /agent/register request body: the full
@@ -184,6 +187,61 @@ type PlanPartition struct {
 	// SwapUUID is the UUID to pass to mkswap, present for a swap
 	// partition (Role == "swap").
 	SwapUUID string `json:"swapUUID,omitempty"`
+}
+
+// ProgressRequest is the POST /agent/machines/<name>/progress request
+// body: a snapshot of every partition the agent is currently executing a
+// DeployPlan against, sent periodically while the deploy runs (see
+// internal/agent/deploy). The controller records it as a lightweight
+// status condition (agentserver's ProvisioningProgress condition) rather
+// than a structured, per-partition status field - a snapshot this size
+// would otherwise inflate every Machine's status object and generation
+// history for information that only matters while a deployment is live.
+type ProgressRequest struct {
+	// Partitions is one entry per partition the current DeployPlan names,
+	// across the OS image and every dataImages entry.
+	Partitions []PartitionProgress `json:"partitions"`
+}
+
+// ProgressResponse is the POST /agent/machines/<name>/progress success
+// response. It carries nothing today; its presence keeps the wire
+// contract symmetric with every other endpoint (a decodable JSON body on
+// success) and gives future fields (for example a server-requested
+// report interval) somewhere to land without a breaking change.
+type ProgressResponse struct{}
+
+// Partition phase values for PartitionProgress.Phase.
+const (
+	// PartitionPhasePartitioning means the disk's partition table is
+	// being written or re-read; no per-partition percent applies yet.
+	PartitionPhasePartitioning = "partitioning"
+	// PartitionPhaseFormatting means mkfs or mkswap is running against a
+	// blank or swap partition.
+	PartitionPhaseFormatting = "formatting"
+	// PartitionPhaseSeeding means a content partition's torrent is
+	// downloading (or already finished and being held open for the stop
+	// policy's idle window).
+	PartitionPhaseSeeding = "seeding"
+	// PartitionPhaseDone means this partition's content is fully in
+	// place: mkfs/mkswap completed, or the torrent reached 100% and the
+	// stop policy paused it.
+	PartitionPhaseDone = "done"
+)
+
+// PartitionProgress is one partition's current status within a running
+// deploy.
+type PartitionProgress struct {
+	// Disk is the partition's target disk device path, for example
+	// "/dev/nvme0n1" - matches ImageDeployPlan.Disk.
+	Disk string `json:"disk"`
+	// Number is the partition number, matching PlanPartition.Number.
+	Number int32 `json:"number"`
+	// Phase is one of the PartitionPhase* constants.
+	Phase string `json:"phase"`
+	// PercentDone is 0-100. For PartitionPhaseSeeding it is the
+	// torrent's download progress; for every other phase it is 0 until
+	// Phase becomes PartitionPhaseDone, at which point it is 100.
+	PercentDone int32 `json:"percentDone"`
 }
 
 // DevicePartitionPath returns the kernel device path for partition

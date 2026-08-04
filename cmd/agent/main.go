@@ -33,6 +33,7 @@ import (
 	"syscall"
 
 	"github.com/tjjh89017/kezio/internal/agent"
+	"github.com/tjjh89017/kezio/internal/agent/deploy"
 )
 
 func main() {
@@ -49,6 +50,11 @@ func main() {
 		Cmdline:       cmdline,
 		InventoryRoot: "/",
 		Logf:          log.Printf,
+		Executor: &deploy.Executor{
+			Runner: execRunner{},
+			Ezio:   ezioLauncher{},
+			Logf:   log.Printf,
+		},
 	})
 	if err != nil && ctx.Err() == nil {
 		log.Fatalf("kezio-agent: %v", err)

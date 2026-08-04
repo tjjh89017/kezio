@@ -109,6 +109,52 @@ func TestClient_Next_SendsSessionTokenAndParsesDeployPlan(t *testing.T) {
 	}
 }
 
+func TestClient_ReportProgress_SendsSessionTokenAndBody(t *testing.T) {
+	var gotAuth, gotPath, gotMethod string
+	var gotReq agentapi.ProgressRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		_ = json.NewDecoder(r.Body).Decode(&gotReq)
+		_ = json.NewEncoder(w).Encode(agentapi.ProgressResponse{})
+	}))
+	defer server.Close()
+
+	c := NewClient(server.URL)
+	partitions := []agentapi.PartitionProgress{
+		{Disk: "/dev/nvme0n1", Number: 2, Phase: agentapi.PartitionPhaseSeeding, PercentDone: 55},
+	}
+	if err := c.ReportProgress(context.Background(), "node-01", "sess-token", partitions); err != nil {
+		t.Fatalf("ReportProgress: %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %q, want POST", gotMethod)
+	}
+	if gotAuth != "Bearer sess-token" {
+		t.Errorf("Authorization header = %q, want Bearer sess-token", gotAuth)
+	}
+	if gotPath != "/agent/machines/node-01/progress" {
+		t.Errorf("request path = %q, want /agent/machines/node-01/progress", gotPath)
+	}
+	if len(gotReq.Partitions) != 1 || gotReq.Partitions[0].PercentDone != 55 {
+		t.Fatalf("request body = %+v, want the posted partition progress", gotReq)
+	}
+}
+
+func TestClient_ReportProgress_NonOKStatusIsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(agentapi.ErrorResponse{Error: "unauthorized"})
+	}))
+	defer server.Close()
+
+	c := NewClient(server.URL)
+	if err := c.ReportProgress(context.Background(), "node-01", "sess-token", nil); err == nil {
+		t.Fatal("ReportProgress: want an error for a 401 response")
+	}
+}
+
 func TestClient_Next_WaitResponseHasNoPlan(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(agentapi.NextResponse{Action: agentapi.ActionWait})

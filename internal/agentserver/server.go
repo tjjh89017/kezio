@@ -116,6 +116,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+agentapi.RegisterPath, s.handleRegister)
 	mux.HandleFunc("GET "+agentapi.NextPathPrefix+"{name}"+agentapi.NextPathSuffix, s.handleNext)
+	mux.HandleFunc("POST "+agentapi.NextPathPrefix+"{name}"+agentapi.ProgressPathSuffix, s.handleProgress)
 	return mux
 }
 
@@ -172,7 +173,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	sessionToken, sessionHash, err := mintSessionToken()
 	if err != nil {
 		log.Error(err, "minting agent session token failed")
-		writeJSON(w, http.StatusInternalServerError, agentapi.ErrorResponse{Error: "internal error"})
+		writeJSON(w, http.StatusInternalServerError, agentapi.ErrorResponse{Error: internalErrorMessage})
 		return
 	}
 
@@ -187,7 +188,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return s.Client.Status().Update(ctx, current)
 	}); err != nil {
 		log.Error(err, "persisting agent registration failed", "machine", machine.Name)
-		writeJSON(w, http.StatusInternalServerError, agentapi.ErrorResponse{Error: "internal error"})
+		writeJSON(w, http.StatusInternalServerError, agentapi.ErrorResponse{Error: internalErrorMessage})
 		return
 	}
 
@@ -201,6 +202,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 // ceiling against a misbehaving or hostile agent sending an unbounded
 // body, not a tight fit to the expected shape.
 const maxRegisterBodyBytes = 1 << 20 // 1 MiB
+
+// internalErrorMessage is the fixed ErrorResponse.Error body for every
+// 500 this package returns: none of them are informative to the caller
+// (a Kubernetes API failure, a marshaling bug), so there is nothing
+// request-specific worth exposing.
+const internalErrorMessage = "internal error"
 
 // ingestRegistration applies a successful registration to machine's
 // status in place: the reported hardware inventory, the AgentRegistered
@@ -278,6 +285,64 @@ func (s *Server) handleNext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, agentapi.NextResponse{Action: agentapi.ActionDeploy, Plan: plan})
+}
+
+// maxProgressBodyBytes bounds the progress request body: a snapshot of
+// every partition in the largest realistic DeployPlan is still a handful
+// of kilobytes, so this is a generous ceiling against a misbehaving or
+// hostile agent sending an unbounded body, matching
+// maxRegisterBodyBytes's reasoning.
+const maxProgressBodyBytes = 1 << 20 // 1 MiB
+
+// handleProgress implements POST /agent/machines/<name>/progress:
+// kezio-agent's periodic report of a running deploy's per-partition
+// status (internal/agent/deploy). It requires the same session
+// credential GET .../next does, and rejects with the identical
+// undifferentiated 401 handleNext's doc comment describes, for the same
+// anti-enumeration reason.
+func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	log := logf.FromContext(ctx).WithName("agentserver")
+
+	token, ok := bearerToken(r)
+	if !ok {
+		writeUnauthorized(w)
+		return
+	}
+
+	name := r.PathValue("name")
+	machine := &keziov1alpha1.Machine{}
+	if err := s.Client.Get(ctx, client.ObjectKey{Name: name}, machine); err != nil {
+		writeUnauthorized(w)
+		return
+	}
+
+	if !validSession(machine, token, s.now()) {
+		writeUnauthorized(w)
+		return
+	}
+
+	var req agentapi.ProgressRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxProgressBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, agentapi.ErrorResponse{Error: "malformed request body"})
+		return
+	}
+
+	key := client.ObjectKeyFromObject(machine)
+	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := &keziov1alpha1.Machine{}
+		if err := s.Client.Get(ctx, key, current); err != nil {
+			return err
+		}
+		setProvisioningProgressCondition(current, req, s.now())
+		return s.Client.Status().Update(ctx, current)
+	}); err != nil {
+		log.Error(err, "persisting deploy progress failed", "machine", machine.Name)
+		writeJSON(w, http.StatusInternalServerError, agentapi.ErrorResponse{Error: internalErrorMessage})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, agentapi.ProgressResponse{})
 }
 
 // lookupMachineByToken resolves token (unhashed, as presented) to the

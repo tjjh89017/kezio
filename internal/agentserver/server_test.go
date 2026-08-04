@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -379,6 +380,105 @@ func TestHandleNext_ProvisioningReadyReturnsDeployPlan(t *testing.T) {
 	}
 	if len(resp.Plan.OS.Partitions) != 1 {
 		t.Fatalf("len(Plan.OS.Partitions) = %d, want 1", len(resp.Plan.OS.Partitions))
+	}
+}
+
+func doProgress(t *testing.T, handler http.Handler, name, token string, body agentapi.ProgressRequest) *httptest.ResponseRecorder {
+	t.Helper()
+	b, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, agentapi.NextPathPrefix+name+agentapi.ProgressPathSuffix, bytes.NewReader(b))
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestHandleProgress_ValidSessionRecordsCondition(t *testing.T) {
+	now := time.Now()
+	machine := newTestMachineWithSession(now)
+	s, c := newTestServer(t, now, machine)
+
+	rec := doProgress(t, s.Handler(), testMachineName, testSessionToken, agentapi.ProgressRequest{
+		Partitions: []agentapi.PartitionProgress{
+			{Disk: "/dev/nvme0n1", Number: 2, Phase: agentapi.PartitionPhaseSeeding, PercentDone: 42},
+			{Disk: "/dev/nvme0n1", Number: 1, Phase: agentapi.PartitionPhaseDone, PercentDone: 100},
+		},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", rec.Code, rec.Body.String())
+	}
+
+	var stored keziov1alpha1.Machine
+	if err := c.Get(context.Background(), types.NamespacedName{Name: testMachineName}, &stored); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	cond := apimeta.FindStatusCondition(stored.Status.Conditions, keziov1alpha1.MachineConditionProvisioningProgress)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Fatalf("ProvisioningProgress condition = %+v, want True", cond)
+	}
+	if cond.Reason != agentapi.PartitionPhaseSeeding {
+		t.Fatalf("Reason = %q, want %q (the furthest-behind partition, sorted before the done one)", cond.Reason, agentapi.PartitionPhaseSeeding)
+	}
+	if !strings.Contains(cond.Message, "seeding 42%") || !strings.Contains(cond.Message, "done 100%") {
+		t.Fatalf("Message = %q, want it to mention both partitions", cond.Message)
+	}
+}
+
+func TestHandleProgress_RejectionsAreConstantShape(t *testing.T) {
+	now := time.Now()
+
+	cases := []struct {
+		name    string
+		machine *keziov1alpha1.Machine
+		reqName string
+		token   string
+	}{
+		{
+			name:    "missing Authorization header",
+			machine: newTestMachineWithSession(now),
+			reqName: testMachineName,
+			token:   "",
+		},
+		{
+			name:    "no such machine",
+			machine: nil,
+			reqName: "no-such-machine",
+			token:   testSessionToken,
+		},
+		{
+			name:    "wrong session token",
+			machine: newTestMachineWithSession(now),
+			reqName: testMachineName,
+			token:   "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+		},
+	}
+
+	var referenceBody string
+	var referenceCode int
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var machines []*keziov1alpha1.Machine
+			if tc.machine != nil {
+				machines = append(machines, tc.machine)
+			}
+			s, _ := newTestServer(t, now, machines...)
+			rec := doProgress(t, s.Handler(), tc.reqName, tc.token, agentapi.ProgressRequest{})
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", rec.Code)
+			}
+			if i == 0 {
+				referenceCode = rec.Code
+				referenceBody = rec.Body.String()
+			} else if rec.Code != referenceCode || rec.Body.String() != referenceBody {
+				t.Fatalf("response for %q differs from the reference 401 response (code=%d body=%q)", tc.name, rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 

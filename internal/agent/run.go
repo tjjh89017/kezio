@@ -22,6 +22,7 @@ import (
 	"time"
 
 	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
+	"github.com/tjjh89017/kezio/internal/agent/deploy"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 )
 
@@ -51,6 +52,16 @@ type Config struct {
 	// Logf receives progress and error messages in fmt.Printf style.
 	// Nil discards them.
 	Logf func(format string, args ...any)
+	// Executor executes a DeployPlan received from a "deploy" poll
+	// response. Nil (the default in every test that only exercises the
+	// poll loop's logging) means a received plan is logged and never
+	// executed - the behavior this package had before the deploy
+	// executor existed. Production wiring (cmd/agent) sets it to a
+	// *deploy.Executor with real Runner/Ezio implementations; Run
+	// attaches this machine's own progress reporter to a copy of it
+	// once registration resolves the machine name and session token
+	// Executor.Progress needs.
+	Executor *deploy.Executor
 }
 
 func (c Config) log(format string, args ...any) {
@@ -116,13 +127,20 @@ func registerWithRetry(ctx context.Context, client *Client, cfg Config, hardware
 // presenting reg.SessionToken on every call. A poll error is logged and
 // retried on the next tick, the same way a heartbeat that misses one
 // beat should not bring the whole agent down. A "wait" response is
-// logged and otherwise ignored; a "deploy" response's plan is parsed and
-// logged - executing it is a later work item, so this loop's job today
-// is proving the registered machine keeps reaching the controller and
-// that a served plan decodes as expected.
+// logged and otherwise ignored. A "deploy" response's plan is always
+// logged; when cfg.Executor is set, it is also executed - once. A
+// successful execution latches deployed so a plan that stays available
+// on later polls (the controller keeps answering ActionDeploy until the
+// Machine leaves Provisioning, which is a later work item's job) is
+// never re-applied; a failed execution does not latch, so a transient
+// failure (a disk not yet settled, a momentary ezio hiccup) gets retried
+// on the next poll.
 func pollLoop(ctx context.Context, client *Client, cfg Config, reg RegisterResult, pollInterval time.Duration) error {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
+
+	executor := attachProgressReporter(cfg.Executor, client, reg)
+	deployed := false
 
 	for {
 		select {
@@ -135,8 +153,45 @@ func pollLoop(ctx context.Context, client *Client, cfg Config, reg RegisterResul
 				continue
 			}
 			logNextResponse(cfg, resp)
+
+			if executor == nil || deployed || resp.Action != agentapi.ActionDeploy || resp.Plan == nil {
+				continue
+			}
+			if err := executor.Execute(ctx, resp.Plan); err != nil {
+				cfg.log("executing deploy plan failed: %v", err)
+				continue
+			}
+			cfg.log("deploy plan executed: every partition written or made, local ezio daemon shut down")
+			deployed = true
 		}
 	}
+}
+
+// attachProgressReporter returns a copy of template with Progress set to
+// a reporter bound to reg's machine name and session token, or nil when
+// template itself is nil. It copies rather than mutates *template so a
+// Config value (and its Executor template) stays reusable across
+// multiple Run calls without one call's session leaking into another's.
+func attachProgressReporter(template *deploy.Executor, client *Client, reg RegisterResult) *deploy.Executor {
+	if template == nil {
+		return nil
+	}
+	executor := *template
+	executor.Progress = &clientProgressReporter{client: client, machineName: reg.MachineName, sessionToken: reg.SessionToken}
+	return &executor
+}
+
+// clientProgressReporter adapts Client.ReportProgress (which needs the
+// machine name and session token on every call) to
+// deploy.ProgressReporter's single-argument shape.
+type clientProgressReporter struct {
+	client       *Client
+	machineName  string
+	sessionToken string
+}
+
+func (r *clientProgressReporter) ReportProgress(ctx context.Context, partitions []agentapi.PartitionProgress) error {
+	return r.client.ReportProgress(ctx, r.machineName, r.sessionToken, partitions)
 }
 
 // logNextResponse reports what a poll returned: a plain "poll: wait" for

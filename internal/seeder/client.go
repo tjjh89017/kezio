@@ -42,13 +42,35 @@ const (
 )
 
 // Torrent is one torrent's status, trimmed from ezioapi.Torrent to the
-// fields the seeder reconciler needs to diff what is already added
-// against what ought to be. Hash is lowercase hex, matching both ezio's
-// wire format and store.InfoHash.String().
+// fields callers need. Hash is lowercase hex, matching both ezio's wire
+// format and store.InfoHash.String(). Beyond the fields the seeder
+// reconciler diffs against, this also carries the byte counters and
+// timers the agent's deploy-side stop policy needs
+// (internal/agent/deploy): TotalDone/Total for progress percent,
+// TotalPayloadUpload/TotalDone for the "upload > 3x size" pause
+// condition, and FinishedTime/LastUpload for the "finished and idle"
+// pause condition - see ezio's own reference client
+// (tmp/ezio/utils/ezio_cli.py's check_stop) for the exact semantics
+// these mirror.
 type Torrent struct {
 	Hash       string
 	IsFinished bool
 	IsPaused   bool
+	// TotalDone is the bytes downloaded (and verified) so far.
+	TotalDone int64
+	// Total is the torrent's full byte size; 0 while ezio has not yet
+	// resolved metadata for it (never the case here, since AddTorrent
+	// always supplies a complete .torrent up front).
+	Total int64
+	// TotalPayloadUpload is the cumulative bytes this torrent has
+	// uploaded to peers.
+	TotalPayloadUpload int64
+	// FinishedTime is how many seconds this torrent has been finished,
+	// counting up from the moment it finished; 0 while not finished.
+	FinishedTime int64
+	// LastUpload is how many seconds since this torrent last uploaded
+	// any bytes, or -1 if it has never uploaded.
+	LastUpload int64
 }
 
 // Client is a typed wrapper around one ezio daemon's gRPC connection. It
@@ -119,12 +141,49 @@ func (c *Client) GetTorrentStatus(ctx context.Context, hashes []string) (map[str
 	out := make(map[string]Torrent, len(resp.GetTorrents()))
 	for hash, t := range resp.GetTorrents() {
 		out[hash] = Torrent{
-			Hash:       t.GetHash(),
-			IsFinished: t.GetIsFinished(),
-			IsPaused:   t.GetIsPaused(),
+			Hash:               t.GetHash(),
+			IsFinished:         t.GetIsFinished(),
+			IsPaused:           t.GetIsPaused(),
+			TotalDone:          t.GetTotalDone(),
+			Total:              t.GetTotal(),
+			TotalPayloadUpload: t.GetTotalPayloadUpload(),
+			FinishedTime:       t.GetFinishedTime(),
+			LastUpload:         t.GetLastUpload(),
 		}
 	}
 	return out, nil
+}
+
+// PauseTorrent pauses the torrent identified by hash (lowercase hex info
+// hash). ezio keeps seeding a paused torrent's already-verified pieces to
+// nobody - a paused torrent simply stops all network activity - which is
+// exactly the deploy-side stop policy's "stop pushing this partition's
+// data" primitive (see internal/agent/deploy).
+func (c *Client) PauseTorrent(ctx context.Context, hash string) error {
+	if _, err := c.rpc.PauseTorrent(ctx, &ezioapi.PauseTorrentRequest{Hash: hash}); err != nil {
+		return fmt.Errorf("PauseTorrent: %w", err)
+	}
+	return nil
+}
+
+// ResumeTorrent resumes a previously paused torrent identified by hash.
+func (c *Client) ResumeTorrent(ctx context.Context, hash string) error {
+	if _, err := c.rpc.ResumeTorrent(ctx, &ezioapi.ResumeTorrentRequest{Hash: hash}); err != nil {
+		return fmt.Errorf("ResumeTorrent: %w", err)
+	}
+	return nil
+}
+
+// Shutdown tells the daemon to exit. ezio does not stop itself (see
+// proto/ezio.proto's doc comment); a client applies the stop policy and
+// calls Shutdown once every torrent it added has been paused, which is
+// how internal/agent/deploy retires the local ezio daemon it spawned for
+// one deployment once that deployment's content is fully seeded.
+func (c *Client) Shutdown(ctx context.Context) error {
+	if _, err := c.rpc.Shutdown(ctx, &ezioapi.Empty{}); err != nil {
+		return fmt.Errorf("Shutdown: %w", err)
+	}
+	return nil
 }
 
 // Healthy calls GetVersion as a liveness check: any successful response
