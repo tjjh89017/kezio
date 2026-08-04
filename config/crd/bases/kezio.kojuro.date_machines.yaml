@@ -243,7 +243,13 @@ spec:
               networkSite:
                 description: |-
                   NetworkSite selects the network zone (the kezio-bootd instance) this
-                  machine network boots through.
+                  machine network boots through. It does not select a seeder: the
+                  deploy plan always announces at the single central tracker
+                  (SEEDER_TRACKER_URL), and BitTorrent's own peer discovery through
+                  that shared tracker is what lets this machine's leecher find a
+                  site-local seeder when one is deployed - no per-site routing field
+                  or lookup is needed for that. See config/seeder/README.md's
+                  "Per-site seeders" section.
                 type: string
               online:
                 default: true

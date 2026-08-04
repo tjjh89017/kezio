@@ -139,6 +139,84 @@ kezio-system`). The reconciler is level-triggered: a fresh, empty seeder
 pod has no existing torrents to diff against, so it re-adds everything
 from scratch with the new URL.
 
+## Per-site seeders
+
+A single central seeder works, but every byte a remote site's machines
+deploy then crosses the WAN once per machine. When a site deploys more
+than a handful of machines at once, it is worth running a seeder near
+that site so same-site leechers exchange pieces with each other over
+the LAN instead, and the WAN carries close to one copy total.
+
+**Topology model: one Service, seeders in multiple sites, all as
+endpoints of it - not a per-site Service.** Concretely:
+
+- The **tracker stays central and singular.** `SEEDER_TRACKER_URL`
+  never varies per site. The tracker is the one shared meeting point of
+  the swarm (see the design doc's cross-network section); a per-site
+  tracker would split the swarm into disconnected islands instead of
+  helping it, since a torrent's peers are only ever the peers *its own*
+  tracker knows about.
+- A site-local seeder is **just another replica of the `ezio-seeder`
+  component**, deployed as an additional Deployment whose pod template
+  labels match `ezio-seeder-service.yaml`'s selector
+  (`app.kubernetes.io/name: kezio`, `app.kubernetes.io/component:
+  ezio-seeder`) - see `ezio-seeder-site.example.yaml` for the full
+  template and its extended comments. Matching those labels is what
+  makes the new pod a second endpoint of the *same* Service; nothing
+  else changes.
+- `SeederReconciler` (`internal/controller/seeder_controller.go`)
+  already resolves every Ready endpoint of one Service independently -
+  it was built that way from the start to tolerate more than one
+  central replica (a pod mid-restart, for example), not specifically
+  for sites. A site-local seeder endpoint is synced by exactly the same
+  loop, with no code change: it is simply one more address in
+  `seederTargets`'s list. `internal/controller/seeder_controller_test.go`
+  has a case ("adds a Ready Image's content to every Ready seeder
+  endpoint when there is more than one") that exercises this directly.
+- Once a site's seeder is seeding, which peer a same-site leecher's
+  libtorrent picks to exchange pieces with is **libtorrent's own peer
+  selection over the shared swarm** - not something kezio decides or
+  needs to decide. This is the design doc's point explicitly: "leechers
+  in one site exchange pieces with each other locally... this is the
+  normal BT behavior; no extra mechanism is needed." Concretely here:
+  every peer (site seeder, central seeder, every machine's leecher)
+  announces to the one tracker and gets back the swarm's full peer
+  list; a site-local seeder is simply reachable at a shorter/cheaper
+  route for that site's leechers, so it ends up serving most of their
+  piece requests without any kezio-side hinting.
+
+**Why not a per-site Service (option B), with the controller resolving
+a Machine's `spec.networkSite` to a specific seeder Service for its
+plan?** That would need: a Service per site, a naming/label convention
+the controller resolves `networkSite` against, a fallback path for a
+site with no seeder yet, and a change to `buildPartitionTorrent`
+(`internal/agentserver/plan.go`) to pick a tracker/seeder set per
+Machine. None of that changes what ends up in the `.torrent` bytes a
+leecher gets, though: `SEEDER_TRACKER_URL` is the *only* thing that
+actually has to be correct for a leecher to find the swarm, and it is
+already the same value for every Machine by design (the central
+tracker). Building a routing layer to solve a problem BT's own peer
+discovery already solves for free would be extra machinery with no
+behavior it makes possible that option A does not already give.
+`Machine.spec.networkSite` therefore stays exactly what it already
+was - the field that selects a machine's `kezio-bootd` zone - and does
+not grow a second meaning for seeder routing (see its doc comment,
+`api/v1alpha1/machine_types.go`).
+
+**Precondition this model assumes:** a site-local seeder Deployment
+still mounts the store PVC read-only, the same way the central seeder
+does, so it needs the store volume to be reachable from that site's
+node(s) (network-backed storage, or routed L3 to the central storage
+backend - see the cross-network design notes below). A site with no
+route to central storage at all cannot use this template as-is; it
+would instead need a plain BT leecher that downloads the content once
+and keeps seeding from local disk afterward (the design doc's
+"pre-warm" pattern - "with Option A this needs no artifact sync; the
+download itself is the sync"). That pod shape is different (added with
+`seed_mode=false`, not the `seed_mode=true` this reconciler always
+uses) and is not implemented by this repository yet; it is a genuine
+follow-up, not something the model above already covers.
+
 ## Known gap: ezio has no interface-binding flag
 
 `entrypoint.seeder.sh` documents this in more detail, but in short: ezio

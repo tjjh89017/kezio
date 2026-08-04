@@ -176,11 +176,17 @@ func createReadyImage(ctx context.Context, hash store.InfoHash) *keziov1alpha1.I
 	return image
 }
 
+// seederEndpointGRPCPort is the gRPC port every createSeederEndpointSlice
+// fixture uses; a test that needs a different port (or a not-Ready
+// endpoint) builds its EndpointSlice inline instead, as the "ignores a
+// not-Ready endpoint" case below already does.
+const seederEndpointGRPCPort int32 = 50051
+
 // createSeederEndpointSlice creates a Ready EndpointSlice for the seeder
-// Service in svcNamespace/svcName, with one endpoint at address on the
-// named gRPC port, and returns the dial target ("address:port") it
-// resolves to.
-func createSeederEndpointSlice(ctx context.Context, svcNamespace, svcName, namePrefix, address string, port int32) string {
+// Service in svcNamespace/svcName, with one endpoint at address on
+// seederEndpointGRPCPort, and returns the dial target ("address:port")
+// it resolves to.
+func createSeederEndpointSlice(ctx context.Context, svcNamespace, svcName, namePrefix, address string) string {
 	ready := true
 	slice := &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
@@ -195,11 +201,11 @@ func createSeederEndpointSlice(ctx context.Context, svcNamespace, svcName, nameP
 		}},
 		Ports: []discoveryv1.EndpointPort{{
 			Name: ptr.To(defaultGRPCPortName),
-			Port: ptr.To(port),
+			Port: ptr.To(seederEndpointGRPCPort),
 		}},
 	}
 	Expect(k8sClient.Create(ctx, slice)).To(Succeed())
-	return fmt.Sprintf("%s:%d", address, port)
+	return fmt.Sprintf("%s:%d", address, seederEndpointGRPCPort)
 }
 
 var _ = Describe("Seeder Controller", func() {
@@ -248,7 +254,7 @@ var _ = Describe("Seeder Controller", func() {
 			image := createReadyImage(ctx, hash)
 			DeferCleanup(func() { _ = k8sClient.Delete(ctx, image) })
 
-			target := createSeederEndpointSlice(ctx, namespace, r.Seeder.ServiceName, "seeder-eps-1", "10.0.0.1", 50051)
+			target := createSeederEndpointSlice(ctx, namespace, r.Seeder.ServiceName, "seeder-eps-1", "10.0.0.1")
 
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: "seeder-sync"}})
 			Expect(err).NotTo(HaveOccurred())
@@ -258,6 +264,34 @@ var _ = Describe("Seeder Controller", func() {
 			Expect(daemon.torrents).To(HaveKey(hash.String()))
 		})
 
+		It("adds a Ready Image's content to every Ready seeder endpoint when there is more than one", func() {
+			// Models the per-site seeder topology (config/seeder/README.md's
+			// "Per-site seeders" section): a site-local seeder is just
+			// another Deployment whose pod labels match the same Service's
+			// selector, so it shows up here as one more EndpointSlice
+			// address on the same ServiceName/ServiceNamespace - exactly
+			// what this test sets up with two independent addresses. The
+			// reconciler needs no site-awareness of its own: it already
+			// resolves and syncs every Ready endpoint of the one
+			// configured Service, central or site-local alike.
+			fixtureRoot, hash := writeFixtureContent()
+			r.Seeder.StoreRoot = fixtureRoot
+
+			image := createReadyImage(ctx, hash)
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, image) })
+
+			central := createSeederEndpointSlice(ctx, namespace, r.Seeder.ServiceName, "seeder-eps-central", "10.0.0.10")
+			siteLocal := createSeederEndpointSlice(ctx, namespace, r.Seeder.ServiceName, "seeder-eps-site-a", "10.0.1.10")
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: "seeder-sync"}})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(registry.daemons[central]).NotTo(BeNil())
+			Expect(registry.daemons[central].torrents).To(HaveKey(hash.String()))
+			Expect(registry.daemons[siteLocal]).NotTo(BeNil())
+			Expect(registry.daemons[siteLocal].torrents).To(HaveKey(hash.String()))
+		})
+
 		It("does not re-add content already present on the endpoint (no duplicate adds)", func() {
 			fixtureRoot, hash := writeFixtureContent()
 			r.Seeder.StoreRoot = fixtureRoot
@@ -265,7 +299,7 @@ var _ = Describe("Seeder Controller", func() {
 			image := createReadyImage(ctx, hash)
 			DeferCleanup(func() { _ = k8sClient.Delete(ctx, image) })
 
-			target := createSeederEndpointSlice(ctx, namespace, r.Seeder.ServiceName, "seeder-eps-1", "10.0.0.2", 50051)
+			target := createSeederEndpointSlice(ctx, namespace, r.Seeder.ServiceName, "seeder-eps-1", "10.0.0.2")
 
 			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "seeder-sync"}}
 			_, err := r.Reconcile(ctx, req)
@@ -284,7 +318,7 @@ var _ = Describe("Seeder Controller", func() {
 			image := createReadyImage(ctx, hash)
 			DeferCleanup(func() { _ = k8sClient.Delete(ctx, image) })
 
-			target := createSeederEndpointSlice(ctx, namespace, r.Seeder.ServiceName, "seeder-eps-1", "10.0.0.3", 50051)
+			target := createSeederEndpointSlice(ctx, namespace, r.Seeder.ServiceName, "seeder-eps-1", "10.0.0.3")
 
 			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "seeder-sync"}}
 			_, err := r.Reconcile(ctx, req)
