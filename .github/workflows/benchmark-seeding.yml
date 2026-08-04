@@ -74,10 +74,10 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Clone the code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
@@ -125,7 +125,7 @@ jobs:
 
       - name: Cache the Ubuntu cloud image
         id: cache-cloud-image
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/ubuntu-cloud.img
           key: ubuntu-cloud-image-${{ env.UBUNTU_CLOUD_IMAGE_URL }}

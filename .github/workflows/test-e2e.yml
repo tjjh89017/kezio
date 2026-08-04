@@ -41,10 +41,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Clone the code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
@@ -142,10 +142,10 @@ jobs:
       IMAGE_SERVICE_IMG: "example.com/kezio-image-service:e2e"
     steps:
       - name: Clone the code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
@@ -195,7 +195,7 @@ jobs:
 
       - name: Cache the Ubuntu cloud image
         id: cache-cloud-image
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/ubuntu-cloud.img
           # Keyed on the pinned URL (env, above): bumping that env var
