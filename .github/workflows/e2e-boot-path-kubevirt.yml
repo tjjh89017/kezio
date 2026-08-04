@@ -33,7 +33,19 @@ name: E2E Boot Path (KubeVirt VM)
 #     commit/PR that introduced it for the first triggered run's outcome
 #     and any follow-up fixes.
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      boot_artifacts_version:
+        description: >-
+          Boot-artifacts release tag to boot (see
+          .github/workflows/build-live-image.yml). Empty uses the
+          repository's latest published release - the same default
+          config/bootserver and config/bootd ship. Publishing a release
+          is a maintainer action (a "v*" tag push, or a manual
+          build-live-image.yml dispatch with publish=true); this input
+          only selects among what is already published.
+        required: false
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -41,10 +53,6 @@ concurrency:
 
 permissions:
   contents: read
-  # Needed to `gh run download` build-live-image.yml's artifacts (see
-  # the "Source the live boot artifacts" step) from this same
-  # repository's Actions history.
-  actions: read
 
 env:
   # Pin every version this job depends on (PLAN's CI notes call this out
@@ -73,8 +81,10 @@ jobs:
     # PXE discovery, TFTP, the live kernel/initrd HTTP fetch, and the
     # squashfs live-boot are each on the order of tens of seconds to a
     # few minutes; budget generously for a first PXE cycle that may need
-    # firmware retries, plus the (already slow, see build-live-image.yml)
-    # live image artifact download.
+    # firmware retries, plus the fetch-boot-artifacts initContainers'
+    # own release-asset download (kernel/initrd/squashfs/shim/grub,
+    # up to a few hundred MiB - see build-live-image.yml) before either
+    # Deployment's main container even starts.
     timeout-minutes: 60
     steps:
       - name: Clone the code
@@ -136,91 +146,22 @@ jobs:
           fi
 
       # ---------------------------------------------------------------
-      # Boot artifacts: kernel/initrd/squashfs (from the live-image
-      # build) and shimx64.efi/grubx64.efi (from Debian/Ubuntu's signed
-      # packages). Both are sourced, never built in this job - a from-
-      # source `lb build` run (build-live-image.yml) takes up to 90
-      # minutes on its own, which this job's already-generous 60 minute
-      # budget cannot also absorb. See this step's own comments for how
-      # each artifact is actually obtained.
+      # Boot artifacts: kernel/initrd/squashfs and shimx64.efi/
+      # grubx64.efi are never built in this job - a from-source
+      # `lb build` run (build-live-image.yml) takes up to 90 minutes on
+      # its own, which this job's already-generous 60 minute budget
+      # cannot also absorb. Nothing in this job downloads them either
+      # anymore: config/bootserver's and config/bootd's own
+      # fetch-boot-artifacts initContainer (see config/boot-artifacts)
+      # does that fetch, from build-live-image.yml's published GitHub
+      # Release, once each Deployment's pod actually starts - the same
+      # mechanism a real deployment uses, dogfooding it here instead of
+      # this job's own now-removed `gh run download` + `apt-get
+      # download` sourcing. That does mean this job needs a published
+      # release to exist first (a "v*" tag push, or a build-live-
+      # image.yml dispatch with publish=true) - see
+      # boot_artifacts_version's own description above.
       # ---------------------------------------------------------------
-
-      - name: Source the live boot artifacts (kernel/initrd/squashfs)
-        # Downloads the most recent successful build-live-image.yml run's
-        # artifact instead of rebuilding it here - see the job doc
-        # comment. If no successful run exists yet (for example, the
-        # very first time this workflow runs on a fresh clone of the
-        # repository), this step fails with an actionable message rather
-        # than silently doing nothing: trigger build-live-image.yml
-        # (workflow_dispatch) once, then re-run this job.
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          run_id="$(gh run list --repo "${GITHUB_REPOSITORY}" --workflow build-live-image.yml \
-            --status success --limit 1 --json databaseId --jq '.[0].databaseId')"
-          if [ -z "${run_id}" ]; then
-            echo "::error::No successful build-live-image.yml run found to download artifacts from. Trigger that workflow once, then re-run this job." >&2
-            exit 1
-          fi
-          echo "Downloading live boot artifacts from build-live-image.yml run ${run_id}"
-          mkdir -p dist/live
-          gh run download "${run_id}" --repo "${GITHUB_REPOSITORY}" -n kezio-live-image -D dist/live
-          ls -la dist/live
-
-      - name: Source shimx64.efi/grubx64.efi from signed packages
-        # kezio never builds its own shim or GRUB binary: Secure Boot's
-        # entire point is that the shim is signed by a chain the
-        # firmware already trusts, which only a distribution's own
-        # signed package can provide. This runner's own Ubuntu apt
-        # sources already carry both, so `apt-get download` (not
-        # `apt-get install` - this job only needs the two .efi payloads,
-        # not to actually install a bootloader on the runner) is enough,
-        # with no extra repository to add. No Secure Boot happens in
-        # this CI VM (OVMF without secure-boot: true, per this job's VM
-        # manifest) - see PLAN's boot-flow section for why a signed shim
-        # still matters in production even though this stage does not
-        # exercise Secure Boot itself: keeping the sourced artifact the
-        # same shape production uses is the point, not signature
-        # verification here.
-        run: |
-          set -euo pipefail
-          mkdir -p "${{ runner.temp }}/tftp" "${{ runner.temp }}/debs"
-          cd "${{ runner.temp }}/debs"
-          apt-get download shim-signed grub-efi-amd64-signed
-          for deb in *.deb; do
-            dpkg -x "${deb}" extracted
-          done
-          shim_src="$(find extracted -iname 'shimx64.efi*' -print -quit)"
-          grub_src="$(find extracted -iname 'grubx64.efi*' -print -quit)"
-          if [ -z "${shim_src}" ] || [ -z "${grub_src}" ]; then
-            echo "::error::Could not find shimx64.efi / grubx64.efi under the extracted shim-signed/grub-efi-amd64-signed packages; package layout may have changed." >&2
-            find extracted -iname '*.efi*'
-            exit 1
-          fi
-          # internal/bootd.ShimFilename / GrubFilename are fixed names
-          # ("shimx64.efi", "grubx64.efi") with no ".signed" suffix -
-          # the packages ship them with one, so normalize on copy.
-          cp "${shim_src}" "${{ runner.temp }}/tftp/shimx64.efi"
-          cp "${grub_src}" "${{ runner.temp }}/tftp/grubx64.efi"
-          ls -la "${{ runner.temp }}/tftp"
-
-      - name: Stage boot artifacts as hostPath sources
-        # A single-node k3s cluster's node IS this runner, so a hostPath
-        # volume pointing at a runner-local directory is a legitimate,
-        # simple way to hand real files to the controller-manager
-        # (BOOT_ARTIFACTS_DIR) and kezio-bootd (its TFTP directory)
-        # Deployments - no PVC provisioner, initContainer, or ConfigMap
-        # size limit to work around, unlike a real multi-node deployment
-        # (see config/bootd/README.md's "Populate the TFTP artifacts
-        # volume" step, which this automates for CI).
-        run: |
-          set -euo pipefail
-          sudo mkdir -p /opt/kezio-boot-artifacts /opt/kezio-tftp
-          sudo cp dist/live/vmlinuz dist/live/initrd.img dist/live/filesystem.squashfs /opt/kezio-boot-artifacts/
-          sudo cp "${{ runner.temp }}/tftp/shimx64.efi" "${{ runner.temp }}/tftp/grubx64.efi" /opt/kezio-tftp/
-          sudo chmod -R a+rX /opt/kezio-boot-artifacts /opt/kezio-tftp
-          ls -la /opt/kezio-boot-artifacts /opt/kezio-tftp
 
       - name: Create the provisioning bridge
         run: |
@@ -333,6 +274,8 @@ jobs:
           EOF
 
       - name: Deploy the boot config and agent registration Services, wire real artifacts
+        env:
+          BOOT_ARTIFACTS_VERSION: ${{ inputs.boot_artifacts_version }}
         run: |
           set -euo pipefail
           kubectl apply -k config/e2e-boot-path
@@ -342,31 +285,56 @@ jobs:
             BOOT_SERVER_URL="http://kezio-boot-server.kezio-system.svc.cluster.local:8090" \
             AGENT_SERVER_ADDR=:8091 \
             DEPLOYER=agent
-          # Mount the real hostPath-staged kernel/initrd/squashfs at
-          # BOOT_ARTIFACTS_DIR - config/e2e-boot-path's own overlay
-          # deliberately leaves BOOT_ARTIFACTS_DIR pointed at an
-          # unpopulated path (see its Makefile target's doc comment)
-          # since the lighter, always-on boot-path lane never fetches
-          # /boot/artifacts/... This job does, so it adds the volume
-          # itself with a JSON patch instead of a third kustomize
-          # overlay.
-          kubectl -n kezio-system patch deployment/kezio-controller-manager --type=json -p='[
-            {"op":"add","path":"/spec/template/spec/volumes/-","value":{"name":"boot-artifacts","hostPath":{"path":"/opt/kezio-boot-artifacts","type":"Directory"}}},
-            {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-","value":{"name":"boot-artifacts","mountPath":"/boot-artifacts","readOnly":true}}
-          ]'
+          # config/e2e-boot-path deliberately does not wire the
+          # fetch-boot-artifacts initContainer into its own
+          # kustomization.yaml (see boot-artifacts-init-patch.yaml's own
+          # comment: doing so would make test-e2e.yml's lighter,
+          # always-on boot-path lane - which shares this same overlay
+          # and never touches real artifact bytes - depend on network
+          # egress and a published release existing). This job does need
+          # real bytes, so it materializes the fetch script's ConfigMap
+          # and applies that initContainer patch itself, on top of the
+          # overlay just applied above.
+          kubectl -n kezio-system create configmap boot-artifacts-fetch-script \
+            --from-file=fetch.sh=config/boot-artifacts/fetch.sh \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n kezio-system patch deployment/kezio-controller-manager --type=json \
+            --patch-file=config/e2e-boot-path/boot-artifacts-init-patch.yaml
+          if [ -n "${BOOT_ARTIFACTS_VERSION}" ]; then
+            kubectl -n kezio-system set env deployment/kezio-controller-manager \
+              -c fetch-boot-artifacts "BOOT_ARTIFACTS_VERSION=${BOOT_ARTIFACTS_VERSION}"
+          fi
           kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
 
       - name: Deploy kezio-bootd on the provisioning bridge
+        env:
+          BOOT_ARTIFACTS_VERSION: ${{ inputs.boot_artifacts_version }}
         run: |
           set -euo pipefail
           cd config/bootd && ../../bin/kustomize edit set image bootd=example.com/kezio-bootd:e2e-boot-path
           cd ../..
           kubectl apply -k config/bootd
           kubectl -n kezio-system set env deployment/kezio-bootd BOOTD_SERVER_IP="${PROVISIONING_BOOTD_IP%%/*}"
+          # config/bootd already wires its own fetch-boot-artifacts
+          # initContainer (see config/boot-artifacts) and a plain
+          # emptyDir "tftp" volume it populates - no volume patch needed
+          # here anymore. Only the Multus network annotation, which is
+          # site/job-specific, still needs patching in. This also fixes
+          # a real bug the previous hostPath-based patch carried: a
+          # hostPath volume violates the "restricted" Pod Security
+          # Standard config/default's namespace enforces, which is
+          # exactly what made this job's first dispatched runs fail
+          # with FailedCreate ("restricted volume types (volume
+          # "boot-artifacts" uses restricted volume type "hostPath")") -
+          # an emptyDir populated by an initContainer has no such
+          # problem.
           kubectl -n kezio-system patch deployment/kezio-bootd --type=json -p='[
-            {"op":"add","path":"/spec/template/metadata/annotations","value":{"k8s.v1.cni.cncf.io/networks":"kezio-boot-network"}},
-            {"op":"replace","path":"/spec/template/spec/volumes/0","value":{"name":"tftp","hostPath":{"path":"/opt/kezio-tftp","type":"Directory"}}}
+            {"op":"add","path":"/spec/template/metadata/annotations","value":{"k8s.v1.cni.cncf.io/networks":"kezio-boot-network"}}
           ]'
+          if [ -n "${BOOT_ARTIFACTS_VERSION}" ]; then
+            kubectl -n kezio-system set env deployment/kezio-bootd \
+              -c fetch-boot-artifacts "BOOT_ARTIFACTS_VERSION=${BOOT_ARTIFACTS_VERSION}"
+          fi
           kubectl rollout status deployment/kezio-bootd -n kezio-system --timeout=180s
 
       - name: Create the Machine CR for the target VM
@@ -389,9 +357,11 @@ jobs:
           EOF
 
       - name: Create and start the target KubeVirt VirtualMachine
-        # OVMF UEFI firmware, no Secure Boot (secureBoot: false - shim is
-        # sourced as a real signed binary anyway, see above, but nothing
-        # here enrolls the firmware's Secure Boot keys). Network boot
+        # OVMF UEFI firmware, no Secure Boot (secureBoot: false - the
+        # shim kezio-bootd serves is still a real signed binary, fetched
+        # by config/bootd's fetch-boot-artifacts initContainer from the
+        # published live-image release, but nothing here enrolls the
+        # firmware's Secure Boot keys). Network boot
         # first (interface bootOrder 1), then the blank data disk
         # (bootOrder 2) as the local-disk fallback GRUB's "exit" hands
         # control back to. The disk's serial is set explicitly so it

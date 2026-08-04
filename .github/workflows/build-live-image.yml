@@ -1,6 +1,7 @@
 name: Build Live Boot Image
 
-# Builds the kezio live boot image (kernel + initrd + squashfs) with
+# Builds the kezio live boot image (kernel + initrd + squashfs) plus the
+# signed shimx64.efi/grubx64.efi kezio-bootd serves over TFTP, with
 # hack/live-image/build.sh. Not on every push: `lb build` compiles ezio
 # from source and assembles a Debian sid squashfs, which takes many
 # minutes, and the resulting artifacts are large (the squashfs alone
@@ -8,8 +9,44 @@ name: Build Live Boot Image
 # check on every push, this is deliberately opt-in: workflow_dispatch
 # for an on-demand build, and "v*" tags so a release carries a matching
 # image without anyone having to remember to trigger one by hand.
+#
+# Publishing target: GitHub Release assets, not a ghcr OCI artifact.
+# This repository is public, so a release asset is a plain HTTPS URL any
+# consumer (config/boot-artifacts' initContainer, a human, `curl`) can
+# fetch with no registry auth at all - unlike ghcr, which even for a
+# public *image* still expects a client that speaks OCI (docker/oras/
+# crane), an extra tool this project would otherwise have no reason to
+# ship into kezio-bootd's or the controller-manager's init path. These
+# artifacts are also not container images or OCI-shaped content in any
+# useful sense - a bare kernel, initrd, squashfs, and two EFI binaries -
+# so an OCI artifact push (oras) would need a custom media type with no
+# ecosystem benefit over a release asset, only ecosystem cost (installing
+# and pinning `oras` here and in every consumer). Release assets also
+# come with GitHub's own size/bandwidth handling for exactly this shape
+# of content and integrate with `gh release` end to end (create, upload,
+# download), which this repository already depends on elsewhere (see
+# e2e-boot-path-kubevirt.yml). If this repository ever goes private, or
+# ghcr becomes the project's one blessed distribution channel, revisit -
+# neither is true today.
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Release tag to build for. Only consulted when "publish" below
+          is also true; a plain build+package dry run ignores it.
+        required: false
+        type: string
+      publish:
+        description: >-
+          Also create/update a GitHub Release named "version" and upload
+          the artifacts to it. Leave false to validate the build and
+          packaging steps only, without publishing anything - cutting a
+          real release is a maintainer action taken by pushing a "v*"
+          tag, not something to flip on a whim.
+        required: false
+        type: boolean
+        default: false
   push:
     tags:
       - "v*"
@@ -29,6 +66,12 @@ jobs:
     # Dockerfile.seeder's builder stage) and then assembles a full
     # Debian sid chroot into a squashfs - budget generously.
     timeout-minutes: 90
+    # contents: write is only exercised by the "Publish GitHub Release"
+    # step below, and only when that step's own `if:` actually runs
+    # (a "v*" tag push, or an explicit workflow_dispatch publish=true) -
+    # every other step in this job only ever reads.
+    permissions:
+      contents: write
     steps:
       - name: Clone the code
         uses: actions/checkout@v7
@@ -48,7 +91,7 @@ jobs:
             echo
             echo "| artifact | size |"
             echo "| --- | --- |"
-            for f in dist/live/vmlinuz dist/live/initrd.img dist/live/filesystem.squashfs; do
+            for f in dist/live/vmlinuz dist/live/initrd.img dist/live/filesystem.squashfs dist/live/shimx64.efi dist/live/grubx64.efi; do
               name="$(basename "${f}")"
               size_bytes="$(stat -c%s "${f}")"
               size_mib="$(awk -v b="${size_bytes}" 'BEGIN { printf "%.1f", b / 1048576 }')"
@@ -56,7 +99,13 @@ jobs:
             done
           } >>"${GITHUB_STEP_SUMMARY}"
 
-      - name: Upload artifacts
+      - name: Upload workflow artifacts
+        # Ephemeral, retention-limited GitHub Actions artifact - kept as
+        # a quick way to inspect a workflow_dispatch build's output
+        # in-place without publishing a release. The durable, easy-to-
+        # consume copy is the GitHub Release asset set uploaded below;
+        # config/boot-artifacts' fetch.sh and everything else that
+        # consumes these artifacts fetches from there, never from here.
         uses: actions/upload-artifact@v4
         with:
           name: kezio-live-image
@@ -64,5 +113,50 @@ jobs:
             dist/live/vmlinuz
             dist/live/initrd.img
             dist/live/filesystem.squashfs
+            dist/live/shimx64.efi
+            dist/live/grubx64.efi
             dist/live/manifest.json
+            dist/live/sha256sums
           if-no-files-found: error
+
+      - name: Publish GitHub Release
+        # Gated on either a real "v*" tag push, or an explicit
+        # workflow_dispatch with publish=true - never a bare
+        # workflow_dispatch (publish defaults false), so an on-demand
+        # build-only run never creates a release as a side effect. When
+        # dispatched with publish=true, "version" names the tag to
+        # create/update; `gh release create` creates that tag pointing
+        # at the dispatched ref if it does not already exist, so this
+        # path also covers cutting a release from a non-tag ref
+        # deliberately, not only re-running a tag push.
+        if: |
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
+          (github.event_name == 'workflow_dispatch' && inputs.publish)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.version }}"
+            if [ -z "${tag}" ]; then
+              echo "::error::publish=true needs a non-empty 'version' input to name the release tag." >&2
+              exit 1
+            fi
+          else
+            tag="${{ github.ref_name }}"
+          fi
+          echo "Publishing boot artifacts to release ${tag}"
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Release ${tag} already exists; uploading assets to it."
+          else
+            gh release create "${tag}" --repo "${GITHUB_REPOSITORY}" \
+              --title "${tag}" --target "${GITHUB_SHA}" --generate-notes
+          fi
+          gh release upload "${tag}" --repo "${GITHUB_REPOSITORY}" --clobber \
+            dist/live/vmlinuz \
+            dist/live/initrd.img \
+            dist/live/filesystem.squashfs \
+            dist/live/shimx64.efi \
+            dist/live/grubx64.efi \
+            dist/live/manifest.json \
+            dist/live/sha256sums

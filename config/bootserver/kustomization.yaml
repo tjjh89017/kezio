@@ -16,8 +16,18 @@ resources:
   - ../default
   - service.yaml
 
+# Supplies fetch.sh (as the "boot-artifacts-fetch-script" ConfigMap) for
+# boot-artifacts-init-patch.yaml's initContainer - see that file and
+# ../boot-artifacts/kustomization.yaml.
+components:
+  - ../boot-artifacts
+
 patches:
   - path: manager-port-patch.yaml
+    target:
+      kind: Deployment
+      name: kezio-controller-manager
+  - path: boot-artifacts-init-patch.yaml
     target:
       kind: Deployment
       name: kezio-controller-manager

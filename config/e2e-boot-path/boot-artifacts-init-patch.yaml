@@ -1,0 +1,78 @@
+# Byte-identical copy of config/bootserver/boot-artifacts-init-patch.yaml
+# - see boot-server-service.yaml in this directory for why this overlay
+# keeps local copies instead of referencing the originals by relative
+# path (kustomize's LoadRestrictionsRootOnly forbids a `patches:` entry
+# naming a plain file outside this kustomization's own root). Keep the
+# two in sync if that file changes.
+#
+# Deliberately NOT wired into this directory's kustomization.yaml
+# `patches:` list: config/e2e-boot-path is shared by test-e2e.yml's
+# always-on, hermetic "boot-path" job (which only simulates GRUB/agent
+# traffic with a plain HTTP client - see e2e-boot-path-kubevirt.yml's
+# own header comment - and never needs real artifact bytes) and
+# e2e-boot-path-kubevirt.yml's real KubeVirt boot. Wiring a real
+# GitHub-Release-fetching initContainer into the shared overlay would
+# make every test-e2e.yml run depend on network egress and a published
+# release existing, which is exactly the "trustworthy, always-on signal"
+# staying that way that e2e-boot-path-kubevirt.yml's header argues for
+# keeping separate. Only e2e-boot-path-kubevirt.yml applies this file,
+# with `kubectl patch --type=json --patch-file`, after the base overlay
+# is already up, and after separately materializing the
+# "boot-artifacts-fetch-script" ConfigMap this patch's "fetch-script"
+# volume references (`kubectl create configmap ... --from-file=fetch.sh=
+# config/boot-artifacts/fetch.sh`) - see that step in
+# e2e-boot-path-kubevirt.yml.
+#
+# Unlike config/bootserver/boot-artifacts-init-patch.yaml, this copy has
+# no "add .../containers/0/env" op: by the time this file is applied,
+# e2e-boot-path-kubevirt.yml has already run `kubectl set env` with
+# BOOT_ARTIFACTS_DIR=/boot-artifacts (among the other BOOT_*/DEPLOYER
+# vars that command sets together), which populates containers[0].env as
+# a whole array - a JSON Patch "add" at that same path here would
+# replace, not extend, that array and silently drop every var `kubectl
+# set env` just set.
+- op: add
+  path: /spec/template/spec/initContainers
+  value:
+    - name: fetch-boot-artifacts
+      image: curlimages/curl:8.21.0
+      command: ["/bin/sh", "/scripts/fetch.sh"]
+      env:
+        - name: BOOT_ARTIFACTS_REPO
+          value: tjjh89017/kezio
+        - name: BOOT_ARTIFACTS_VERSION
+          value: latest
+        - name: BOOT_ARTIFACTS_FILES
+          value: "vmlinuz initrd.img filesystem.squashfs manifest.json"
+        - name: DEST_DIR
+          value: /boot-artifacts
+      volumeMounts:
+        - name: boot-artifacts
+          mountPath: /boot-artifacts
+        - name: fetch-script
+          mountPath: /scripts
+          readOnly: true
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        capabilities:
+          drop: ["ALL"]
+- op: add
+  path: /spec/template/spec/volumes/-
+  value:
+    name: boot-artifacts
+    emptyDir: {}
+- op: add
+  path: /spec/template/spec/volumes/-
+  value:
+    name: fetch-script
+    configMap:
+      name: boot-artifacts-fetch-script
+      defaultMode: 0o444
+- op: add
+  path: /spec/template/spec/containers/0/volumeMounts/-
+  value:
+    name: boot-artifacts
+    mountPath: /boot-artifacts
+    readOnly: true

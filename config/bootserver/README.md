@@ -30,9 +30,16 @@ kustomize build config/bootserver | kubectl apply -f -
      (matching `manager-port-patch.yaml`'s `containerPort`).
    - `BOOT_ARTIFACTS_DIR` - the local directory `GET
      /boot/artifacts/...` serves the live kernel/initrd/squashfs from.
-     Mounting a volume there is left to the cluster operator (the
-     artifact build and its placement are a separate concern from this
-     server).
+     This kustomization already sets it to `/boot-artifacts` and mounts
+     an emptyDir there, populated at pod startup by a
+     `fetch-boot-artifacts` initContainer that downloads the published
+     live-image release assets (see
+     `.github/workflows/build-live-image.yml` and
+     `boot-artifacts-init-patch.yaml`) - no manual volume setup needed.
+     By default it fetches the repository's *latest* release; pin a
+     specific one with `kubectl set env deployment/kezio-controller-
+     manager -c fetch-boot-artifacts BOOT_ARTIFACTS_VERSION=v0.1.0` (or
+     a further kustomize patch) instead.
    - `BOOT_SERVER_URL` - this server's own externally reachable base
      URL, for example `http://10.0.0.5:8090`. GRUB and the live agent
      both fetch from it directly from the boot network, so it must name

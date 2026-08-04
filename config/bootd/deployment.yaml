@@ -47,6 +47,46 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
+      # Fetches shimx64.efi/grubx64.efi (see .github/workflows/
+      # build-live-image.yml, which now publishes them alongside the
+      # live kernel/initrd/squashfs) into the "tftp" emptyDir below
+      # before bootd starts - the concrete answer to what this
+      # Deployment's own comment on the "tftp" volume used to call a
+      # gap this kustomization does not fill. Uses fetch.sh from the
+      # "boot-artifacts-fetch-script" ConfigMap (../boot-artifacts, a
+      # Component this kustomization's own kustomization.yaml adds
+      # under `components:`).
+      #
+      # BOOT_ARTIFACTS_VERSION defaults to "latest" - override with
+      # `kubectl set env deployment/kezio-bootd -c fetch-boot-artifacts
+      # BOOT_ARTIFACTS_VERSION=v0.1.0` (or a further kustomize patch) to
+      # pin a specific release instead.
+      initContainers:
+        - name: fetch-boot-artifacts
+          image: curlimages/curl:8.21.0
+          command: ["/bin/sh", "/scripts/fetch.sh"]
+          env:
+            - name: BOOT_ARTIFACTS_REPO
+              value: tjjh89017/kezio
+            - name: BOOT_ARTIFACTS_VERSION
+              value: latest
+            - name: BOOT_ARTIFACTS_FILES
+              value: "shimx64.efi grubx64.efi"
+            - name: DEST_DIR
+              value: /tftp
+          volumeMounts:
+            - name: tftp
+              mountPath: /tftp
+            - name: fetch-script
+              mountPath: /scripts
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - "ALL"
       containers:
         - name: bootd
           image: bootd:latest
@@ -106,14 +146,18 @@ spec:
           # "Machine MAC cache synced" from internal/bootd.MACCache)
           # turns out to be worth exposing.
       volumes:
+        # Populated by the fetch-boot-artifacts initContainer above
+        # before bootd's own container starts; an emptyDir is enough
+        # since the fetch is cheap (two small EFI binaries) and repeats
+        # on every pod (re)start rather than needing to persist across
+        # one. If internal/bootd's TFTPServer ever finds this volume
+        # empty regardless (for example, the initContainer failed and
+        # the Deployment tolerated it, which it does not by default -
+        # see internal/bootd's package doc comment), it serves a clean
+        # per-file error, not a startup crash.
         - name: tftp
-          # PLACEHOLDER: shimx64.efi and grubx64.efi must land here by
-          # some means outside this kustomization - a PVC populated by
-          # the artifact build, a ConfigMap (if small enough), or an
-          # initContainer this Deployment does not define. An empty
-          # emptyDir leaves the TFTP server serving nothing at all
-          # (see internal/bootd's TFTPServer: it only ever opens exactly
-          # these two names, so a missing file is a clean per-file
-          # error, not a startup failure). Replace with a real volume
-          # source before deploying.
           emptyDir: {}
+        - name: fetch-script
+          configMap:
+            name: kezio-boot-artifacts-fetch-script
+            defaultMode: 0o444

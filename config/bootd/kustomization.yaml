@@ -28,6 +28,14 @@ resources:
   # networkattachmentdefinition.example.yaml is NOT listed here on
   # purpose - see that file's header comment.
 
+# Supplies fetch.sh (as the "boot-artifacts-fetch-script" ConfigMap,
+# namePrefix'd to "kezio-boot-artifacts-fetch-script" by this
+# kustomization's own namePrefix above) for deployment.yaml's
+# fetch-boot-artifacts initContainer - see ../boot-artifacts/
+# kustomization.yaml.
+components:
+  - ../boot-artifacts
+
 images:
   - name: bootd
     newName: ghcr.io/tjjh89017/kezio-bootd

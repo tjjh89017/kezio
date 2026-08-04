@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
 # Builds the kezio live boot image: a kernel, an initrd, and a squashfs
 # root file system that GRUB (see internal/bootserver's grub.go) hands a
-# PXE-booting machine.
+# PXE-booting machine. It also stages the signed shimx64.efi/grubx64.efi
+# kezio-bootd serves over TFTP (see stage_signed_boot_binaries), so the
+# whole PXE-to-agent artifact set - vmlinuz, initrd.img,
+# filesystem.squashfs, shimx64.efi, grubx64.efi, manifest.json,
+# sha256sums - comes out of dist/live/ as one set for
+# .github/workflows/build-live-image.yml to publish together.
 #
+# Tool choice: Debian live-build, not dracut+livenet.
+#
+# The initrd this image ships has one job at boot: DHCP the NIC, fetch
+# the squashfs over HTTP from the URL the kernel cmdline carries
+# (fetch=...), overlay a writable tmpfs over the read-only squashfs, and
 # Tool choice: Debian live-build, not dracut+livenet.
 #
 # The initrd this image ships has one job at boot: DHCP the NIC, fetch
@@ -94,6 +104,49 @@ stage_ezio_build_inputs() {
 	cp "${repo_root}"/patches/ezio/*.patch "${stage_dir}/patches/"
 }
 
+stage_signed_boot_binaries() {
+	# shimx64.efi and grubx64.efi are what kezio-bootd serves over TFTP
+	# (internal/bootd.ShimFilename / GrubFilename) - PXE-booting UEFI
+	# firmware chainloads the signed shim, which then chainloads grub,
+	# which loads the GRUB config internal/bootserver renders. kezio
+	# never builds either binary itself: Secure Boot's entire point is
+	# that the shim is signed by a chain the firmware already trusts,
+	# which only a distribution's own signed package can provide (the
+	# same reasoning the KubeVirt e2e lane's now-removed "Source
+	# shimx64.efi/grubx64.efi from signed packages" step used to record
+	# inline). Pulling shim-signed/grub-efi-amd64-signed from
+	# debian:sid - the same base image run_live_build already uses -
+	# keeps this one version-pin (Debian sid) the single source of
+	# truth for every package this script touches, rather than adding
+	# a second, host-apt-dependent code path.
+	log "extracting shimx64.efi/grubx64.efi from Debian's signed packages"
+	docker run --rm \
+		-v "${dist_dir}:/out" \
+		debian:sid \
+		sh -c '
+			set -eu
+			apt-get update
+			cd /tmp
+			apt-get download shim-signed grub-efi-amd64-signed
+			mkdir -p extracted
+			for deb in *.deb; do
+				dpkg -x "${deb}" extracted
+			done
+			shim_src="$(find extracted -iname "shimx64.efi*" -print -quit)"
+			grub_src="$(find extracted -iname "grubx64.efi*" -print -quit)"
+			if [ -z "${shim_src}" ] || [ -z "${grub_src}" ]; then
+				echo "shimx64.efi / grubx64.efi not found under the extracted shim-signed/grub-efi-amd64-signed packages; package layout may have changed." >&2
+				find extracted -iname "*.efi*" >&2
+				exit 1
+			fi
+			# internal/bootd.ShimFilename / GrubFilename are fixed names
+			# with no ".signed" suffix - the packages ship them with
+			# one, so normalize on copy.
+			cp "${shim_src}" /out/shimx64.efi
+			cp "${grub_src}" /out/grubx64.efi
+		'
+}
+
 build_agent() {
 	log "building kezio-agent (CGO_ENABLED=0, static, matches go.mod's toolchain)"
 	local out_dir="${live_dir}/config/includes.chroot/usr/local/bin"
@@ -165,13 +218,16 @@ collect_artifacts() {
 	# step summary can report them against the 100-300 MiB squashfs
 	# target and so internal/bootserver's KernelPath/InitrdPath/
 	# SquashfsPath defaults (which these three filenames match) have
-	# something to check integrity against downstream.
+	# something to check integrity against downstream. shimx64.efi and
+	# grubx64.efi (staged by stage_signed_boot_binaries) are listed here
+	# too, now that they are published alongside the live image instead
+	# of being sourced separately by each consumer.
 	(
 		cd "${dist_dir}"
 		{
 			printf '{\n  "artifacts": [\n'
 			first=1
-			for f in vmlinuz initrd.img filesystem.squashfs; do
+			for f in vmlinuz initrd.img filesystem.squashfs shimx64.efi grubx64.efi; do
 				[ "${first}" -eq 1 ] || printf ',\n'
 				first=0
 				size="$(stat -c%s "${f}")"
@@ -182,12 +238,24 @@ collect_artifacts() {
 		} >manifest.json
 	)
 	log "manifest written to ${dist_dir}/manifest.json"
+
+	# sha256sums: a plain GNU-coreutils-format checksum file (one
+	# "<sha256>  <name>" line per artifact, manifest.json included) so a
+	# consumer - a release-asset download, or config/boot-artifacts'
+	# fetch.sh initContainer - can `sha256sum -c` instead of parsing
+	# manifest.json's JSON just to verify integrity.
+	(
+		cd "${dist_dir}"
+		sha256sum vmlinuz initrd.img filesystem.squashfs shimx64.efi grubx64.efi manifest.json >sha256sums
+	)
+	log "checksums written to ${dist_dir}/sha256sums"
 }
 
 main() {
 	mkdir -p "${dist_dir}"
 	cleanup_includes
 	stage_ezio_build_inputs
+	stage_signed_boot_binaries
 	build_agent
 	run_live_build
 	collect_artifacts
