@@ -64,6 +64,19 @@ func newTestServer(t *testing.T, now time.Time, machines ...*keziov1alpha1.Machi
 	return s, c
 }
 
+// TestServer_NeedLeaderElectionIsFalse guards against a regression that
+// broke the boot-path e2e (test/e2e/e2e_boot_path_test.go) - see
+// bootserver.TestServer_NeedLeaderElectionIsFalse's doc comment for the
+// full reasoning; this server needs the identical guarantee for the
+// same reason (a rolling update must not leave POST /agent/register
+// unanswered until the previous pod's un-released leader lease expires).
+func TestServer_NeedLeaderElectionIsFalse(t *testing.T) {
+	s, _ := newTestServer(t, time.Now())
+	if s.NeedLeaderElection() {
+		t.Fatal("Server.NeedLeaderElection() = true; want false so a rolling update does not leave /agent/register unanswered until the old lease expires")
+	}
+}
+
 // testMachineName is the name every test machine in this file uses.
 const testMachineName = "node-01"
 

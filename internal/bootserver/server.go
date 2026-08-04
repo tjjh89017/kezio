@@ -63,7 +63,10 @@ type Server struct {
 	Now func() time.Time
 }
 
-var _ manager.Runnable = (*Server)(nil)
+var (
+	_ manager.Runnable               = (*Server)(nil)
+	_ manager.LeaderElectionRunnable = (*Server)(nil)
+)
 
 // New builds a Server ready to add to a controller-runtime manager
 // (mgr.Add). c is typically mgr.GetClient(); the caller must also call
@@ -71,6 +74,26 @@ var _ manager.Runnable = (*Server)(nil)
 // below fails.
 func New(c client.Client, cfg Config) *Server {
 	return &Server{Client: c, Config: cfg.withDefaults(), Now: time.Now}
+}
+
+// NeedLeaderElection implements manager.LeaderElectionRunnable: this
+// server must start regardless of leader election status. Without this,
+// mgr.Add's default (any Runnable that does not implement
+// LeaderElectionRunnable, or that implements it and returns true, is
+// placed in the manager's leader-election-gated group - see
+// controller-runtime's runnables.Add) leaves GRUB's grub.cfg fetch and
+// the live artifact download unanswered for as long as the previous
+// leader's lease has not yet expired after a rolling update - by
+// default, controller-runtime never releases a lease on graceful
+// shutdown (LeaderElectionReleaseOnCancel defaults false, see
+// cmd/main.go), so a redeployed manager pod can pass its readiness probe
+// (a static ping, unrelated to leadership) while this server stays dark
+// for up to a full lease duration. A machine mid net-boot cannot wait
+// out that gap, and with the Deployment always running a single replica
+// (config/manager/manager.yaml has no replica count override) there is
+// no "other leader" this server would ever need to defer to anyway.
+func (s *Server) NeedLeaderElection() bool {
+	return false
 }
 
 func (s *Server) now() time.Time {

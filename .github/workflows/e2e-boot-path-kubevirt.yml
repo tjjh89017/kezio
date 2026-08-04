@@ -63,7 +63,7 @@ env:
   # that is fine for proxyDHCP/TFTP traffic.
   PROVISIONING_BRIDGE: kezio-prov0
   PROVISIONING_BOOTD_IP: 192.0.2.1/24
-  TARGET_VM_MAC: "52:54:00:ke:zi:01"
+  TARGET_VM_MAC: "52:54:00:be:ef:01"
   TARGET_VM_DISK_SERIAL: "KEZIOE2EVMDISK01"
 
 jobs:
@@ -279,24 +279,6 @@ jobs:
           kubectl apply -f "https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/${MULTUS_VERSION}/deployments/multus-daemonset-thick.yml"
           kubectl -n kube-system rollout status daemonset/kube-multus-ds --timeout=180s
 
-      - name: Create the provisioning NetworkAttachmentDefinition
-        run: |
-          cat <<EOF | kubectl apply -f -
-          apiVersion: k8s.cni.cncf.io/v1
-          kind: NetworkAttachmentDefinition
-          metadata:
-            name: kezio-boot-network
-            namespace: kezio-system
-          spec:
-            config: |
-              {
-                "cniVersion": "0.3.1",
-                "type": "bridge",
-                "bridge": "${PROVISIONING_BRIDGE}",
-                "ipam": {}
-              }
-          EOF
-
       - name: Build and import the manager image
         run: |
           set -euo pipefail
@@ -320,6 +302,35 @@ jobs:
           # label is this step's own responsibility.
           kubectl label --overwrite ns kezio-system pod-security.kubernetes.io/enforce=restricted
           kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
+
+      - name: Create the provisioning NetworkAttachmentDefinition
+        # Namespaced under kezio-system, so this must run after "Deploy
+        # CRDs and the controller-manager" above: that step's `make
+        # deploy` is what creates the kezio-system namespace in the
+        # first place (config/default's own kustomization - see that
+        # step's own comment), and creating a namespaced object before
+        # its namespace exists is a plain 404 from the API server. This
+        # step used to run earlier, alongside the other cluster-addon
+        # installs (KubeVirt/CDI/Multus); moving it here is the fix, not
+        # a stylistic reshuffle - the first dispatched run of this
+        # workflow failed with exactly that 404
+        # ("namespaces \"kezio-system\" not found").
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: k8s.cni.cncf.io/v1
+          kind: NetworkAttachmentDefinition
+          metadata:
+            name: kezio-boot-network
+            namespace: kezio-system
+          spec:
+            config: |
+              {
+                "cniVersion": "0.3.1",
+                "type": "bridge",
+                "bridge": "${PROVISIONING_BRIDGE}",
+                "ipam": {}
+              }
+          EOF
 
       - name: Deploy the boot config and agent registration Services, wire real artifacts
         run: |

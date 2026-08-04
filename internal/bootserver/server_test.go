@@ -90,6 +90,28 @@ func newTestMachine(state string) *keziov1alpha1.Machine {
 	}
 }
 
+// TestServer_NeedLeaderElectionIsFalse guards against a regression that
+// broke the boot-path e2e (test/e2e/e2e_boot_path_test.go): a Server
+// that does not implement manager.LeaderElectionRunnable, or implements
+// it and returns true, is placed by controller-runtime in the
+// leader-election-gated runnable group (see
+// sigs.k8s.io/controller-runtime/pkg/manager's runnables.Add). Since
+// config/manager sets --leader-elect and never sets
+// LeaderElectionReleaseOnCancel (so a terminated pod's lease is not
+// released), a rolling update of the controller-manager Deployment can
+// pass its readiness probe - a static ping, unrelated to leadership -
+// well before the new pod wins leadership away from the old lease. If
+// this server waited on that gate, GET /boot/grub.cfg-<mac> would go
+// unanswered for that whole window, which is exactly what the e2e
+// observed as a "connection refused" on the very first port-forward
+// after `make deploy-boot-path`'s rollout completed.
+func TestServer_NeedLeaderElectionIsFalse(t *testing.T) {
+	s, _ := newTestServer(t, "")
+	if s.NeedLeaderElection() {
+		t.Fatal("Server.NeedLeaderElection() = true; want false so a rolling update does not leave grub.cfg unanswered until the old lease expires")
+	}
+}
+
 var tokenPattern = regexp.MustCompile(`kezio\.token=([0-9a-f]+)`)
 
 func extractToken(t *testing.T, body string) string {

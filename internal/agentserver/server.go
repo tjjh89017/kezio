@@ -54,13 +54,27 @@ type Server struct {
 	Now func() time.Time
 }
 
-var _ manager.Runnable = (*Server)(nil)
+var (
+	_ manager.Runnable               = (*Server)(nil)
+	_ manager.LeaderElectionRunnable = (*Server)(nil)
+)
 
 // New builds a Server ready to add to a controller-runtime manager
 // (mgr.Add). c is typically mgr.GetClient(); the caller must also call
 // SetupFieldIndexer(ctx, mgr) before the manager starts.
 func New(c client.Client, cfg Config) *Server {
 	return &Server{Client: c, Config: cfg, Now: time.Now}
+}
+
+// NeedLeaderElection implements manager.LeaderElectionRunnable: this
+// server must start regardless of leader election status - see
+// bootserver.Server.NeedLeaderElection's doc comment for the full
+// reasoning (a redeployed manager pod can otherwise pass its readiness
+// probe well before it wins leadership from a lease its predecessor
+// never released, leaving kezio-agent's registration call unanswered
+// for that whole window).
+func (s *Server) NeedLeaderElection() bool {
+	return false
 }
 
 func (s *Server) now() time.Time {
