@@ -350,6 +350,22 @@ spec:
           status:
             description: MachineStatus defines the observed state of Machine.
             properties:
+              agentSession:
+                description: |-
+                  AgentSession records the session credential most recently minted
+                  for kezio-agent at registration, presented on every subsequent
+                  GET .../next poll.
+                properties:
+                  expiresAt:
+                    description: ExpiresAt is when the current session token stops
+                      being accepted.
+                    format: date-time
+                    type: string
+                  tokenHash:
+                    description: TokenHash is the SHA-256 hex digest of the current
+                      session token.
+                    type: string
+                type: object
               conditions:
                 description: Conditions report the current state of the machine.
                 items:

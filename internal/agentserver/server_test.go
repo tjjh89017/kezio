@@ -149,6 +149,9 @@ func TestHandleRegister_ValidTokenIngestsInventoryAndInvalidatesToken(t *testing
 	if resp.MachineName != "node-01" {
 		t.Fatalf("MachineName = %q, want node-01", resp.MachineName)
 	}
+	if resp.SessionToken == "" {
+		t.Fatal("SessionToken is empty; want a fresh session credential")
+	}
 
 	var stored keziov1alpha1.Machine
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "node-01"}, &stored); err != nil {
@@ -166,6 +169,15 @@ func TestHandleRegister_ValidTokenIngestsInventoryAndInvalidatesToken(t *testing
 	cond := apimeta.FindStatusCondition(stored.Status.Conditions, keziov1alpha1.MachineConditionAgentRegistered)
 	if cond == nil || cond.Status != metav1.ConditionTrue {
 		t.Fatalf("AgentRegistered condition = %+v, want True", cond)
+	}
+	if stored.Status.AgentSession == nil || stored.Status.AgentSession.TokenHash == "" {
+		t.Fatalf("AgentSession = %+v, want a stored session hash", stored.Status.AgentSession)
+	}
+	if stored.Status.AgentSession.TokenHash == resp.SessionToken {
+		t.Fatal("status.agentSession.tokenHash stores the plaintext session token; want only its hash")
+	}
+	if stored.Status.AgentSession.TokenHash != bootserver.HashToken(resp.SessionToken) {
+		t.Fatalf("status.agentSession.tokenHash = %q, want the SHA-256 hash of the returned session token", stored.Status.AgentSession.TokenHash)
 	}
 
 	// Reusing the same (now-invalidated) token must fail exactly like an
@@ -264,16 +276,53 @@ func TestHandleRegister_MalformedBodyIsBadRequest(t *testing.T) {
 	}
 }
 
-func TestHandleNext_AlwaysWait(t *testing.T) {
-	now := time.Now()
-	s, _ := newTestServer(t, now)
+// testSessionToken is the plaintext session credential every next-test
+// machine in this file is seeded with; its hash is what
+// newTestMachineWithSession stores in status.agentSession.tokenHash.
+const testSessionToken = "session-0123456789abcdef0123456789abcdef0123456789abcdef01234567"
 
-	req := httptest.NewRequest(http.MethodGet, agentapi.NextPathPrefix+"node-01"+agentapi.NextPathSuffix, nil)
+// newTestMachineWithSession builds a Machine named testMachineName with
+// a live, unexpired agent session (hash of testSessionToken), and no
+// net-boot token (already consumed, as it would be by the time a real
+// agent starts polling).
+func newTestMachineWithSession(now time.Time) *keziov1alpha1.Machine {
+	return &keziov1alpha1.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: testMachineName},
+		Spec: keziov1alpha1.MachineSpec{
+			BMC: keziov1alpha1.MachineBMC{
+				Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+				CredentialsSecretRef: keziov1alpha1.SecretReference{Name: testMachineName + "-bmc"},
+			},
+			BootMACAddress: "aa:bb:cc:dd:ee:01",
+		},
+		Status: keziov1alpha1.MachineStatus{
+			State: keziov1alpha1.MachineStateAvailable,
+			AgentSession: &keziov1alpha1.MachineAgentSessionStatus{
+				TokenHash: bootserver.HashToken(testSessionToken),
+				ExpiresAt: metav1.NewTime(now.Add(time.Hour)),
+			},
+		},
+	}
+}
+
+func doNext(handler http.Handler, name, token string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, agentapi.NextPathPrefix+name+agentapi.NextPathSuffix, nil)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	rec := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, req)
+	handler.ServeHTTP(rec, req)
+	return rec
+}
 
+func TestHandleNext_NotProvisioningReturnsWait(t *testing.T) {
+	now := time.Now()
+	machine := newTestMachineWithSession(now) // State: Available
+	s, _ := newTestServer(t, now, machine)
+
+	rec := doNext(s.Handler(), testMachineName, testSessionToken)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
+		t.Fatalf("status = %d, body = %s, want 200", rec.Code, rec.Body.String())
 	}
 	var resp agentapi.NextResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
@@ -281,5 +330,127 @@ func TestHandleNext_AlwaysWait(t *testing.T) {
 	}
 	if resp.Action != agentapi.ActionWait {
 		t.Fatalf("Action = %q, want %q", resp.Action, agentapi.ActionWait)
+	}
+	if resp.Plan != nil {
+		t.Fatalf("Plan = %+v, want nil alongside ActionWait", resp.Plan)
+	}
+}
+
+func TestHandleNext_ProvisioningReadyReturnsDeployPlan(t *testing.T) {
+	now := time.Now()
+	// readyImage fixes its Image/ConfigMap namespace at "default"; the
+	// test machine has no namespace of its own (matching every other
+	// test machine in this file), so the imageRef names it explicitly
+	// rather than relying on ResolveNamespace's machine-namespace
+	// fallback.
+	imageRef := keziov1alpha1.NameRef{Namespace: "default", Name: "os-image"}
+	machine := newTestMachineWithSession(now)
+	machine.Spec.ImageRef = &imageRef
+	machine.Status.State = keziov1alpha1.MachineStateProvisioning
+	machine.Status.Provisioning = &keziov1alpha1.MachineProvisioningStatus{
+		Image: &keziov1alpha1.MachineProvisionedImage{
+			ImageRef:   imageRef,
+			TargetDisk: "/dev/nvme0n1",
+		},
+	}
+	image, cm := readyImage("os-image", "{}", []keziov1alpha1.ImagePartitionStatus{
+		{Number: 1, Role: keziov1alpha1.PartitionRoleData, FSType: "ext4"},
+	})
+	// newTestServer's fake client needs a scheme that also knows
+	// ConfigMap; build this test's client directly instead of going
+	// through newTestServer.
+	c := newPlanTestClient(t, machine, image, cm)
+	s := New(c, Config{StoreRoot: t.TempDir(), TrackerURL: testTrackerURL})
+	s.Now = func() time.Time { return now }
+
+	rec := doNext(s.Handler(), testMachineName, testSessionToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", rec.Code, rec.Body.String())
+	}
+	var resp agentapi.NextResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if resp.Action != agentapi.ActionDeploy {
+		t.Fatalf("Action = %q, want %q", resp.Action, agentapi.ActionDeploy)
+	}
+	if resp.Plan == nil || resp.Plan.OS == nil || resp.Plan.OS.Disk != "/dev/nvme0n1" {
+		t.Fatalf("Plan = %+v, want an OS plan targeting /dev/nvme0n1", resp.Plan)
+	}
+	if len(resp.Plan.OS.Partitions) != 1 {
+		t.Fatalf("len(Plan.OS.Partitions) = %d, want 1", len(resp.Plan.OS.Partitions))
+	}
+}
+
+func TestHandleNext_RejectionsAreConstantShape(t *testing.T) {
+	now := time.Now()
+
+	cases := []struct {
+		name    string
+		machine *keziov1alpha1.Machine
+		reqName string
+		token   string
+	}{
+		{
+			name:    "missing Authorization header",
+			machine: newTestMachineWithSession(now),
+			reqName: testMachineName,
+			token:   "",
+		},
+		{
+			name:    "no such machine",
+			machine: nil,
+			reqName: "no-such-machine",
+			token:   testSessionToken,
+		},
+		{
+			name:    "wrong session token",
+			machine: newTestMachineWithSession(now),
+			reqName: testMachineName,
+			token:   "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+		},
+		{
+			name: "expired session",
+			machine: func() *keziov1alpha1.Machine {
+				m := newTestMachineWithSession(now)
+				m.Status.AgentSession.ExpiresAt = metav1.NewTime(now.Add(-time.Minute))
+				return m
+			}(),
+			reqName: testMachineName,
+			token:   testSessionToken,
+		},
+		{
+			name: "no session minted yet",
+			machine: func() *keziov1alpha1.Machine {
+				m := newTestMachineWithSession(now)
+				m.Status.AgentSession = nil
+				return m
+			}(),
+			reqName: testMachineName,
+			token:   testSessionToken,
+		},
+	}
+
+	var referenceBody string
+	var referenceCode int
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var machines []*keziov1alpha1.Machine
+			if tc.machine != nil {
+				machines = append(machines, tc.machine)
+			}
+			s, _ := newTestServer(t, now, machines...)
+			rec := doNext(s.Handler(), tc.reqName, tc.token)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", rec.Code)
+			}
+			if i == 0 {
+				referenceCode = rec.Code
+				referenceBody = rec.Body.String()
+			} else if rec.Code != referenceCode || rec.Body.String() != referenceBody {
+				t.Fatalf("response for %q differs from the reference 401 response (code=%d body=%q)", tc.name, rec.Code, rec.Body.String())
+			}
+		})
 	}
 }

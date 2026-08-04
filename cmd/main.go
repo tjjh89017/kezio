@@ -239,10 +239,11 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "Machine")
 		os.Exit(1)
 	}
+	seederCfg := seederConfigFromEnv()
 	if err := (&controller.SeederReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-		Seeder: seederConfigFromEnv(),
+		Seeder: seederCfg,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Seeder")
 		os.Exit(1)
@@ -282,7 +283,7 @@ func main() {
 		}
 	}
 
-	agentConfig := agentServerConfigFromEnv()
+	agentConfig := agentServerConfigFromEnv(seederCfg)
 	if agentConfig != nil {
 		if err := agentserver.SetupFieldIndexer(context.Background(), mgr); err != nil {
 			setupLog.Error(err, "unable to set up agent token field indexer")
@@ -470,14 +471,31 @@ func bootServerConfigFromEnv() (*bootserver.Config, error) {
 // bootServerConfigFromEnv's inert-by-default shape: leaving
 // AGENT_SERVER_ADDR unset returns a nil Config, and main does not add
 // the server to the manager at all. Setting AGENT_SERVER_ADDR (for
-// example ":8091") opts in. Unlike bootServerConfigFromEnv, there is no
-// second required variable to validate, so this returns no error.
-func agentServerConfigFromEnv() *agentserver.Config {
+// example ":8091") opts in.
+//
+// Building a DeployPlan needs the same two things
+// seederConfigFromEnv's SeederConfig already carries - a tracker URL and
+// a read-only store mount, for the identical reason SeederConfig's own
+// doc comment gives (reading contents/<hash>/torrent.info to build
+// .torrent bytes) - so this reuses seeder verbatim rather than
+// introducing a second, parallel set of AGENT_TRACKER_URL /
+// AGENT_STORE_ROOT variables naming the same tracker and the same
+// volume. A deployment that sets AGENT_SERVER_ADDR without also setting
+// SEEDER_TRACKER_URL / SEEDER_STORE_ROOT (see config/seeder's README)
+// still starts - GET .../next then never has enough to build a plan for
+// an Image with a content partition, and answers ActionWait forever
+// instead of failing outright, the same graceful degradation
+// buildDeployPlan gives an unexpected build error.
+func agentServerConfigFromEnv(seeder controller.SeederConfig) *agentserver.Config {
 	addr := os.Getenv("AGENT_SERVER_ADDR")
 	if addr == "" {
 		return nil
 	}
-	return &agentserver.Config{Addr: addr}
+	return &agentserver.Config{
+		Addr:       addr,
+		StoreRoot:  seeder.StoreRoot,
+		TrackerURL: seeder.TrackerURL,
+	}
 }
 
 // deployerFactoryFromEnv selects the Deployer implementation the Machine

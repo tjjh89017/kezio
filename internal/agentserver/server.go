@@ -39,6 +39,8 @@ import (
 
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines,verbs=get;list;watch
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=kezio.kojuro.date,resources=images,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 
 // Server is the HTTP handler kezio-agent registers with. See the package
 // doc comment for the full threat model.
@@ -167,6 +169,13 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	sessionToken, sessionHash, err := mintSessionToken()
+	if err != nil {
+		log.Error(err, "minting agent session token failed")
+		writeJSON(w, http.StatusInternalServerError, agentapi.ErrorResponse{Error: "internal error"})
+		return
+	}
+
 	key := client.ObjectKeyFromObject(machine)
 	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		current := &keziov1alpha1.Machine{}
@@ -174,6 +183,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		ingestRegistration(current, req.Hardware, s.now())
+		current.Status.AgentSession = newAgentSessionStatus(sessionHash, s.now(), s.Config.sessionTTL())
 		return s.Client.Status().Update(ctx, current)
 	}); err != nil {
 		log.Error(err, "persisting agent registration failed", "machine", machine.Name)
@@ -182,7 +192,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Info("agent registered", "machine", machine.Name)
-	writeJSON(w, http.StatusOK, agentapi.RegisterResponse{MachineName: machine.Name})
+	writeJSON(w, http.StatusOK, agentapi.RegisterResponse{MachineName: machine.Name, SessionToken: sessionToken})
 }
 
 // maxRegisterBodyBytes bounds the registration request body: a full
@@ -222,16 +232,52 @@ func setAgentRegisteredCondition(machine *keziov1alpha1.Machine, status metav1.C
 }
 
 // handleNext implements GET /agent/machines/<name>/next: the agent's poll
-// loop target. It always answers "wait" today - deploy actions are a
-// later work item - and, deliberately, the same "wait" regardless of
-// whether <name> names a real Machine or the credential presented (none,
-// today) is valid: this keeps the endpoint from becoming an oracle for
-// enumerating enrolled machine names ahead of the day it actually starts
-// returning a real deployment plan, at which point it needs its own,
-// separate authentication (a session credential minted at registration,
-// not the single-use net-boot token, which is already consumed by then).
-func (s *Server) handleNext(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, agentapi.NextResponse{Action: agentapi.ActionWait})
+// loop target. It requires the session credential minted at
+// registration (RegisterResponse.SessionToken, presented the same way as
+// the boot token: "Authorization: Bearer <token>") and answers with a
+// DeployPlan once the named Machine is Provisioning with every target
+// disk resolved and every referenced Image Ready; otherwise it answers
+// ActionWait.
+//
+// Every rejection path - missing header, malformed header, no Machine
+// named <name>, no live session, a wrong or expired session token -
+// returns the exact same 401 response body (writeUnauthorized), for the
+// same reason internal/bootserver's and this package's own
+// POST /agent/register do: nothing about the response shape may let a
+// caller distinguish "no such machine" from "wrong session" from "right
+// machine, expired session", which would otherwise make this endpoint an
+// oracle for enumerating enrolled machine names.
+func (s *Server) handleNext(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	log := logf.FromContext(ctx).WithName("agentserver")
+
+	token, ok := bearerToken(r)
+	if !ok {
+		writeUnauthorized(w)
+		return
+	}
+
+	name := r.PathValue("name")
+	machine := &keziov1alpha1.Machine{}
+	if err := s.Client.Get(ctx, client.ObjectKey{Name: name}, machine); err != nil {
+		writeUnauthorized(w)
+		return
+	}
+
+	if !validSession(machine, token, s.now()) {
+		writeUnauthorized(w)
+		return
+	}
+
+	plan, err := buildDeployPlan(ctx, s.Client, s.Config, machine)
+	if err != nil {
+		log.Error(err, "building deploy plan failed; answering wait", "machine", machine.Name)
+	}
+	if plan == nil {
+		writeJSON(w, http.StatusOK, agentapi.NextResponse{Action: agentapi.ActionWait})
+		return
+	}
+	writeJSON(w, http.StatusOK, agentapi.NextResponse{Action: agentapi.ActionDeploy, Plan: plan})
 }
 
 // lookupMachineByToken resolves token (unhashed, as presented) to the

@@ -45,4 +45,16 @@ limitations under the License.
 //     status.netBoot.tokenHash immediately, so replaying the same POST
 //     body (the same Authorization header) a second time resolves to no
 //     Machine at all and gets the same 401 as any other unknown token.
+//
+// GET .../next needs its own credential, since the boot token above is
+// already consumed by the time registration succeeds: a successful
+// registration mints a second, separate token (RegisterResponse.
+// SessionToken) whose SHA-256 hash - never the plaintext, same
+// discipline as the boot token - lands in
+// Machine.status.agentSession.tokenHash. It is presented the same way
+// ("Authorization: Bearer <token>") and rejected with the same
+// undifferentiated 401 (missing header, malformed header, no such
+// Machine, no live session, wrong or expired session token - all
+// identical), so this endpoint cannot become a machine-name enumeration
+// oracle either.
 package agentserver

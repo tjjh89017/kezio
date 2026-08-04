@@ -378,6 +378,24 @@ type MachineNetBootStatus struct {
 	ExpiresAt metav1.Time `json:"expiresAt,omitempty"`
 }
 
+// MachineAgentSessionStatus records the session credential most recently
+// minted for kezio-agent by POST /agent/register (internal/agentserver),
+// distinct from the single-use net-boot token: the boot token is
+// consumed by registration itself, so once registration succeeds the
+// agent needs a separate credential to present on every subsequent GET
+// .../next poll. The same never-store-the-plaintext discipline as
+// MachineNetBootStatus applies here and for the same reason: only the
+// SHA-256 hash and expiry are ever persisted, so a leaked status object
+// cannot be replayed to poll as the machine.
+type MachineAgentSessionStatus struct {
+	// TokenHash is the SHA-256 hex digest of the current session token.
+	// +optional
+	TokenHash string `json:"tokenHash,omitempty"`
+	// ExpiresAt is when the current session token stops being accepted.
+	// +optional
+	ExpiresAt metav1.Time `json:"expiresAt,omitempty"`
+}
+
 // MachineStatus defines the observed state of Machine.
 type MachineStatus struct {
 	// Conditions report the current state of the machine.
@@ -394,6 +412,11 @@ type MachineStatus struct {
 	// machine by the boot config server.
 	// +optional
 	NetBoot *MachineNetBootStatus `json:"netBoot,omitempty"`
+	// AgentSession records the session credential most recently minted
+	// for kezio-agent at registration, presented on every subsequent
+	// GET .../next poll.
+	// +optional
+	AgentSession *MachineAgentSessionStatus `json:"agentSession,omitempty"`
 	// Hardware is the inventory the agent reported at registration.
 	// +optional
 	Hardware *MachineHardwareStatus `json:"hardware,omitempty"`

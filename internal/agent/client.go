@@ -54,67 +54,84 @@ func NewClient(baseURL string) *Client {
 	}
 }
 
+// RegisterResult is what a successful Register call returns: the
+// machine name subsequent Next calls target, and the session credential
+// they authenticate with.
+type RegisterResult struct {
+	// MachineName is the name the presented boot token resolved to.
+	MachineName string
+	// SessionToken is the short-lived credential returned exactly once
+	// by this call; Next presents it as a Bearer token on every poll.
+	SessionToken string
+}
+
 // Register posts the collected hardware inventory to the controller,
 // authenticating with the single-use boot token. It returns the machine
-// name the controller resolved the token to, which subsequent Next calls
-// use.
-func (c *Client) Register(ctx context.Context, token string, hardware *keziov1alpha1.MachineHardwareStatus) (string, error) {
+// name the controller resolved the token to and the session token that
+// authenticates subsequent Next calls.
+func (c *Client) Register(ctx context.Context, token string, hardware *keziov1alpha1.MachineHardwareStatus) (RegisterResult, error) {
 	body, err := json.Marshal(agentapi.RegisterRequest{Hardware: *hardware})
 	if err != nil {
-		return "", fmt.Errorf("encoding registration request: %w", err)
+		return RegisterResult{}, fmt.Errorf("encoding registration request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url(agentapi.RegisterPath), bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("building registration request: %w", err)
+		return RegisterResult{}, fmt.Errorf("building registration request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("registration request failed: %w", err)
+		return RegisterResult{}, fmt.Errorf("registration request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("registration rejected: %s", statusSummary(resp))
+		return RegisterResult{}, fmt.Errorf("registration rejected: %s", statusSummary(resp))
 	}
 
 	var out agentapi.RegisterResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", fmt.Errorf("decoding registration response: %w", err)
+		return RegisterResult{}, fmt.Errorf("decoding registration response: %w", err)
 	}
 	if out.MachineName == "" {
-		return "", fmt.Errorf("registration response has no machine name")
+		return RegisterResult{}, fmt.Errorf("registration response has no machine name")
 	}
-	return out.MachineName, nil
+	if out.SessionToken == "" {
+		return RegisterResult{}, fmt.Errorf("registration response has no session token")
+	}
+	return RegisterResult{MachineName: out.MachineName, SessionToken: out.SessionToken}, nil
 }
 
-// Next polls the controller for this machine's next action. It returns
-// the raw NextResponse.Action value (today, always agentapi.ActionWait).
-func (c *Client) Next(ctx context.Context, machineName string) (string, error) {
+// Next polls the controller for this machine's next action,
+// authenticating with the session token Register returned. It returns
+// the decoded NextResponse: Action is agentapi.ActionWait or
+// agentapi.ActionDeploy, with Plan populated in the latter case.
+func (c *Client) Next(ctx context.Context, machineName, sessionToken string) (agentapi.NextResponse, error) {
 	path := agentapi.NextPathPrefix + machineName + agentapi.NextPathSuffix
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url(path), nil)
 	if err != nil {
-		return "", fmt.Errorf("building poll request: %w", err)
+		return agentapi.NextResponse{}, fmt.Errorf("building poll request: %w", err)
 	}
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("poll request failed: %w", err)
+		return agentapi.NextResponse{}, fmt.Errorf("poll request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("poll rejected: %s", statusSummary(resp))
+		return agentapi.NextResponse{}, fmt.Errorf("poll rejected: %s", statusSummary(resp))
 	}
 
 	var out agentapi.NextResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", fmt.Errorf("decoding poll response: %w", err)
+		return agentapi.NextResponse{}, fmt.Errorf("decoding poll response: %w", err)
 	}
-	return out.Action, nil
+	return out, nil
 }
 
 func (c *Client) url(path string) string {

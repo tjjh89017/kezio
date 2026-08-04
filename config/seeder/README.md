@@ -59,6 +59,23 @@ Both apply into the `kezio-system` namespace.
      patched to something else).
 3. **A real data network.** See the next section.
 
+## The agent registration server reuses this same mount
+
+`SEEDER_TRACKER_URL` and `SEEDER_STORE_ROOT` are not exclusive to the
+seeder reconciler: `AGENT_SERVER_ADDR`'s GET `/agent/machines/<name>/next`
+endpoint (`internal/agentserver`) builds each deployment plan's
+per-partition `.torrent` bytes the same way `SeederReconciler.addContent`
+does, from the identical `contents/<hash>/torrent.info` files under
+`SEEDER_STORE_ROOT`, announcing at the identical `SEEDER_TRACKER_URL` -
+the agent's leecher and the seeder join the same swarm. There is no
+separate `AGENT_STORE_ROOT` / `AGENT_TRACKER_URL` pair to configure: if
+`controller-manager` already has the store mounted read-only and
+`SEEDER_TRACKER_URL` set for the seeder reconciler, the agent server
+picks up both automatically. Running the agent server without the seeder
+reconciler enabled still works, but GET `.../next` can then never build a
+plan for an Image with a content partition - it answers `wait` forever
+instead of a plan, which is easy to mistake for "still resolving".
+
 ## The no-NAT rule
 
 BitTorrent is not NAT-friendly: a peer connects directly to the IP:port a
