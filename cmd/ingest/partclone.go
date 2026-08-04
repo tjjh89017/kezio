@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 )
 
 // ddFallbackBinary is the partclone binary used for a file system it
@@ -51,10 +52,19 @@ type execPartclone struct{}
 func (execPartclone) Clone(ctx context.Context, fsType, source, targetDir string) error {
 	binary := partcloneBinary(fsType)
 
-	//nolint:gosec // binary is chosen from a fixed set below; source/targetDir are ingest-controlled scratch paths
-	cmd := exec.CommandContext(ctx, binary, "-c", "-F", "-s", source, "-o", targetDir, "-T")
+	// partclone defaults its logfile to /var/log/partclone.log and
+	// always opens it (`open_log` in partclone.c), exiting immediately
+	// if the open fails; the ingest container runs as nonroot uid
+	// 65532, which cannot write to /var/log. -L/--logfile redirects it
+	// next to targetDir, inside the already-writable work dir, named
+	// after the partition's content directory so concurrent partitions
+	// (if this ever parallelizes) cannot collide on one logfile.
+	logPath := filepath.Join(filepath.Dir(targetDir), "partclone."+filepath.Base(targetDir)+".log")
+
+	//nolint:gosec // binary is chosen from a fixed set below; source/targetDir/logPath are ingest-controlled scratch paths
+	cmd := exec.CommandContext(ctx, binary, "-c", "-F", "-s", source, "-o", targetDir, "-T", "-L", logPath)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%s -c -s %s -o %s: %w: %s", binary, source, targetDir, err, out)
+		return fmt.Errorf("%s -c -s %s -o %s -L %s: %w: %s", binary, source, targetDir, logPath, err, out)
 	}
 	return nil
 }
