@@ -57,9 +57,12 @@ type Config struct {
 	// internal/store's path scheme).
 	StoreRoot string
 	// WorkDir is a scratch directory this run may fill with temporary
-	// files (the downloaded/staged source, the raw conversion,
-	// per-partition slices, per-partition content before it is moved
-	// into the store). The caller creates it and is responsible for
+	// files: the downloaded/staged source, the raw conversion, and
+	// per-partition slices extracted from it. Its sizing need is
+	// therefore source + converted raw (plus one partition slice at a
+	// time) - partclone's content output no longer lands here, so it
+	// does not also need room for a partition's worth of content (see
+	// processPartition). The caller creates it and is responsible for
 	// removing it after Run returns; a Job pod uses its container's
 	// writable layer or an emptyDir, never the store or staging
 	// volumes, so scratch files never leak into either.
@@ -95,14 +98,18 @@ func Run(ctx context.Context, cfg Config, deps Dependencies) Result {
 }
 
 func run(ctx context.Context, cfg Config, deps Dependencies) (*ResultDisk, error) {
-	// scratchDir is where publishContent lands a content directory on
-	// the store's own filesystem before its final same-filesystem
-	// rename into contents/ (see publishContent's doc comment). It is
-	// keyed by ImageName, so a retried attempt after a crash reuses the
-	// same path; clean it before this attempt starts (a prior crash may
-	// have left a half-copied content behind) and after it ends either
-	// way, so nothing under contents/ is ever left half-published and
-	// nothing accumulates under .ingest/ across attempts.
+	// scratchDir is where partclone writes each partition's content
+	// directly, on the store's own filesystem, before publishContent's
+	// final same-filesystem rename into contents/ (see processPartition
+	// and publishContent). It is keyed by ImageName, so a retried
+	// attempt after a crash reuses the same path; clean it before this
+	// attempt starts (a prior crash may have left a half-written
+	// content behind) and after it ends either way, so nothing under
+	// contents/ is ever left half-published and nothing accumulates
+	// under .ingest/ across attempts. The store volume needs headroom
+	// for this - one in-flight partition's content plus whatever is
+	// already published under contents/ - since content is written
+	// here directly rather than assembled on the work volume first.
 	scratchDir := store.IngestScratchDir(cfg.StoreRoot, cfg.ImageName)
 	if err := os.RemoveAll(scratchDir); err != nil {
 		return nil, fmt.Errorf("clean ingest scratch dir: %w", err)
@@ -225,7 +232,12 @@ func processPartition(ctx context.Context, cfg Config, deps Dependencies, rawPat
 		return slot, resultPart, nil
 	}
 
-	contentDir := filepath.Join(cfg.WorkDir, fmt.Sprintf("content-%d", part.Number))
+	// contentDir lives under the store's own per-Image ingest scratch
+	// tree, not the work dir: partclone writes its extent files and
+	// torrent.info straight onto the store filesystem, so publishing is
+	// just a same-filesystem rename with no intermediate copy (see
+	// publishContent).
+	contentDir := filepath.Join(store.IngestScratchDir(cfg.StoreRoot, cfg.ImageName), fmt.Sprintf("content-%d", part.Number))
 	if err := os.MkdirAll(contentDir, 0o750); err != nil {
 		return store.ImageLayoutSlot{}, ResultPartition{}, fmt.Errorf("create content scratch dir: %w", err)
 	}
@@ -233,7 +245,7 @@ func processPartition(ctx context.Context, cfg Config, deps Dependencies, rawPat
 		return store.ImageLayoutSlot{}, ResultPartition{}, fmt.Errorf("clone partition content: %w", err)
 	}
 
-	hash, usedBytes, err := publishContent(cfg.StoreRoot, cfg.ImageName, contentDir, part.Number)
+	hash, usedBytes, err := publishContent(cfg.StoreRoot, contentDir)
 	if err != nil {
 		return store.ImageLayoutSlot{}, ResultPartition{}, fmt.Errorf("store partition content: %w", err)
 	}
@@ -245,38 +257,29 @@ func processPartition(ctx context.Context, cfg Config, deps Dependencies, rawPat
 }
 
 // publishContent validates a partclone content directory that partclone
-// wrote under the work dir (a fast, node-local emptyDir - see Config.WorkDir),
-// computes its info hash, and publishes it into the store at its
-// content-addressed path. If a content directory with the same hash
-// already exists (this exact content was ingested before, by this Image
-// or another one), the fresh copy is discarded instead: content is
-// deduplicated by hash, per the design's partition content model.
+// wrote directly into the store's per-Image ingest scratch tree (see
+// processPartition and store.IngestScratchDir - contentDir already
+// lives on storeRoot's own filesystem, not the work dir), computes its
+// info hash, and publishes it into the store at its content-addressed
+// path. If a content directory with the same hash already exists (this
+// exact content was ingested before, by this Image or another one), the
+// scratch copy is discarded instead: content is deduplicated by hash,
+// per the design's partition content model.
 //
-// contentDir lives on the work volume, which is not guaranteed to share
-// a filesystem with storeRoot (a Job pod's work emptyDir is node-local
-// disk; the store is commonly a networked RWX PVC). A direct
-// os.Rename(contentDir, dest) would then cross devices and fail with
-// EXDEV. To keep the publish step atomic per content, this function
-// instead copies contentDir onto the store's own filesystem first, at a
-// scratch path under store.IngestScratchDir, and renames from there:
-// that rename is always same-filesystem and so is atomic - a reader
-// never observes a partially written contents/<hash> directory, and a
-// crash between the copy and the rename leaves at worst an orphaned
-// scratch directory, which the next attempt for this Image cleans up
-// (see run's scratchDir handling).
-//
-// Partclone still writes its content output to the work dir rather than
-// straight to a store-rooted scratch directory: partclone's writes
-// during cloning are numerous small, effectively random-access extent
-// writes, which a node-local disk absorbs far better than a networked
-// filesystem. Landing the finished output with one sequential copy
-// plays to a networked store's strength (bulk sequential transfer)
-// instead of its weakness (small random I/O), at the cost of writing
-// the payload's bytes twice on a Job pod whose work and store volumes
-// happen to be the same underlying disk (as in this repo's CI, which
-// uses a local-path PVC) - an acceptable trade given production stores
-// are the networked case this is optimizing for.
-func publishContent(storeRoot, imageName, contentDir string, partitionNumber int32) (store.InfoHash, int64, error) {
+// Because contentDir is already on storeRoot's filesystem,
+// os.Rename(contentDir, dest) is always a same-filesystem, atomic
+// operation: a reader never observes a partially written
+// contents/<hash> directory, and a crash between partclone finishing
+// and this rename leaves at worst an orphaned scratch directory, which
+// the next attempt for this Image cleans up (see run's scratchDir
+// handling). This is also why partclone is pointed at the scratch
+// directory directly rather than a work-dir path that would need
+// copying onto storeRoot's filesystem first: partclone's -T extent
+// output is sequential writes, which land on a networked store exactly
+// as well as on local disk, so the copy step that direction would need
+// is pure overhead - it would write every content byte twice for no
+// benefit.
+func publishContent(storeRoot, contentDir string) (store.InfoHash, int64, error) {
 	torrentInfo, err := store.LoadContentDirTorrentInfo(contentDir)
 	if err != nil {
 		return store.InfoHash{}, 0, err
@@ -299,7 +302,7 @@ func publishContent(storeRoot, imageName, contentDir string, partitionNumber int
 		// Already published (by an earlier partition in this run, an
 		// earlier run of this Image, or another Image entirely): the
 		// hash is a content address, so an existing directory at dest
-		// already holds these exact bytes. Discard the work-dir copy
+		// already holds these exact bytes. Discard the scratch copy
 		// and skip publishing gracefully.
 		if rmErr := os.RemoveAll(contentDir); rmErr != nil {
 			return store.InfoHash{}, 0, fmt.Errorf("remove duplicate content scratch dir: %w", rmErr)
@@ -307,20 +310,10 @@ func publishContent(storeRoot, imageName, contentDir string, partitionNumber int
 		return hash, usedBytes, nil
 	}
 
-	scratchDest := filepath.Join(store.IngestScratchDir(storeRoot, imageName), fmt.Sprintf("content-%d", partitionNumber))
-	if err := os.RemoveAll(scratchDest); err != nil {
-		return store.InfoHash{}, 0, fmt.Errorf("clear content publish scratch dir: %w", err)
-	}
-	if err := copyContentDir(contentDir, scratchDest); err != nil {
-		_ = os.RemoveAll(scratchDest)
-		return store.InfoHash{}, 0, fmt.Errorf("copy content onto store filesystem: %w", err)
-	}
-
 	if err := os.MkdirAll(filepath.Dir(dest), 0o750); err != nil {
-		_ = os.RemoveAll(scratchDest)
 		return store.InfoHash{}, 0, fmt.Errorf("create store contents dir: %w", err)
 	}
-	if err := os.Rename(scratchDest, dest); err != nil {
+	if err := os.Rename(contentDir, dest); err != nil {
 		// A concurrent publish of the same content (a different
 		// partition or a different Image, racing this one) may have
 		// landed dest between our Stat above and this Rename; content
@@ -328,83 +321,13 @@ func publishContent(storeRoot, imageName, contentDir string, partitionNumber int
 		// so treat a dest that now exists as success rather than an
 		// error.
 		if _, statErr := os.Stat(dest); statErr == nil {
-			_ = os.RemoveAll(scratchDest)
+			_ = os.RemoveAll(contentDir)
 			return hash, usedBytes, nil
 		}
-		_ = os.RemoveAll(scratchDest)
 		return store.InfoHash{}, 0, fmt.Errorf("move content into store: %w", err)
 	}
 
-	if err := os.RemoveAll(contentDir); err != nil {
-		return store.InfoHash{}, 0, fmt.Errorf("remove published content from work dir: %w", err)
-	}
 	return hash, usedBytes, nil
-}
-
-// copyContentDir copies the flat set of regular files a partclone
-// content directory holds (torrent.info plus extent files - see
-// store.ValidateContentDir) from src to a newly created dst, fsyncing
-// each file and, once every file is written, the directory itself. The
-// fsyncs make the copy durable before publishContent renames dst into
-// the store: a crash right after the rename must not be able to expose
-// a contents/<hash> directory whose files are not actually on disk yet.
-func copyContentDir(src, dst string) error {
-	if err := os.MkdirAll(dst, 0o750); err != nil {
-		return fmt.Errorf("create %s: %w", dst, err)
-	}
-
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", src, err)
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			return fmt.Errorf("%s: unexpected subdirectory %s", src, entry.Name())
-		}
-		if err := copyFileSynced(filepath.Join(src, entry.Name()), filepath.Join(dst, entry.Name())); err != nil {
-			return err
-		}
-	}
-
-	dir, err := os.Open(dst) //nolint:gosec // dst is an ingest-controlled scratch path
-	if err != nil {
-		return fmt.Errorf("open %s: %w", dst, err)
-	}
-	defer func() { _ = dir.Close() }()
-	if err := dir.Sync(); err != nil {
-		return fmt.Errorf("sync %s: %w", dst, err)
-	}
-	return nil
-}
-
-// copyFileSynced copies one regular file from src to dst and fsyncs dst
-// before returning, so its bytes are durable ahead of copyContentDir's
-// directory fsync.
-func copyFileSynced(src, dst string) (err error) {
-	in, err := os.Open(src) //nolint:gosec // src is an ingest-controlled scratch path
-	if err != nil {
-		return fmt.Errorf("open %s: %w", src, err)
-	}
-	defer func() { _ = in.Close() }()
-
-	out, err := os.Create(dst) //nolint:gosec // dst is an ingest-controlled scratch path
-	if err != nil {
-		return fmt.Errorf("create %s: %w", dst, err)
-	}
-	defer func() {
-		cerr := out.Close()
-		if err == nil {
-			err = cerr
-		}
-	}()
-
-	if _, err := io.Copy(out, in); err != nil {
-		return fmt.Errorf("copy %s to %s: %w", src, dst, err)
-	}
-	if err := out.Sync(); err != nil {
-		return fmt.Errorf("sync %s: %w", dst, err)
-	}
-	return nil
 }
 
 // extractPartition copies the byte range [start, start+size) of src into
