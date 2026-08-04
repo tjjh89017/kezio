@@ -1,0 +1,34 @@
+# Standalone kustomization for kezio-bootd: the proxyDHCP and TFTP
+# services a UEFI firmware talks to before grub or the boot config
+# server (config/bootserver) ever come into the picture. It is
+# deliberately not one of config/default's resources, and not composed
+# with config/default the way config/bootserver is - bootd is not part
+# of the controller-manager process at all (see internal/bootd's
+# package doc comment), runs one replica per boot L2 segment rather than
+# once per cluster, and needs its own Multus attachment onto that
+# segment. Deploy it as an addition once config/default is applied:
+#
+#   kustomize build config/bootd | kubectl apply -f -
+#
+# Before applying, read README.md in this directory - in particular the
+# BOOTD_SERVER_IP placeholder, the TFTP artifacts volume, and the Multus
+# boot-network attachment, none of which a kustomize apply alone can
+# satisfy.
+namespace: kezio-system
+namePrefix: kezio-
+
+labels:
+  - includeSelectors: true
+    pairs:
+      app.kubernetes.io/part-of: kezio
+
+resources:
+  - rbac.yaml
+  - deployment.yaml
+  # networkattachmentdefinition.example.yaml is NOT listed here on
+  # purpose - see that file's header comment.
+
+images:
+  - name: bootd
+    newName: ghcr.io/tjjh89017/kezio-bootd
+    newTag: latest

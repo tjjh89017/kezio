@@ -13,11 +13,13 @@ name: Publish Images
 #   kezio-image-service  <- Dockerfile.image-service
 #   kezio-ingest         <- Dockerfile.ingest
 #   kezio-seeder         <- Dockerfile.seeder
+#   kezio-bootd          <- Dockerfile.bootd
 #
-# Architecture: manager, image-service and ingest cross-compile their Go
-# binary (BUILDPLATFORM/TARGETPLATFORM) and only need apt-get to install
-# a handful of prebuilt runtime packages, so they build fine under QEMU
-# emulation for both amd64 and arm64. The seeder image instead compiles
+# Architecture: manager, image-service, ingest and bootd cross-compile
+# their Go binary (BUILDPLATFORM/TARGETPLATFORM) and only need apt-get to
+# install a handful of prebuilt runtime packages, so they build fine
+# under QEMU emulation for both amd64 and arm64. The seeder image instead
+# compiles
 # ezio's C++ stack (libtorrent-rasterbar, boost, grpc) from source with
 # cmake; doing that under QEMU emulation is very slow. Seeder therefore
 # builds amd64-only for now - TODO: add an arm64 leg once either a
@@ -72,6 +74,10 @@ jobs:
             dockerfile: Dockerfile.seeder
             # amd64-only: see the architecture note above the `on:` block.
             platforms: linux/amd64
+          - name: bootd
+            image: kezio-bootd
+            dockerfile: Dockerfile.bootd
+            platforms: linux/amd64,linux/arm64
     steps:
       - name: Clone the code
         uses: actions/checkout@v7

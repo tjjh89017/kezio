@@ -244,6 +244,24 @@ docker-build-seeder: ## Build docker image for the ezio seeder.
 docker-push-seeder: ## Push docker image for the ezio seeder.
 	$(CONTAINER_TOOL) push ${SEEDER_IMG}
 
+.PHONY: build-bootd
+build-bootd: fmt vet ## Build the kezio-bootd binary (proxyDHCP/PXE/TFTP, see internal/bootd).
+	go build -o bin/bootd ./cmd/bootd
+
+# BOOTD_IMG is the image tag for kezio-bootd. It is a separate image
+# from IMG (the controller manager) because bootd is not part of the
+# manager process - it is its own per-site binary needing privileged UDP
+# ports; see Dockerfile.bootd and config/bootd.
+BOOTD_IMG ?= $(IMAGE_TAG_BASE)-bootd:latest
+
+.PHONY: docker-build-bootd
+docker-build-bootd: ## Build docker image for kezio-bootd.
+	$(CONTAINER_TOOL) build -t ${BOOTD_IMG} -f Dockerfile.bootd .
+
+.PHONY: docker-push-bootd
+docker-push-bootd: ## Push docker image for kezio-bootd.
+	$(CONTAINER_TOOL) push ${BOOTD_IMG}
+
 .PHONY: build-kezioctl
 build-kezioctl: fmt vet ## Build the kezioctl binary (the operator-side CLI client; no container image, it runs on an operator's workstation).
 	go build -o bin/kezioctl ./cmd/kezioctl

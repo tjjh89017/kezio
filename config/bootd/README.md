@@ -1,0 +1,110 @@
+# kezio-bootd
+
+This kustomization deploys kezio-bootd: the proxyDHCP and TFTP services a
+UEFI firmware talks to at the very start of a network boot, before grub
+or the boot config server (`config/bootserver`, `internal/bootserver`)
+ever come into the picture. See `internal/bootd`'s package doc comment
+for the full protocol-level design; this README covers what to set up
+before applying it.
+
+It is a standalone kustomization, applied as an addition to
+`config/default` (like `config/image-service` and `config/seeder`), not
+composed with it the way `config/bootserver` is - bootd is not part of
+the `controller-manager` process at all, it is its own binary
+(`cmd/bootd`) and its own Deployment:
+
+```sh
+kustomize build config/default | kubectl apply -f -
+kustomize build config/bootd    | kubectl apply -f -
+```
+
+Both apply into the `kezio-system` namespace.
+
+## No IP leases: bootd coexists with production DHCP
+
+bootd never assigns an IP address. The site's production DHCP server
+keeps sole ownership of leases; bootd only answers the PXE portion of
+the boot exchange (which file to TFTP, and from which next-server) -
+see `internal/bootd`'s package doc comment for the exact proxyDHCP
+(port 67) and PXE boot-server (port 4011) roles it plays. Both services
+can - and are meant to - run on the same broadcast domain without
+conflicting.
+
+## DHCP relay support
+
+bootd answers correctly whether a DHCPDISCOVER/DHCPREQUEST arrived by
+direct L2 broadcast or by unicast through a DHCP relay agent (`giaddr`
+set): a relayed request's reply is unicast back to the relay's own
+address on the DHCP server port, exactly as RFC 2131 requires, and the
+relay is responsible for delivering it on to the client from there. See
+`internal/bootd.BuildResponse`'s doc comment and `destinationFor` for
+the exact rule, and `internal/bootd/dhcp_test.go` for the packet-level
+test covering both the relayed and non-relayed cases.
+
+## Before applying
+
+1. **Set `BOOTD_SERVER_IP`.** `deployment.yaml`'s env has a
+   `REPLACE_WITH_BOOTD_BOOT_NETWORK_IP` placeholder - this must be the
+   pod's actual reachable IP address on the boot L2 segment (the Multus
+   attachment below), not a cluster-internal address. Firmware reads it
+   back as both the DHCP Server Identifier and (unless
+   `BOOTD_NEXT_SERVER_IP` overrides it) the TFTP next-server address.
+2. **Attach the boot L2 segment.** See
+   `networkattachmentdefinition.example.yaml` and its extended comments
+   on why this uses Multus rather than `hostNetwork`. Copy it, fill in
+   the site-specific interface/IPAM values, add it to
+   `kustomization.yaml`'s resources, and uncomment the
+   `k8s.v1.cni.cncf.io/networks` annotation on `deployment.yaml`'s pod
+   template.
+3. **Populate the TFTP artifacts volume.** `deployment.yaml` mounts an
+   `emptyDir` at `/tftp` as a placeholder - `shimx64.efi` and
+   `grubx64.efi` (see `internal/bootd.ShimFilename` /
+   `internal/bootd.GrubFilename`) have to land there by some means this
+   kustomization does not provide (a PVC populated by the artifact
+   build, a ConfigMap if small enough, or your own initContainer).
+   Replace the `emptyDir` volume source with a real one before
+   deploying; an unpopulated volume leaves the TFTP server unable to
+   serve either file (a clean per-request error, not a startup crash -
+   see `internal/bootd.TFTPServer`'s doc comment).
+4. **One replica per boot segment.** `deployment.yaml` is pinned to
+   `replicas: 1` - two bootd pods answering the same broadcast domain
+   would both reply to every DHCPDISCOVER, and firmware has no way to
+   prefer one proxyDHCP answer over the other. Deploy this
+   kustomization once per site/segment (each with its own Multus
+   attachment and, if the segments are on different subnets, its own
+   overlay), not by raising this replica count.
+
+## MAC gating: fail-secure by default
+
+bootd only answers a client whose MAC address matches an enrolled
+Machine's `spec.bootMACAddress` - it never net-boots an unrecognized
+device on the segment unless `BOOTD_ANSWER_ALL=true` is set (off by
+default). The enrolled-MAC set is a locally cached watch of Machine
+objects (`internal/bootd.MACCache`), not a per-packet API call, since
+bootd runs per-site and a proxyDHCP responder that hit the API server
+once per broadcast would be both slow and unwanted load. That cache
+fails secure: it answers nothing at all until its first sync completes,
+and permanently denies everything if the sync never completes (API
+server unreachable at startup) - restart bootd once connectivity is
+restored. See `internal/bootd/maccache.go`'s doc comment for the full
+reasoning.
+
+## Privileged ports and Pod Security Admission
+
+Ports 67 (proxyDHCP) and 69 (TFTP) are privileged (<1024). Rather than
+run as root - which restricted Pod Security Admission forbids outright
+- `deployment.yaml` keeps the container `runAsNonRoot` (matching every
+other kezio image) and adds only the `NET_BIND_SERVICE` capability,
+which restricted PSA still permits a container to add (every other
+capability is dropped). No other privilege is granted: no
+`hostNetwork`, no `hostPort`, no elevated capability beyond that one.
+
+## RBAC scope
+
+`rbac.yaml` grants `bootd`'s ServiceAccount a **ClusterRole** (`get`,
+`list`, `watch` on `machines`), not a namespaced Role: bootd's MAC cache
+watches every Machine in the cluster, since a site's bootd has no
+reliable way to know in advance which namespace(s) the Machines it
+should net-boot live in. If every Machine at a site is known to live in
+a single namespace, narrow this to a namespaced Role + RoleBinding in an
+overlay.

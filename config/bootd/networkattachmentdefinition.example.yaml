@@ -1,0 +1,73 @@
+# EXAMPLE / PLACEHOLDER - not applied by this kustomization (note the
+# ".example.yaml" suffix; it is not listed in kustomization.yaml's
+# resources). A real NetworkAttachmentDefinition depends on the site's
+# physical boot L2 segment and IPAM allocator, neither of which this
+# repository can know in advance. Copy this file, strip the ".example"
+# suffix, fill in the site-specific values marked below, and add it to
+# kustomization.yaml's resources - then uncomment the
+# k8s.v1.cni.cncf.io/networks annotation on deployment.yaml's pod
+# template to actually attach it.
+#
+# Requires the Multus CNI meta-plugin
+# (https://github.com/k8snetworkplumbingwg/multus-cni) and its
+# NetworkAttachmentDefinition CRD to already be installed cluster-wide;
+# neither is installed by this kustomization. See
+# config/seeder/networkattachmentdefinition.example.yaml for the same
+# pattern applied to the BitTorrent data network - the reasoning below
+# is specific to bootd's proxyDHCP/TFTP traffic, not a repeat of that
+# file's no-NAT rule (which does not apply here).
+#
+# === Why Multus, not hostNetwork ===
+#
+# bootd needs to see the exact broadcast domain a booting machine's NIC
+# is on, and needs its unrelayed proxyDHCP replies (broadcast to
+# 255.255.255.255:68 - see internal/bootd's destinationFor) to reach
+# only that segment. hostNetwork would work for that, but ties the pod
+# to a specific node's physical NIC and fights over ports 67/69/4011
+# with anything else on that host - a dedicated Multus secondary
+# interface (net1) gets the same L2 visibility without either problem,
+# and keeps the pod's primary interface (eth0) free for the Kubernetes
+# API access bootd's MAC cache depends on (internal/bootd.MACCache).
+#
+# === Routing ===
+#
+# Unlike config/seeder's data network, bootd's boot-network attachment
+# does not need routes onto other subnets - proxyDHCP and TFTP traffic
+# on this segment is all directly-connected L2 traffic (broadcast
+# replies, or unicast back to whatever source address a request arrived
+# from - see internal/bootd's package doc comment on relay awareness for
+# the one exception: a DHCP relay agent's giaddr, reached over whatever
+# route already gets a pod to that relay's IP, ordinarily via the
+# cluster's normal eth0 routing, not net1).
+#
+# === IPAM ===
+#
+# BOOTD_SERVER_IP (deployment.yaml) must match whatever address this
+# NAD assigns net1 - static or a cluster-wide allocator such as
+# whereabouts both work; see config/seeder's own NAD example for the
+# tradeoffs between them, which apply here unchanged.
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: kezio-boot-network
+  namespace: system
+spec:
+  # SITE-SPECIFIC: replace this config with whatever CNI plugin this
+  # cluster's boot L2 segment actually uses (macvlan, ipvlan, a Multus
+  # bridge onto a VLAN-tagged host interface, ...); this "macvlan"
+  # example is illustrative only, not a recommendation.
+  config: |
+    {
+      "cniVersion": "0.3.1",
+      "type": "macvlan",
+      "master": "REPLACE_WITH_BOOT_NETWORK_HOST_INTERFACE",
+      "mode": "bridge",
+      "ipam": {
+        "type": "static",
+        "addresses": [
+          {
+            "address": "REPLACE_WITH_STATIC_CIDR/32"
+          }
+        ]
+      }
+    }
