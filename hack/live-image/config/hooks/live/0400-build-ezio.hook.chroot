@@ -1,0 +1,62 @@
+#!/bin/sh
+# Runs inside the chroot during `lb build`, after includes.chroot has been
+# extracted - build.sh's stage_ezio_build_inputs drops the pinned EZIO_REF
+# and patches/ezio/*.patch at /usr/local/src/kezio-ezio/ for this hook to
+# read.
+#
+# ezio is built right here, inside this chroot, instead of being copied in
+# from a separately built image (Dockerfile.seeder's builder stage, the
+# previous approach): this chroot is a full Debian sid system already
+# using its own glibc/libstdc++/etc, and staging a foreign build's
+# shared-library closure over those same system paths corrupts the chroot
+# it needs to keep running in. Building against this chroot's own apt
+# snapshot instead guarantees ezio links against exactly the libraries
+# already here - ABI-consistent by construction, no closure to copy at
+# all.
+set -eu
+
+ezio_ref="$(cat /usr/local/src/kezio-ezio/ezio_ref)"
+
+# Packages this hook alone needs: build tools plus the -dev packages ezio
+# links against (mirrors Dockerfile.seeder's builder stage). Their
+# matching runtime shared libraries - libtorrent-rasterbar, libgrpc(++),
+# libprotobuf, libspdlog, libssl3, boost's program_options - come along as
+# ordinary apt dependencies of these -dev packages and are what ezio
+# actually needs at runtime; this same list is purged by name (not
+# autoremoved) below once the build is done, which is what keeps those
+# runtime libraries in the squashfs afterward.
+build_deps="git build-essential cmake make libssl-dev libgrpc-dev
+libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc
+libtorrent-rasterbar-dev libboost-program-options-dev libspdlog-dev"
+
+apt-get update
+# shellcheck disable=SC2086
+apt-get install -y --no-install-recommends ca-certificates ${build_deps}
+
+src_dir="$(mktemp -d)"
+git clone https://github.com/tjjh89017/ezio.git "${src_dir}"
+(
+	cd "${src_dir}"
+	git checkout --detach "${ezio_ref}"
+	for p in /usr/local/src/kezio-ezio/patches/*.patch; do
+		echo "applying ${p}"
+		git apply "${p}"
+	done
+	cmake .
+	make
+	make install
+)
+
+# Build tools and -dev headers only exist to produce /usr/local/sbin/ezio;
+# nothing at runtime needs them, so they are purged by name once the
+# build is done. Deliberately not `apt-get autoremove`: that would also
+# sweep out the runtime shared libraries apt pulled in as dependencies of
+# these -dev packages above (see the comment on build_deps) - apt has no
+# way to know a hand-built binary outside dpkg's bookkeeping depends on
+# them, so autoremove would happily delete the very libraries ezio just
+# linked against. ca-certificates is kept: it is not build-only, other
+# parts of the live OS may need it for TLS.
+# shellcheck disable=SC2086
+apt-get purge -y ${build_deps}
+apt-get clean
+rm -rf "${src_dir}" /usr/local/src/kezio-ezio /var/lib/apt/lists/*

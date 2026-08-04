@@ -46,52 +46,52 @@ repo_root="$(cd "${script_dir}/../.." && pwd)"
 live_dir="${script_dir}"
 dist_dir="${repo_root}/dist/live"
 
-# EZIO_REF selects the ezio revision the seeder-builder stage compiles.
-# Defaults to Dockerfile.seeder's own default so the live image ships
-# the same ezio revision as the seeder pods it swarms with, unless a
-# caller deliberately overrides one or the other.
+# EZIO_REF selects the ezio revision built inside the live-build chroot
+# (see hooks/live/0400-build-ezio.hook.chroot). Defaults to
+# Dockerfile.seeder's own default so the live image ships the same ezio
+# revision as the seeder pods it swarms with, unless a caller
+# deliberately overrides one or the other.
 ezio_ref="${EZIO_REF:-v2.0.28}"
-ezio_builder_image="kezio-live-ezio-builder:local"
 
 log() {
 	printf '[build-live-image] %s\n' "$*" >&2
 }
 
 cleanup_includes() {
-	# config/includes.chroot is populated fresh on every run (the ezio
-	# binary and its shared-library closure, copied out of the builder
-	# image below) and is never committed - see .gitignore. Clearing it
-	# first keeps a stale binary from a previous EZIO_REF from lingering
-	# into this build.
+	# config/includes.chroot is populated fresh on every run (kezio-agent
+	# plus the ezio source-build inputs staged below) and is never
+	# committed - see .gitignore. Clearing it first keeps a stale
+	# EZIO_REF/patch set or a stale kezio-agent binary from a previous
+	# run from lingering into this build.
 	rm -rf "${live_dir}/config/includes.chroot"
 	mkdir -p "${live_dir}/config/includes.chroot"
 	cp -a "${live_dir}/config/includes.chroot.static/." "${live_dir}/config/includes.chroot/"
 }
 
-build_ezio() {
-	log "building ezio ${ezio_ref} (reusing Dockerfile.seeder's builder stage)"
-	docker build \
-		--target builder \
-		--build-arg "EZIO_REF=${ezio_ref}" \
-		-f "${repo_root}/Dockerfile.seeder" \
-		-t "${ezio_builder_image}" \
-		"${repo_root}"
-
-	# Dockerfile.seeder's builder stage already resolves ezio's full
-	# shared-library closure into /out (see that Dockerfile's own
-	# comment on why: apt-get install and ldd run against the same apt
-	# transaction there, which a second, independent apt-get install in
-	# this image would not guarantee). Reusing that /out tree, instead
-	# of re-deriving the closure here, is exactly the "reuse the seeder
-	# image build recipe's approach" this build follows.
-	local cid
-	cid="$(docker create "${ezio_builder_image}")"
-	trap 'docker rm -f "${cid}" >/dev/null 2>&1 || true' RETURN
-	docker cp "${cid}:/out/." "${live_dir}/config/includes.chroot/"
-	mkdir -p "${live_dir}/config/includes.chroot/usr/local/sbin"
-	docker cp "${cid}:/usr/local/sbin/ezio" "${live_dir}/config/includes.chroot/usr/local/sbin/ezio"
-	docker rm -f "${cid}" >/dev/null
-	trap - RETURN
+stage_ezio_build_inputs() {
+	# ezio is compiled *inside* the live-build chroot by
+	# hooks/live/0400-build-ezio.hook.chroot, not built in a separate
+	# Docker image and copied in: the live image's chroot is a full
+	# Debian sid system with its own glibc/libstdc++/etc that it is
+	# actively using while `lb build` assembles it, and staging a
+	# separately-built binary's shared-library closure over those system
+	# paths (the approach Dockerfile.seeder's runtime stage uses, which
+	# is fine for that image's empty distroless base) corrupts the
+	# chroot mid-extraction. Building against the chroot's own apt
+	# snapshot instead guarantees ABI consistency by construction, the
+	# same lesson Dockerfile.seeder's builder-stage comment already
+	# records for the seeder image.
+	#
+	# All this function does is hand that hook its inputs: the pinned
+	# ref and the patch set (patches/ezio/*.patch is otherwise only
+	# reachable from outside the chroot). Staged under includes.chroot so
+	# they land in the chroot before hooks run; the hook removes them
+	# again once ezio is built.
+	log "staging ezio ${ezio_ref} + patches for the in-chroot build"
+	local stage_dir="${live_dir}/config/includes.chroot/usr/local/src/kezio-ezio"
+	mkdir -p "${stage_dir}/patches"
+	printf '%s' "${ezio_ref}" >"${stage_dir}/ezio_ref"
+	cp "${repo_root}"/patches/ezio/*.patch "${stage_dir}/patches/"
 }
 
 build_agent() {
@@ -100,18 +100,26 @@ build_agent() {
 	mkdir -p "${out_dir}"
 
 	# A plain golang:1.26 container, not a Dockerfile target: cmd/agent
-	# has no build-time inputs beyond the module itself (unlike build_ezio,
-	# there is no upstream source tree or shared-library closure to
-	# resolve), so a one-off `go build` run is the whole job. GOCACHE/
-	# GOPATH point at a writable path inside the container since the
-	# repo itself is bind-mounted read-only - go build must never write
-	# into the source tree it is building from.
+	# has no build-time inputs beyond the module itself (unlike ezio,
+	# which is built from an upstream source tree inside the live-build
+	# chroot - see hooks/live/0400-build-ezio.hook.chroot), so a one-off
+	# `go build` run is the whole job. GOCACHE/GOPATH point at a writable
+	# path inside the container since the repo itself is bind-mounted
+	# read-only - go build must never write into the source tree it is
+	# building from. GIT_CONFIG_* silences `go build`'s VCS stamping step
+	# (it shells out to git) refusing to touch a checkout it does not
+	# own: the checkout's UID rarely matches this container's, root
+	# included since git's ownership check does not exempt root, and
+	# that mismatch varies by host/runner - setting safe.directory here
+	# rather than relying on the environment already having it keeps the
+	# build reproducible regardless.
 	docker run --rm \
 		-v "${repo_root}:/workspace:ro" \
 		-v "${out_dir}:/out" \
 		-w /workspace \
 		-e CGO_ENABLED=0 -e GOOS=linux -e GOARCH=amd64 \
 		-e GOCACHE=/tmp/go-build -e GOPATH=/tmp/go \
+		-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
 		golang:1.26 \
 		go build -o /out/kezio-agent ./cmd/agent
 }
@@ -124,6 +132,14 @@ set -eu
 apt-get update
 apt-get install -y --no-install-recommends live-build ca-certificates
 cd /work
+# lb build tracks completed stages under .build/ so a re-run after a
+# failure resumes instead of repeating finished stages - convenient for
+# live-build's own iterative workflow, but it means a config/package-list
+# edit made after a failed run silently would not take effect on the next
+# run (the stage that would pick it up is skipped as "already done").
+# This container is thrown away when the script exits either way, so
+# there is no resume to preserve - always start from a clean state.
+lb clean --purge
 lb config
 lb build
 INNER
@@ -171,7 +187,7 @@ collect_artifacts() {
 main() {
 	mkdir -p "${dist_dir}"
 	cleanup_includes
-	build_ezio
+	stage_ezio_build_inputs
 	build_agent
 	run_live_build
 	collect_artifacts

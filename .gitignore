@@ -38,10 +38,11 @@ go.work
 bin/
 /dist/
 
-# hack/live-image/build.sh populates this with the ezio binary and its
-# shared-library closure at build time (see the script's build_ezio /
-# cleanup_includes functions) - never committed, only the static
-# includes.chroot.static tree is.
+# hack/live-image/build.sh populates this with the kezio-agent binary and
+# the ezio source-build inputs (pinned ref + patches, consumed by
+# hooks/live/0400-build-ezio.hook.chroot) at build time (see the script's
+# stage_ezio_build_inputs / build_agent / cleanup_includes functions) -
+# never committed, only the static includes.chroot.static tree is.
 /hack/live-image/config/includes.chroot/
 # live-build's own working/output directories, created by `lb build`.
 /hack/live-image/binary/
@@ -51,3 +52,23 @@ bin/
 /hack/live-image/config/chroot*
 /hack/live-image/*.iso
 /hack/live-image/*.log
+# `lb config` (invoked by run_live_build) records the exact configuration
+# it resolved and symlinks in live-build's stock hooks/package lists
+# alongside kezio's own - both are regenerated on every run, never
+# hand-authored, and only kezio's own config/*.chroot files under
+# hooks/live, hooks/normal being absent, and package-lists are meant to
+# be committed.
+/hack/live-image/config/binary
+/hack/live-image/config/bootstrap
+/hack/live-image/config/common
+/hack/live-image/config/source
+/hack/live-image/config/package-lists/live.list.chroot
+/hack/live-image/config/hooks/live/00*.hook.chroot
+/hack/live-image/config/hooks/normal/
+# `lb build` also drops its own manifests (installed-package lists,
+# file/content listings, timestamps) as loose files directly under
+# hack/live-image/ once a build reaches the chroot/binary/source stages -
+# regenerated every run, never hand-authored.
+/hack/live-image/chroot.*
+/hack/live-image/binary.*
+/hack/live-image/live-image-*
