@@ -1,0 +1,22 @@
+# Byte-identical copy of config/agentserver/service.yaml; see
+# boot-server-service.yaml in this directory for why this overlay keeps
+# a local copy instead of referencing the original by relative path.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kezio-agent-server
+  namespace: kezio-system
+  labels:
+    app.kubernetes.io/name: kezio
+    app.kubernetes.io/component: agent-server
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  type: ClusterIP
+  selector:
+    control-plane: controller-manager
+    app.kubernetes.io/name: kezio
+  ports:
+    - name: agent-http
+      port: 8091
+      targetPort: agent-http
+      protocol: TCP

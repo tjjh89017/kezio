@@ -1,0 +1,41 @@
+# Overlay used only by the e2e boot-path stage (test/e2e's "Boot path
+# (control-plane wiring)" Context, gated by E2E_BOOT_PATH=true - see that
+# file and .github/workflows/test-e2e.yml's "boot-path" job). It
+# aggregates the base deployment plus the two standalone-Service pieces
+# config/bootserver and config/agentserver each normally leave for a
+# cluster operator to opt into by hand, so both the boot config server
+# and the agent registration server become reachable Services in one
+# apply - mirroring config/e2e-image-path's shape for config/image-service
+# and config/seeder.
+#
+# It does not compose config/bootserver or config/agentserver directly
+# (`resources: [../bootserver, ../agentserver]`): both of those already
+# list ../default as one of their own resources, and kustomize cannot
+# merge two kustomizations that each independently pull in the same base
+# - it would error on the duplicate GVK+name resources ../default
+# produces (namespace, CRDs, RBAC, the manager Deployment itself). Instead
+# this overlay pulls in ../default exactly once, plus local copies of the
+# Service and patch manifests bootserver and agentserver each ship (see
+# boot-server-service.yaml's header comment for why they are local copies
+# rather than relative-path references to the originals).
+#
+# BOOT_SERVER_ADDR, BOOT_ARTIFACTS_DIR, BOOT_SERVER_URL, AGENT_SERVER_ADDR,
+# and DEPLOYER are NOT set here (they need per-run values kustomize's
+# static YAML cannot express, the same reasoning config/e2e-image-path
+# uses for INGEST_IMAGE/SEEDER_*) - the e2e suite sets them with
+# `kubectl set env` after applying this overlay; see the "Boot path
+# (control-plane wiring)" Context's BeforeAll.
+resources:
+  - ../default
+  - boot-server-service.yaml
+  - agent-server-service.yaml
+
+patches:
+  - path: manager-boot-port-patch.yaml
+    target:
+      kind: Deployment
+      name: kezio-controller-manager
+  - path: manager-agent-port-patch.yaml
+    target:
+      kind: Deployment
+      name: kezio-controller-manager

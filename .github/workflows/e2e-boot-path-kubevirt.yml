@@ -1,0 +1,489 @@
+name: E2E Boot Path (KubeVirt VM)
+
+# Drives a real UEFI-native-PXE boot of a KubeVirt VirtualMachine through
+# kezio-bootd's proxyDHCP/TFTP responder, the boot config server, and a
+# real kezio-agent inside the live boot image - the full flow
+# test-e2e.yml's "boot-path" job only simulates with a plain HTTP client
+# (see that job's own doc comment and test/e2e/e2e_boot_path_test.go).
+# This asserts nothing more than that job already asserts about the
+# Machine's end state (status.hardware populated, status.state reaches
+# Available) - what it adds is that the state got there through the real
+# proxyDHCP + TFTP + GRUB + HTTP kernel/initrd + live-boot squashfs +
+# kezio-agent chain, on a Multus bridge network, instead of a simulated
+# registration call.
+#
+# workflow_dispatch only - deliberately NOT on every push or pull
+# request. Reasons, honestly:
+#   - PXE over a Multus bridge network inside a nested KubeVirt VM is
+#     meaningfully riskier than the KubeVirt-in-k3s-in-GitHub-Actions
+#     topology alone (which is proven elsewhere - see tmp/vrouter-operator
+#     referenced by this project's design doc): it adds a real L2
+#     broadcast domain, a real UEFI firmware PXE ROM, TFTP, GRUB, and a
+#     multi-minute live boot, any one of which can flake for reasons that
+#     have nothing to do with a given pull request's actual change.
+#   - A flaky job gating every PR trains reviewers to ignore red checks,
+#     which is worse than not having the check at all. Keeping this
+#     separate means test-e2e.yml's lanes (fast, image-path, boot-path)
+#     stay the trustworthy, always-on signal, and this job is an
+#     on-demand, deeper confidence check - run it before a release, after
+#     touching internal/bootd or the live-image build, or when
+#     deliberately validating this exact flow.
+#   - This job has not yet been proven green in CI (no prior successful
+#     run to point to at the time this workflow was added) - see the
+#     commit/PR that introduced it for the first triggered run's outcome
+#     and any follow-up fixes.
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  # Needed to `gh run download` build-live-image.yml's artifacts (see
+  # the "Source the live boot artifacts" step) from this same
+  # repository's Actions history.
+  actions: read
+
+env:
+  # Pin every version this job depends on (PLAN's CI notes call this out
+  # explicitly for the KubeVirt topology) - bump deliberately, not as a
+  # side effect of an unrelated change.
+  K3S_VERSION: "v1.33.13+k3s1"
+  CERT_MANAGER_VERSION: "v1.16.2"
+  KUBEVIRT_VERSION: "v1.4.0"
+  CDI_VERSION: "v1.60.3"
+  MULTUS_VERSION: "v4.1.0"
+
+  # The provisioning L2 segment: a Linux bridge on the runner's host
+  # network namespace, attached to both kezio-bootd's Pod and the target
+  # VM's NIC through Multus. It carries no route to any other network -
+  # see config/bootd's networkattachmentdefinition.example.yaml for why
+  # that is fine for proxyDHCP/TFTP traffic.
+  PROVISIONING_BRIDGE: kezio-prov0
+  PROVISIONING_BOOTD_IP: 192.0.2.1/24
+  TARGET_VM_MAC: "52:54:00:ke:zi:01"
+  TARGET_VM_DISK_SERIAL: "KEZIOE2EVMDISK01"
+
+jobs:
+  boot-path-kubevirt:
+    name: Boot a KubeVirt VM through the real PXE/GRUB/agent chain
+    runs-on: ubuntu-latest
+    # PXE discovery, TFTP, the live kernel/initrd HTTP fetch, and the
+    # squashfs live-boot are each on the order of tens of seconds to a
+    # few minutes; budget generously for a first PXE cycle that may need
+    # firmware retries, plus the (already slow, see build-live-image.yml)
+    # live image artifact download.
+    timeout-minutes: 60
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Fail fast unless /dev/kvm is usable
+        # Never fall back to TCG (software) emulation: it hides real PXE
+        # timing problems instead of surfacing them, and a KubeVirt VM
+        # under TCG is far too slow to net boot within any timeout this
+        # job could reasonably set.
+        run: |
+          set -euo pipefail
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm does not exist on this runner; KubeVirt VMs need hardware virtualization." >&2
+            exit 1
+          fi
+          sudo usermod -aG kvm "$(whoami)"
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - name: Raise inotify limits
+        # A known KubeVirt-in-CI failure mode: virt-handler and the
+        # kubelet both watch a large number of files per running VM.
+        run: |
+          sudo sysctl -w fs.inotify.max_user_watches=1048576
+          sudo sysctl -w fs.inotify.max_user_instances=8192
+
+      - name: Resource check (fail fast if the runner is under-resourced)
+        run: |
+          set -euo pipefail
+          echo "===== CPU ====="
+          nproc
+          echo "===== Memory ====="
+          free -h
+          echo "===== Disk ====="
+          df -h
+
+          cpus="$(nproc)"
+          mem_mb="$(free -m | awk '/^Mem:/{print $2}')"
+
+          # Higher floor than test-e2e.yml's lanes: this job additionally
+          # runs KubeVirt/CDI's control plane and one live-booted VM
+          # (OVMF + initramfs + kezio-agent, see the design doc's "runner
+          # resources" table) on top of everything those lanes need.
+          if [ "$cpus" -lt 4 ]; then
+            echo "::error::Runner has only ${cpus} CPU(s); the KubeVirt boot-path stage needs at least 4." >&2
+            exit 1
+          fi
+          if [ "$mem_mb" -lt 14000 ]; then
+            echo "::error::Runner has only ${mem_mb} MiB RAM; the KubeVirt boot-path stage needs at least 14000 MiB." >&2
+            exit 1
+          fi
+
+      # ---------------------------------------------------------------
+      # Boot artifacts: kernel/initrd/squashfs (from the live-image
+      # build) and shimx64.efi/grubx64.efi (from Debian/Ubuntu's signed
+      # packages). Both are sourced, never built in this job - a from-
+      # source `lb build` run (build-live-image.yml) takes up to 90
+      # minutes on its own, which this job's already-generous 60 minute
+      # budget cannot also absorb. See this step's own comments for how
+      # each artifact is actually obtained.
+      # ---------------------------------------------------------------
+
+      - name: Source the live boot artifacts (kernel/initrd/squashfs)
+        # Downloads the most recent successful build-live-image.yml run's
+        # artifact instead of rebuilding it here - see the job doc
+        # comment. If no successful run exists yet (for example, the
+        # very first time this workflow runs on a fresh clone of the
+        # repository), this step fails with an actionable message rather
+        # than silently doing nothing: trigger build-live-image.yml
+        # (workflow_dispatch) once, then re-run this job.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id="$(gh run list --repo "${GITHUB_REPOSITORY}" --workflow build-live-image.yml \
+            --status success --limit 1 --json databaseId --jq '.[0].databaseId')"
+          if [ -z "${run_id}" ]; then
+            echo "::error::No successful build-live-image.yml run found to download artifacts from. Trigger that workflow once, then re-run this job." >&2
+            exit 1
+          fi
+          echo "Downloading live boot artifacts from build-live-image.yml run ${run_id}"
+          mkdir -p dist/live
+          gh run download "${run_id}" --repo "${GITHUB_REPOSITORY}" -n kezio-live-image -D dist/live
+          ls -la dist/live
+
+      - name: Source shimx64.efi/grubx64.efi from signed packages
+        # kezio never builds its own shim or GRUB binary: Secure Boot's
+        # entire point is that the shim is signed by a chain the
+        # firmware already trusts, which only a distribution's own
+        # signed package can provide. This runner's own Ubuntu apt
+        # sources already carry both, so `apt-get download` (not
+        # `apt-get install` - this job only needs the two .efi payloads,
+        # not to actually install a bootloader on the runner) is enough,
+        # with no extra repository to add. No Secure Boot happens in
+        # this CI VM (OVMF without secure-boot: true, per this job's VM
+        # manifest) - see PLAN's boot-flow section for why a signed shim
+        # still matters in production even though this stage does not
+        # exercise Secure Boot itself: keeping the sourced artifact the
+        # same shape production uses is the point, not signature
+        # verification here.
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/tftp" "${{ runner.temp }}/debs"
+          cd "${{ runner.temp }}/debs"
+          apt-get download shim-signed grub-efi-amd64-signed
+          for deb in *.deb; do
+            dpkg -x "${deb}" extracted
+          done
+          shim_src="$(find extracted -iname 'shimx64.efi*' -print -quit)"
+          grub_src="$(find extracted -iname 'grubx64.efi*' -print -quit)"
+          if [ -z "${shim_src}" ] || [ -z "${grub_src}" ]; then
+            echo "::error::Could not find shimx64.efi / grubx64.efi under the extracted shim-signed/grub-efi-amd64-signed packages; package layout may have changed." >&2
+            find extracted -iname '*.efi*'
+            exit 1
+          fi
+          # internal/bootd.ShimFilename / GrubFilename are fixed names
+          # ("shimx64.efi", "grubx64.efi") with no ".signed" suffix -
+          # the packages ship them with one, so normalize on copy.
+          cp "${shim_src}" "${{ runner.temp }}/tftp/shimx64.efi"
+          cp "${grub_src}" "${{ runner.temp }}/tftp/grubx64.efi"
+          ls -la "${{ runner.temp }}/tftp"
+
+      - name: Stage boot artifacts as hostPath sources
+        # A single-node k3s cluster's node IS this runner, so a hostPath
+        # volume pointing at a runner-local directory is a legitimate,
+        # simple way to hand real files to the controller-manager
+        # (BOOT_ARTIFACTS_DIR) and kezio-bootd (its TFTP directory)
+        # Deployments - no PVC provisioner, initContainer, or ConfigMap
+        # size limit to work around, unlike a real multi-node deployment
+        # (see config/bootd/README.md's "Populate the TFTP artifacts
+        # volume" step, which this automates for CI).
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /opt/kezio-boot-artifacts /opt/kezio-tftp
+          sudo cp dist/live/vmlinuz dist/live/initrd.img dist/live/filesystem.squashfs /opt/kezio-boot-artifacts/
+          sudo cp "${{ runner.temp }}/tftp/shimx64.efi" "${{ runner.temp }}/tftp/grubx64.efi" /opt/kezio-tftp/
+          sudo chmod -R a+rX /opt/kezio-boot-artifacts /opt/kezio-tftp
+          ls -la /opt/kezio-boot-artifacts /opt/kezio-tftp
+
+      - name: Create the provisioning bridge
+        run: |
+          set -euo pipefail
+          sudo ip link add "${PROVISIONING_BRIDGE}" type bridge
+          sudo ip addr add "${PROVISIONING_BOOTD_IP}" dev "${PROVISIONING_BRIDGE}"
+          sudo ip link set "${PROVISIONING_BRIDGE}" up
+
+      - name: Install k3s (pinned)
+        run: |
+          set -euo pipefail
+          curl -sfL https://get.k3s.io \
+            | INSTALL_K3S_VERSION="${K3S_VERSION}" sh -s - --write-kubeconfig-mode 644
+          echo "KUBECONFIG=/etc/rancher/k3s/k3s.yaml" >> "$GITHUB_ENV"
+          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+          kubectl wait --for=condition=Ready node --all --timeout=120s
+          kubectl get nodes -o wide
+
+      - name: Install cert-manager (pinned)
+        # Pinned here, unlike test/utils.InstallCertManager's "always
+        # latest" (used by the Go e2e suite's other lanes) - this
+        # standalone workflow does not go through that helper, so it
+        # follows PLAN's general CI guidance of pinning every version
+        # this job depends on.
+        run: |
+          set -euo pipefail
+          kubectl apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"
+          for d in cert-manager cert-manager-webhook cert-manager-cainjector; do
+            kubectl wait deployment.apps/"${d}" --for condition=Available --namespace cert-manager --timeout=180s
+          done
+
+      - name: Install KubeVirt (pinned)
+        run: |
+          set -euo pipefail
+          kubectl apply -f "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-operator.yaml"
+          kubectl apply -f "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-cr.yaml"
+          kubectl -n kubevirt wait kubevirt kubevirt --for=condition=Available --timeout=300s
+
+      - name: Install virtctl
+        run: |
+          set -euo pipefail
+          curl -sfL -o /usr/local/bin/virtctl \
+            "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/virtctl-${KUBEVIRT_VERSION}-linux-amd64"
+          chmod +x /usr/local/bin/virtctl
+
+      - name: Install CDI (pinned)
+        run: |
+          set -euo pipefail
+          kubectl apply -f "https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_VERSION}/cdi-operator.yaml"
+          kubectl apply -f "https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_VERSION}/cdi-cr.yaml"
+          kubectl wait cdi cdi --for=condition=Available --timeout=300s
+
+      - name: Install Multus (pinned)
+        run: |
+          set -euo pipefail
+          kubectl apply -f "https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/${MULTUS_VERSION}/deployments/multus-daemonset-thick.yml"
+          kubectl -n kube-system rollout status daemonset/kube-multus-ds --timeout=180s
+
+      - name: Create the provisioning NetworkAttachmentDefinition
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: k8s.cni.cncf.io/v1
+          kind: NetworkAttachmentDefinition
+          metadata:
+            name: kezio-boot-network
+            namespace: kezio-system
+          spec:
+            config: |
+              {
+                "cniVersion": "0.3.1",
+                "type": "bridge",
+                "bridge": "${PROVISIONING_BRIDGE}",
+                "ipam": {}
+              }
+          EOF
+
+      - name: Build and import the manager image
+        run: |
+          set -euo pipefail
+          go mod tidy
+          make docker-build IMG=example.com/kezio:e2e-boot-path
+          docker save example.com/kezio:e2e-boot-path | sudo k3s ctr images import -
+
+      - name: Build and import the bootd image
+        run: |
+          set -euo pipefail
+          make docker-build-bootd BOOTD_IMG=example.com/kezio-bootd:e2e-boot-path
+          docker save example.com/kezio-bootd:e2e-boot-path | sudo k3s ctr images import -
+
+      - name: Deploy CRDs and the controller-manager
+        run: |
+          set -euo pipefail
+          make install
+          make deploy IMG=example.com/kezio:e2e-boot-path
+          # config/default's own kustomization creates the kezio-system
+          # namespace as part of `make deploy` above; only the security
+          # label is this step's own responsibility.
+          kubectl label --overwrite ns kezio-system pod-security.kubernetes.io/enforce=restricted
+          kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
+
+      - name: Deploy the boot config and agent registration Services, wire real artifacts
+        run: |
+          set -euo pipefail
+          kubectl apply -k config/e2e-boot-path
+          kubectl -n kezio-system set env deployment/kezio-controller-manager \
+            BOOT_SERVER_ADDR=:8090 \
+            BOOT_ARTIFACTS_DIR=/boot-artifacts \
+            BOOT_SERVER_URL="http://kezio-boot-server.kezio-system.svc.cluster.local:8090" \
+            AGENT_SERVER_ADDR=:8091 \
+            DEPLOYER=agent
+          # Mount the real hostPath-staged kernel/initrd/squashfs at
+          # BOOT_ARTIFACTS_DIR - config/e2e-boot-path's own overlay
+          # deliberately leaves BOOT_ARTIFACTS_DIR pointed at an
+          # unpopulated path (see its Makefile target's doc comment)
+          # since the lighter, always-on boot-path lane never fetches
+          # /boot/artifacts/... This job does, so it adds the volume
+          # itself with a JSON patch instead of a third kustomize
+          # overlay.
+          kubectl -n kezio-system patch deployment/kezio-controller-manager --type=json -p='[
+            {"op":"add","path":"/spec/template/spec/volumes/-","value":{"name":"boot-artifacts","hostPath":{"path":"/opt/kezio-boot-artifacts","type":"Directory"}}},
+            {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-","value":{"name":"boot-artifacts","mountPath":"/boot-artifacts","readOnly":true}}
+          ]'
+          kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
+
+      - name: Deploy kezio-bootd on the provisioning bridge
+        run: |
+          set -euo pipefail
+          cd config/bootd && ../../bin/kustomize edit set image bootd=example.com/kezio-bootd:e2e-boot-path
+          cd ../..
+          kubectl apply -k config/bootd
+          kubectl -n kezio-system set env deployment/kezio-bootd BOOTD_SERVER_IP="${PROVISIONING_BOOTD_IP%%/*}"
+          kubectl -n kezio-system patch deployment/kezio-bootd --type=json -p='[
+            {"op":"add","path":"/spec/template/metadata/annotations","value":{"k8s.v1.cni.cncf.io/networks":"kezio-boot-network"}},
+            {"op":"replace","path":"/spec/template/spec/volumes/0","value":{"name":"tftp","hostPath":{"path":"/opt/kezio-tftp","type":"Directory"}}}
+          ]'
+          kubectl rollout status deployment/kezio-bootd -n kezio-system --timeout=180s
+
+      - name: Create the Machine CR for the target VM
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: kezio.kojuro.date/v1alpha1
+          kind: Machine
+          metadata:
+            name: e2e-boot-path-vm
+            namespace: kezio-system
+          spec:
+            bmc:
+              address: redfish://198.51.100.30/redfish/v1/Systems/1
+              credentialsSecretRef:
+                name: e2e-boot-path-vm-bmc
+            bootMACAddress: "${TARGET_VM_MAC}"
+            online: true
+            targetDisk:
+              serialNumber: "${TARGET_VM_DISK_SERIAL}"
+          EOF
+
+      - name: Create and start the target KubeVirt VirtualMachine
+        # OVMF UEFI firmware, no Secure Boot (secureBoot: false - shim is
+        # sourced as a real signed binary anyway, see above, but nothing
+        # here enrolls the firmware's Secure Boot keys). Network boot
+        # first (interface bootOrder 1), then the blank data disk
+        # (bootOrder 2) as the local-disk fallback GRUB's "exit" hands
+        # control back to. The disk's serial is set explicitly so it
+        # matches TARGET_VM_DISK_SERIAL / the Machine's targetDisk hint,
+        # the same "KubeVirt sets a disk serial the targetDisk hint can
+        # match" property PLAN's test topology calls for.
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: kubevirt.io/v1
+          kind: VirtualMachine
+          metadata:
+            name: e2e-boot-path-vm
+            namespace: kezio-system
+          spec:
+            running: true
+            template:
+              metadata:
+                labels:
+                  kubevirt.io/vm: e2e-boot-path-vm
+              spec:
+                domain:
+                  cpu:
+                    cores: 1
+                  resources:
+                    requests:
+                      memory: 2Gi
+                  firmware:
+                    bootloader:
+                      efi:
+                        secureBoot: false
+                  devices:
+                    interfaces:
+                      - name: provisioning
+                        macAddress: "${TARGET_VM_MAC}"
+                        bridge: {}
+                        bootOrder: 1
+                    disks:
+                      - name: data
+                        serial: "${TARGET_VM_DISK_SERIAL}"
+                        bootOrder: 2
+                        disk:
+                          bus: virtio
+                networks:
+                  - name: provisioning
+                    multus:
+                      networkName: kezio-boot-network
+                volumes:
+                  - name: data
+                    emptyDisk:
+                      capacity: 2Gi
+          EOF
+          kubectl wait vmi/e2e-boot-path-vm -n kezio-system --for=condition=Ready --timeout=180s
+
+      - name: Wait for the Machine to reach Available with reported hardware
+        # Generous but bounded: PXE discovery + TFTP + the kernel/initrd
+        # HTTP fetch + the live-boot squashfs fetch + kezio-agent startup
+        # is a multi-minute chain end to end, well beyond a simulated
+        # registration's near-instant round trip (contrast
+        # test-e2e.yml's boot-path job).
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + 1200 ))
+          while true; do
+            state="$(kubectl get machine e2e-boot-path-vm -n kezio-system -o jsonpath='{.status.state}' || true)"
+            echo "$(date -Is) Machine state: ${state:-<none>}"
+            if [ "${state}" = "Available" ]; then
+              break
+            fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::Machine e2e-boot-path-vm did not reach Available within the timeout." >&2
+              exit 1
+            fi
+            sleep 10
+          done
+          kubectl get machine e2e-boot-path-vm -n kezio-system -o yaml
+          disks="$(kubectl get machine e2e-boot-path-vm -n kezio-system -o jsonpath='{.status.hardware.disks[*].serialNumber}')"
+          case "${disks}" in
+            *"${TARGET_VM_DISK_SERIAL}"*) ;;
+            *)
+              echo "::error::expected reported disk serial ${TARGET_VM_DISK_SERIAL} in status.hardware.disks, got: ${disks}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          echo "===== nodes ====="
+          kubectl get nodes -o wide
+          echo "===== kezio-system pods ====="
+          kubectl get pods -n kezio-system -o wide
+          echo "===== controller-manager logs ====="
+          kubectl -n kezio-system logs deployment/kezio-controller-manager --all-containers --tail=1000
+          echo "===== bootd logs ====="
+          kubectl -n kezio-system logs deployment/kezio-bootd --all-containers --tail=1000
+          echo "===== VirtualMachine / VMI ====="
+          kubectl get vm,vmi -n kezio-system -o yaml
+          echo "===== virt-launcher pod describe ====="
+          kubectl describe pod -n kezio-system -l kubevirt.io/vm=e2e-boot-path-vm
+          echo "===== VM console (last output) ====="
+          timeout 20 virtctl console e2e-boot-path-vm -n kezio-system || true
+          echo "===== Machine CR ====="
+          kubectl get machine e2e-boot-path-vm -n kezio-system -o yaml
+          echo "===== events ====="
+          kubectl get events -n kezio-system --sort-by=.lastTimestamp

@@ -287,3 +287,91 @@ jobs:
           kubectl get images -A -o wide
           echo "===== events ====="
           kubectl get events -n kezio-system --sort-by=.lastTimestamp
+
+  test-e2e-boot-path:
+    # Boot-path lane: test/e2e's "Boot path (control-plane wiring)"
+    # Context (test/e2e/e2e_boot_path_test.go), gated on E2E_BOOT_PATH=true
+    # below. It proves the real boot config server (internal/bootserver)
+    # and agent registration server (internal/agentserver) wiring - a
+    # real minted single-use token, a real Machine status update - by
+    # standing in a plain HTTP client for kezio-agent instead of driving
+    # an actual PXE boot. It does NOT start a VM, does NOT touch
+    # kezio-bootd's proxyDHCP/TFTP responder, and does NOT fetch a real
+    # kernel/initrd/squashfs: those need a NIC on a real L2 broadcast
+    # domain and a UEFI firmware actually executing GRUB, which a
+    # GitHub-hosted runner's pod network cannot provide - see
+    # e2e-boot-path-kubevirt.yml (workflow_dispatch only, not run here)
+    # for that heavier, separable stage and the realism assessment behind
+    # keeping it out of this always-on lane.
+    name: Run boot-path against k3s
+    runs-on: ubuntu-latest
+    # Small, in-process HTTP servers and one reconciler cycle per phase -
+    # no image builds beyond the manager itself, no real network boot.
+    # Generous headroom over the fast lane's 30m only because it shares
+    # this file's resource-check/k3s-install boilerplate, not because the
+    # boot-path specs themselves are slow.
+    timeout-minutes: 30
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Resource check (fail fast if the runner is under-resourced)
+        run: |
+          set -euo pipefail
+          echo "===== CPU ====="
+          nproc
+          echo "===== Memory ====="
+          free -h
+          echo "===== Disk ====="
+          df -h
+
+          cpus="$(nproc)"
+          mem_mb="$(free -m | awk '/^Mem:/{print $2}')"
+
+          # Same floor as the fast lane's own resource-check step (see
+          # its comment): this lane is no heavier than that one.
+          if [ "$cpus" -lt 2 ]; then
+            echo "::error::Runner has only ${cpus} CPU(s); kezio e2e needs at least 2." >&2
+            exit 1
+          fi
+          if [ "$mem_mb" -lt 6000 ]; then
+            echo "::error::Runner has only ${mem_mb} MiB RAM; kezio e2e needs at least 6000 MiB." >&2
+            exit 1
+          fi
+
+      - name: Install k3s (pinned)
+        run: |
+          set -euo pipefail
+          curl -sfL https://get.k3s.io \
+            | INSTALL_K3S_VERSION="${K3S_VERSION}" sh -s - --write-kubeconfig-mode 644
+          echo "KUBECONFIG=/etc/rancher/k3s/k3s.yaml" >> "$GITHUB_ENV"
+          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+          kubectl wait --for=condition=Ready node --all --timeout=120s
+          kubectl get nodes -o wide
+
+      - name: Running Test e2e (boot-path)
+        run: |
+          set -euo pipefail
+          go mod tidy
+          make manifests generate fmt vet
+          E2E_BOOT_PATH=true E2E_CLUSTER=k3s go test ./test/e2e/ -v -ginkgo.v -timeout 20m
+
+      - name: Dump operator logs on failure
+        if: failure()
+        run: |
+          set +e
+          echo "===== kezio-system pods ====="
+          kubectl get pods -n kezio-system -o wide
+          echo "===== controller-manager logs ====="
+          kubectl -n kezio-system logs deployment/kezio-controller-manager --all-containers --tail=500
+          echo "===== kezio-boot-server / kezio-agent-server Services ====="
+          kubectl get svc -n kezio-system kezio-boot-server kezio-agent-server -o wide
+          echo "===== boot-path Machine ====="
+          kubectl get machine e2e-boot-node-01 -n kezio-system -o yaml
+          echo "===== events ====="
+          kubectl get events -n kezio-system --sort-by=.lastTimestamp

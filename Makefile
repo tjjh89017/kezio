@@ -358,6 +358,33 @@ deploy-image-path: manifests kustomize ## Deploy image-service+seeder+store and 
 		SEEDER_SERVICE_NAMESPACE=kezio-system \
 		SEEDER_SERVICE_NAME=kezio-ezio-seeder
 
+# deploy-boot-path applies config/e2e-boot-path (config/default plus the
+# boot config server's and agent registration server's Services - see
+# that overlay's README-style comment) and then wires BOOT_SERVER_ADDR/
+# BOOT_ARTIFACTS_DIR/BOOT_SERVER_URL/AGENT_SERVER_ADDR/DEPLOYER onto the
+# already-deployed controller-manager with `kubectl set env`, mirroring
+# deploy-image-path's shape. Used only by the e2e boot-path stage
+# (test/e2e's "Boot path (control-plane wiring)" Context); run `deploy`
+# first so config/default's CRDs/RBAC/webhook/manager exist to add these
+# resources on top of.
+#
+# BOOT_ARTIFACTS_DIR points at a directory this stage never populates:
+# the control-plane-wiring test only exercises GET /boot/grub.cfg-<mac>
+# and POST /agent/register, never GET /boot/artifacts/..., so no real
+# kernel/initrd/squashfs need to exist on the manager container's file
+# system for this stage to pass (see internal/bootserver.artifactsHandler,
+# which only stats a file when a request for it actually arrives).
+.PHONY: deploy-boot-path
+deploy-boot-path: manifests kustomize ## Deploy the boot config + agent registration Services and wire DEPLOYER=agent onto the controller-manager (e2e boot-path stage only).
+	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
+	$(KUSTOMIZE) build config/e2e-boot-path | $(KUBECTL) apply -f -
+	$(KUBECTL) -n kezio-system set env deployment/kezio-controller-manager \
+		BOOT_SERVER_ADDR=:8090 \
+		BOOT_ARTIFACTS_DIR=/tmp \
+		BOOT_SERVER_URL=http://kezio-boot-server.kezio-system.svc.cluster.local:8090 \
+		AGENT_SERVER_ADDR=:8091 \
+		DEPLOYER=agent
+
 ##@ Dependencies
 
 ## Location to install dependencies to

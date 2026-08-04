@@ -1,0 +1,28 @@
+# Byte-identical copy of config/bootserver/service.yaml. Kustomize's
+# default load restriction (LoadRestrictionsRootOnly) forbids a
+# `resources:` entry that names a plain YAML file (as opposed to a
+# sub-kustomization directory, which config/e2e-image-path's ../image-service
+# and ../seeder entries are) outside this kustomization's own root
+# directory - `kustomize build config/e2e-boot-path` fails accumulating
+# `../bootserver/service.yaml` for exactly this reason. A local copy is
+# the least-surprising fix; see config/bootserver/service.yaml for the
+# annotated original and keep the two in sync if that file changes.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kezio-boot-server
+  namespace: kezio-system
+  labels:
+    app.kubernetes.io/name: kezio
+    app.kubernetes.io/component: boot-server
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  type: ClusterIP
+  selector:
+    control-plane: controller-manager
+    app.kubernetes.io/name: kezio
+  ports:
+    - name: boot-http
+      port: 8090
+      targetPort: boot-http
+      protocol: TCP
