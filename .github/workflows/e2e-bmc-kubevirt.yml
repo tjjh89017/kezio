@@ -1,0 +1,894 @@
+name: E2E BMC-Driven Deploy (KubeVirtBMC + KubeVirt VM)
+
+# The BMC proof: everywhere e2e-deploy-kubevirt.yml relies on the target
+# VM's own native KubeVirt power (the harness sets `running: true`, and
+# the post-deploy reboot re-enters firmware on its own), this workflow
+# instead gives the VM a Redfish endpoint through KubeVirtBMC
+# (https://github.com/kubevirtbmc/kubevirtbmc's VirtualMachineBMC CRD)
+# and leaves the VM powered off. kezio's own Redfish driver
+# (internal/bmc/redfish) is what has to power it on: the deployer's
+# Register step (internal/deployer/agent.go) calls SetOneTimePXEBoot then
+# PowerOn against that endpoint whenever a Machine names a BMC, and the
+# same driver answers a real server's BMC over the wire - this workflow
+# is the proof that code path actually drives a VM through KubeVirtBMC,
+# not a mock. It layers onto e2e-deploy-kubevirt.yml's setup (same
+# cluster stack, same real ingest/seed/deploy chain, same three-layer
+# verify): see that workflow's header for the parts this one does not
+# repeat documenting.
+#
+# What changes versus e2e-deploy-kubevirt.yml:
+#   - KubeVirtBMC is installed alongside KubeVirt/CDI/Multus.
+#   - The target VirtualMachine is created with `running: false` and is
+#     never started by this workflow - no `virtctl start`, no
+#     `running: true`. Only kezio's controller is allowed to power it
+#     on, through the BMC.
+#   - The Machine's spec.bmc.address points at the VirtualMachineBMC's
+#     Redfish Service (see the "Create the KubeVirtBMC ... " step for
+#     the exact resource shape), with credentials from a Secret shared
+#     with the VirtualMachineBMC's own authSecretRef (both expect
+#     "username"/"password" keys - see internal/bmc/credentials.go and
+#     KubeVirtBMC's own bmcUserKey/bmcPasswordKey).
+#   - Before creating the Machine, the workflow asserts the VM is off
+#     (Stopped, no VMI). After the Machine reaches Provisioned, it
+#     drives a second, independent BMC power cycle by flipping
+#     spec.online off then on (internal/controller/machine_controller.go's
+#     reconcilePower calls dep.PowerOff/dep.PowerOn, which go through the
+#     BMC exactly like Register does) and asserts the VM followed along
+#     - proving the steady-state power path is BMC-driven too, not just
+#     the initial PXE boot.
+#
+# workflow_dispatch only, release-gated exactly like
+# e2e-deploy-kubevirt.yml (see that workflow's header for why: it cannot
+# reach a live boot without a published boot-artifacts release), plus
+# this workflow adds a second, independent gate: it needs a published
+# KubeVirtBMC release whose install manifest and image tags match
+# KUBEVIRTBMC_VERSION below. Both gates are pinned, not auto-discovered,
+# so a version bump on either side is a deliberate edit to this file.
+# Trigger it by hand after touching internal/bmc, internal/deployer's BMC
+# wiring, or when deliberately validating the BMC-driven power/PXE path
+# end to end. Expect early runs to need iteration: this is the heaviest
+# lane in the repository (every cost e2e-deploy-kubevirt.yml pays, plus
+# KubeVirtBMC's own control plane and webhook, plus the extra power
+# cycle), and it is exercising an integration (kezio's Redfish driver
+# against KubeVirtBMC's Redfish implementation) that has never run
+# end-to-end before this workflow existed.
+on:
+  workflow_dispatch:
+    inputs:
+      boot_artifacts_version:
+        description: >-
+          Boot-artifacts release tag to boot (see
+          .github/workflows/build-live-image.yml). Empty uses the
+          repository's latest published release. Publishing a release is
+          a maintainer action (a "v*" tag push, or a manual
+          build-live-image.yml dispatch with publish=true); this input
+          only selects among what is already published.
+        required: false
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Pinned the same way e2e-deploy-kubevirt.yml pins them - bump
+  # deliberately, not as a side effect of an unrelated change.
+  K3S_VERSION: "v1.33.13+k3s1"
+  CERT_MANAGER_VERSION: "v1.16.2"
+  KUBEVIRT_VERSION: "v1.4.0"
+  CDI_VERSION: "v1.60.3"
+  MULTUS_VERSION: "v4.1.0"
+  # KubeVirtBMC ships one release asset, an "install everything" manifest
+  # (CRD, RBAC, cert-manager Certificate/Issuer, webhook, controller
+  # Deployment) built by its own tag.yml release workflow. It needs
+  # cert-manager (already installed below, before KubeVirt, for the same
+  # node-contention reason e2e-deploy-kubevirt.yml orders it first).
+  KUBEVIRTBMC_VERSION: "v0.9.0"
+
+  # The provisioning L2 segment, same shape as e2e-deploy-kubevirt.yml.
+  PROVISIONING_BRIDGE: kezio-prov0
+  PROVISIONING_BOOTD_IP: 192.0.2.1/24
+  TARGET_VM_MAC: "52:54:00:be:ef:03"
+  TARGET_VM_DISK_SERIAL: "KEZIOE2EBMCDISK1"
+  TARGET_VM_NAME: "e2e-bmc-vm"
+  BMC_CREDS_SECRET: "e2e-bmc-vm-bmc-creds"
+  # KubeVirtBMC names the Service it creates for a VirtualMachineBMC
+  # "<virtualMachineRef.name>-virtbmc" (RedfishSvcPort 80, plain HTTP -
+  # KubeVirtBMC does not terminate TLS on this port, hence
+  # "redfish+http" rather than "redfish" below). Both the VirtualMachineBMC
+  # and the Machine live in kezio-system, alongside the VM.
+  BMC_REDFISH_ADDRESS: "redfish+http://e2e-bmc-vm-virtbmc.kezio-system.svc.cluster.local/redfish/v1/Systems/1"
+
+  # Same source e2e-deploy-kubevirt.yml uses; see that workflow's own
+  # comment for why "minimal".
+  UBUNTU_CLOUD_IMAGE_URL: "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img"
+  INGEST_IMG: "example.com/kezio-ingest:e2e-bmc"
+  SEEDER_IMG: "example.com/kezio-seeder:e2e-bmc"
+  IMAGE_SERVICE_IMG: "example.com/kezio-image-service:e2e-bmc"
+
+  # Same role as e2e-deploy-kubevirt.yml's MARKER_PATH; see that
+  # workflow's comment for why a freshly generated marker beats reading
+  # a field the stock image already has.
+  MARKER_PATH: "/etc/kezio-build-id"
+
+jobs:
+  bmc-kubevirt:
+    name: Power and PXE-boot a KubeVirt VM through KubeVirtBMC, deploy through it, and verify
+    runs-on: ubuntu-latest
+    # Honest budget: every cost e2e-deploy-kubevirt.yml pays, plus
+    # installing and waiting on KubeVirtBMC's own control plane and
+    # cert-manager-issued webhook certificate, plus a second BMC power
+    # cycle (PowerOff/PowerOn) and a second guest-agent reconnect wait
+    # after Provisioned.
+    timeout-minutes: 100
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Fail fast unless /dev/kvm is usable
+        run: |
+          set -euo pipefail
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm does not exist on this runner; KubeVirt VMs need hardware virtualization." >&2
+            exit 1
+          fi
+          sudo usermod -aG kvm "$(whoami)"
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - name: Raise inotify limits
+        run: |
+          sudo sysctl -w fs.inotify.max_user_watches=1048576
+          sudo sysctl -w fs.inotify.max_user_instances=8192
+
+      - name: Reclaim runner disk space
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Resource check (fail fast if the runner is under-resourced)
+        run: |
+          set -euo pipefail
+          echo "===== CPU ====="
+          nproc
+          echo "===== Memory ====="
+          free -h
+          echo "===== Disk ====="
+          df -h
+
+          cpus="$(nproc)"
+          mem_mb="$(free -m | awk '/^Mem:/{print $2}')"
+          disk_avail_gb="$(df -BG --output=avail / | tail -1 | tr -dc '0-9')"
+
+          # Same floor as e2e-deploy-kubevirt.yml: KubeVirtBMC's own
+          # control plane (controller + one virtbmc pod per managed VM)
+          # is small next to KubeVirt/CDI/cert-manager, already inside
+          # that floor's headroom.
+          if [ "$cpus" -lt 4 ]; then
+            echo "::error::Runner has only ${cpus} CPU(s); this stage needs at least 4." >&2
+            exit 1
+          fi
+          if [ "$mem_mb" -lt 14000 ]; then
+            echo "::error::Runner has only ${mem_mb} MiB RAM; this stage needs at least 14000 MiB." >&2
+            exit 1
+          fi
+          if [ "$disk_avail_gb" -lt 25 ]; then
+            echo "::error::Runner has only ${disk_avail_gb} GiB free disk; this stage needs at least 25 GiB." >&2
+            exit 1
+          fi
+
+      - name: Create the provisioning bridge
+        run: |
+          set -euo pipefail
+          sudo ip link add "${PROVISIONING_BRIDGE}" type bridge
+          sudo ip addr add "${PROVISIONING_BOOTD_IP}" dev "${PROVISIONING_BRIDGE}"
+          sudo ip link set "${PROVISIONING_BRIDGE}" up
+
+      - name: Cache the Ubuntu cloud image
+        id: cache-cloud-image
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/ubuntu-cloud.img
+          key: ubuntu-cloud-image-${{ env.UBUNTU_CLOUD_IMAGE_URL }}
+
+      - name: Download the Ubuntu cloud image
+        if: steps.cache-cloud-image.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -sfL -o "${{ runner.temp }}/ubuntu-cloud.img" "${UBUNTU_CLOUD_IMAGE_URL}"
+
+      - name: Customize the Ubuntu cloud image with a marker file and qemu-guest-agent
+        # Same approach as e2e-deploy-kubevirt.yml's step of the same
+        # name, including installing qemu-guest-agent offline (see that
+        # workflow's comment for why virt-customize's own --install is
+        # avoided).
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libguestfs-tools
+          export LIBGUESTFS_BACKEND=direct
+
+          cp "${{ runner.temp }}/ubuntu-cloud.img" "${{ runner.temp }}/ubuntu-cloud-marked.img"
+
+          MARKER_TOKEN="$(openssl rand -hex 16)"
+          echo "MARKER_TOKEN=${MARKER_TOKEN}" >> "$GITHUB_ENV"
+
+          qga_deb_dir="$(mktemp -d)"
+          (cd "${qga_deb_dir}" && apt-get download qemu-guest-agent)
+
+          sudo --preserve-env=LIBGUESTFS_BACKEND virt-customize \
+            -a "${{ runner.temp }}/ubuntu-cloud-marked.img" \
+            --run-command "echo ${MARKER_TOKEN} > ${MARKER_PATH}" \
+            --copy-in "${qga_deb_dir}:/tmp" \
+            --run-command 'dpkg -i /tmp/qemu-guest-agent_*.deb' \
+            --run-command "systemctl enable qemu-guest-agent" \
+            --run-command "rm -f /tmp/qemu-guest-agent_*.deb"
+
+          echo "UBUNTU_CLOUD_IMAGE_PATH=${{ runner.temp }}/ubuntu-cloud-marked.img" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Warm the ingest/seeder/image-service image caches
+        run: |
+          set -euo pipefail
+          for spec in "ingest:Dockerfile.ingest:${INGEST_IMG}" "seeder:Dockerfile.seeder:${SEEDER_IMG}" "image-service:Dockerfile.image-service:${IMAGE_SERVICE_IMG}"; do
+            IFS=: read -r scope dockerfile tag <<< "${spec}"
+            docker buildx build \
+              --file "${dockerfile}" \
+              --tag "${tag}" \
+              --cache-from "type=gha,scope=${scope}" \
+              --cache-to "type=gha,mode=max,scope=${scope}" \
+              --load \
+              .
+          done
+
+      - name: Build the manager image
+        run: |
+          set -euo pipefail
+          go mod tidy
+          make docker-build IMG=example.com/kezio:e2e-bmc
+
+      - name: Build the bootd image
+        run: |
+          set -euo pipefail
+          make docker-build-bootd BOOTD_IMG=example.com/kezio-bootd:e2e-bmc
+
+      - name: Build kezioctl
+        run: |
+          set -euo pipefail
+          make build-kezioctl
+
+      - name: Install k3s (pinned)
+        run: |
+          set -euo pipefail
+          curl -sfL https://get.k3s.io \
+            | INSTALL_K3S_VERSION="${K3S_VERSION}" sh -s - --write-kubeconfig-mode 644
+          echo "KUBECONFIG=/etc/rancher/k3s/k3s.yaml" >> "$GITHUB_ENV"
+          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+          for _ in $(seq 1 60); do
+            [ "$(kubectl get nodes --no-headers 2>/dev/null | wc -l)" -ge 1 ] && break
+            sleep 2
+          done
+          kubectl wait --for=condition=Ready node --all --timeout=120s
+          kubectl get nodes -o wide
+
+      - name: Import images into k3s containerd
+        run: |
+          set -euo pipefail
+          for img in "example.com/kezio:e2e-bmc" "example.com/kezio-bootd:e2e-bmc" "${INGEST_IMG}" "${SEEDER_IMG}" "${IMAGE_SERVICE_IMG}"; do
+            docker save "${img}" | sudo k3s ctr images import -
+          done
+
+      - name: Install cert-manager (pinned)
+        # Installed before KubeVirt, same node-contention reasoning as
+        # e2e-deploy-kubevirt.yml - and now also a hard prerequisite for
+        # KubeVirtBMC's webhook certificate below.
+        run: |
+          set -euo pipefail
+          kubectl apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"
+          for d in cert-manager cert-manager-webhook cert-manager-cainjector; do
+            kubectl wait deployment.apps/"${d}" --for condition=Available --namespace cert-manager --timeout=180s
+          done
+
+      - name: Install KubeVirt (pinned)
+        run: |
+          set -euo pipefail
+          kubectl apply -f "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-operator.yaml"
+          kubectl apply -f "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-cr.yaml"
+          kubectl -n kubevirt wait kubevirt kubevirt --for=condition=Available --timeout=300s
+
+      - name: Install virtctl
+        run: |
+          set -euo pipefail
+          curl -sfL -o /usr/local/bin/virtctl \
+            "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/virtctl-${KUBEVIRT_VERSION}-linux-amd64"
+          chmod +x /usr/local/bin/virtctl
+
+      - name: Install CDI (pinned)
+        run: |
+          set -euo pipefail
+          kubectl apply -f "https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_VERSION}/cdi-operator.yaml"
+          kubectl apply -f "https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_VERSION}/cdi-cr.yaml"
+          kubectl wait cdi cdi --for=condition=Available --timeout=300s
+
+      - name: Install Multus (pinned)
+        run: |
+          set -euo pipefail
+          kubectl apply -f "https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/${MULTUS_VERSION}/deployments/multus-daemonset-thick.yml"
+          kubectl -n kube-system rollout status daemonset/kube-multus-ds --timeout=180s
+
+      - name: Install KubeVirtBMC (pinned)
+        # One release asset, "kubevirtbmc-install.yaml" (CRD, RBAC,
+        # cert-manager Certificate/Issuer, webhook, controller
+        # Deployment), published by KubeVirtBMC's own tag.yml on every
+        # "v*" tag. `kubectl wait --for condition=Available` on its
+        # Deployment also waits out cert-manager issuing the webhook
+        # certificate the Deployment's pod mounts (the pod cannot start
+        # until that Secret exists).
+        run: |
+          set -euo pipefail
+          kubectl apply -f "https://github.com/kubevirtbmc/kubevirtbmc/releases/download/${KUBEVIRTBMC_VERSION}/kubevirtbmc-install.yaml"
+          kubectl -n kubevirtbmc-system wait deployment/kubevirtbmc-controller-manager --for=condition=Available --timeout=300s
+
+      - name: Deploy CRDs and the controller-manager
+        run: |
+          set -euo pipefail
+          make install
+          make deploy IMG=example.com/kezio:e2e-bmc
+          kubectl label --overwrite ns kezio-system pod-security.kubernetes.io/enforce=restricted
+          kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
+
+      - name: Create the provisioning NetworkAttachmentDefinition
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: k8s.cni.cncf.io/v1
+          kind: NetworkAttachmentDefinition
+          metadata:
+            name: kezio-boot-network
+            namespace: kezio-system
+          spec:
+            config: |
+              {
+                "cniVersion": "0.3.1",
+                "type": "bridge",
+                "bridge": "${PROVISIONING_BRIDGE}",
+                "ipam": {}
+              }
+          EOF
+
+      - name: Create the image-service bearer token Secret
+        run: |
+          set -euo pipefail
+          kubectl -n kezio-system create secret generic kezio-image-service-token \
+            --from-literal=token=kezio-e2e-bmc-token \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy image-service+seeder+store+boot/agent servers, wire real ingest/seeding/deploy
+        # Same overlay and wiring as e2e-deploy-kubevirt.yml's step of the
+        # same name; see that workflow's own comment for why
+        # config/e2e-deploy-path exists instead of composing the image-path
+        # and boot-path overlays directly.
+        env:
+          BOOT_ARTIFACTS_VERSION: ${{ inputs.boot_artifacts_version }}
+        run: |
+          set -euo pipefail
+          cd config/manager && ../../bin/kustomize edit set image controller=example.com/kezio:e2e-bmc
+          cd ../..
+          cd config/image-service && ../../bin/kustomize edit set image "image-service=${IMAGE_SERVICE_IMG}"
+          cd ../..
+          cd config/seeder && ../../bin/kustomize edit set image "seeder=${SEEDER_IMG}"
+          cd ../..
+          bin/kustomize build config/e2e-deploy-path | kubectl apply -f -
+
+          kubectl -n kezio-system set env deployment/kezio-controller-manager \
+            INGEST_IMAGE="${INGEST_IMG}" \
+            INGEST_STORE_PVC=kezio-store \
+            INGEST_STAGING_PVC=kezio-image-service-staging \
+            SEEDER_TRACKER_URL=http://kezio-opentracker.kezio-system.svc.cluster.local:6969/announce \
+            SEEDER_STORE_ROOT=/store \
+            SEEDER_SERVICE_NAMESPACE=kezio-system \
+            SEEDER_SERVICE_NAME=kezio-ezio-seeder \
+            BOOT_SERVER_ADDR=:8090 \
+            BOOT_ARTIFACTS_DIR=/boot-artifacts \
+            BOOT_SERVER_URL="http://kezio-boot-server.kezio-system.svc.cluster.local:8090" \
+            AGENT_SERVER_ADDR=:8091 \
+            DEPLOYER=agent
+
+          kubectl -n kezio-system create configmap boot-artifacts-fetch-script \
+            --from-file=fetch.sh=config/boot-artifacts/fetch.sh \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n kezio-system patch deployment/kezio-controller-manager --type=json \
+            --patch-file=config/e2e-boot-path/boot-artifacts-init-patch.yaml
+          if [ -n "${BOOT_ARTIFACTS_VERSION}" ]; then
+            kubectl -n kezio-system set env deployment/kezio-controller-manager \
+              -c fetch-boot-artifacts "BOOT_ARTIFACTS_VERSION=${BOOT_ARTIFACTS_VERSION}"
+          fi
+
+          kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
+          for d in kezio-image-service kezio-ezio-seeder kezio-opentracker; do
+            kubectl rollout status deployment/"${d}" -n kezio-system --timeout=180s
+          done
+
+      - name: Deploy kezio-bootd on the provisioning bridge
+        env:
+          BOOT_ARTIFACTS_VERSION: ${{ inputs.boot_artifacts_version }}
+        run: |
+          set -euo pipefail
+          cd config/bootd && ../../bin/kustomize edit set image bootd=example.com/kezio-bootd:e2e-bmc
+          cd ../..
+          kubectl apply -k config/bootd
+          kubectl -n kezio-system set env deployment/kezio-bootd BOOTD_SERVER_IP="${PROVISIONING_BOOTD_IP%%/*}"
+          kubectl -n kezio-system patch deployment/kezio-bootd --type=json -p='[
+            {"op":"add","path":"/spec/template/metadata/annotations","value":{"k8s.v1.cni.cncf.io/networks":"kezio-boot-network"}}
+          ]'
+          if [ -n "${BOOT_ARTIFACTS_VERSION}" ]; then
+            kubectl -n kezio-system set env deployment/kezio-bootd \
+              -c fetch-boot-artifacts "BOOT_ARTIFACTS_VERSION=${BOOT_ARTIFACTS_VERSION}"
+          fi
+          kubectl rollout status deployment/kezio-bootd -n kezio-system --timeout=180s
+
+      - name: Ingest the marker-customized Ubuntu image through kezioctl
+        run: |
+          set -euo pipefail
+          kubectl -n kezio-system port-forward svc/kezio-image-service 18080:8080 &
+          PF_PID=$!
+          echo "PF_PID=${PF_PID}" >> "$GITHUB_ENV"
+          for _ in $(seq 1 30); do
+            curl -sf -o /dev/null "http://127.0.0.1:18080/healthz" && break
+            sleep 1
+          done
+
+          bin/kezioctl image upload "${UBUNTU_CLOUD_IMAGE_PATH}" \
+            --name e2e-bmc-ubuntu \
+            --namespace kezio-system \
+            --server http://127.0.0.1:18080 \
+            --token kezio-e2e-bmc-token \
+            --format qcow2
+
+      - name: Wait for the Image to reach Ready (real ingest - qemu-img, sfdisk, partclone)
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + 900 ))
+          while true; do
+            state="$(kubectl get image e2e-bmc-ubuntu -n kezio-system -o jsonpath='{.status.state}' || true)"
+            echo "$(date -Is) Image state: ${state:-<none>}"
+            [ "${state}" = "Ready" ] && break
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::Image e2e-bmc-ubuntu did not reach Ready within the timeout." >&2
+              kubectl get image e2e-bmc-ubuntu -n kezio-system -o yaml
+              exit 1
+            fi
+            sleep 5
+          done
+          kubectl get image e2e-bmc-ubuntu -n kezio-system -o yaml
+
+      - name: Stop the image-service port-forward
+        if: always()
+        run: kill "${PF_PID}" 2>/dev/null || true
+
+      - name: Create the BMC credentials Secret
+        # Shared by both sides of the BMC relationship: KubeVirtBMC's
+        # VirtualMachineBMC.spec.authSecretRef reads the same
+        # "username"/"password" keys kezio's
+        # Machine.spec.bmc.credentialsSecretRef does (KubeVirtBMC's
+        # bmcUserKey/bmcPasswordKey constants match
+        # internal/bmc/credentials.go's SecretKeyUsername/SecretKeyPassword
+        # exactly), so one Secret authenticates kezio's Redfish client
+        # against KubeVirtBMC's Redfish server.
+        run: |
+          set -euo pipefail
+          BMC_PASSWORD="$(openssl rand -hex 16)"
+          echo "::add-mask::${BMC_PASSWORD}"
+          kubectl -n kezio-system create secret generic "${BMC_CREDS_SECRET}" \
+            --type=kubernetes.io/basic-auth \
+            --from-literal=username=kezio-e2e \
+            --from-literal=password="${BMC_PASSWORD}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Create the target KubeVirtVirtualMachine, powered off
+        # `running: false`: unlike e2e-deploy-kubevirt.yml, this VM is
+        # never started by the workflow. Network boot first (bootOrder
+        # 1), the blank data disk second (bootOrder 2) - same device
+        # shape as the other KubeVirt lanes, so the post-deploy in-guest
+        # reboot (kezio-agent's own systemctl reboot, unrelated to the
+        # BMC) falls through to disk exactly the way
+        # e2e-deploy-kubevirt.yml's header comment explains.
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: kubevirt.io/v1
+          kind: VirtualMachine
+          metadata:
+            name: ${TARGET_VM_NAME}
+            namespace: kezio-system
+          spec:
+            running: false
+            template:
+              metadata:
+                labels:
+                  kubevirt.io/vm: ${TARGET_VM_NAME}
+              spec:
+                domain:
+                  cpu:
+                    cores: 2
+                  resources:
+                    requests:
+                      memory: 3Gi
+                  firmware:
+                    bootloader:
+                      efi:
+                        secureBoot: false
+                  devices:
+                    interfaces:
+                      - name: provisioning
+                        macAddress: "${TARGET_VM_MAC}"
+                        bridge: {}
+                        bootOrder: 1
+                    disks:
+                      - name: data
+                        serial: "${TARGET_VM_DISK_SERIAL}"
+                        bootOrder: 2
+                        disk:
+                          bus: virtio
+                networks:
+                  - name: provisioning
+                    multus:
+                      networkName: kezio-boot-network
+                volumes:
+                  - name: data
+                    emptyDisk:
+                      capacity: 4Gi
+          EOF
+
+      - name: "Assert the VM is off before any Machine is created (the harness did not start it)"
+        run: |
+          set -euo pipefail
+          status="$(kubectl get vm "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.status.printableStatus}')"
+          echo "VM printableStatus: ${status}"
+          if [ "${status}" != "Stopped" ]; then
+            echo "::error::VM ${TARGET_VM_NAME} printableStatus = ${status}, want Stopped - it must be off until kezio's controller powers it on through the BMC." >&2
+            exit 1
+          fi
+          if kubectl get vmi "${TARGET_VM_NAME}" -n kezio-system >/dev/null 2>&1; then
+            echo "::error::A VirtualMachineInstance already exists for ${TARGET_VM_NAME}; the VM must not be running yet." >&2
+            exit 1
+          fi
+
+      - name: Create the KubeVirtBMC VirtualMachineBMC for the target VM
+        # Gives the VM a Redfish endpoint: KubeVirtBMC's
+        # VirtualMachineBMC controller creates a Pod running the
+        # "virtbmc" agent (talking to the Kubernetes API, translating
+        # Redfish calls into VirtualMachine Start/Stop/Restart and boot
+        # order patches) and a ClusterIP Service named
+        # "<virtualMachineRef.name>-virtbmc" in front of it, on port 80
+        # (plain HTTP - see BMC_REDFISH_ADDRESS's comment above). No IPMI
+        # simulator is enabled; this workflow only exercises the Redfish
+        # side, matching kezio's redfish:// driver.
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: bmc.kubevirt.io/v1beta1
+          kind: VirtualMachineBMC
+          metadata:
+            name: ${TARGET_VM_NAME}
+            namespace: kezio-system
+          spec:
+            virtualMachineRef:
+              name: ${TARGET_VM_NAME}
+            authSecretRef:
+              name: ${BMC_CREDS_SECRET}
+          EOF
+
+      - name: Wait for the VirtualMachineBMC to become Ready
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + 180 ))
+          while true; do
+            ready="$(kubectl get virtualmachinebmc "${TARGET_VM_NAME}" -n kezio-system \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' || true)"
+            clusterip="$(kubectl get virtualmachinebmc "${TARGET_VM_NAME}" -n kezio-system \
+              -o jsonpath='{.status.clusterIP}' || true)"
+            echo "$(date -Is) VirtualMachineBMC Ready=${ready:-<none>} clusterIP=${clusterip:-<none>}"
+            [ "${ready}" = "True" ] && [ -n "${clusterip}" ] && break
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::VirtualMachineBMC ${TARGET_VM_NAME} did not become Ready within the timeout." >&2
+              kubectl get virtualmachinebmc "${TARGET_VM_NAME}" -n kezio-system -o yaml
+              exit 1
+            fi
+            sleep 5
+          done
+          kubectl get virtualmachinebmc "${TARGET_VM_NAME}" -n kezio-system -o yaml
+          kubectl -n kezio-system rollout status deployment 2>/dev/null || true
+          kubectl -n kezio-system get pods -l app=virtbmc 2>/dev/null || true
+
+      - name: "Verify the Redfish endpoint is reachable and reports the VM off"
+        # Exercised from inside the cluster with a throwaway Pod (the
+        # Service is ClusterIP-only, same as kezio's other in-cluster
+        # services); the same call the controller's Register step is
+        # about to make, done here by hand first so a broken Redfish
+        # endpoint fails with a clear diagnostic instead of surfacing
+        # only as a Machine stuck in Error.
+        run: |
+          set -euo pipefail
+          BMC_USERNAME="$(kubectl get secret "${BMC_CREDS_SECRET}" -n kezio-system -o jsonpath='{.data.username}' | base64 -d)"
+          BMC_PASSWORD="$(kubectl get secret "${BMC_CREDS_SECRET}" -n kezio-system -o jsonpath='{.data.password}' | base64 -d)"
+          echo "::add-mask::${BMC_PASSWORD}"
+
+          redfish_body="$(kubectl run kezio-e2e-redfish-check -n kezio-system \
+            --rm -i --restart=Never --image=curlimages/curl:8.11.0 --quiet -- \
+            curl -sf -u "${BMC_USERNAME}:${BMC_PASSWORD}" \
+            "http://${TARGET_VM_NAME}-virtbmc.kezio-system.svc.cluster.local/redfish/v1/Systems/1")"
+          echo "Redfish ComputerSystem response: ${redfish_body}"
+
+          power_state="$(jq -r '.PowerState' <<<"${redfish_body}")"
+          if [ "${power_state}" != "Off" ]; then
+            echo "::error::Redfish reports PowerState=${power_state}, want Off before Register runs." >&2
+            exit 1
+          fi
+
+      - name: Create the Machine CR, with spec.bmc pointing at KubeVirtBMC's Redfish endpoint
+        # No manual power-on, no manual boot-order flip: the controller's
+        # Register step (internal/deployer/agent.go) is what must call
+        # SetOneTimePXEBoot and PowerOn against BMC_REDFISH_ADDRESS to
+        # bring this Machine up.
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: kezio.kojuro.date/v1alpha1
+          kind: Machine
+          metadata:
+            name: ${TARGET_VM_NAME}
+            namespace: kezio-system
+          spec:
+            bmc:
+              address: ${BMC_REDFISH_ADDRESS}
+              credentialsSecretRef:
+                name: ${BMC_CREDS_SECRET}
+            bootMACAddress: "${TARGET_VM_MAC}"
+            online: true
+            targetDisk:
+              serialNumber: "${TARGET_VM_DISK_SERIAL}"
+            imageRef:
+              name: e2e-bmc-ubuntu
+          EOF
+
+      - name: "Assert kezio powered the VM on through the BMC (not the harness)"
+        # The only thing that has touched this VM since it was created
+        # `running: false` is the Machine CR just created above. If the
+        # VM comes up, it came up because agentDeployer.Register called
+        # the BMC.
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + 180 ))
+          while true; do
+            status="$(kubectl get vm "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.status.printableStatus}' || true)"
+            echo "$(date -Is) VM printableStatus: ${status:-<none>}"
+            case "${status}" in
+              Running) break ;;
+            esac
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::VM ${TARGET_VM_NAME} never reached Running after the Machine was created - kezio's Register did not power it on through the BMC." >&2
+              kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o yaml
+              exit 1
+            fi
+            sleep 5
+          done
+          kubectl wait vmi/"${TARGET_VM_NAME}" -n kezio-system --for=condition=Ready --timeout=180s
+
+      - name: Wait for the Machine to reach Provisioned
+        # Same generous, bounded wait as e2e-deploy-kubevirt.yml's step
+        # of the same name.
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + 1800 ))
+          while true; do
+            state="$(kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.status.state}' || true)"
+            echo "$(date -Is) Machine state: ${state:-<none>}"
+            if [ "${state}" = "Provisioned" ]; then
+              break
+            fi
+            if [ "${state}" = "Error" ]; then
+              echo "::error::Machine ${TARGET_VM_NAME} landed in Error while deploying." >&2
+              kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o yaml
+              exit 1
+            fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::Machine ${TARGET_VM_NAME} did not reach Provisioned within the timeout." >&2
+              exit 1
+            fi
+            sleep 10
+          done
+          kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o yaml
+
+      - name: "Verify layer 1 (controller): status.provisioning matches spec, conditions clean"
+        run: |
+          set -euo pipefail
+          machine_json="$(kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o json)"
+
+          provisioned_image="$(jq -r '.status.provisioning.image.imageRef.name' <<<"${machine_json}")"
+          if [ "${provisioned_image}" != "e2e-bmc-ubuntu" ]; then
+            echo "::error::status.provisioning.image.imageRef.name = ${provisioned_image}, want e2e-bmc-ubuntu" >&2
+            exit 1
+          fi
+
+          target_disk="$(jq -r '.status.provisioning.image.targetDisk' <<<"${machine_json}")"
+          if [ -z "${target_disk}" ] || [ "${target_disk}" = "null" ]; then
+            echo "::error::status.provisioning.image.targetDisk is empty" >&2
+            exit 1
+          fi
+          echo "resolved target disk: ${target_disk}"
+
+          ready_status="$(jq -r '.status.conditions[] | select(.type=="Ready") | .status' <<<"${machine_json}")"
+          if [ "${ready_status}" != "True" ]; then
+            echo "::error::Ready condition status = ${ready_status}, want True" >&2
+            echo "${machine_json}" | jq '.status.conditions'
+            exit 1
+          fi
+
+      - name: "Wait for layer 2 (boot): the deployed disk boots and qemu-guest-agent connects"
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + 600 ))
+          while true; do
+            connected="$(kubectl get vmi "${TARGET_VM_NAME}" -n kezio-system \
+              -o jsonpath='{.status.conditions[?(@.type=="AgentConnected")].status}' || true)"
+            echo "$(date -Is) VMI AgentConnected: ${connected:-<none>}"
+            [ "${connected}" = "True" ] && break
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::qemu-guest-agent never connected within the timeout after Provisioned - the VM did not boot from the deployed disk." >&2
+              exit 1
+            fi
+            sleep 5
+          done
+
+          guest_os_id="$(kubectl get vmi "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.status.guestOSInfo.id}')"
+          echo "guestOSInfo.id: ${guest_os_id}"
+          if [ "${guest_os_id}" != "ubuntu" ]; then
+            echo "::error::guestOSInfo.id = ${guest_os_id}, want ubuntu (the deployed image's OS, not the live-boot environment's)" >&2
+            exit 1
+          fi
+
+      - name: "Verify layer 3 (content): read the marker file back through QGA and compare"
+        # Same mechanism as e2e-deploy-kubevirt.yml's step of the same
+        # name; see that workflow's comment for why virsh
+        # qemu-agent-command rather than SSH or a guestexec subcommand.
+        run: |
+          set -euo pipefail
+          launcher_pod="$(kubectl get pods -n kezio-system -l "kubevirt.io/vm=${TARGET_VM_NAME}" -o jsonpath='{.items[0].metadata.name}')"
+          domain="kezio-system_${TARGET_VM_NAME}"
+
+          qga_exec() {
+            kubectl exec -n kezio-system "${launcher_pod}" -c compute -- \
+              virsh qemu-agent-command "${domain}" "$1"
+          }
+
+          open_reply="$(qga_exec "{\"execute\":\"guest-file-open\",\"arguments\":{\"path\":\"${MARKER_PATH}\",\"mode\":\"r\"}}")"
+          handle="$(jq -r '.return' <<<"${open_reply}")"
+          if [ "${handle}" = "null" ] || [ -z "${handle}" ]; then
+            echo "::error::guest-file-open on ${MARKER_PATH} failed: ${open_reply}" >&2
+            exit 1
+          fi
+
+          read_reply="$(qga_exec "{\"execute\":\"guest-file-read\",\"arguments\":{\"handle\":${handle},\"count\":4096}}")"
+          qga_exec "{\"execute\":\"guest-file-close\",\"arguments\":{\"handle\":${handle}}}" >/dev/null
+
+          marker_content="$(jq -r '.return["buf-b64"]' <<<"${read_reply}" | base64 -d | tr -d '\n')"
+          echo "marker content: ${marker_content}"
+
+          if [ "${marker_content}" != "${MARKER_TOKEN}" ]; then
+            echo "::error::marker file content mismatch: guest has ${marker_content@Q}, expected ${MARKER_TOKEN@Q}" >&2
+            exit 1
+          fi
+
+      - name: "BMC power cycle: PowerOff through the BMC (spec.online=false)"
+        # Independent of Register's one-time PXE power-on: once
+        # Provisioned, internal/controller/machine_controller.go's
+        # reconcilePower keeps the VM's power matched to spec.online
+        # through the same BMC, and agentDeployer.PowerOff requests a
+        # graceful shutdown (Redfish GracefulShutdownResetType ->
+        # KubeVirtBMC's VirtualMachine Stop). This proves the
+        # steady-state power path is BMC-driven too, not only the
+        # initial boot.
+        run: |
+          set -euo pipefail
+          kubectl patch machine "${TARGET_VM_NAME}" -n kezio-system --type=merge -p '{"spec":{"online":false}}'
+
+          deadline=$(( $(date +%s) + 300 ))
+          while true; do
+            status="$(kubectl get vm "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.status.printableStatus}' || true)"
+            powered_on="$(kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.status.poweredOn}' || true)"
+            echo "$(date -Is) VM printableStatus=${status:-<none>} Machine status.poweredOn=${powered_on:-<none>}"
+            [ "${status}" = "Stopped" ] && break
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::VM ${TARGET_VM_NAME} did not stop within the timeout after spec.online=false - kezio's BMC-driven PowerOff did not take effect." >&2
+              kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o yaml
+              exit 1
+            fi
+            sleep 5
+          done
+
+      - name: "BMC power cycle: PowerOn through the BMC (spec.online=true) and reconnect"
+        run: |
+          set -euo pipefail
+          kubectl patch machine "${TARGET_VM_NAME}" -n kezio-system --type=merge -p '{"spec":{"online":true}}'
+
+          deadline=$(( $(date +%s) + 300 ))
+          while true; do
+            status="$(kubectl get vm "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.status.printableStatus}' || true)"
+            echo "$(date -Is) VM printableStatus: ${status:-<none>}"
+            [ "${status}" = "Running" ] && break
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::VM ${TARGET_VM_NAME} did not start within the timeout after spec.online=true - kezio's BMC-driven PowerOn did not take effect." >&2
+              kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o yaml
+              exit 1
+            fi
+            sleep 5
+          done
+          kubectl wait vmi/"${TARGET_VM_NAME}" -n kezio-system --for=condition=Ready --timeout=180s
+
+          deadline=$(( $(date +%s) + 600 ))
+          while true; do
+            connected="$(kubectl get vmi "${TARGET_VM_NAME}" -n kezio-system \
+              -o jsonpath='{.status.conditions[?(@.type=="AgentConnected")].status}' || true)"
+            echo "$(date -Is) VMI AgentConnected: ${connected:-<none>}"
+            [ "${connected}" = "True" ] && break
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::qemu-guest-agent never reconnected after the BMC-driven PowerOn - the VM did not boot back from the deployed disk." >&2
+              exit 1
+            fi
+            sleep 5
+          done
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          echo "===== nodes ====="
+          kubectl get nodes -o wide
+          echo "===== kezio-system pods ====="
+          kubectl get pods -n kezio-system -o wide
+          echo "===== kubevirtbmc-system pods ====="
+          kubectl get pods -n kubevirtbmc-system -o wide
+          echo "===== controller-manager logs ====="
+          kubectl -n kezio-system logs deployment/kezio-controller-manager --all-containers --tail=1000
+          echo "===== bootd logs ====="
+          kubectl -n kezio-system logs deployment/kezio-bootd --all-containers --tail=1000
+          echo "===== ingest Job(s) ====="
+          kubectl get jobs -n kezio-system -l kezio.kojuro.date/image -o wide
+          kubectl logs -n kezio-system -l kezio.kojuro.date/image --all-containers --tail=1000
+          echo "===== seeder logs ====="
+          kubectl -n kezio-system logs deployment/kezio-ezio-seeder --tail=1000
+          echo "===== opentracker logs ====="
+          kubectl -n kezio-system logs deployment/kezio-opentracker --tail=1000
+          echo "===== image-service logs ====="
+          kubectl -n kezio-system logs deployment/kezio-image-service --tail=1000
+          echo "===== KubeVirtBMC controller-manager logs ====="
+          kubectl -n kubevirtbmc-system logs deployment/kubevirtbmc-controller-manager --all-containers --tail=1000
+          echo "===== VirtualMachineBMC ====="
+          kubectl get virtualmachinebmc -n kezio-system -o yaml
+          echo "===== virtbmc pod logs (the per-VM Redfish/IPMI agent) ====="
+          kubectl -n kezio-system logs "${TARGET_VM_NAME}-virtbmc" --all-containers --tail=1000
+          echo "===== virtbmc Service ====="
+          kubectl get svc -n kezio-system -l app=virtbmc -o yaml
+          echo "===== VirtualMachine / VMI ====="
+          kubectl get vm,vmi -n kezio-system -o yaml
+          echo "===== virt-launcher pod describe ====="
+          kubectl describe pod -n kezio-system -l "kubevirt.io/vm=${TARGET_VM_NAME}"
+          echo "===== VM console (last output) ====="
+          timeout 20 virtctl console "${TARGET_VM_NAME}" -n kezio-system || true
+          echo "===== Machine CR ====="
+          kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o yaml
+          echo "===== Image CR ====="
+          kubectl get image e2e-bmc-ubuntu -n kezio-system -o yaml
+          echo "===== events ====="
+          kubectl get events -n kezio-system --sort-by=.lastTimestamp
+          kubectl get events -n kubevirtbmc-system --sort-by=.lastTimestamp
