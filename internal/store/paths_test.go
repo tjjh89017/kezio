@@ -82,3 +82,29 @@ func TestImagePaths(t *testing.T) {
 		t.Errorf("ImageLayoutPath = %q, want %q", got, want)
 	}
 }
+
+func TestIngestScratchDir(t *testing.T) {
+	root := "/store"
+	imageName := "ubuntu-24-04"
+
+	dir := IngestScratchDir(root, imageName)
+	wantDir := filepath.Join(root, ".ingest", imageName)
+	if dir != wantDir {
+		t.Errorf("IngestScratchDir = %q, want %q", dir, wantDir)
+	}
+
+	// The scratch dir must live under the store root itself (not under
+	// contents/ or images/), so it always shares a filesystem with
+	// contents/ and a rename from one to the other is guaranteed
+	// same-device.
+	if filepath.Dir(filepath.Dir(dir)) != root {
+		t.Errorf("IngestScratchDir %q is not two levels below root %q", dir, root)
+	}
+}
+
+func TestIngestScratchDir_DifferentImagesDoNotCollide(t *testing.T) {
+	root := "/store"
+	if IngestScratchDir(root, "image-a") == IngestScratchDir(root, "image-b") {
+		t.Fatal("IngestScratchDir collides for different image names")
+	}
+}

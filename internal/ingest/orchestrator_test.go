@@ -248,3 +248,174 @@ func TestRun_PartcloneFailurePropagates(t *testing.T) {
 		t.Fatal("expected failure when partclone fails")
 	}
 }
+
+// writeFixtureContentDir writes a minimal, valid partclone content
+// directory (one extent file plus a matching torrent.info) at dir,
+// mirroring what fakePartclone.Clone produces - see its doc comment for
+// why an arbitrary piece hash is fine here.
+func writeFixtureContentDir(t *testing.T, dir string, content []byte) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	info := &store.TorrentInfo{
+		BlockSize:   4096,
+		BlocksTotal: 1,
+		Extents:     []store.Extent{{Offset: 0, Length: uint64(len(content))}}, //nolint:gosec // fixture length
+		PieceHashes: []store.PieceHash{{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}},
+	}
+	if err := os.WriteFile(filepath.Join(dir, store.ExtentFileName(0)), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(store.ContentDirTorrentInfoPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := store.WriteTorrentInfo(f, info); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPublishContent_PublishesViaScratchAndCleansWorkDir(t *testing.T) {
+	storeRoot := t.TempDir()
+	workDir := t.TempDir()
+	contentDir := filepath.Join(workDir, "content-1")
+	writeFixtureContentDir(t, contentDir, []byte("payload"))
+
+	hash, usedBytes, err := publishContent(storeRoot, "golden", contentDir, 1)
+	if err != nil {
+		t.Fatalf("publishContent: %v", err)
+	}
+	if usedBytes != int64(len("payload")) {
+		t.Errorf("usedBytes = %d, want %d", usedBytes, len("payload"))
+	}
+
+	// The content landed at its content-addressed path in contents/.
+	dest := store.ContentDir(storeRoot, hash)
+	if _, err := os.Stat(store.ContentDirTorrentInfoPath(dest)); err != nil {
+		t.Errorf("published content missing torrent.info: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, store.ExtentFileName(0))); err != nil {
+		t.Errorf("published content missing extent file: %v", err)
+	}
+
+	// The work-dir copy is gone: publishContent does not leave a
+	// second copy of the payload sitting on the node disk once it is
+	// durably in the store.
+	if _, err := os.Stat(contentDir); !os.IsNotExist(err) {
+		t.Errorf("expected work dir content-1 to be removed after publish, stat err = %v", err)
+	}
+
+	// Nothing is left behind under the per-Image scratch tree: the
+	// intermediate landing directory was renamed away, not copied
+	// again.
+	scratchContentDir := filepath.Join(store.IngestScratchDir(storeRoot, "golden"), "content-1")
+	if _, err := os.Stat(scratchContentDir); !os.IsNotExist(err) {
+		t.Errorf("expected scratch content-1 to be gone after publish, stat err = %v", err)
+	}
+}
+
+func TestPublishContent_SkipsWhenContentAlreadyPublished(t *testing.T) {
+	storeRoot := t.TempDir()
+	workDir := t.TempDir()
+
+	first := filepath.Join(workDir, "content-1")
+	writeFixtureContentDir(t, first, []byte("same-bytes"))
+	hash1, _, err := publishContent(storeRoot, "golden", first, 1)
+	if err != nil {
+		t.Fatalf("first publishContent: %v", err)
+	}
+
+	// A second partition (or a second Image) producing byte-identical
+	// content must dedup onto the same hash instead of erroring or
+	// double-publishing.
+	second := filepath.Join(workDir, "content-2")
+	writeFixtureContentDir(t, second, []byte("same-bytes"))
+	hash2, _, err := publishContent(storeRoot, "golden", second, 2)
+	if err != nil {
+		t.Fatalf("second publishContent: %v", err)
+	}
+	if hash1 != hash2 {
+		t.Fatalf("expected identical content to dedup to the same hash, got %s and %s", hash1, hash2)
+	}
+
+	if _, err := os.Stat(second); !os.IsNotExist(err) {
+		t.Errorf("expected duplicate work dir content-2 to be discarded, stat err = %v", err)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(storeRoot, "contents"))
+	if err != nil {
+		t.Fatalf("read contents dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("got %d content directories, want 1 (deduped)", len(entries))
+	}
+}
+
+func TestPublishContent_FailureLeavesWorkDirContentIntact(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission checks do not apply when running as root")
+	}
+
+	storeRoot := t.TempDir()
+	workDir := t.TempDir()
+	contentDir := filepath.Join(workDir, "content-1")
+	writeFixtureContentDir(t, contentDir, []byte("payload"))
+
+	// Pre-create contents/ read-only, so the final rename into it fails
+	// after the copy onto the store filesystem has already succeeded.
+	contentsDir := filepath.Join(storeRoot, "contents")
+	if err := os.MkdirAll(contentsDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(contentsDir, 0o750) })
+
+	_, _, err := publishContent(storeRoot, "golden", contentDir, 1)
+	if err == nil {
+		t.Fatal("expected publishContent to fail when contents/ is not writable")
+	}
+
+	// A failed publish must not lose the only copy of the content: the
+	// work-dir directory is still there for a retry to pick up.
+	if _, statErr := os.Stat(contentDir); statErr != nil {
+		t.Errorf("expected work dir content-1 to survive a failed publish, stat err = %v", statErr)
+	}
+
+	// The scratch copy made on the store filesystem before the failed
+	// rename must not be left behind either.
+	scratchContentDir := filepath.Join(store.IngestScratchDir(storeRoot, "golden"), "content-1")
+	if _, statErr := os.Stat(scratchContentDir); !os.IsNotExist(statErr) {
+		t.Errorf("expected scratch content-1 to be cleaned up after failure, stat err = %v", statErr)
+	}
+}
+
+func TestCopyContentDir_CopiesWithoutRemovingSource(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "content-1")
+	writeFixtureContentDir(t, src, []byte("payload"))
+	dst := filepath.Join(t.TempDir(), "landed")
+
+	if err := copyContentDir(src, dst); err != nil {
+		t.Fatalf("copyContentDir: %v", err)
+	}
+
+	// This is the property that makes the intermediate landing step a
+	// copy rather than a rename: publishContent must never move the
+	// work-dir directory directly into place (that is exactly the
+	// EXDEV-prone operation this whole publish flow replaces). Both the
+	// source and the freshly landed copy must exist simultaneously
+	// right after copyContentDir returns.
+	if _, err := os.Stat(filepath.Join(src, store.ExtentFileName(0))); err != nil {
+		t.Errorf("expected source extent file to still exist after copy, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, store.ExtentFileName(0))); err != nil {
+		t.Errorf("expected copied extent file at destination, stat err = %v", err)
+	}
+	gotContent, err := os.ReadFile(filepath.Join(dst, store.ExtentFileName(0)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotContent) != "payload" {
+		t.Errorf("copied extent content = %q, want %q", gotContent, "payload")
+	}
+}

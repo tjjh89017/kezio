@@ -45,6 +45,12 @@ const (
 	contentsDirName = "contents"
 	// imagesDirName is the images/ subdirectory under a store root.
 	imagesDirName = "images"
+	// ingestDirName is the .ingest/ subdirectory under a store root: a
+	// scratch tree ingest uses to land a partition content directory on
+	// the store's own filesystem before the final rename into
+	// contents/, so that rename is a same-filesystem, atomic operation
+	// (see IngestScratchDir).
+	ingestDirName = ".ingest"
 	// ContentTorrentFileName is the generated .torrent file name inside a
 	// content directory.
 	ContentTorrentFileName = "content.torrent"
@@ -76,6 +82,21 @@ func ContentExtentPath(root string, hash InfoHash, offset uint64) string {
 // content's directory.
 func ContentTorrentPath(root string, hash InfoHash) string {
 	return filepath.Join(ContentDir(root, hash), ContentTorrentFileName)
+}
+
+// IngestScratchDir returns the per-Image scratch directory ingest may
+// use to stage a partition content directory on the store's own
+// filesystem before publishing it into contents/. It is keyed by
+// imageName (a validated Kubernetes object name, safe as a path
+// component) rather than by a random or per-attempt token: the Image
+// controller runs at most one ingest Job per Image, with a deterministic
+// Job name (see internal/controller's ingestJobName), so a retried
+// attempt after a crash reuses this same path and can safely clean up
+// whatever a previous attempt left behind before starting - no leftover
+// scratch survives a crashed job, and no coordination between attempts
+// is needed since they never run concurrently for the same Image.
+func IngestScratchDir(root, imageName string) string {
+	return filepath.Join(root, ingestDirName, imageName)
 }
 
 // ImageDir returns the directory holding an Image's layout metadata. The
