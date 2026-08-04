@@ -1,0 +1,21 @@
+# Byte-identical copy of config/e2e-image-path/manager-store-patch.yaml;
+# see kustomization.yaml in this directory for why this overlay keeps
+# local copies instead of referencing the originals by relative path.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kezio-controller-manager
+  namespace: kezio-system
+spec:
+  template:
+    spec:
+      containers:
+        - name: manager
+          volumeMounts:
+            - name: store
+              mountPath: /store
+              readOnly: true
+      volumes:
+        - name: store
+          persistentVolumeClaim:
+            claimName: kezio-store

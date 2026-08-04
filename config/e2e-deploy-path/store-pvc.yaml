@@ -1,0 +1,21 @@
+# Byte-identical copy of config/e2e-image-path/store-pvc.yaml; see
+# kustomization.yaml in this directory for why this overlay keeps local
+# copies instead of referencing the originals by relative path.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kezio-store
+  namespace: kezio-system
+  labels:
+    app.kubernetes.io/name: kezio
+    app.kubernetes.io/component: store
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      # A cloud-image-sized source (hundreds of MiB to a few GiB) leaves
+      # plenty of headroom here; generous but not wasteful for a
+      # throwaway CI volume.
+      storage: 10Gi

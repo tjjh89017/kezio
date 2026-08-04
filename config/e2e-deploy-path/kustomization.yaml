@@ -1,0 +1,55 @@
+# Overlay used only by the e2e full-deploy KubeVirt stage
+# (.github/workflows/e2e-deploy-kubevirt.yml, workflow_dispatch only). It
+# is the union of config/e2e-image-path (real ingest + seeding) and
+# config/e2e-boot-path (the boot config server and agent registration
+# server Services), because the full-deploy stage needs both halves at
+# once: a real Image ingested through image-service/ingest/seeder, and a
+# real Machine net-booting through kezio-bootd into kezio-agent to
+# deploy that Image onto a KubeVirt VM's disk.
+#
+# It does not compose ../e2e-image-path or ../e2e-boot-path directly
+# (`resources: [../e2e-image-path, ../e2e-boot-path]`): both already
+# pull in ../default as one of their own resources, and kustomize cannot
+# merge two kustomizations that each independently pull in the same base
+# (see config/e2e-boot-path/kustomization.yaml's own comment for the
+# exact error this produces). Instead this overlay pulls in ../default
+# exactly once, plus ../image-service and ../seeder (neither of which
+# includes ../default itself), plus local copies of the plain-YAML
+# resource and patch files config/e2e-image-path and config/e2e-boot-path
+# each ship. Those are local copies rather than relative-path references
+# to the originals for the same reason config/e2e-boot-path's own Service
+# copies are local: kustomize's LoadRestrictionsRootOnly forbids a
+# `resources:`/`patches:` entry naming a plain file outside this
+# kustomization's own root directory. Keep each copy in sync with its
+# origin if that file changes.
+#
+# INGEST_IMAGE, SEEDER_*, BOOT_SERVER_ADDR, BOOT_ARTIFACTS_DIR,
+# BOOT_SERVER_URL, AGENT_SERVER_ADDR, and DEPLOYER are NOT set here (same
+# reasoning as config/e2e-image-path and config/e2e-boot-path: they need
+# per-run values kustomize's static YAML cannot express) - the workflow
+# sets them with `kubectl set env` after applying this overlay.
+resources:
+  - ../default
+  - ../image-service
+  - ../seeder
+  - store-pvc.yaml
+  - boot-server-service.yaml
+  - agent-server-service.yaml
+
+patches:
+  - path: manager-store-patch.yaml
+    target:
+      kind: Deployment
+      name: kezio-controller-manager
+  - path: staging-pvc-patch.yaml
+    target:
+      kind: PersistentVolumeClaim
+      name: kezio-image-service-staging
+  - path: manager-boot-port-patch.yaml
+    target:
+      kind: Deployment
+      name: kezio-controller-manager
+  - path: manager-agent-port-patch.yaml
+    target:
+      kind: Deployment
+      name: kezio-controller-manager

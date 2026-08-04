@@ -1,0 +1,23 @@
+# Byte-identical copy of config/e2e-boot-path/boot-server-service.yaml
+# (itself a copy of config/bootserver/service.yaml); see
+# kustomization.yaml in this directory for why this overlay keeps local
+# copies instead of referencing the originals by relative path.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kezio-boot-server
+  namespace: kezio-system
+  labels:
+    app.kubernetes.io/name: kezio
+    app.kubernetes.io/component: boot-server
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  type: ClusterIP
+  selector:
+    control-plane: controller-manager
+    app.kubernetes.io/name: kezio
+  ports:
+    - name: boot-http
+      port: 8090
+      targetPort: boot-http
+      protocol: TCP

@@ -1,0 +1,11 @@
+# Byte-identical copy of
+# config/e2e-boot-path/manager-boot-port-patch.yaml (itself a copy of
+# config/bootserver/manager-port-patch.yaml); see kustomization.yaml in
+# this directory for why this overlay keeps local copies instead of
+# referencing the originals by relative path.
+- op: add
+  path: /spec/template/spec/containers/0/ports/-
+  value:
+    containerPort: 8090
+    name: boot-http
+    protocol: TCP
