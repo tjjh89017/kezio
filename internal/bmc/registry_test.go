@@ -134,6 +134,39 @@ func TestRegisterPanicsOnDuplicateScheme(t *testing.T) {
 	})
 }
 
+func TestRegisteredSchemesIncludesNewlyRegisteredScheme(t *testing.T) {
+	scheme := registerTestDriver(t, func(context.Context, *url.URL, Credentials, Options) (BMC, error) {
+		return stubBMC{}, nil
+	})
+
+	found := false
+	for _, s := range RegisteredSchemes() {
+		if s == scheme {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("RegisteredSchemes() = %v, want it to include %q", RegisteredSchemes(), scheme)
+	}
+}
+
+func TestIsSchemeRegistered(t *testing.T) {
+	scheme := registerTestDriver(t, func(context.Context, *url.URL, Credentials, Options) (BMC, error) {
+		return stubBMC{}, nil
+	})
+
+	if !IsSchemeRegistered(scheme) {
+		t.Errorf("IsSchemeRegistered(%q) = false, want true", scheme)
+	}
+	if !IsSchemeRegistered(strings.ToUpper(scheme)) {
+		t.Errorf("IsSchemeRegistered(%q) = false, want true (case-insensitive)", strings.ToUpper(scheme))
+	}
+	if IsSchemeRegistered("does-not-exist") {
+		t.Error("IsSchemeRegistered(\"does-not-exist\") = true, want false")
+	}
+}
+
 func TestRegisterPanicsOnEmptyScheme(t *testing.T) {
 	defer func() {
 		if recover() == nil {

@@ -119,6 +119,67 @@ var _ = Describe("Machine Webhook", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 
+		It("Should admit a spec with no bmc block at all", func() {
+			obj.Spec.BMC = keziov1alpha1.MachineBMC{}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("Should admit an ipmi:// bmc address", func() {
+			obj.Spec.BMC.Address = "ipmi://198.51.100.10"
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("Should deny a bmc address with an unregistered scheme", func() {
+			obj.Spec.BMC.Address = "http://198.51.100.10"
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("no registered BMC driver"))
+		})
+
+		It("Should deny an unparseable bmc address", func() {
+			obj.Spec.BMC.Address = "://not a url"
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("not a valid URL"))
+		})
+
+		It("Should deny a bmc address with no scheme", func() {
+			obj.Spec.BMC.Address = "198.51.100.10/redfish/v1/Systems/1"
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("has no scheme"))
+		})
+
+		It("Should deny a bmc address set without a credentialsSecretRef", func() {
+			obj.Spec.BMC.CredentialsSecretRef = keziov1alpha1.SecretReference{}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("credentialsSecretRef is required"))
+		})
+
+		It("Should redact userinfo embedded in the bmc address from the rejection message", func() {
+			obj.Spec.BMC.Address = "http://admin:hunter2@198.51.100.10"
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).NotTo(ContainSubstring("hunter2"))
+			Expect(err.Error()).To(ContainSubstring("admin:xxxxx@198.51.100.10"))
+		})
+
+		It("Should admit a valid bmc-insecure-skip-verify annotation value", func() {
+			obj.Annotations = map[string]string{keziov1alpha1.AnnotationBMCInsecureSkipVerify: "true"}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("Should deny an invalid bmc-insecure-skip-verify annotation value", func() {
+			obj.Annotations = map[string]string{keziov1alpha1.AnnotationBMCInsecureSkipVerify: "maybe"}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("not a valid boolean"))
+		})
+
 		It("Should skip validation on update when the object is being deleted", func() {
 			now := metav1.Now()
 			obj.DeletionTimestamp = &now

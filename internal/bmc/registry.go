@@ -122,3 +122,24 @@ func registeredSchemesLocked() []string {
 	sort.Strings(schemes)
 	return schemes
 }
+
+// RegisteredSchemes returns the URL schemes currently registered with a
+// Driver, sorted. It exists for callers that need to check or report on
+// registration state without going through Connect - for example the
+// Machine validating webhook, which rejects a spec.bmc.address whose
+// scheme has no registered driver rather than letting that surface later
+// as a Connect failure during a deploy.
+func RegisteredSchemes() []string {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	return registeredSchemesLocked()
+}
+
+// IsSchemeRegistered reports whether scheme (case-insensitive) has a
+// registered Driver.
+func IsSchemeRegistered(scheme string) bool {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	_, ok := registry[strings.ToLower(scheme)]
+	return ok
+}

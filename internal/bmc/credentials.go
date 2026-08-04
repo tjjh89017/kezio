@@ -34,6 +34,14 @@ const (
 // helper). It looks up SecretKeyUsername and SecretKeyPassword; both keys
 // must be present and non-empty, or it returns an error naming the missing
 // key(s) but never the Secret's contents.
+//
+// The Secret referenced by Machine.spec.bmc.credentialsSecretRef is
+// expected to hold exactly these two keys - "username" and "password" -
+// which matches the builtin "kubernetes.io/basic-auth" Secret type, so an
+// operator can use that type directly rather than inventing a
+// kezio-specific shape (see config/samples for a placeholder example). A
+// Secret missing either key fails loudly here, at resolve time, rather
+// than connecting to the BMC with an empty username or password.
 func CredentialsFromSecretData(data map[string][]byte) (Credentials, error) {
 	username, password := data[SecretKeyUsername], data[SecretKeyPassword]
 	switch {

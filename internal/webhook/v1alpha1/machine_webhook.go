@@ -19,7 +19,10 @@ package v1alpha1
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"reflect"
+	"strconv"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -28,6 +31,18 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
+	"github.com/tjjh89017/kezio/internal/bmc"
+
+	// Blank-imported for their init() side effect: each registers its URL
+	// scheme with internal/bmc's driver registry (see
+	// internal/bmc/registry.go's Register). validateMachineBMC below
+	// checks spec.bmc.address's scheme against that registry, so this
+	// package must not depend on some other package (cmd/main.go, in
+	// today's single binary) having imported the drivers first - it needs
+	// the registry populated on its own, in every binary that links this
+	// webhook (including its own test binary).
+	_ "github.com/tjjh89017/kezio/internal/bmc/ipmi"
+	_ "github.com/tjjh89017/kezio/internal/bmc/redfish"
 )
 
 // nolint:unused
@@ -132,10 +147,79 @@ type diskTarget struct {
 // exists). These checks catch configurations that are guaranteed invalid
 // regardless of what hardware the Machine turns out to have.
 func validateMachine(machine *keziov1alpha1.Machine) error {
+	if err := validateMachineBMC(machine); err != nil {
+		return err
+	}
+	if err := validateBMCInsecureSkipVerifyAnnotation(machine); err != nil {
+		return err
+	}
 	if err := validateDistinctTargetDisks(machine); err != nil {
 		return err
 	}
 	return validateNoDuplicateDataImageRefs(machine)
+}
+
+// validateMachineBMC rejects a spec.bmc.address this codebase already
+// knows cannot work, before it reaches a deploy attempt: unparseable,
+// missing a scheme, or naming a scheme with no driver registered in
+// internal/bmc's registry (see the blank imports above for how that
+// registry gets populated in this binary). It also requires
+// credentialsSecretRef whenever address is set, since every registered
+// driver authenticates to the BMC - an address with no way to resolve
+// credentials is certain to fail at connect time.
+//
+// spec.bmc.address being empty (the MachineBMC zero value) means this
+// Machine has no BMC configured at all, which is valid - not every
+// Machine's lifecycle goes through kezio-driven power control.
+//
+// Every error path reports address through (*url.URL).Redacted() where
+// possible, or omits it entirely when it cannot even be parsed enough to
+// redact: a Machine author who embeds credentials in the address (for
+// example "redfish://user:pass@host/...") must never see them echoed back
+// in an admission rejection message.
+func validateMachineBMC(machine *keziov1alpha1.Machine) error {
+	address := machine.Spec.BMC.Address
+	if address == "" {
+		return nil
+	}
+
+	parsed, err := url.Parse(address)
+	if err != nil {
+		return fmt.Errorf("spec.bmc.address is not a valid URL: %w", err)
+	}
+	if parsed.Scheme == "" {
+		return fmt.Errorf("spec.bmc.address %q has no scheme; a BMC address must be a URL like \"redfish://host/...\" or \"ipmi://host\"", parsed.Redacted())
+	}
+	if !bmc.IsSchemeRegistered(parsed.Scheme) {
+		return fmt.Errorf(
+			"spec.bmc.address %q has scheme %q, which has no registered BMC driver (known: %s)",
+			parsed.Redacted(), parsed.Scheme, strings.Join(bmc.RegisteredSchemes(), ", "),
+		)
+	}
+
+	if machine.Spec.BMC.CredentialsSecretRef.Name == "" {
+		return fmt.Errorf("spec.bmc.credentialsSecretRef is required when spec.bmc.address %q is set", parsed.Redacted())
+	}
+	return nil
+}
+
+// validateBMCInsecureSkipVerifyAnnotation rejects a
+// AnnotationBMCInsecureSkipVerify value that is not a valid boolean.
+// Only exactly "true" (see the annotation's doc comment) opts a Machine
+// out of TLS verification, and any other value - including absence -
+// already means "verify", so a typo like "yes" or "maybe" would silently
+// fall back to the safe default rather than doing what its author
+// intended. Rejecting it at admission time catches that mistake instead
+// of letting it pass unnoticed.
+func validateBMCInsecureSkipVerifyAnnotation(machine *keziov1alpha1.Machine) error {
+	value, ok := machine.Annotations[keziov1alpha1.AnnotationBMCInsecureSkipVerify]
+	if !ok {
+		return nil
+	}
+	if _, err := strconv.ParseBool(value); err != nil {
+		return fmt.Errorf("annotation %q has value %q, which is not a valid boolean", keziov1alpha1.AnnotationBMCInsecureSkipVerify, value)
+	}
+	return nil
 }
 
 // validateDistinctTargetDisks rejects a Machine whose OS image and
