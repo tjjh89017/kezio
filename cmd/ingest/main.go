@@ -95,7 +95,7 @@ func buildFromEnv() (ingest.Config, ingest.Dependencies, error) {
 
 	workDir := os.Getenv("WORK_DIR")
 	if workDir == "" {
-		workDir = "/work"
+		workDir = ingest.DefaultWorkDir
 	}
 	if err := os.MkdirAll(workDir, 0o750); err != nil {
 		return ingest.Config{}, ingest.Dependencies{}, fmt.Errorf("create work dir %s: %w", workDir, err)

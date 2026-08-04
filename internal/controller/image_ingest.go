@@ -47,10 +47,14 @@ const ingestPollInterval = 5 * time.Second
 // storeMountPath and stagingMountPath are where the ingest Job's
 // container mounts the store and staging volumes; kezio-ingest is told
 // about them through the STORE_ROOT / STAGING_ROOT environment variables
-// set on its container (see cmd/ingest).
+// set on its container (see cmd/ingest). workMountPath is where its
+// scratch work volume is mounted; it is always ingest.DefaultWorkDir so
+// the WORK_DIR env var this file sets and cmd/ingest's own fallback stay
+// in lockstep even if neither is read.
 const (
 	storeMountPath   = "/store"
 	stagingMountPath = "/staging"
+	workMountPath    = ingest.DefaultWorkDir
 )
 
 // ingestJobLabel marks every resource (Job, its Pods) created for one
@@ -133,9 +137,28 @@ func (r *ImageReconciler) buildIngestJob(image *keziov1alpha1.Image, jobName str
 		{Name: "SOURCE_FORMAT", Value: image.Spec.Source.Format},
 		{Name: "SOURCE_CHECKSUM", Value: image.Spec.Source.Checksum},
 		{Name: "STORE_ROOT", Value: storeMountPath},
+		// WORK_DIR is set explicitly (rather than left to cmd/ingest's
+		// own "/work" fallback) so this Job template and the binary's
+		// default can never independently drift; both ultimately come
+		// from ingest.DefaultWorkDir (see workMountPath).
+		{Name: "WORK_DIR", Value: workMountPath},
 	}
-	volumes := []corev1.Volume{{Name: "store", VolumeSource: r.Ingest.StoreVolume}}
-	mounts := []corev1.VolumeMount{{Name: "store", MountPath: storeMountPath}}
+	volumes := []corev1.Volume{
+		{Name: "store", VolumeSource: r.Ingest.StoreVolume},
+		// work is scratch space for the fetched/staged source image,
+		// the qemu-img-converted raw disk, and per-partition slices
+		// and content before they are moved into the store - never the
+		// store or staging volumes themselves (see ingest.Config.WorkDir's
+		// doc comment). A cloud image (e.g. Ubuntu's) inflates to several
+		// GiB once converted to raw, so this is plain node-disk emptyDir
+		// with no sizeLimit rather than a small tmpfs-backed one; nothing
+		// here needs to survive the Job.
+		{Name: "work", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+	}
+	mounts := []corev1.VolumeMount{
+		{Name: "store", MountPath: storeMountPath},
+		{Name: "work", MountPath: workMountPath},
+	}
 
 	if r.Ingest.StagingVolume != nil {
 		env = append(env, corev1.EnvVar{Name: "STAGING_ROOT", Value: stagingMountPath})

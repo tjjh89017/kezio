@@ -28,6 +28,14 @@ import (
 	"github.com/tjjh89017/kezio/internal/store"
 )
 
+// DefaultWorkDir is the scratch directory path cmd/ingest falls back to
+// when WORK_DIR is unset, and the path
+// internal/controller.buildIngestJob mounts the Job's work emptyDir at.
+// Both sides reference this one constant instead of each hard-coding
+// "/work" so the binary's default and the Job template's mount can never
+// drift apart.
+const DefaultWorkDir = "/work"
+
 // Config parametrizes one Run: everything about the Image being ingested
 // and the volumes this Job's pod mounts.
 type Config struct {

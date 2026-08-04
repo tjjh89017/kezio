@@ -141,16 +141,40 @@ var _ = Describe("Image Controller, ingest mode", func() {
 			Expect(envByName["SOURCE_FORMAT"]).To(Equal(keziov1alpha1.ImageFormatQCOW2))
 			Expect(envByName["SOURCE_CHECKSUM"]).To(Equal(checksum))
 			Expect(envByName["STORE_ROOT"]).To(Equal(storeMountPath))
+			Expect(envByName["WORK_DIR"]).To(Equal(workMountPath))
 			Expect(envByName).NotTo(HaveKey("STAGING_ROOT"))
 
-			var storeMount *corev1.VolumeMount
-			for i := range container.VolumeMounts {
-				if container.VolumeMounts[i].Name == "store" {
-					storeMount = &container.VolumeMounts[i]
+			mountsByName := map[string]corev1.VolumeMount{}
+			for _, m := range container.VolumeMounts {
+				mountsByName[m.Name] = m
+			}
+
+			By("asserting the store mount is present and read-write")
+			storeMount, ok := mountsByName["store"]
+			Expect(ok).To(BeTrue())
+			Expect(storeMount.MountPath).To(Equal(storeMountPath))
+			Expect(storeMount.ReadOnly).To(BeFalse())
+
+			By("asserting the work mount is present, read-write, and backed by an emptyDir")
+			// Regression coverage for the ingest Job pod failing with
+			// "mkdir /work: permission denied": nothing was mounted at
+			// WORK_DIR at all, and a nonroot container cannot create a
+			// directory at the filesystem root. Pinning the mount here
+			// (and workMountPath's WORK_DIR wiring above) keeps that
+			// failure from coming back.
+			workMount, ok := mountsByName["work"]
+			Expect(ok).To(BeTrue())
+			Expect(workMount.MountPath).To(Equal(workMountPath))
+			Expect(workMount.ReadOnly).To(BeFalse())
+
+			var workVolume *corev1.Volume
+			for i := range job.Spec.Template.Spec.Volumes {
+				if job.Spec.Template.Spec.Volumes[i].Name == "work" {
+					workVolume = &job.Spec.Template.Spec.Volumes[i]
 				}
 			}
-			Expect(storeMount).NotTo(BeNil())
-			Expect(storeMount.MountPath).To(Equal(storeMountPath))
+			Expect(workVolume).NotTo(BeNil())
+			Expect(workVolume.EmptyDir).NotTo(BeNil())
 
 			By("asserting the Job's pod is restricted-PodSecurity compliant")
 			// kezio-system enforces PodSecurity "restricted:latest";
@@ -183,6 +207,64 @@ var _ = Describe("Image Controller, ingest mode", func() {
 			jobs := &batchv1.JobList{}
 			Expect(k8sClient.List(ctx, jobs, client.InNamespace(namespace), client.MatchingLabels{ingestJobLabel: resourceName})).To(Succeed())
 			Expect(jobs.Items).To(HaveLen(1))
+		})
+
+		It("mounts the staging volume read-write when configured", func() {
+			// kezio-ingest deletes the staged upload from the staging
+			// volume after a successful ingest (see
+			// internal/ingest.CleanupStagedSource); a read-only mount
+			// here would make that deletion fail silently (it is
+			// best-effort) and leak the staged upload forever. Pin the
+			// mount mode so that regression cannot come back unnoticed.
+			const resourceName = "ingest-job-staging-shape"
+			namespace := "default"
+			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+
+			image := &keziov1alpha1.Image{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec: keziov1alpha1.ImageSpec{
+					Source: keziov1alpha1.ImageSource{
+						URL:    "kezio-staged://golden",
+						Format: keziov1alpha1.ImageFormatQCOW2,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, image)).To(Succeed())
+
+			cfg := testIngestConfig()
+			cfg.StagingVolume = &corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}
+			r := &ImageReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Ingest: cfg}
+			DeferCleanup(func() { deleteImageAndFinalize(ctx, r, key, image) })
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+
+			job := &batchv1.Job{}
+			jobKey := types.NamespacedName{Name: ingestJobName(resourceName), Namespace: namespace}
+			Expect(k8sClient.Get(ctx, jobKey, job)).To(Succeed())
+
+			Expect(job.Spec.Template.Spec.Containers).To(HaveLen(1))
+			container := job.Spec.Template.Spec.Containers[0]
+
+			envByName := map[string]string{}
+			for _, e := range container.Env {
+				envByName[e.Name] = e.Value
+			}
+			Expect(envByName["STAGING_ROOT"]).To(Equal(stagingMountPath))
+
+			var stagingMount *corev1.VolumeMount
+			for i := range container.VolumeMounts {
+				if container.VolumeMounts[i].Name == "staging" {
+					stagingMount = &container.VolumeMounts[i]
+				}
+			}
+			Expect(stagingMount).NotTo(BeNil())
+			Expect(stagingMount.MountPath).To(Equal(stagingMountPath))
+			Expect(stagingMount.ReadOnly).To(BeFalse())
 		})
 
 		It("populates status and reaches Ready once the Job succeeds", func() {
