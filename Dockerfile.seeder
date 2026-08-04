@@ -48,6 +48,17 @@ ARG EZIO_REF=v2.0.28
 RUN git clone https://github.com/tjjh89017/ezio.git . \
     && git checkout --detach "${EZIO_REF}"
 
+# patches/ezio/*.patch fix bugs in the pinned upstream revision that
+# block kezio's own use of ezio's gRPC API, pending a matching fix
+# landing upstream - see each patch file's own commit-message-style
+# header for what it fixes and why. Applied in name order (numeric
+# prefix) so patch ordering is explicit and reproducible.
+COPY patches/ezio/*.patch /tmp/ezio-patches/
+RUN for p in /tmp/ezio-patches/*.patch; do \
+    echo "applying $p"; \
+    git apply "$p"; \
+    done
+
 RUN cmake . && make && make install
 
 # Resolve /app/ezio's full shared-library closure (transitively, via the

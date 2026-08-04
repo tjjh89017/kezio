@@ -294,12 +294,14 @@ func TestPublishContent_PublishesViaRenameFromScratch(t *testing.T) {
 		t.Errorf("usedBytes = %d, want %d", usedBytes, len("payload"))
 	}
 
-	// The content landed at its content-addressed path in contents/.
+	// The content landed at its content-addressed path in contents/,
+	// with its extent file nested under the content/ data subdirectory
+	// (see store.ContentDataDir) rather than flat alongside torrent.info.
 	dest := store.ContentDir(storeRoot, hash)
 	if _, err := os.Stat(store.ContentDirTorrentInfoPath(dest)); err != nil {
 		t.Errorf("published content missing torrent.info: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dest, store.ExtentFileName(0))); err != nil {
+	if _, err := os.Stat(filepath.Join(store.ContentDataDir(dest), store.ExtentFileName(0))); err != nil {
 		t.Errorf("published content missing extent file: %v", err)
 	}
 

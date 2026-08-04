@@ -119,9 +119,11 @@ func (r *fakeSeederRegistry) restart(target string) {
 }
 
 // writeFixtureContent writes a minimal, valid content directory (a
-// torrent.info plus its one extent file, both required by
-// store.LoadContentDirTorrentInfo/store.ValidateContentDir) under a fresh
-// temp store root, and returns the root and the content's info hash.
+// torrent.info plus its one extent file nested under the content/ data
+// subdirectory, both required by
+// store.LoadContentDirTorrentInfo/store.ValidateContentDir - see
+// store.ContentDataDir) under a fresh temp store root, and returns the
+// root and the content's info hash.
 func writeFixtureContent() (root string, hash store.InfoHash) {
 	root, err := os.MkdirTemp("", "seeder-store-*")
 	Expect(err).NotTo(HaveOccurred())
@@ -137,7 +139,7 @@ func writeFixtureContent() (root string, hash store.InfoHash) {
 	Expect(err).NotTo(HaveOccurred())
 
 	dir := store.ContentDir(root, hash)
-	Expect(os.MkdirAll(dir, 0o755)).To(Succeed())
+	Expect(os.MkdirAll(store.ContentDataDir(dir), 0o755)).To(Succeed())
 
 	infoFile, err := os.Create(store.ContentTorrentInfoPath(root, hash)) //nolint:gosec // test fixture path
 	Expect(err).NotTo(HaveOccurred())

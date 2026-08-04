@@ -27,7 +27,8 @@ import "path/filepath"
 //	  contents/
 //	    <info-hash-hex>/
 //	      torrent.info
-//	      <extent files, named by ExtentFileName>
+//	      content/
+//	        <extent files, named by ExtentFileName>
 //	      content.torrent
 //	  images/
 //	    <image-name>/
@@ -39,6 +40,18 @@ import "path/filepath"
 // content goes to which position on a target disk); that mapping is an
 // Image-level concern, so this package only reserves the path for it and
 // does not define layout.json's schema.
+//
+// The extent files sit inside a content/ subdirectory - not directly
+// inside <info-hash-hex>/ - because BuildInfoDict's info dict is a
+// BitTorrent v1 multi-file torrent with "name": contentName ("content").
+// BEP3 multi-file semantics resolve every file entry as
+// save_path/<name>/<path...>, and every compliant client (libtorrent
+// included) enforces that unconditionally - there is no way to add a
+// multi-file torrent whose files resolve directly under save_path with
+// no extra directory level. So for AddTorrent(save_path=ContentDir(...))
+// to find real bytes, the extent files have to actually live at
+// ContentDir(...)/content/<hex>, matching what the torrent's own file
+// entries already imply (see ContentDataDir, NestExtentFiles).
 
 const (
 	// contentsDirName is the contents/ subdirectory under a store root.
@@ -73,9 +86,10 @@ func ContentTorrentInfoPath(root string, hash InfoHash) string {
 }
 
 // ContentExtentPath returns the extent file path for one offset inside a
-// content's directory.
+// content's directory (under its content/ data subdirectory - see
+// ContentDataDir).
 func ContentExtentPath(root string, hash InfoHash, offset uint64) string {
-	return filepath.Join(ContentDir(root, hash), ExtentFileName(offset))
+	return filepath.Join(ContentDataDir(ContentDir(root, hash)), ExtentFileName(offset))
 }
 
 // ContentTorrentPath returns the generated .torrent file path inside a

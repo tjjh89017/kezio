@@ -248,6 +248,17 @@ spec:
   restartPolicy: Never
   securityContext:
     runAsNonRoot: true
+    # fsGroup: an emptyDir volume is created root:root 0755 by default,
+    # which a non-root container (runAsUser 65532 below) can read and
+    # traverse but not write into. The seeder Deployment never noticed
+    # this (it mounts the store read-only, see
+    # config/seeder/ezio-seeder-deployment.yaml), but this leecher does
+    # need to write the downloaded pieces into /leech: the kubelet
+    # chowns every volume's group ownership to fsGroup and grants it
+    # group rwx, which - combined with every container in the pod
+    # implicitly running with fsGroup as a supplementary group - is what
+    # lets uid 65532 write here.
+    fsGroup: 65532
     seccompProfile:
       type: RuntimeDefault
   containers:
@@ -294,11 +305,18 @@ spec:
 
 			By("byte-comparing every leeched extent file against the seeder's store copy " +
 				"(belt-and-suspenders on top of piece-hash verification)")
-			storeContentDir := store.ContentDir("/store", mustParseInfoHash(partition.InfoHash))
+			// Both paths go through store.ContentDataDir/ContentExtentPath
+			// rather than a bare "<dir>/<name>" join: the torrent leecherClient
+			// just downloaded is a BEP3 multi-file torrent named "content"
+			// (store.BuildInfoDict), so every compliant client - the leecher
+			// included - resolves each file entry as
+			// "<save_path>/content/<name>", not "<save_path>/<name>" (see
+			// internal/controller's addContent doc comment).
+			infoHash := mustParseInfoHash(partition.InfoHash)
 			for _, ext := range info.Extents {
 				name := store.ExtentFileName(ext.Offset)
-				leechedDigest := sha256sumInPod("pod/"+leecherPodName, "/leech/"+name)
-				storeDigest := sha256sumInPod("deploy/kezio-ezio-seeder", storeContentDir+"/"+name)
+				leechedDigest := sha256sumInPod("pod/"+leecherPodName, store.ContentDataDir("/leech")+"/"+name)
+				storeDigest := sha256sumInPod("deploy/kezio-ezio-seeder", store.ContentExtentPath("/store", infoHash, ext.Offset))
 				Expect(leechedDigest).To(Equal(storeDigest), "extent file %s content mismatch between leecher and store", name)
 			}
 		})

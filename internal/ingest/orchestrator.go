@@ -284,6 +284,16 @@ func publishContent(storeRoot, contentDir string) (store.InfoHash, int64, error)
 	if err != nil {
 		return store.InfoHash{}, 0, err
 	}
+	// partclone -T writes torrent.info and every extent file flat,
+	// directly inside contentDir (see internal/ingest.Partclone's doc
+	// comment - it has no option to nest its own output). Move the
+	// extent files into contentDir's content/ data subdirectory before
+	// validating and publishing, so the published layout matches what
+	// BuildInfoDict's torrent file entries resolve to on a real
+	// BitTorrent v1 client (see store.ContentDataDir).
+	if err := store.NestExtentFiles(contentDir, torrentInfo); err != nil {
+		return store.InfoHash{}, 0, err
+	}
 	if err := store.ValidateContentDir(contentDir, torrentInfo); err != nil {
 		return store.InfoHash{}, 0, err
 	}

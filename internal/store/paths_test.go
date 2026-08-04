@@ -40,8 +40,11 @@ func TestContentPaths(t *testing.T) {
 	if got, want := ContentTorrentPath(root, hash), filepath.Join(dir, ContentTorrentFileName); got != want {
 		t.Errorf("ContentTorrentPath = %q, want %q", got, want)
 	}
-	if got, want := ContentExtentPath(root, hash, 0x1000), filepath.Join(dir, ExtentFileName(0x1000)); got != want {
+	if got, want := ContentExtentPath(root, hash, 0x1000), filepath.Join(dir, contentName, ExtentFileName(0x1000)); got != want {
 		t.Errorf("ContentExtentPath = %q, want %q", got, want)
+	}
+	if got, want := ContentDataDir(dir), filepath.Join(dir, contentName); got != want {
+		t.Errorf("ContentDataDir = %q, want %q", got, want)
 	}
 }
 

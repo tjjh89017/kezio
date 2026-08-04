@@ -1,0 +1,29 @@
+fix(seeder-image): AddTorrent gRPC handler never sets result=true
+
+gRPCService::AddTorrent (service.cpp) calls ezio::add_torrent and, on
+success, falls through to `return Status::OK` without ever calling
+`response->set_result(true)`. AddResponse.result is a proto3 bool, whose
+zero value is false, so every successful AddTorrent call reports
+result=false on the wire - indistinguishable from a real failure to any
+client that checks it (as kezio's internal/seeder.Client.AddTorrent
+does; a real failure still reaches the client as a distinct gRPC error
+status via the existing catch block below, unaffected by this patch).
+GetTorrentStatus immediately shows the torrent as added, proving the
+underlying add_torrent() call itself succeeded; only the response's
+result field was wrong.
+
+Applied at Dockerfile.seeder build time (see EZIO_REF) against the
+pinned upstream ezio revision, pending a matching fix upstream.
+
+diff --git a/service.cpp b/service.cpp
+index 437c355..7d1da82 100644
+--- a/service.cpp
++++ b/service.cpp
+@@ -103,6 +103,7 @@ Status gRPCService::AddTorrent(ServerContext *context,
+ 		return Status(grpc::StatusCode::UNAVAILABLE, e.what());
+ 	}
+ 
++	response->set_result(true);
+ 	return Status::OK;
+ }
+ 

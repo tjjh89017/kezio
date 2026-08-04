@@ -271,13 +271,19 @@ func (r *SeederReconciler) syncTarget(ctx context.Context, target string, hashes
 // addContent reads hash's torrent.info from the store, builds its
 // .torrent bytes with the configured tracker URL, and adds it to c with
 // seed_mode set. save_path is the content's directory itself
-// (store.ContentDir): ezio's -F (file) mode resolves each torrent file
-// entry as a path relative to save_path, and the torrent's file names are
-// the extents' own hex-offset leaf names (internal/store.ExtentFileName),
-// so save_path must be exactly that directory for ezio to find them. In
-// -F mode ezio leaves libtorrent's default file storage in place instead
-// of its own raw-disk I/O path, and that default storage opens
-// "<save_path>/<file name>" for each file entry.
+// (store.ContentDir): ezio's -F (file) mode leaves libtorrent's default
+// multi-file storage in place instead of its own raw-disk I/O path, and
+// that storage resolves every torrent file entry as
+// "<save_path>/<info dict name>/<file path>" per BEP3 - not
+// "<save_path>/<file path>" directly. BuildInfoDict's info dict name is
+// the fixed contentName ("content"), and its file entries are the
+// extents' own hex-offset leaf names (internal/store.ExtentFileName), so
+// the bytes libtorrent actually opens live at
+// "<save_path>/content/<hex offset>" - store.ContentDataDir(contentDir),
+// which is exactly where the store publishes them (see
+// internal/store.NestExtentFiles). save_path itself stays contentDir:
+// only the physical extent files moved one level deeper to match what
+// the torrent's own metadata already implies.
 func (r *SeederReconciler) addContent(ctx context.Context, c SeederEZIOClient, hash string) error {
 	infoHash, err := store.ParseInfoHash(hash)
 	if err != nil {
