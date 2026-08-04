@@ -26,50 +26,89 @@ import (
 )
 
 // TestExecPartclone_Argv pins the full argv execPartclone.Clone shells
-// out with. It exists because of a production incident: the ingest Job
-// runs as nonroot uid 65532, and partclone always opens its logfile
-// (default /var/log/partclone.log) before doing anything else, exiting
-// immediately if that open fails - which it does under nonroot, since
-// /var/log is root-owned. -L/--logfile must redirect the logfile into
-// the writable work dir alongside targetDir. This test also pins -c
-// (clone), -T (btfiles - the extent-slice output mode
+// out with, for both the fs-specific binaries and the partclone.dd
+// fallback - the two families take different flag sets. It exists
+// because of two production incidents:
+//
+//  1. The ingest Job runs as nonroot uid 65532, and partclone always
+//     opens its logfile (default /var/log/partclone.log) before doing
+//     anything else, exiting immediately if that open fails - which it
+//     does under nonroot, since /var/log is root-owned. -L/--logfile
+//     must redirect the logfile into the writable work dir alongside
+//     targetDir.
+//  2. partclone.dd has no -c/--clone flag: its getopt short-option
+//     string (see `sopt` in partclone.c, compiled with -DDD) omits 'c'
+//     entirely, unlike partclone.<fs>, which needs -c to select clone
+//     mode among clone/restore/dev-to-dev/domain. Passing -c to
+//     partclone.dd makes it dump its usage and exit(1) instead of
+//     cloning - this broke the BIOS-boot-partition (no filesystem)
+//     path of the image-path e2e, which routes to the dd fallback.
+//
+// This test also pins -T (btfiles - the extent-slice output mode
 // internal/store.ValidateContentDir expects), -s (source) and -o
-// (targetDir), so a regression on any of those flags fails loudly
-// instead of surfacing as a runtime partclone exit status.
+// (targetDir) for both variants, so a regression on any of those flags
+// fails loudly instead of surfacing as a runtime partclone exit status.
 func TestExecPartclone_Argv(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test fakes a partclone binary via a POSIX shell script")
 	}
 
-	binDir := t.TempDir()
-	recordFile := filepath.Join(binDir, "argv.recorded")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + shellQuote(recordFile) + "\n"
-	scriptPath := filepath.Join(binDir, "partclone.ext4")
-	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
-		t.Fatalf("write fake partclone.ext4: %v", err)
+	tests := []struct {
+		name       string
+		fakeBinary string // binary name to fake on PATH
+		fsType     string // fsType passed to Clone
+		wantClone  bool   // whether -c should appear in argv
+	}{
+		{
+			name:       "fs-specific binary takes -c",
+			fakeBinary: "partclone.ext4",
+			fsType:     "ext4",
+			wantClone:  true,
+		},
+		{
+			name:       "dd fallback binary has no -c",
+			fakeBinary: ddFallbackBinary,
+			fsType:     "", // no blkid signature -> dd fallback directly
+			wantClone:  false,
+		},
 	}
 
-	t.Setenv("PATH", binDir)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			binDir := t.TempDir()
+			recordFile := filepath.Join(binDir, "argv.recorded")
+			script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + shellQuote(recordFile) + "\n"
+			scriptPath := filepath.Join(binDir, tt.fakeBinary)
+			if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
+				t.Fatalf("write fake %s: %v", tt.fakeBinary, err)
+			}
 
-	workDir := t.TempDir()
-	source := filepath.Join(workDir, "part-1.raw")
-	targetDir := filepath.Join(workDir, "content-1")
+			t.Setenv("PATH", binDir)
 
-	if err := (execPartclone{}).Clone(context.Background(), "ext4", source, targetDir); err != nil {
-		t.Fatalf("Clone: %v", err)
-	}
+			workDir := t.TempDir()
+			source := filepath.Join(workDir, "part-1.raw")
+			targetDir := filepath.Join(workDir, "content-1")
 
-	recorded, err := os.ReadFile(recordFile)
-	if err != nil {
-		t.Fatalf("read recorded argv: %v", err)
-	}
-	got := strings.Split(strings.TrimRight(string(recorded), "\n"), "\n")
+			if err := (execPartclone{}).Clone(context.Background(), tt.fsType, source, targetDir); err != nil {
+				t.Fatalf("Clone: %v", err)
+			}
 
-	wantLogPath := filepath.Join(workDir, "partclone.content-1.log")
-	want := []string{"-c", "-F", "-s", source, "-o", targetDir, "-T", "-L", wantLogPath}
+			recorded, err := os.ReadFile(recordFile)
+			if err != nil {
+				t.Fatalf("read recorded argv: %v", err)
+			}
+			got := strings.Split(strings.TrimRight(string(recorded), "\n"), "\n")
 
-	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
-		t.Errorf("argv = %q, want %q", got, want)
+			wantLogPath := filepath.Join(workDir, "partclone.content-1.log")
+			want := []string{"-F", "-s", source, "-o", targetDir, "-T", "-L", wantLogPath}
+			if tt.wantClone {
+				want = append([]string{"-c"}, want...)
+			}
+
+			if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+				t.Errorf("argv = %q, want %q", got, want)
+			}
+		})
 	}
 }
 

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // ddFallbackBinary is the partclone binary used for a file system it
@@ -61,10 +62,21 @@ func (execPartclone) Clone(ctx context.Context, fsType, source, targetDir string
 	// (if this ever parallelizes) cannot collide on one logfile.
 	logPath := filepath.Join(filepath.Dir(targetDir), "partclone."+filepath.Base(targetDir)+".log")
 
+	// partclone.dd has no -c/--clone flag: its getopt short-option
+	// string (see `sopt` in partclone.c, compiled with -DDD) omits 'c'
+	// entirely - passing it makes partclone.dd dump its usage and
+	// exit(1) instead of cloning. partclone.<fs> needs -c to pick
+	// clone mode among clone/restore/dev-to-dev/domain, so it stays for
+	// every binary except the dd fallback.
+	args := []string{"-F", "-s", source, "-o", targetDir, "-T", "-L", logPath}
+	if binary != ddFallbackBinary {
+		args = append([]string{"-c"}, args...)
+	}
+
 	//nolint:gosec // binary is chosen from a fixed set below; source/targetDir/logPath are ingest-controlled scratch paths
-	cmd := exec.CommandContext(ctx, binary, "-c", "-F", "-s", source, "-o", targetDir, "-T", "-L", logPath)
+	cmd := exec.CommandContext(ctx, binary, args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%s -c -s %s -o %s -L %s: %w: %s", binary, source, targetDir, logPath, err, out)
+		return fmt.Errorf("%s %s: %w: %s", binary, strings.Join(args, " "), err, out)
 	}
 	return nil
 }
