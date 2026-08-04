@@ -9,6 +9,7 @@ require (
 	github.com/onsi/gomega v1.36.1
 	github.com/pin/tftp/v3 v3.2.0
 	github.com/spf13/cobra v1.8.1
+	github.com/stmcginnis/gofish v0.24.0
 	google.golang.org/grpc v1.68.1
 	google.golang.org/protobuf v1.36.5
 	k8s.io/api v0.33.0
