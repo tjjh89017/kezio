@@ -56,6 +56,40 @@ func TestSmallestSeedablePartition(t *testing.T) {
 	})
 }
 
+func TestLargestSeedablePartition(t *testing.T) {
+	t.Run("picks the largest UsedBytes among partitions with an infoHash", func(t *testing.T) {
+		partitions := []keziov1alpha1.ImagePartitionStatus{
+			{Number: 1, Role: keziov1alpha1.PartitionRoleESP, InfoHash: "a", UsedBytes: 100},
+			{Number: 2, Role: keziov1alpha1.PartitionRoleData, InfoHash: "b", UsedBytes: 5000},
+			{Number: 3, Role: keziov1alpha1.PartitionRoleSwap, UUID: "c", UsedBytes: 1_000_000}, // no infoHash: not a candidate
+		}
+
+		got, err := LargestSeedablePartition(partitions)
+		if err != nil {
+			t.Fatalf("LargestSeedablePartition() error = %v", err)
+		}
+		if got.InfoHash != "b" {
+			t.Errorf("LargestSeedablePartition() = partition %d (hash %q), want the data partition (hash %q)",
+				got.Number, got.InfoHash, "b")
+		}
+	})
+
+	t.Run("errors when no partition has an infoHash", func(t *testing.T) {
+		partitions := []keziov1alpha1.ImagePartitionStatus{
+			{Number: 1, Role: keziov1alpha1.PartitionRoleSwap, UUID: "some-uuid"},
+		}
+		if _, err := LargestSeedablePartition(partitions); err == nil {
+			t.Error("LargestSeedablePartition() error = nil, want an error")
+		}
+	})
+
+	t.Run("errors on an empty list", func(t *testing.T) {
+		if _, err := LargestSeedablePartition(nil); err == nil {
+			t.Error("LargestSeedablePartition() error = nil, want an error")
+		}
+	})
+}
+
 func TestParseSHA256Sum(t *testing.T) {
 	tests := []struct {
 		name    string

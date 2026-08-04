@@ -321,6 +321,15 @@ spec:
 			}
 		})
 
+		// registerSeedingBenchmarkSpec (e2e_benchmark_test.go) adds the
+		// seeding throughput baseline as one more It() in this Context,
+		// reusing the Image this BeforeAll already ingested and seeded -
+		// but only when E2E_BENCHMARK=true, so the default image-path run
+		// this Context otherwise supports never pays for the swarm.
+		if benchmarkEnabled {
+			registerSeedingBenchmarkSpec()
+		}
+
 		AfterEach(func() {
 			if !CurrentSpecReport().Failed() {
 				return
@@ -389,7 +398,12 @@ func waitForPodRunning(name string) {
 	}).WithTimeout(2 * time.Minute).WithPolling(2 * time.Second).Should(Succeed())
 }
 
-// getImage fetches and unmarshals the named Image in namespace.
+// getImage fetches and unmarshals the named Image in namespace. Every
+// current caller (across e2e_image_path_test.go and e2e_benchmark_test.go)
+// happens to pass imagePathImageName, but the parameter is kept: this is a
+// generic kubectl-get-and-unmarshal helper, not one specific to that Image.
+//
+//nolint:unparam // see doc comment: deliberately generic, not accidentally single-value
 func getImage(name string) *keziov1alpha1.Image {
 	cmd := exec.Command("kubectl", "get", "image", name, "-n", namespace, "-o", "json")
 	out, err := utils.Run(cmd)

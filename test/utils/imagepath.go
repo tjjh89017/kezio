@@ -34,13 +34,37 @@ import (
 func SmallestSeedablePartition(
 	partitions []keziov1alpha1.ImagePartitionStatus,
 ) (keziov1alpha1.ImagePartitionStatus, error) {
+	return extremeSeedablePartition(partitions, func(candidate, best int64) bool { return candidate < best })
+}
+
+// LargestSeedablePartition returns the partition in partitions with the
+// largest UsedBytes among those that carry an InfoHash, the same
+// candidate rule SmallestSeedablePartition uses (see its doc comment).
+// The seeding benchmark uses this to pick the rootfs - the partition with
+// the most meaningful data volume to swarm N leechers against - without
+// hardcoding a role name that varies by image layout.
+func LargestSeedablePartition(
+	partitions []keziov1alpha1.ImagePartitionStatus,
+) (keziov1alpha1.ImagePartitionStatus, error) {
+	return extremeSeedablePartition(partitions, func(candidate, best int64) bool { return candidate > best })
+}
+
+// extremeSeedablePartition returns the partition among those with a
+// non-empty InfoHash for which isBetter(candidate.UsedBytes,
+// best.UsedBytes) holds against every other candidate - the shared
+// selection loop behind SmallestSeedablePartition and
+// LargestSeedablePartition.
+func extremeSeedablePartition(
+	partitions []keziov1alpha1.ImagePartitionStatus,
+	isBetter func(candidate, best int64) bool,
+) (keziov1alpha1.ImagePartitionStatus, error) {
 	var best keziov1alpha1.ImagePartitionStatus
 	found := false
 	for _, p := range partitions {
 		if p.InfoHash == "" {
 			continue
 		}
-		if !found || p.UsedBytes < best.UsedBytes {
+		if !found || isBetter(p.UsedBytes, best.UsedBytes) {
 			best = p
 			found = true
 		}
