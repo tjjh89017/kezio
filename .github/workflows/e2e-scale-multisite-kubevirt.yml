@@ -502,12 +502,42 @@ jobs:
         # host (https://docs.k3s.io/networking/multus-ipams,
         # k3s-io/k3s#10869); this is what actually broke workflow runs
         # 30999047426 and 31001958670, not the Multus version.
+        #
+        # /var/lib/rancher/k3s/data/cni is not where every k3s version
+        # actually keeps its bundled CNI plugin binaries (run 31003551730:
+        # that path was empty/dangling on k3s v1.36.2+k3s1, so every pod
+        # sandbox failed with "failed to find plugin \"flannel\" in path
+        # [/opt/cni/bin]"). Resolve the real directory on the runner
+        # instead of hardcoding it.
         run: |
           set -euo pipefail
           sudo mkdir -p /etc/cni /opt/cni
           sudo rm -rf /etc/cni/net.d /opt/cni/bin
           sudo ln -s /var/lib/rancher/k3s/agent/etc/cni/net.d /etc/cni/net.d
-          sudo ln -s /var/lib/rancher/k3s/data/cni /opt/cni/bin
+
+          flannel_path="$(sudo find /var/lib/rancher/k3s/data -maxdepth 3 -type f -name flannel 2>/dev/null | head -n1)"
+          if [ -z "${flannel_path}" ] && [ -x /var/lib/rancher/k3s/data/current/bin/flannel ]; then
+            flannel_path="/var/lib/rancher/k3s/data/current/bin/flannel"
+          fi
+          if [ -z "${flannel_path}" ]; then
+            echo "::error::could not locate k3s's bundled CNI plugins (flannel) under /var/lib/rancher/k3s/data"
+            sudo ls -la /var/lib/rancher/k3s/data || true
+            exit 1
+          fi
+
+          bin_dir="$(dirname "${flannel_path}")"
+          echo "Resolved k3s CNI plugin dir: ${bin_dir}"
+          for plugin in flannel bridge; do
+            if [ -x "${bin_dir}/${plugin}" ]; then
+              echo "  found ${plugin}: yes"
+            else
+              echo "::error::required CNI plugin '${plugin}' missing from ${bin_dir}"
+              sudo ls -la "${bin_dir}"
+              exit 1
+            fi
+          done
+
+          sudo ln -s "${bin_dir}" /opt/cni/bin
 
       - name: Install Multus
         run: |
