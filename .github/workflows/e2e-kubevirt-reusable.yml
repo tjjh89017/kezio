@@ -201,7 +201,22 @@ env:
 
   # The provisioning L2 segment, same shape as e2e-boot-path-kubevirt.yml.
   PROVISIONING_BRIDGE: kezio-prov0
-  PROVISIONING_BOOTD_IP: 192.0.2.1/24
+  # Three distinct addresses on that segment, kept apart deliberately:
+  #   - PROVISIONING_HOST_IP: the runner host's own address on the
+  #     bridge. It anchors only the socat TCP forwards for the
+  #     boot/agent servers below - it is NOT bootd's address (bootd
+  #     stopped borrowing it when it grew its own net1 address).
+  #   - PROVISIONING_BOOTD_NET1_IP: the static address the
+  #     kezio-boot-network NetworkAttachmentDefinition assigns to
+  #     bootd's net1. It is dnsmasq's dhcp-range subnet anchor, the
+  #     relay giaddr, and the TFTP next-server bootd advertises - so
+  #     firmware TFTPs straight into bootd's pod with no host-side
+  #     UDP/69 forward in the path.
+  #   - PROVISIONING_CIDR: the whole segment, handed to bootd as
+  #     BOOTD_PROVISIONING_CIDR (its proxyDHCP dhcp-range).
+  PROVISIONING_HOST_IP: 192.0.2.1/24
+  PROVISIONING_BOOTD_NET1_IP: 192.0.2.2/24
+  PROVISIONING_CIDR: 192.0.2.0/24
   TARGET_VM_NAME: ${{ inputs.target_vm_name }}
   TARGET_VM_MAC: ${{ inputs.target_vm_mac }}
   TARGET_VM_DISK_SERIAL: ${{ inputs.target_vm_disk_serial }}
@@ -382,7 +397,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo ip link add "${PROVISIONING_BRIDGE}" type bridge
-          sudo ip addr add "${PROVISIONING_BOOTD_IP}" dev "${PROVISIONING_BRIDGE}"
+          sudo ip addr add "${PROVISIONING_HOST_IP}" dev "${PROVISIONING_BRIDGE}"
           sudo ip link set "${PROVISIONING_BRIDGE}" up
 
       - name: Cache the Ubuntu cloud image
@@ -702,6 +717,51 @@ jobs:
             sudo ethtool -K "${PROVISIONING_BRIDGE}" tx off || true
           fi
 
+      - name: Start a lease-only DHCP server on the runner host (stands in for the site's existing DHCP server)
+        # bootd's dnsmasq is proxyDHCP only - it never assigns
+        # addresses. A real site keeps its existing DHCP server for
+        # leases, and bootd relays the segment's lease traffic to it
+        # (BOOTD_DHCP_RELAY_SERVER -> dnsmasq's dhcp-relay). This host
+        # dnsmasq plays that existing server: port=0 (no DNS), one
+        # lease range on the provisioning subnet, nothing else.
+        #
+        # It is deliberately bound AWAY from the provisioning bridge:
+        # bind-interfaces plus a listen-address on the default-route
+        # interface's own address means its DHCP socket never hears
+        # the bridge's broadcasts - the only path from the target VM
+        # to this server is bootd's relay (giaddr'd unicast to this
+        # address), which is exactly the path this lane must prove.
+        # Relayed replies go back to the giaddr (bootd's net1 address
+        # on the bridge, reachable from the host through its own
+        # bridge port), and bootd's dnsmasq re-emits them onto the
+        # segment.
+        #
+        # dnsmasq-base, not dnsmasq: the -base package ships only the
+        # binary, with no distro service unit that would auto-start a
+        # port-53 DNS server with the stock config behind our back.
+        # This install happens on the ephemeral CI runner host only.
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends dnsmasq-base
+          host_ip="$(ip -4 route get 1.1.1.1 | awk '{for (i=1; i<NF; i++) if ($i=="src") print $(i+1)}' | head -1)"
+          if [ -z "${host_ip}" ]; then
+            echo "::error::could not determine the runner's default-route source address for the lease DHCP server" >&2
+            exit 1
+          fi
+          echo "host lease DHCP server address: ${host_ip}"
+          cat <<EOF | sudo tee /etc/kezio-host-dnsmasq.conf
+          port=0
+          bind-interfaces
+          listen-address=${host_ip}
+          dhcp-range=192.0.2.10,192.0.2.100,255.255.255.0,12h
+          no-ping
+          log-dhcp
+          log-facility=${RUNNER_TEMP}/host-dnsmasq.log
+          dhcp-leasefile=${RUNNER_TEMP}/host-dnsmasq.leases
+          EOF
+          sudo dnsmasq --conf-file=/etc/kezio-host-dnsmasq.conf
+          echo "RELAY_DHCP_SERVER_IP=${host_ip}" >> "$GITHUB_ENV"
+
       - name: Start capturing the provisioning bridge (tcpdump)
         # Definitive instrumentation regardless of whether the checksum
         # fix above is the actual/only cause: capture every DHCP/TFTP
@@ -759,9 +819,14 @@ jobs:
 
       - name: Install KubeVirt
         # The KubevirtSeccompProfile feature gate plus seccompConfiguration
-        # patch below is required for virt-launcher pods to run at all in
-        # the "Deploy CRDs and the controller-manager" step's
-        # restricted-PSA kezio-system namespace: without it, KubeVirt
+        # patch below made virt-launcher pods admissible back when the
+        # "Deploy CRDs and the controller-manager" step still enforced
+        # restricted PSA on kezio-system (that step now labels the
+        # namespace privileged - bootd's dnsmasq needs NET_ADMIN/NET_RAW -
+        # so the gate is no longer load-bearing for admission, but it is
+        # kept: an explicit seccompProfile on virt-launcher pods costs
+        # nothing and keeps every pod as strict as the namespace label
+        # allows). The original failure mode: without it, KubeVirt
         # renders the compute/guest-console-log containers with no
         # explicit securityContext.seccompProfile, which the "restricted"
         # Pod Security Standard rejects outright (every virt-launcher pod
@@ -857,10 +922,19 @@ jobs:
           set -euo pipefail
           make install
           make deploy IMG="${MANAGER_IMG}"
-          kubectl label --overwrite ns kezio-system pod-security.kubernetes.io/enforce=restricted
+          # privileged, not restricted: bootd's dnsmasq child needs NET_ADMIN/NET_RAW, outside both the restricted and baseline PSA profiles - see config/bootd/deployment.yaml's capabilities comment. Every pod keeps its own strict securityContext regardless.
+          kubectl label --overwrite ns kezio-system pod-security.kubernetes.io/enforce=privileged
           kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
 
       - name: Create the provisioning NetworkAttachmentDefinition
+        # Static ipam, not "ipam": {}: bootd's net1 must carry a fixed
+        # address (PROVISIONING_BOOTD_NET1_IP) on the provisioning
+        # subnet - dnsmasq binds its DHCP sockets to net1, uses this
+        # address as the dhcp-relay giaddr, and BOOTD_SERVER_IP
+        # advertises it as the TFTP next-server. The runner host keeps
+        # PROVISIONING_HOST_IP on the same bridge, so the two never
+        # collide.
+        #
         # Chains the "tuning" CNI plugin onto the plain bridge attachment
         # to force net1's reverse-path filter loose (rp_filter=0) inside
         # bootd's own network namespace, IFNAME substituted by the tuning
@@ -890,7 +964,12 @@ jobs:
                   {
                     "type": "bridge",
                     "bridge": "${PROVISIONING_BRIDGE}",
-                    "ipam": {}
+                    "ipam": {
+                      "type": "static",
+                      "addresses": [
+                        {"address": "${PROVISIONING_BOOTD_NET1_IP}"}
+                      ]
+                    }
                   },
                   {
                     "type": "tuning",
@@ -947,9 +1026,9 @@ jobs:
             SEEDER_SERVICE_NAME=kezio-ezio-seeder \
             BOOT_SERVER_ADDR=:8090 \
             BOOT_ARTIFACTS_DIR=/boot-artifacts \
-            BOOT_SERVER_URL="http://${PROVISIONING_BOOTD_IP%%/*}:8090" \
+            BOOT_SERVER_URL="http://${PROVISIONING_HOST_IP%%/*}:8090" \
             AGENT_SERVER_ADDR=:8091 \
-            BOOT_AGENT_SERVER_URL="http://${PROVISIONING_BOOTD_IP%%/*}:8091" \
+            BOOT_AGENT_SERVER_URL="http://${PROVISIONING_HOST_IP%%/*}:8091" \
             DEPLOYER=agent
 
           kubectl -n kezio-system create configmap boot-artifacts-fetch-script \
@@ -986,10 +1065,7 @@ jobs:
         # proxyDHCP/TFTP traffic by running as a Multus-attached pod
         # directly on this bridge (see config/bootd/
         # networkattachmentdefinition.example.yaml's "Why Multus, not
-        # hostNetwork" section) - not reused here because kezio-system is
-        # labeled pod-security.kubernetes.io/enforce=restricted (see
-        # "Deploy CRDs and the controller-manager" above), which forbids
-        # hostPort outright, and because attaching the whole
+        # hostNetwork" section) - not reused here because attaching the whole
         # controller-manager Pod (leader election, the mutating/
         # validating webhooks, every other controller) onto an isolated
         # test L2 segment is a much bigger blast radius than this narrow
@@ -1001,9 +1077,10 @@ jobs:
         # not inside any container), so it already sits on the same
         # broadcast domain as the target VM's provisioning NIC and can
         # reach each Service's ClusterIP over the cluster's own pod
-        # network. socat listens on that shared bridge address
-        # (${PROVISIONING_BOOTD_IP%%/*}, the same address kezio-bootd
-        # already advertises as its own TFTP next-server) and relays to
+        # network. socat listens on the host's own bridge address
+        # (${PROVISIONING_HOST_IP%%/*} - only these two TCP forwards;
+        # TFTP needs no host forward, since bootd advertises its own
+        # net1 address as next-server) and relays to
         # each Service's ClusterIP rather than a specific Pod IP, so a
         # Pod restart does not stop the forward from working - the same
         # property kube-proxy's own iptables rules would give a Pod
@@ -1012,7 +1089,7 @@ jobs:
           set -euo pipefail
           command -v socat >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq socat)
 
-          bridge_ip="${PROVISIONING_BOOTD_IP%%/*}"
+          bridge_ip="${PROVISIONING_HOST_IP%%/*}"
           boot_clusterip="$(kubectl -n kezio-system get svc kezio-boot-server -o jsonpath='{.spec.clusterIP}')"
           agent_clusterip="$(kubectl -n kezio-system get svc kezio-agent-server -o jsonpath='{.spec.clusterIP}')"
 
@@ -1045,7 +1122,21 @@ jobs:
           cd config/bootd && ../../bin/kustomize edit set image bootd="${BOOTD_IMG}"
           cd ../..
           kubectl apply -k config/bootd
-          kubectl -n kezio-system set env deployment/kezio-bootd BOOTD_SERVER_IP="${PROVISIONING_BOOTD_IP%%/*}"
+          # The three site-specific values config/bootd/deployment.yaml
+          # leaves as placeholders/comments (BOOTD_DHCP_INTERFACE=net1
+          # is already set there):
+          #   - BOOTD_SERVER_IP: bootd's OWN net1 static address (the
+          #     NAD's ipam above) - the PXE next-server, so firmware
+          #     TFTPs straight to the pod, and the dhcp-relay giaddr.
+          #   - BOOTD_PROVISIONING_CIDR: the segment's subnet, rendered
+          #     as dnsmasq's proxyDHCP dhcp-range.
+          #   - BOOTD_DHCP_RELAY_SERVER: the host lease-only dnsmasq
+          #     (see "Start a lease-only DHCP server" above) - the
+          #     stand-in for the site's existing DHCP server.
+          kubectl -n kezio-system set env deployment/kezio-bootd \
+            BOOTD_SERVER_IP="${PROVISIONING_BOOTD_NET1_IP%%/*}" \
+            BOOTD_PROVISIONING_CIDR="${PROVISIONING_CIDR}" \
+            BOOTD_DHCP_RELAY_SERVER="${RELAY_DHCP_SERVER_IP}"
           # Strategic-merge (kubectl patch's default type for a built-in
           # object like Deployment), not --type=json: a JSON Patch "add"
           # on .../metadata/annotations replaces the whole annotations
@@ -1466,11 +1557,11 @@ jobs:
           # as curlimages/curl's other initContainer uses in this repo
           # (e.g. config/bootd/deployment.yaml): the image's own USER
           # is the non-numeric "curl_user", which restricted PSA can't
-          # resolve to verify runAsNonRoot. Re-validated at this version
-          # bump: restricted PSA is a Kubernetes admission policy this
-          # workflow sets on the namespace itself, not something
-          # KubeVirt/CDI/Multus/curl version changes affect, so the
-          # override is still required.
+          # resolve to verify runAsNonRoot. kezio-system now enforces
+          # privileged PSA (bootd's dnsmasq needs NET_ADMIN/NET_RAW -
+          # see the namespace label step above), so this override is no
+          # longer required for admission; it is kept so this throwaway
+          # pod stays as strict as every other pod in the lane.
           redfish_overrides="$(jq -n \
             --arg name "kezio-e2e-redfish-check" \
             --arg image "curlimages/curl:8.21.0" \
@@ -1981,6 +2072,24 @@ jobs:
             tcpdump -vvv -r "${RUNNER_TEMP}/bootd-netns.pcap" > "${RUNNER_TEMP}/bootd-netns-pcap.txt" 2>&1
           fi
 
+      - name: Flush the bootd and host DHCP-server logs to the artifact
+        if: always()
+        # Unconditional, like the pcap flushes above: bootd's pod log
+        # now carries dnsmasq's forwarded per-request log-dhcp decision
+        # lines (see internal/bootd's forwardLines), and the host
+        # lease server's own log-dhcp log shows whether relayed lease
+        # traffic ever arrived - both are the DHCP story a passing OR
+        # failing run needs on record. The failure-only diagnostics
+        # dump includes bootd's log too, but only on failure.
+        run: |
+          set +e
+          kubectl -n kezio-system logs deployment/kezio-bootd --all-containers --tail=-1 \
+            > "${RUNNER_TEMP}/bootd.log" 2>&1 || true
+          if [ -f "${RUNNER_TEMP}/host-dnsmasq.log" ]; then
+            sudo chmod 0644 "${RUNNER_TEMP}/host-dnsmasq.log"
+          fi
+          exit 0
+
       - name: Dump KubeVirtBMC diagnostics on failure
         if: ${{ failure() && inputs.bmc_mode }}
         run: |
@@ -2022,5 +2131,8 @@ jobs:
             ${{ runner.temp }}/bridge-pcap.txt
             ${{ runner.temp }}/bootd-netns.pcap
             ${{ runner.temp }}/bootd-netns-pcap.txt
+            ${{ runner.temp }}/bootd.log
+            ${{ runner.temp }}/host-dnsmasq.log
+            ${{ runner.temp }}/host-dnsmasq.leases
           if-no-files-found: ignore
           retention-days: 7
