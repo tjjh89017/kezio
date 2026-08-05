@@ -3,9 +3,10 @@ name: Publish Images
 # Builds and pushes the four kezio images to ghcr.io/tjjh89017 on every
 # push to main (moving "latest" tag) and on every "v*" tag (semver
 # tags). This is additive to test-e2e.yml, which builds the manager
-# image locally and imports it into a k3s node with `k3s ctr images
-# import` - that flow never pulls from a registry, so it is unaffected
-# by whatever this workflow pushes or how long it takes to push it.
+# image locally and imports it into an RKE2 node's containerd with `ctr
+# images import` - that flow never pulls from a registry, so it is
+# unaffected by whatever this workflow pushes or how long it takes to
+# push it.
 #
 # Image <-> Dockerfile mapping (must stay in sync with the per-binary
 # docker-build-* targets in the Makefile):

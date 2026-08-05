@@ -343,9 +343,9 @@ spec:
 
 // buildAndImportImagePathImages builds the ingest, seeder, and
 // image-service Docker images and imports them the same way BeforeSuite
-// already does for the manager image: `k3s ctr images import` for a
-// pre-provisioned k3s cluster, `kind load docker-image` otherwise. None of
-// the three is ever pulled from a registry.
+// already does for the manager image: `ctr images import` against RKE2's
+// containerd for a pre-provisioned RKE2 cluster, `kind load docker-image`
+// otherwise. None of the three is ever pulled from a registry.
 func buildAndImportImagePathImages() {
 	runMake("docker-build-ingest", "INGEST_IMG="+ingestImagePathImage)
 	runMake("docker-build-seeder", "SEEDER_IMG="+seederImagePathImage)
@@ -353,8 +353,8 @@ func buildAndImportImagePathImages() {
 
 	for _, img := range []string{ingestImagePathImage, seederImagePathImage, imageServiceImagePathImage} {
 		var err error
-		if e2eCluster == "k3s" {
-			err = utils.LoadImageToK3sContainerd(img)
+		if e2eCluster == "rke2" {
+			err = utils.LoadImageToRKE2Containerd(img)
 		} else {
 			err = utils.LoadImageToKindClusterWithName(img)
 		}

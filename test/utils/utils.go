@@ -207,17 +207,21 @@ func LoadImageToKindClusterWithName(name string) error {
 	return err
 }
 
-// LoadImageToK3sContainerd imports a local docker image into the k3s node's
-// containerd image store. Used when the e2e suite targets a pre-provisioned
-// single-node k3s cluster instead of Kind. k3s ctr defaults to the k8s.io
-// containerd namespace that the kubelet reads, so the imported image is
-// available to pods without pushing to a registry.
-func LoadImageToK3sContainerd(name string) error {
-	// Stream the docker image tarball straight into k3s containerd rather
-	// than buffering it to disk: docker save (stdout) -> k3s ctr images
+// LoadImageToRKE2Containerd imports a local docker image into the RKE2
+// node's containerd image store. Used when the e2e suite targets a
+// pre-provisioned single-node RKE2 cluster instead of Kind. Unlike k3s's
+// "k3s ctr" wrapper (which defaults to the embedded socket and the k8s.io
+// namespace on its own), RKE2 ships a plain "ctr" binary that needs both
+// pointed at explicitly: -a selects RKE2's containerd socket (still under
+// /run/k3s/containerd - RKE2 kept that path from its k3s lineage even
+// though the cluster itself is RKE2, not k3s), and -n k8s.io selects the
+// namespace the kubelet reads from, matching what "k3s ctr" did implicitly.
+func LoadImageToRKE2Containerd(name string) error {
+	// Stream the docker image tarball straight into RKE2's containerd
+	// rather than buffering it to disk: docker save (stdout) -> ctr images
 	// import (stdin).
 	saveCmd := exec.Command("docker", "save", name)
-	importCmd := exec.Command("sudo", "k3s", "ctr", "images", "import", "-")
+	importCmd := exec.Command("sudo", "ctr", "-a", "/run/k3s/containerd/containerd.sock", "-n", "k8s.io", "images", "import", "-")
 
 	pipe, err := saveCmd.StdoutPipe()
 	if err != nil {
@@ -230,13 +234,13 @@ func LoadImageToK3sContainerd(name string) error {
 	importCmd.Stderr = &importOut
 
 	if err := importCmd.Start(); err != nil {
-		return fmt.Errorf("failed to start k3s ctr images import: %w", err)
+		return fmt.Errorf("failed to start ctr images import: %w", err)
 	}
 	if err := saveCmd.Run(); err != nil {
 		return fmt.Errorf("failed to run docker save %q: %w", name, err)
 	}
 	if err := importCmd.Wait(); err != nil {
-		return fmt.Errorf("k3s ctr images import failed: %q: %w", importOut.String(), err)
+		return fmt.Errorf("ctr images import failed: %q: %w", importOut.String(), err)
 	}
 
 	return nil

@@ -9,7 +9,7 @@ name: Seeding Throughput Baseline (Benchmark)
 # not so a PR can fail on it.
 #
 # workflow_dispatch only, deliberately: this reuses the same slow-lane
-# setup as test-e2e.yml's "image-path" job (k3s, four locally built
+# setup as test-e2e.yml's "image-path" job (RKE2, four locally built
 # images including the from-source seeder, a real ingest of an Ubuntu
 # cloud image) and then adds a multi-minute leecher swarm on top, which
 # would slow down every push/PR if it ran there. Those setup steps are
@@ -46,7 +46,15 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  K3S_VERSION: "v1.36.2+k3s1"
+  RKE2_VERSION: "v1.36.2+rke2r1"
+  # RKE2 has no default StorageClass (unlike k3s's bundled local-path);
+  # config/e2e-image-path's store/staging PVCs (applied by the Go suite's
+  # own BeforeAll, not by this workflow directly) request storageClassName
+  # local-path explicitly, so this rancher/local-path-provisioner release
+  # is installed and marked default below. This lane never touches
+  # Multus/NADs (each leecher Pod's emptyDir is single-node, no secondary
+  # network needed), so it installs RKE2 with plain canal.
+  LOCAL_PATH_PROVISIONER_VERSION: "v0.0.37"
   # Same minimal Ubuntu cloud image the image-path e2e job uses - see
   # test-e2e.yml's own env block for why the minimal image is preferred
   # here (half the download/convert/partclone time of the full image for
@@ -63,7 +71,7 @@ jobs:
     name: Swarm N leechers against one seeder
     runs-on: ubuntu-latest
     # Budget: everything test-e2e.yml's image-path job budgets 60 minutes
-    # for (k3s install, four image builds, a real ingest of the Ubuntu
+    # for (RKE2 install, four image builds, a real ingest of the Ubuntu
     # cloud image) plus the swarm itself. Each leecher is individually
     # bounded to 10 minutes (benchmarkLeechTimeout in
     # test/e2e/e2e_benchmark_test.go) but all leechers run concurrently,
@@ -105,17 +113,18 @@ jobs:
           mem_mb="$(free -m | awk '/^Mem:/{print $2}')"
           disk_avail_gb="$(df -BG --output=avail / | tail -1 | tr -dc '0-9')"
 
-          # Same floors as test-e2e.yml's image-path job. This job never
-          # fails on "not enough disk for N leechers" here - that is a
-          # runtime decision the benchmark itself makes (see
-          # CapLeecherCount) and reports, not a hard CI gate - these
-          # floors only catch a runner that is clearly the wrong class.
+          # Same floors as test-e2e.yml's image-path job (including its
+          # RKE2-vs-k3s bump). This job never fails on "not enough disk
+          # for N leechers" here - that is a runtime decision the
+          # benchmark itself makes (see CapLeecherCount) and reports, not
+          # a hard CI gate - these floors only catch a runner that is
+          # clearly the wrong class.
           if [ "$cpus" -lt 2 ]; then
             echo "::error::Runner has only ${cpus} CPU(s); kezio's benchmark needs at least 2." >&2
             exit 1
           fi
-          if [ "$mem_mb" -lt 6000 ]; then
-            echo "::error::Runner has only ${mem_mb} MiB RAM; kezio's benchmark needs at least 6000 MiB." >&2
+          if [ "$mem_mb" -lt 7000 ]; then
+            echo "::error::Runner has only ${mem_mb} MiB RAM; kezio's benchmark needs at least 7000 MiB." >&2
             exit 1
           fi
           if [ "$disk_avail_gb" -lt 20 ]; then
@@ -157,30 +166,64 @@ jobs:
               .
           done
 
-      - name: Install k3s
+      - name: Write the RKE2 config (must exist before the service starts)
+        # Plain canal - each leecher Pod's emptyDir is single-node; this
+        # lane never touches Multus/NADs.
         run: |
           set -euo pipefail
-          curl -sfL https://get.k3s.io \
-            | INSTALL_K3S_VERSION="${K3S_VERSION}" sh -s - --write-kubeconfig-mode 644
-          echo "KUBECONFIG=/etc/rancher/k3s/k3s.yaml" >> "$GITHUB_ENV"
-          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-          # k3s registers its node a moment after the installer returns; wait
+          sudo mkdir -p /etc/rancher/rke2
+          cat <<'EOF' | sudo tee /etc/rancher/rke2/config.yaml
+          write-kubeconfig-mode: "0644"
+          cni: canal
+          EOF
+
+      - name: Install RKE2
+        run: |
+          set -euo pipefail
+          curl -sfL https://get.rke2.io | INSTALL_RKE2_VERSION="${RKE2_VERSION}" sh -
+          sudo systemctl enable --now rke2-server.service
+
+          # kubectl/ctr/crictl ship under /var/lib/rancher/rke2/bin, not on
+          # PATH by default - symlink them into /usr/local/bin (inside
+          # sudo's secure_path) the same way the k3s installer always put
+          # its own "k3s" binary there.
+          sudo ln -sf /var/lib/rancher/rke2/bin/kubectl /usr/local/bin/kubectl
+          sudo ln -sf /var/lib/rancher/rke2/bin/ctr /usr/local/bin/ctr
+          sudo ln -sf /var/lib/rancher/rke2/bin/crictl /usr/local/bin/crictl
+
+          echo "KUBECONFIG=/etc/rancher/rke2/rke2.yaml" >> "$GITHUB_ENV"
+          export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+          # RKE2 registers its node a moment after the service starts; wait
           # for the node object to exist before waiting on its Ready condition,
           # since `kubectl wait` errors out immediately on zero matches.
-          for _ in $(seq 1 60); do
+          for _ in $(seq 1 90); do
             [ "$(kubectl get nodes --no-headers 2>/dev/null | wc -l)" -ge 1 ] && break
             sleep 2
           done
-          kubectl wait --for=condition=Ready node --all --timeout=120s
+          kubectl wait --for=condition=Ready node --all --timeout=300s
           kubectl get nodes -o wide
 
+      - name: Install local-path-provisioner and mark it the default StorageClass
+        # RKE2 ships no default StorageClass (k3s bundled local-path by
+        # default; RKE2 deliberately does not). config/e2e-image-path's
+        # store/staging PVCs (applied by the Go suite's own BeforeAll, not
+        # by this workflow directly) request storageClassName local-path
+        # explicitly, so that name must exist here before the suite runs.
+        run: |
+          set -euo pipefail
+          kubectl apply -f "https://raw.githubusercontent.com/rancher/local-path-provisioner/${LOCAL_PATH_PROVISIONER_VERSION}/deploy/local-path-storage.yaml"
+          kubectl -n local-path-storage rollout status deployment/local-path-provisioner --timeout=180s
+          kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+
       - name: Confirm metrics-server (seeder CPU/RSS sampling degrades gracefully if absent)
-        # k3s ships metrics-server by default, so this is expected to
-        # succeed - but the benchmark itself (seederMetricsSampler in
-        # test/e2e/e2e_benchmark_test.go) tolerates it being missing or
-        # slow to warm up and reports "unavailable" for the CPU/RSS row
-        # rather than failing the run, so this step is informational
-        # only (never fails the job).
+        # Unlike k3s, RKE2 does not bundle metrics-server by default, so
+        # this step is expected to typically report "unavailable" here -
+        # the benchmark itself (seederMetricsSampler in
+        # test/e2e/e2e_benchmark_test.go) already tolerates it being
+        # missing or slow to warm up and reports that for the CPU/RSS row
+        # rather than failing the run, so this step stays informational
+        # only (never fails the job) rather than installing metrics-server
+        # just to make it succeed.
         run: |
           set +e
           kubectl wait --for=condition=Available deployment/metrics-server -n kube-system --timeout=60s
@@ -203,7 +246,7 @@ jobs:
           INGEST_IMG="${INGEST_IMG}" \
           SEEDER_IMG="${SEEDER_IMG}" \
           IMAGE_SERVICE_IMG="${IMAGE_SERVICE_IMG}" \
-          E2E_CLUSTER=k3s go test ./test/e2e/ -v -ginkgo.v -timeout 80m
+          E2E_CLUSTER=rke2 go test ./test/e2e/ -v -ginkgo.v -timeout 80m
 
       - name: Dump operator, ingest, and seeder logs on failure
         if: failure()

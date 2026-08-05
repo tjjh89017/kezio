@@ -1,14 +1,14 @@
 name: E2E Tests
 
-# Runs the e2e suite against a real k3s cluster (not Kind): the suite itself
-# (test/e2e, driven by `make test-e2e E2E_CLUSTER=k3s`) installs cert-manager
+# Runs the e2e suite against a real RKE2 cluster (not Kind): the suite itself
+# (test/e2e, driven by `make test-e2e E2E_CLUSTER=rke2`) installs cert-manager
 # (always "latest", never pinned - see test/utils.InstallCertManager), builds
-# the operator image, imports it into the k3s node's containerd with `k3s ctr
+# the operator image, imports it into RKE2's node containerd with `ctr
 # images import`, deploys the operator with `make deploy` (kustomize), and
 # then drives an Image and a Machine through the reconcilers against this
 # cluster. Keeping that sequence inside the suite (instead of duplicating it
 # as separate workflow steps) means the same steps run identically for a
-# developer's local `make test-e2e E2E_CLUSTER=k3s` and for this workflow.
+# developer's local `make test-e2e E2E_CLUSTER=rke2` and for this workflow.
 #
 # cert-manager is required from here on: every kezio CRD carries a
 # defaulting and a validating webhook, and the controller-manager cannot
@@ -25,9 +25,16 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # k3s version the job installs. Pinned so the e2e cluster doesn't shift
+  # RKE2 version the job installs. Pinned so the e2e cluster doesn't shift
   # under us on a stable branch; bump deliberately.
-  K3S_VERSION: "v1.36.2+k3s1"
+  RKE2_VERSION: "v1.36.2+rke2r1"
+  # RKE2 has no default StorageClass (unlike k3s's bundled local-path);
+  # config/e2e-image-path's store/staging PVCs (applied by the image-path
+  # job's own Go suite) request storageClassName local-path explicitly,
+  # so this rancher/local-path-provisioner release is installed and
+  # marked default in that job below. The fast and boot-path jobs below
+  # never touch a PVC, so they install RKE2 without it.
+  LOCAL_PATH_PROVISIONER_VERSION: "v0.0.37"
 
 jobs:
   test-e2e:
@@ -36,7 +43,7 @@ jobs:
     # the seeder - see the image-path job below, which is additive and
     # runs on its own runner so this job's timing never regresses because
     # of it.
-    name: Run against k3s
+    name: Run against RKE2
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -64,38 +71,61 @@ jobs:
           # GitHub-hosted ubuntu-latest runners give 4 vCPUs / 16 GiB RAM.
           # These thresholds only catch a runner that is clearly the wrong
           # class (e.g. a misconfigured self-hosted runner), not normal
-          # variance on the hosted fleet.
+          # variance on the hosted fleet. Bumped from k3s's 6000 MiB floor:
+          # RKE2's etcd + canal control plane runs roughly 1 GiB heavier.
           if [ "$cpus" -lt 2 ]; then
             echo "::error::Runner has only ${cpus} CPU(s); kezio e2e needs at least 2." >&2
             exit 1
           fi
-          if [ "$mem_mb" -lt 6000 ]; then
-            echo "::error::Runner has only ${mem_mb} MiB RAM; kezio e2e needs at least 6000 MiB." >&2
+          if [ "$mem_mb" -lt 7000 ]; then
+            echo "::error::Runner has only ${mem_mb} MiB RAM; kezio e2e needs at least 7000 MiB." >&2
             exit 1
           fi
 
-      - name: Install k3s
+      - name: Write the RKE2 config (must exist before the service starts)
+        # Plain canal here - this lane never creates a NetworkAttachmentDefinition
+        # or touches Multus, unlike the KubeVirt VM lanes (see
+        # e2e-kubevirt-reusable.yml), so there is no reason to pay for the
+        # multus HelmChart addon in this always-on, every-push/PR lane.
         run: |
           set -euo pipefail
-          curl -sfL https://get.k3s.io \
-            | INSTALL_K3S_VERSION="${K3S_VERSION}" sh -s - --write-kubeconfig-mode 644
-          echo "KUBECONFIG=/etc/rancher/k3s/k3s.yaml" >> "$GITHUB_ENV"
-          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-          # k3s registers its node a moment after the installer returns; wait
+          sudo mkdir -p /etc/rancher/rke2
+          cat <<'EOF' | sudo tee /etc/rancher/rke2/config.yaml
+          write-kubeconfig-mode: "0644"
+          cni: canal
+          EOF
+
+      - name: Install RKE2
+        run: |
+          set -euo pipefail
+          curl -sfL https://get.rke2.io | INSTALL_RKE2_VERSION="${RKE2_VERSION}" sh -
+          sudo systemctl enable --now rke2-server.service
+
+          # kubectl/ctr/crictl ship under /var/lib/rancher/rke2/bin, not on
+          # PATH by default - symlink them into /usr/local/bin (inside
+          # sudo's secure_path) the same way the k3s installer always put
+          # its own "k3s" binary there.
+          sudo ln -sf /var/lib/rancher/rke2/bin/kubectl /usr/local/bin/kubectl
+          sudo ln -sf /var/lib/rancher/rke2/bin/ctr /usr/local/bin/ctr
+          sudo ln -sf /var/lib/rancher/rke2/bin/crictl /usr/local/bin/crictl
+
+          echo "KUBECONFIG=/etc/rancher/rke2/rke2.yaml" >> "$GITHUB_ENV"
+          export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+          # RKE2 registers its node a moment after the service starts; wait
           # for the node object to exist before waiting on its Ready condition,
           # since `kubectl wait` errors out immediately on zero matches.
-          for _ in $(seq 1 60); do
+          for _ in $(seq 1 90); do
             [ "$(kubectl get nodes --no-headers 2>/dev/null | wc -l)" -ge 1 ] && break
             sleep 2
           done
-          kubectl wait --for=condition=Ready node --all --timeout=120s
+          kubectl wait --for=condition=Ready node --all --timeout=300s
           kubectl get nodes -o wide
 
       - name: Running Test e2e
         run: |
           set -euo pipefail
           go mod tidy
-          make test-e2e E2E_CLUSTER=k3s
+          make test-e2e E2E_CLUSTER=rke2
 
       - name: Dump operator logs on failure
         if: failure()
@@ -118,11 +148,11 @@ jobs:
     # Ubuntu cloud image through kezioctl, and drives it through real
     # qemu-img/sfdisk/partclone ingest, real seeding, and a real BitTorrent
     # leech - see that file's doc comments for the full flow. This is a
-    # separate job (own runner, own k3s, own timeout) precisely so none of
+    # separate job (own runner, own RKE2, own timeout) precisely so none of
     # that weight lands on the test-e2e job above.
-    name: Run image-path against k3s
+    name: Run image-path against RKE2
     runs-on: ubuntu-latest
-    # Honest budget, not a guess: k3s + cert-manager install (~1-2m),
+    # Honest budget, not a guess: RKE2 + cert-manager install (~1-2m),
     # building+importing the manager/image-service/ingest images (~2-3m,
     # small Go binaries), the seeder image (compiles ezio/libtorrent-rasterbar/
     # grpc from source on debian:sid - the dominant cost, ~10-20m without a
@@ -182,17 +212,17 @@ jobs:
           disk_avail_gb="$(df -BG --output=avail / | tail -1 | tr -dc '0-9')"
 
           # Same CPU/RAM floor as the fast job (see test-e2e's own
-          # resource-check step). Disk gets its own, higher floor: this
-          # job builds four local images (one of them a from-source
-          # debian:sid C++ build) and downloads and converts a
-          # several-hundred-MiB cloud image, on top of everything the
-          # fast job already needs.
+          # resource-check step, including its RKE2-vs-k3s bump). Disk
+          # gets its own, higher floor: this job builds four local images
+          # (one of them a from-source debian:sid C++ build) and
+          # downloads and converts a several-hundred-MiB cloud image, on
+          # top of everything the fast job already needs.
           if [ "$cpus" -lt 2 ]; then
             echo "::error::Runner has only ${cpus} CPU(s); kezio e2e needs at least 2." >&2
             exit 1
           fi
-          if [ "$mem_mb" -lt 6000 ]; then
-            echo "::error::Runner has only ${mem_mb} MiB RAM; kezio e2e needs at least 6000 MiB." >&2
+          if [ "$mem_mb" -lt 7000 ]; then
+            echo "::error::Runner has only ${mem_mb} MiB RAM; kezio e2e needs at least 7000 MiB." >&2
             exit 1
           fi
           if [ "$disk_avail_gb" -lt 20 ]; then
@@ -242,22 +272,54 @@ jobs:
               .
           done
 
-      - name: Install k3s
+      - name: Write the RKE2 config (must exist before the service starts)
+        # Plain canal - this job never touches Multus/NADs, just PVCs, so
+        # canal alone (no multus addon cost) is enough.
         run: |
           set -euo pipefail
-          curl -sfL https://get.k3s.io \
-            | INSTALL_K3S_VERSION="${K3S_VERSION}" sh -s - --write-kubeconfig-mode 644
-          echo "KUBECONFIG=/etc/rancher/k3s/k3s.yaml" >> "$GITHUB_ENV"
-          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-          # k3s registers its node a moment after the installer returns; wait
+          sudo mkdir -p /etc/rancher/rke2
+          cat <<'EOF' | sudo tee /etc/rancher/rke2/config.yaml
+          write-kubeconfig-mode: "0644"
+          cni: canal
+          EOF
+
+      - name: Install RKE2
+        run: |
+          set -euo pipefail
+          curl -sfL https://get.rke2.io | INSTALL_RKE2_VERSION="${RKE2_VERSION}" sh -
+          sudo systemctl enable --now rke2-server.service
+
+          # kubectl/ctr/crictl ship under /var/lib/rancher/rke2/bin, not on
+          # PATH by default - symlink them into /usr/local/bin (inside
+          # sudo's secure_path) the same way the k3s installer always put
+          # its own "k3s" binary there.
+          sudo ln -sf /var/lib/rancher/rke2/bin/kubectl /usr/local/bin/kubectl
+          sudo ln -sf /var/lib/rancher/rke2/bin/ctr /usr/local/bin/ctr
+          sudo ln -sf /var/lib/rancher/rke2/bin/crictl /usr/local/bin/crictl
+
+          echo "KUBECONFIG=/etc/rancher/rke2/rke2.yaml" >> "$GITHUB_ENV"
+          export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+          # RKE2 registers its node a moment after the service starts; wait
           # for the node object to exist before waiting on its Ready condition,
           # since `kubectl wait` errors out immediately on zero matches.
-          for _ in $(seq 1 60); do
+          for _ in $(seq 1 90); do
             [ "$(kubectl get nodes --no-headers 2>/dev/null | wc -l)" -ge 1 ] && break
             sleep 2
           done
-          kubectl wait --for=condition=Ready node --all --timeout=120s
+          kubectl wait --for=condition=Ready node --all --timeout=300s
           kubectl get nodes -o wide
+
+      - name: Install local-path-provisioner and mark it the default StorageClass
+        # RKE2 ships no default StorageClass (k3s bundled local-path by
+        # default; RKE2 deliberately does not). config/e2e-image-path's
+        # store/staging PVCs (applied by the Go suite's own BeforeAll, not
+        # by this workflow directly) request storageClassName local-path
+        # explicitly, so that name must exist here before the suite runs.
+        run: |
+          set -euo pipefail
+          kubectl apply -f "https://raw.githubusercontent.com/rancher/local-path-provisioner/${LOCAL_PATH_PROVISIONER_VERSION}/deploy/local-path-storage.yaml"
+          kubectl -n local-path-storage rollout status deployment/local-path-provisioner --timeout=180s
+          kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
 
       - name: Running Test e2e (image-path)
         run: |
@@ -274,7 +336,7 @@ jobs:
           INGEST_IMG="${INGEST_IMG}" \
           SEEDER_IMG="${SEEDER_IMG}" \
           IMAGE_SERVICE_IMG="${IMAGE_SERVICE_IMG}" \
-          E2E_CLUSTER=k3s go test ./test/e2e/ -v -ginkgo.v -timeout 50m
+          E2E_CLUSTER=rke2 go test ./test/e2e/ -v -ginkgo.v -timeout 50m
 
       - name: Dump operator, ingest, and seeder logs on failure
         if: failure()
@@ -317,12 +379,12 @@ jobs:
     # e2e-boot-path-kubevirt.yml (workflow_dispatch only, not run here)
     # for that heavier, separable stage and the realism assessment behind
     # keeping it out of this always-on lane.
-    name: Run boot-path against k3s
+    name: Run boot-path against RKE2
     runs-on: ubuntu-latest
     # Small, in-process HTTP servers and one reconciler cycle per phase -
     # no image builds beyond the manager itself, no real network boot.
     # Generous headroom over the fast lane's 30m only because it shares
-    # this file's resource-check/k3s-install boilerplate, not because the
+    # this file's resource-check/RKE2-install boilerplate, not because the
     # boot-path specs themselves are slow.
     timeout-minutes: 30
     steps:
@@ -348,31 +410,51 @@ jobs:
           mem_mb="$(free -m | awk '/^Mem:/{print $2}')"
 
           # Same floor as the fast lane's own resource-check step (see
-          # its comment): this lane is no heavier than that one.
+          # its comment, including its RKE2-vs-k3s bump): this lane is no
+          # heavier than that one.
           if [ "$cpus" -lt 2 ]; then
             echo "::error::Runner has only ${cpus} CPU(s); kezio e2e needs at least 2." >&2
             exit 1
           fi
-          if [ "$mem_mb" -lt 6000 ]; then
-            echo "::error::Runner has only ${mem_mb} MiB RAM; kezio e2e needs at least 6000 MiB." >&2
+          if [ "$mem_mb" -lt 7000 ]; then
+            echo "::error::Runner has only ${mem_mb} MiB RAM; kezio e2e needs at least 7000 MiB." >&2
             exit 1
           fi
 
-      - name: Install k3s
+      - name: Write the RKE2 config (must exist before the service starts)
+        # Plain canal - this lane never touches Multus/NADs.
         run: |
           set -euo pipefail
-          curl -sfL https://get.k3s.io \
-            | INSTALL_K3S_VERSION="${K3S_VERSION}" sh -s - --write-kubeconfig-mode 644
-          echo "KUBECONFIG=/etc/rancher/k3s/k3s.yaml" >> "$GITHUB_ENV"
-          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-          # k3s registers its node a moment after the installer returns; wait
+          sudo mkdir -p /etc/rancher/rke2
+          cat <<'EOF' | sudo tee /etc/rancher/rke2/config.yaml
+          write-kubeconfig-mode: "0644"
+          cni: canal
+          EOF
+
+      - name: Install RKE2
+        run: |
+          set -euo pipefail
+          curl -sfL https://get.rke2.io | INSTALL_RKE2_VERSION="${RKE2_VERSION}" sh -
+          sudo systemctl enable --now rke2-server.service
+
+          # kubectl/ctr/crictl ship under /var/lib/rancher/rke2/bin, not on
+          # PATH by default - symlink them into /usr/local/bin (inside
+          # sudo's secure_path) the same way the k3s installer always put
+          # its own "k3s" binary there.
+          sudo ln -sf /var/lib/rancher/rke2/bin/kubectl /usr/local/bin/kubectl
+          sudo ln -sf /var/lib/rancher/rke2/bin/ctr /usr/local/bin/ctr
+          sudo ln -sf /var/lib/rancher/rke2/bin/crictl /usr/local/bin/crictl
+
+          echo "KUBECONFIG=/etc/rancher/rke2/rke2.yaml" >> "$GITHUB_ENV"
+          export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+          # RKE2 registers its node a moment after the service starts; wait
           # for the node object to exist before waiting on its Ready condition,
           # since `kubectl wait` errors out immediately on zero matches.
-          for _ in $(seq 1 60); do
+          for _ in $(seq 1 90); do
             [ "$(kubectl get nodes --no-headers 2>/dev/null | wc -l)" -ge 1 ] && break
             sleep 2
           done
-          kubectl wait --for=condition=Ready node --all --timeout=120s
+          kubectl wait --for=condition=Ready node --all --timeout=300s
           kubectl get nodes -o wide
 
       - name: Running Test e2e (boot-path)
@@ -380,7 +462,7 @@ jobs:
           set -euo pipefail
           go mod tidy
           make manifests generate fmt vet
-          E2E_BOOT_PATH=true E2E_CLUSTER=k3s go test ./test/e2e/ -v -ginkgo.v -timeout 20m
+          E2E_BOOT_PATH=true E2E_CLUSTER=rke2 go test ./test/e2e/ -v -ginkgo.v -timeout 20m
 
       - name: Dump operator logs on failure
         if: failure()

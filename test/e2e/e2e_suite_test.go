@@ -32,8 +32,8 @@ var (
 	// e2eCluster selects the target cluster flavor and must stay in sync
 	// with the Makefile's E2E_CLUSTER variable. The default (empty or
 	// "kind") builds and `kind load`s the manager image into a throwaway
-	// Kind cluster. Set E2E_CLUSTER=k3s to target a pre-provisioned
-	// single-node k3s cluster (the CI job stands one up and sets
+	// Kind cluster. Set E2E_CLUSTER=rke2 to target a pre-provisioned
+	// single-node RKE2 cluster (the CI job stands one up and sets
 	// KUBECONFIG itself), in which case the image is imported into the
 	// node's containerd instead, and no Kind cluster is created or torn
 	// down around the run.
@@ -88,13 +88,13 @@ var _ = BeforeSuite(func() {
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the manager(Operator) image")
 
 	// Make the freshly built image available to the target cluster. Kind
-	// loads it directly; a pre-provisioned k3s cluster (E2E_CLUSTER=k3s)
+	// loads it directly; a pre-provisioned RKE2 cluster (E2E_CLUSTER=rke2)
 	// imports it into the node's containerd instead, since there is no
 	// Kind cluster to load it into.
-	if e2eCluster == "k3s" {
-		By("importing the manager(Operator) image into the k3s node containerd")
-		err = utils.LoadImageToK3sContainerd(projectImage)
-		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to import the manager(Operator) image into k3s containerd")
+	if e2eCluster == "rke2" {
+		By("importing the manager(Operator) image into the RKE2 node containerd")
+		err = utils.LoadImageToRKE2Containerd(projectImage)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to import the manager(Operator) image into RKE2 containerd")
 	} else {
 		By("loading the manager(Operator) image on Kind")
 		err = utils.LoadImageToKindClusterWithName(projectImage)

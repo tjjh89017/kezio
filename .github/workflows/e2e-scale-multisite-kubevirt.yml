@@ -9,7 +9,7 @@ name: E2E Scale (Multi-Site KubeVirt VMs)
 # seeder alone.
 #
 # Builds on the same setup e2e-kubevirt-reusable.yml uses (KubeVirt +
-# CDI + Multus on k3s, the same five locally-built images, the same
+# CDI + Multus on RKE2, the same five locally-built images, the same
 # ingest-through-kezioctl path, the same three-layer verify), but the
 # topology diverges enough that this is a dedicated workflow rather than
 # a `workflow_call` of that file:
@@ -26,7 +26,7 @@ name: E2E Scale (Multi-Site KubeVirt VMs)
 #     it) for a topology only this lane needs;
 #   - two target VMs/Machines polled concurrently instead of one, and a
 #     swarm-wide peer-count sample gathered while both are leeching.
-# Every step below that has no site-specific content (image builds, k3s
+# Every step below that has no site-specific content (image builds, RKE2
 # install, KubeVirt/CDI/Multus install, ingest) is copied from
 # e2e-kubevirt-reusable.yml verbatim in spirit - keep the two in sync by
 # hand if that workflow's own setup steps change; the alternative (making
@@ -80,7 +80,7 @@ name: E2E Scale (Multi-Site KubeVirt VMs)
 # seeders" section for a site that has no route to the central storage
 # backend. This lane's two site-local seeder replicas are NOT that
 # storage-isolated pattern either - they mount the very same PVC the
-# central seeder does, because every pod here runs on one k3s node with
+# central seeder does, because every pod here runs on one RKE2 node with
 # one storage backend. Proving the storage-isolated leecher-then-seeder
 # pre-warm pattern needs a site with a genuinely separate store, which a
 # single-runner cluster cannot provide; this lane proves the
@@ -138,11 +138,15 @@ permissions:
 env:
   # Pinned the same way e2e-kubevirt-reusable.yml pins them - bump
   # deliberately, not as a side effect of an unrelated change.
-  K3S_VERSION: "v1.36.2+k3s1"
+  RKE2_VERSION: "v1.36.2+rke2r1"
   CERT_MANAGER_VERSION: "v1.21.1"
   KUBEVIRT_VERSION: "v1.9.0"
   CDI_VERSION: "v1.65.0"
-  MULTUS_VERSION: "v4.3.0"
+  # RKE2 has no default StorageClass (unlike k3s's bundled local-path);
+  # config/e2e-deploy-path's store/staging PVCs request storageClassName
+  # local-path explicitly, so this rancher/local-path-provisioner release
+  # is installed and marked default below.
+  LOCAL_PATH_PROVISIONER_VERSION: "v0.0.37"
 
   # Two boot L2 segments, one per simulated site - see the header
   # comment's "Honest scope" section for what these genuinely simulate.
@@ -320,7 +324,7 @@ jobs:
           # attempts before treating "no ext4 partition" as real.
           # Re-validated at this version bump: this is a GitHub Actions
           # runner kernel/udev race, independent of the KubeVirt/CDI/
-          # Multus/k3s pins above, so it is still needed.
+          # RKE2 pins above, so it is still needed.
           for attempt in $(seq 1 10); do
             root_part=""
             root_size=0
@@ -416,25 +420,74 @@ jobs:
           go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      - name: Install k3s
+      - name: Write the RKE2 config (must exist before the service starts)
+        # cni: [multus, canal] is RKE2's own native way to run Multus
+        # alongside a default CNI (https://docs.rke2.io/networking/multus_sriov)
+        # - multus must be first in the list, canal is the actual pod
+        # network. RKE2 deploys both as its own HelmChart addons at
+        # startup; nothing further needs installing for Multus itself (see
+        # the "Wait for the Multus NetworkAttachmentDefinition CRD" step
+        # below, once the cluster is up).
         run: |
           set -euo pipefail
-          curl -sfL https://get.k3s.io \
-            | INSTALL_K3S_VERSION="${K3S_VERSION}" sh -s - --write-kubeconfig-mode 644
-          echo "KUBECONFIG=/etc/rancher/k3s/k3s.yaml" >> "$GITHUB_ENV"
-          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-          for _ in $(seq 1 60); do
+          sudo mkdir -p /etc/rancher/rke2
+          cat <<'EOF' | sudo tee /etc/rancher/rke2/config.yaml
+          write-kubeconfig-mode: "0644"
+          cni:
+            - multus
+            - canal
+          EOF
+
+      - name: Install RKE2
+        run: |
+          set -euo pipefail
+          curl -sfL https://get.rke2.io | INSTALL_RKE2_VERSION="${RKE2_VERSION}" sh -
+          sudo systemctl enable --now rke2-server.service
+
+          # kubectl/ctr/crictl ship under /var/lib/rancher/rke2/bin, not on
+          # PATH by default - symlink them into /usr/local/bin (inside
+          # sudo's secure_path) the same way the k3s installer always put
+          # its own "k3s" binary there.
+          sudo ln -sf /var/lib/rancher/rke2/bin/kubectl /usr/local/bin/kubectl
+          sudo ln -sf /var/lib/rancher/rke2/bin/ctr /usr/local/bin/ctr
+          sudo ln -sf /var/lib/rancher/rke2/bin/crictl /usr/local/bin/crictl
+
+          echo "KUBECONFIG=/etc/rancher/rke2/rke2.yaml" >> "$GITHUB_ENV"
+          export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+          # RKE2's control plane (etcd + canal + multus HelmChart addons)
+          # takes longer to reach node-Ready than k3s's bare flannel did,
+          # hence the more generous timeout below versus the old 120s.
+          for _ in $(seq 1 90); do
             [ "$(kubectl get nodes --no-headers 2>/dev/null | wc -l)" -ge 1 ] && break
             sleep 2
           done
-          kubectl wait --for=condition=Ready node --all --timeout=120s
+          kubectl wait --for=condition=Ready node --all --timeout=300s
           kubectl get nodes -o wide
 
-      - name: Import images into k3s containerd
+      - name: Install local-path-provisioner and mark it the default StorageClass
+        # RKE2 ships no default StorageClass (k3s bundled local-path by
+        # default; RKE2 deliberately does not). config/e2e-deploy-path's
+        # store/staging PVCs request storageClassName local-path
+        # explicitly, so that name must exist and be default is a
+        # reasonable fallback for anything else (e.g. CDI's own scratch
+        # space) that resolves a StorageClass by cluster default instead.
+        run: |
+          set -euo pipefail
+          kubectl apply -f "https://raw.githubusercontent.com/rancher/local-path-provisioner/${LOCAL_PATH_PROVISIONER_VERSION}/deploy/local-path-storage.yaml"
+          kubectl -n local-path-storage rollout status deployment/local-path-provisioner --timeout=180s
+          kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+
+      - name: Import images into RKE2 containerd
+        # RKE2's containerd socket is still under /run/k3s/containerd (a
+        # genuine leftover of RKE2's k3s lineage - the socket path itself,
+        # not the cluster, is k3s-named), and the plain "ctr" binary needs
+        # both -a (socket) and -n k8s.io (the namespace the kubelet reads
+        # from) spelled out explicitly - unlike k3s's own "k3s ctr"
+        # wrapper, which defaulted both on its own.
         run: |
           set -euo pipefail
           for img in "${MANAGER_IMG}" "${BOOTD_IMG}" "${INGEST_IMG}" "${SEEDER_IMG}" "${IMAGE_SERVICE_IMG}"; do
-            docker save "${img}" | sudo k3s ctr images import -
+            docker save "${img}" | sudo ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images import -
           done
 
       - name: Install cert-manager
@@ -493,57 +546,33 @@ jobs:
           kubectl apply -f "https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_VERSION}/cdi-cr.yaml"
           kubectl wait cdi cdi --for=condition=Available --timeout=300s
 
-      - name: Point host CNI paths at k3s's own directories
-        # See e2e-kubevirt-reusable.yml's step of the same name for why:
-        # k3s's kubelet reads CNI config/binaries from
-        # /var/lib/rancher/k3s/agent/etc/cni/net.d and
-        # /var/lib/rancher/k3s/data/cni, not the stock /etc/cni/net.d and
-        # /opt/cni/bin that multus-daemonset-thick.yml mounts from the
-        # host (https://docs.k3s.io/networking/multus-ipams,
-        # k3s-io/k3s#10869); this is what actually broke workflow runs
-        # 30999047426 and 31001958670, not the Multus version.
-        #
-        # /var/lib/rancher/k3s/data/cni is not where every k3s version
-        # actually keeps its bundled CNI plugin binaries (run 31003551730:
-        # that path was empty/dangling on k3s v1.36.2+k3s1, so every pod
-        # sandbox failed with "failed to find plugin \"flannel\" in path
-        # [/opt/cni/bin]"). Resolve the real directory on the runner
-        # instead of hardcoding it.
+      - name: Wait for the Multus NetworkAttachmentDefinition CRD (RKE2's own rke2-multus HelmChart addon)
+        # See e2e-kubevirt-reusable.yml's step of the same name for the
+        # full "why": RKE2 deploys Multus itself as a packaged HelmChart
+        # addon (triggered by cni: [multus, canal] in the config.yaml
+        # written before RKE2 started), eliminating k3s's non-standard,
+        # multi-location CNI directory layout entirely - that layout
+        # mismatch (not the Multus version) is what actually broke
+        # workflow runs 30999047426 and 31001958670, and a follow-up
+        # symlink fix for it produced its own, mirror-image failures (run
+        # 31003551730: flannel not found; run 31005051325: multus-shim not
+        # found). The addon's own HelmChart install can still lag behind
+        # node-Ready, so wait for its NAD CRD to actually exist (and be
+        # Established) before the "Create the two boot
+        # NetworkAttachmentDefinitions" step below tries to use it.
         run: |
           set -euo pipefail
-          sudo mkdir -p /etc/cni /opt/cni
-          sudo rm -rf /etc/cni/net.d /opt/cni/bin
-          sudo ln -s /var/lib/rancher/k3s/agent/etc/cni/net.d /etc/cni/net.d
-
-          flannel_path="$(sudo find /var/lib/rancher/k3s/data -maxdepth 3 -type f -name flannel 2>/dev/null | head -n1)"
-          if [ -z "${flannel_path}" ] && [ -x /var/lib/rancher/k3s/data/current/bin/flannel ]; then
-            flannel_path="/var/lib/rancher/k3s/data/current/bin/flannel"
-          fi
-          if [ -z "${flannel_path}" ]; then
-            echo "::error::could not locate k3s's bundled CNI plugins (flannel) under /var/lib/rancher/k3s/data"
-            sudo ls -la /var/lib/rancher/k3s/data || true
-            exit 1
-          fi
-
-          bin_dir="$(dirname "${flannel_path}")"
-          echo "Resolved k3s CNI plugin dir: ${bin_dir}"
-          for plugin in flannel bridge; do
-            if [ -x "${bin_dir}/${plugin}" ]; then
-              echo "  found ${plugin}: yes"
-            else
-              echo "::error::required CNI plugin '${plugin}' missing from ${bin_dir}"
-              sudo ls -la "${bin_dir}"
+          deadline=$(( $(date +%s) + 300 ))
+          until kubectl get crd network-attachment-definitions.k8s.cni.cncf.io >/dev/null 2>&1; do
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::network-attachment-definitions.k8s.cni.cncf.io CRD did not appear within the timeout - RKE2's rke2-multus HelmChart addon may not have installed." >&2
+              kubectl get helmcharts -A -o wide || true
+              kubectl -n kube-system get pods -o wide || true
               exit 1
             fi
+            sleep 5
           done
-
-          sudo ln -s "${bin_dir}" /opt/cni/bin
-
-      - name: Install Multus
-        run: |
-          set -euo pipefail
-          kubectl apply -f "https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/${MULTUS_VERSION}/deployments/multus-daemonset-thick.yml"
-          kubectl -n kube-system rollout status daemonset/kube-multus-ds --timeout=180s
+          kubectl wait --for=condition=Established crd/network-attachment-definitions.k8s.cni.cncf.io --timeout=60s
 
       - name: Deploy CRDs and the controller-manager
         run: |

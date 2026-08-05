@@ -58,7 +58,7 @@ const (
 	// disk that must stay unused regardless of leecher count - headroom
 	// for the OS, the four already-built container images, and the store
 	// PVC's own copy of the content this benchmark leeches, all of which
-	// already occupy this same disk on the single-node k3s cluster this
+	// already occupy this same disk on the single-node RKE2 cluster this
 	// stage runs on. See utils.CapLeecherCount.
 	benchmarkDiskSafetyFraction = 0.2
 
@@ -347,8 +347,8 @@ func benchmarkRequestedLeecherCount() int {
 
 // benchmarkAvailableDiskBytes returns the free disk space on this test
 // process's own root filesystem ("/"), via `df`. On this stage's
-// single-node k3s cluster (see .github/workflows/benchmark-seeding.yml),
-// k3s runs directly on the runner (not inside a Kind/Docker node), so this
+// single-node RKE2 cluster (see .github/workflows/benchmark-seeding.yml),
+// RKE2 runs directly on the runner (not inside a Kind/Docker node), so this
 // is the same disk every leecher Pod's emptyDir volume will actually
 // consume - the same assumption the image-path job's own "Resource check"
 // step already makes when it runs `df -h` on the runner directly.

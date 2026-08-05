@@ -127,8 +127,8 @@ KIND_CLUSTER ?= kezio-test-e2e
 
 # E2E_CLUSTER selects the cluster flavor the e2e suite targets. The default
 # "kind" creates and deletes a throwaway Kind cluster locally. Set
-# E2E_CLUSTER=k3s to run against a pre-provisioned single-node k3s cluster
-# (the k3s CI workflow stands one up and sets KUBECONFIG itself): setup and
+# E2E_CLUSTER=rke2 to run against a pre-provisioned single-node RKE2 cluster
+# (the RKE2 CI workflow stands one up and sets KUBECONFIG itself): setup and
 # cleanup become no-ops that leave the external cluster intact, and the
 # manager image is imported into the node's containerd instead of `kind
 # load`.
