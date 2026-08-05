@@ -1400,6 +1400,34 @@ jobs:
           done
           kubectl wait vmi/"${TARGET_VM_NAME}" -n kezio-system --for=condition=Ready --timeout=180s
 
+      - name: Start continuous VM console capture
+        # No `if:` guard - both the bmc_mode and non-bmc_mode branches
+        # above land here with the VMI already Ready, so this runs
+        # exactly once regardless of which power path this job used.
+        #
+        # Runs for the rest of the job (nohup + disown, the same
+        # backgrounding pattern the socat forwards above use) so the
+        # eventual "Dump diagnostics on failure" step's 20-second live
+        # `virtctl console` attach - which only ever sees whatever the
+        # guest happens to print in that narrow window, nothing from
+        # before it - is no longer the only window onto the guest: this
+        # file accumulates the VM's serial console from the moment it
+        # started, through however this job ends.
+        #
+        # `virtctl console` puts the local terminal into raw mode to
+        # relay guest input, which fails outright without a real TTY
+        # (verified against virtctl v1.9.0: it errors "not a terminal"
+        # on a plain pipe or file redirect). `script` supplies a fake
+        # pty - the standard way to run a TTY-requiring program
+        # headlessly - and, given a logfile argument, records everything
+        # written to that pty there, byte for byte, without also needing
+        # a real terminal itself.
+        run: |
+          set -euo pipefail
+          nohup script -qec "virtctl console '${TARGET_VM_NAME}' -n kezio-system" \
+            "${RUNNER_TEMP}/console.log" >/tmp/console-capture-wrapper.log 2>&1 &
+          disown
+
       - name: Wait for the Machine to reach Provisioned
         # Generous but bounded: this covers the same multi-minute live
         # boot chain e2e-boot-path-kubevirt.yml's own wait step covers,
@@ -1586,6 +1614,12 @@ jobs:
         if: failure()
         run: |
           set +e
+          # Tee the whole dump into a file too, on top of the usual job
+          # log output: this is one of the two files "Upload E2E
+          # diagnostics artifacts" below picks up, so this dump survives
+          # past the log retention/scroll-back a human would otherwise
+          # have to dig through.
+          exec > >(tee "${RUNNER_TEMP}/diagnostics-dump.log") 2>&1
           echo "===== nodes ====="
           kubectl get nodes -o wide
           echo "===== kezio-system pods ====="
@@ -1645,7 +1679,7 @@ jobs:
           kubectl get vm,vmi -n kezio-system -o yaml
           echo "===== virt-launcher pod describe ====="
           kubectl describe pod -n kezio-system -l "kubevirt.io/vm=${TARGET_VM_NAME}"
-          echo "===== VM console (last output) - kezio-agent's own log lines land here over the live image's serial console ====="
+          echo "===== VM console (last 20s, live attach only - see the uploaded console.log artifact for the full history from VM start) ====="
           timeout 20 virtctl console "${TARGET_VM_NAME}" -n kezio-system || true
           echo "===== Machine CR ====="
           kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o yaml
@@ -1658,6 +1692,9 @@ jobs:
         if: ${{ failure() && inputs.bmc_mode }}
         run: |
           set +e
+          # See "Dump diagnostics on failure" above for why this is
+          # teed into a file as well as the job log.
+          exec > >(tee "${RUNNER_TEMP}/diagnostics-kubevirtbmc-dump.log") 2>&1
           echo "===== kubevirtbmc-system pods ====="
           kubectl get pods -n kubevirtbmc-system -o wide
           echo "===== KubeVirtBMC controller-manager logs ====="
@@ -1670,3 +1707,23 @@ jobs:
           kubectl get svc -n kezio-system -l app=virtbmc -o yaml
           echo "===== events (kubevirtbmc-system) ====="
           kubectl get events -n kubevirtbmc-system --sort-by=.lastTimestamp
+
+      - name: Upload E2E diagnostics artifacts
+        # Always, not just on failure: the continuous console capture and
+        # the diagnostics dump are equally worth having on a passing run
+        # (for example, to confirm a fix actually restored DHCP/TFTP
+        # activity) - restricting the upload to failed runs would mean
+        # only ever validating this observability path when it is
+        # hardest to also validate the fix it is meant to help diagnose.
+        # if-no-files-found: ignore, since the two diagnostics-*-dump.log
+        # files above only exist on a failed run at all.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-diagnostics-${{ github.job }}-${{ inputs.target_vm_name }}
+          path: |
+            ${{ runner.temp }}/console.log
+            ${{ runner.temp }}/diagnostics-dump.log
+            ${{ runner.temp }}/diagnostics-kubevirtbmc-dump.log
+          if-no-files-found: ignore
+          retention-days: 7
