@@ -1,14 +1,21 @@
 # Adds an initContainer to controller-manager that fetches the published
 # live-image artifacts (vmlinuz, initrd.img, filesystem.squashfs,
-# manifest.json - see .github/workflows/build-live-image.yml) into an
-# emptyDir mounted at /boot-artifacts before the manager container
-# starts, and points BOOT_ARTIFACTS_DIR at that mount. This is the
-# concrete answer to what used to be README.md's "mounting a volume
-# there is left to the cluster operator" gap: the default now works with
-# no further overlay, and BOOT_ARTIFACTS_VERSION (below) is the one knob
-# an operator overrides - via `kubectl set env` on the fetch-boot-
-# artifacts container, or a further kustomize patch - to pin a specific
-# release instead of always fetching the repository's latest one.
+# shimx64.efi, grubx64.efi, manifest.json - see
+# .github/workflows/build-live-image.yml) into an emptyDir mounted at
+# /boot-artifacts before the manager container starts, and points
+# BOOT_ARTIFACTS_DIR at that mount. This is the concrete answer to what
+# used to be README.md's "mounting a volume there is left to the cluster
+# operator" gap: the default now works with no further overlay, and
+# BOOT_ARTIFACTS_VERSION (below) is the one knob an operator overrides -
+# via `kubectl set env` on the fetch-boot-artifacts container, or a
+# further kustomize patch - to pin a specific release instead of always
+# fetching the repository's latest one.
+#
+# shimx64.efi/grubx64.efi are included here (not just vmlinuz/initrd.img/
+# filesystem.squashfs) because Config.EFIDir (internal/bootserver)
+# defaults to this same BOOT_ARTIFACTS_DIR: GET /boot/http/<name> (the
+# UEFI HTTP Boot route) needs them in this directory to serve out of the
+# box, with no separate volume or BOOT_EFI_DIR override required.
 #
 # config/boot-artifacts (a Component this kustomization's own
 # kustomization.yaml adds under `components:`) supplies fetch.sh itself,
@@ -25,7 +32,7 @@
         - name: BOOT_ARTIFACTS_VERSION
           value: latest
         - name: BOOT_ARTIFACTS_FILES
-          value: "vmlinuz initrd.img filesystem.squashfs manifest.json"
+          value: "vmlinuz initrd.img filesystem.squashfs shimx64.efi grubx64.efi manifest.json"
         - name: DEST_DIR
           value: /boot-artifacts
       volumeMounts:

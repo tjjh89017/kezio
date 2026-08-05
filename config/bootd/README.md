@@ -102,13 +102,21 @@ for machines/firmware that support it, not as a substitute. See
 `internal/bootd`'s package doc comment for the option 60 (Vendor Class
 Identifier) negotiation this relies on.
 
-**Setting `BOOTD_HTTP_BOOT_URL` does not, by itself, serve anything at
-that URL.** bootd only decides which URL to hand out in the DHCP reply;
-nothing in this kustomization currently serves the EFI binary over
-HTTP. Point it at an HTTP endpoint you have separately stood up to
-serve `shimx64.efi` (or extend `internal/bootserver`'s existing
-artifact-serving path to also serve it) before relying on this in
-production.
+**Setting `BOOTD_HTTP_BOOT_URL` only decides which URL bootd hands out -
+it does not itself serve anything there.** Point it at
+`internal/bootserver`'s `GET /boot/http/<name>` route, which serves the
+same signed `shimx64.efi`/`grubx64.efi` allowlist as the TFTP service
+above (see `internal/bootserver`'s package doc comment and
+`config/bootserver/README.md`), for example:
+
+```
+BOOTD_HTTP_BOOT_URL=http://10.0.0.5:8090/boot/http/shimx64.efi
+```
+
+`internal/bootserver`'s `EFIDir` config (env `BOOT_EFI_DIR`) defaults to
+its existing artifacts directory (`BOOT_ARTIFACTS_DIR`), so adding
+`shimx64.efi`/`grubx64.efi` to that same fetch is enough to make this
+route usable - no separate volume required unless you want one.
 
 ## MAC gating: fail-secure by default
 

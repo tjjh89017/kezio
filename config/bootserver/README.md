@@ -51,6 +51,13 @@ kustomize build config/bootserver | kubectl apply -f -
      `initrd.img`).
    - `BOOT_TOKEN_TTL` - optional, overrides how long a minted boot token
      is accepted (a Go duration string, for example `30m`).
+   - `BOOT_EFI_DIR` - optional, overrides the directory `GET
+     /boot/http/<name>` serves the signed `shimx64.efi`/`grubx64.efi`
+     from, for UEFI HTTP Boot (see `config/bootd/README.md`'s UEFI HTTP
+     Boot section). Empty means `BOOT_ARTIFACTS_DIR` -
+     `boot-artifacts-init-patch.yaml` already fetches both binaries into
+     that same directory, so this route works with no further overlay
+     either.
 2. **Make the Service reachable from the boot network.** `service.yaml`
    ships as `ClusterIP`, the safe default; GRUB running on firmware
    cannot reach a ClusterIP from outside the cluster network. Patch it

@@ -25,8 +25,16 @@ limitations under the License.
 //   - GET /boot/artifacts/...: serves the live kernel, initramfs, and
 //     squashfs GRUB's config points at, from a directory mounted into the
 //     manager container out of band.
+//   - GET /boot/http/<name>: serves the signed shim/grub EFI binaries
+//     (bootserver.ShimFilename / bootserver.GrubFilename - the exact
+//     allowlist internal/bootd's TFTP server also serves) for UEFI HTTP
+//     Boot, an alternative to PXE+TFTP that some firmware supports. This
+//     is the endpoint internal/bootd.Config.HTTPBootURL is expected to
+//     point at (see that field's doc comment and
+//     config/bootd/README.md's UEFI HTTP Boot section) - PXE+TFTP
+//     firmware never touches this route at all.
 //
-// Both endpoints are unauthenticated by design: a UEFI firmware or a
+// All three endpoints are unauthenticated by design: a UEFI firmware or a
 // GRUB instance has no credential to present, and the whole point of a
 // network boot flow is that a machine has nothing installed yet. Every
 // design choice in this package follows from that: the grub.cfg

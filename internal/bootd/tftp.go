@@ -27,6 +27,8 @@ import (
 	tftp "github.com/pin/tftp/v3"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+
+	"github.com/tjjh89017/kezio/internal/bootserver"
 )
 
 // ShimFilename and GrubFilename are the only two names the TFTP server
@@ -34,10 +36,14 @@ import (
 // DefaultBootFilename's doc comment) and the grub image it loads,
 // which then fetches its real config over HTTP from the boot config
 // server (internal/bootserver) - TFTP's job in this boot flow ends
+// there. These alias bootserver.ShimFilename / bootserver.GrubFilename
+// (rather than redefining the two names) so that package's UEFI HTTP
+// Boot route serves exactly the same allowlist TFTP does - see
+// bootserver.ShimFilename's doc comment for why the definition lives
 // there.
 const (
-	ShimFilename = "shimx64.efi"
-	GrubFilename = "grubx64.efi"
+	ShimFilename = bootserver.ShimFilename
+	GrubFilename = bootserver.GrubFilename
 )
 
 // allowedTFTPFiles is queried by basename only (see readHandler): a

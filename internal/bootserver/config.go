@@ -62,6 +62,16 @@ type Config struct {
 	KernelPath   string
 	InitrdPath   string
 	SquashfsPath string
+	// EFIDir is the local filesystem directory GET /boot/http/... serves
+	// the signed shim/grub EFI binaries from (see efi.go) - the HTTP
+	// counterpart to internal/bootd's TFTP allowlist, for UEFI HTTP
+	// Boot. Empty means ArtifactsDir: the same read-only mounted volume
+	// already used for the kernel/initrd/squashfs is the natural place
+	// to also stage shimx64.efi/grubx64.efi, so a deployment that adds
+	// those two files to that volume needs no separate mount or env var
+	// to serve them. Set it only if the EFI binaries live somewhere
+	// else.
+	EFIDir string
 	// TokenTTL bounds how long a minted boot token is accepted. Zero
 	// means DefaultTokenTTL.
 	TokenTTL time.Duration
@@ -81,6 +91,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.TokenTTL <= 0 {
 		c.TokenTTL = DefaultTokenTTL
+	}
+	if c.EFIDir == "" {
+		c.EFIDir = c.ArtifactsDir
 	}
 	return c
 }

@@ -494,6 +494,13 @@ func ezioTuningFromEnv(maxUploadsVar, maxConnectionsVar string) (*keziov1alpha1.
 //   - BOOT_TOKEN_TTL optionally overrides how long a minted boot token
 //     is accepted (a Go duration string, for example "30m"; default
 //     bootserver.DefaultTokenTTL).
+//   - BOOT_EFI_DIR optionally overrides the directory GET
+//     /boot/http/<name> serves the signed shim/grub EFI binaries from,
+//     for UEFI HTTP Boot (see internal/bootd's Config.HTTPBootURL).
+//     Empty means BOOT_ARTIFACTS_DIR: the same volume already used for
+//     the kernel/initrd/squashfs is the natural place to also stage
+//     shimx64.efi/grubx64.efi, so this only needs setting if those live
+//     somewhere else.
 func bootServerConfigFromEnv() (*bootserver.Config, error) {
 	addr := os.Getenv("BOOT_SERVER_ADDR")
 	if addr == "" {
@@ -515,6 +522,7 @@ func bootServerConfigFromEnv() (*bootserver.Config, error) {
 		ServerURL:    serverURL,
 		KernelPath:   os.Getenv("BOOT_KERNEL_PATH"),
 		InitrdPath:   os.Getenv("BOOT_INITRD_PATH"),
+		EFIDir:       os.Getenv("BOOT_EFI_DIR"),
 	}
 	if ttl := os.Getenv("BOOT_TOKEN_TTL"); ttl != "" {
 		d, err := time.ParseDuration(ttl)

@@ -71,8 +71,9 @@ type Config struct {
 	// answered with a TFTP-relative filename it cannot fetch. Setting
 	// it does not change the PXEClient path in any way - both coexist.
 	//
-	// Nothing in this package serves the artifact at that URL; see the
-	// package doc comment's HTTP Boot section for what has to.
+	// Nothing in this package serves the artifact at that URL - see
+	// internal/bootserver's GET /boot/http/<name> route (its package doc
+	// comment's endpoint list), which is what this URL should point at.
 	HTTPBootURL string
 
 	// TFTPDir is the local filesystem directory the TFTP server (see

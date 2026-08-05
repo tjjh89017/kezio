@@ -84,9 +84,8 @@ limitations under the License.
 // the default and the one every deployment can rely on. Where HTTP Boot
 // is enabled, this package still only decides *which URL to hand out* -
 // it does not itself serve the EFI binary at that URL. Wire
-// Config.HTTPBootURL at whatever HTTP endpoint actually serves
-// shimx64.efi (or the deployment's HTTP-Boot-specific artifact); as of
-// this package, no such endpoint exists yet, so enabling HTTP Boot
-// without one first stood up leaves firmware unable to fetch what the
-// URL points at even though the DHCP exchange itself succeeds.
+// Config.HTTPBootURL at internal/bootserver's GET /boot/http/<name>
+// route (for example "http://10.0.0.5:8090/boot/http/shimx64.efi"),
+// which serves the same shim/grub allowlist this package's TFTP server
+// does; see that package's doc comment for the endpoint.
 package bootd
