@@ -341,6 +341,46 @@ func TestSetOneTimePXEBootPatchesBootOverride(t *testing.T) {
 	}
 }
 
+// TestDeploySequenceSetPXEBootThenPowerOnThenGetPowerState walks the real
+// deploy sequence end to end: SetOneTimePXEBoot, then PowerOn, then
+// GetPowerState. All three operate on the same cached system, so this
+// guards against an ordering regression where PowerOn's reset clobbers or
+// is blocked by the boot-override PATCH that came before it - a bug that
+// TestSetOneTimePXEBootPatchesBootOverride and
+// TestGetPowerStateObservesChangeAfterPowerOn cannot catch on their own,
+// since neither drives the sequence a deploy actually issues.
+func TestDeploySequenceSetPXEBootThenPowerOnThenGetPowerState(t *testing.T) {
+	fake := newFakeRedfishServer("1")
+	server := fake.start(t)
+
+	b := connectTo(t, server.URL, "/redfish/v1/Systems/1", bmc.Credentials{Username: "admin", Password: "hunter2"})
+
+	if err := b.SetOneTimePXEBoot(context.Background()); err != nil {
+		t.Fatalf("SetOneTimePXEBoot() error = %v", err)
+	}
+	if err := b.PowerOn(context.Background()); err != nil {
+		t.Fatalf("PowerOn() error = %v", err)
+	}
+	got, err := b.GetPowerState(context.Background())
+	if err != nil {
+		t.Fatalf("GetPowerState() error = %v", err)
+	}
+	if got != bmc.PowerStateOn {
+		t.Fatalf("GetPowerState() = %v, want %v", got, bmc.PowerStateOn)
+	}
+
+	if len(fake.patchCalls) != 1 {
+		t.Fatalf("patchCalls = %+v, want exactly one PATCH from SetOneTimePXEBoot", fake.patchCalls)
+	}
+	patch := fake.patchCalls[0].boot.Boot
+	if patch.BootSourceOverrideTarget != "Pxe" || patch.BootSourceOverrideEnabled != "Once" {
+		t.Errorf("PATCH body = %+v, want BootSourceOverrideTarget=Pxe, BootSourceOverrideEnabled=Once", patch)
+	}
+	if len(fake.resetCalls) != 1 || fake.resetCalls[0].resetType != "On" {
+		t.Fatalf("resetCalls = %+v, want one call with ResetType=On", fake.resetCalls)
+	}
+}
+
 func TestConnectWithoutSystemPathRequiresExactlyOneSystem(t *testing.T) {
 	fake := newFakeRedfishServer("1", "2")
 	server := fake.start(t)

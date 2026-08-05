@@ -82,6 +82,12 @@ type BMC interface {
 // BMC with. The caller resolves Machine.spec.bmc.credentialsSecretRef into
 // this shape (see CredentialsFromSecretData); this package never reads a
 // Kubernetes Secret itself.
+//
+// It must never be logged or included verbatim in an error or debug output
+// - a driver that formats this value (for example via a naive "%+v") would
+// leak the password. A driver wrapping a lower-level client error must
+// redact or omit this value before returning any error that references a
+// connection; see Driver's doc comment.
 type Credentials struct {
 	Username string
 	Password string
