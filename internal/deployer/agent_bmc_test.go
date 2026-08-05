@@ -61,6 +61,13 @@ type testBMC struct {
 	powerCycleCalls        int
 	getPowerStateCalls     int
 
+	// getPowerStateOverride, when non-empty, is what GetPowerState reports
+	// instead of state - letting a test simulate a BMC whose read-back
+	// power state disagrees with what a preceding PowerOn/PowerOff/
+	// PowerCycle call commanded (for example, a machine that fails to
+	// actually power on).
+	getPowerStateOverride bmc.PowerState
+
 	setOneTimePXEBootErr error
 	powerOnErr           error
 	powerOffErr          error
@@ -115,6 +122,9 @@ func (f *testBMC) GetPowerState(context.Context) (bmc.PowerState, error) {
 	f.getPowerStateCalls++
 	if f.getPowerStateErr != nil {
 		return "", f.getPowerStateErr
+	}
+	if f.getPowerStateOverride != "" {
+		return f.getPowerStateOverride, nil
 	}
 	return f.state, nil
 }
@@ -466,5 +476,175 @@ func TestAgentDeployer_PowerOn_BMCPowerOnFails_ReportsError(t *testing.T) {
 	}
 	if result.ErrorMessage == "" {
 		t.Fatal("ErrorMessage = \"\", want a non-empty message when the BMC rejects PowerOn")
+	}
+}
+
+// TestAgentDeployer_PowerOn_ObservesDriverReportedState covers the
+// GetPowerState read-back: even though the BMC's PowerOn call itself
+// reports success, a machine that fails to actually power on (the
+// read-back state disagrees with the commanded one) must be reflected in
+// Result.PoweredOn as the driver-reported state, not the commanded one.
+func TestAgentDeployer_PowerOn_ObservesDriverReportedState(t *testing.T) {
+	machine := newTestMachine("default", "node-01")
+	address := testBMCAddress(t)
+	machine.Spec.BMC = &keziov1alpha1.MachineBMC{
+		Address:              address,
+		CredentialsSecretRef: keziov1alpha1.SecretReference{Name: bmcCredsSecretName},
+	}
+	secret := bmcCredsSecret()
+	c := newAgentTestClientWithSecret(t, machine, secret)
+	dep := &agentDeployer{client: c, key: types.NamespacedName{Namespace: "default", Name: "node-01"}, bmcSpec: machine.Spec.BMC}
+
+	fakeKey := strings.TrimPrefix(address, testBMCScheme+"://")
+	// PowerOn itself succeeds (no powerOnErr), but the BMC still reports
+	// the machine as off on read-back - simulating hardware that never
+	// actually powered on despite acknowledging the command.
+	testBMCFor(fakeKey).getPowerStateOverride = bmc.PowerStateOff
+
+	result, err := dep.PowerOn(context.Background())
+	if err != nil {
+		t.Fatalf("PowerOn: %v", err)
+	}
+	if result.ErrorMessage != "" {
+		t.Fatalf("ErrorMessage = %q, want empty (the PowerOn command itself succeeded)", result.ErrorMessage)
+	}
+	if result.PoweredOn == nil || *result.PoweredOn {
+		t.Fatalf("PoweredOn = %v, want a non-nil false (the driver-reported state, not the commanded true)", result.PoweredOn)
+	}
+}
+
+// TestAgentDeployer_PowerOff_ObservesDriverReportedState is
+// PowerOn's read-back test mirrored for PowerOff.
+func TestAgentDeployer_PowerOff_ObservesDriverReportedState(t *testing.T) {
+	machine := newTestMachine("default", "node-01")
+	address := testBMCAddress(t)
+	machine.Spec.BMC = &keziov1alpha1.MachineBMC{
+		Address:              address,
+		CredentialsSecretRef: keziov1alpha1.SecretReference{Name: bmcCredsSecretName},
+	}
+	secret := bmcCredsSecret()
+	c := newAgentTestClientWithSecret(t, machine, secret)
+	dep := &agentDeployer{client: c, key: types.NamespacedName{Namespace: "default", Name: "node-01"}, bmcSpec: machine.Spec.BMC}
+
+	fakeKey := strings.TrimPrefix(address, testBMCScheme+"://")
+	testBMCFor(fakeKey).getPowerStateOverride = bmc.PowerStateOn
+
+	result, err := dep.PowerOff(context.Background())
+	if err != nil {
+		t.Fatalf("PowerOff: %v", err)
+	}
+	if result.ErrorMessage != "" {
+		t.Fatalf("ErrorMessage = %q, want empty (the PowerOff command itself succeeded)", result.ErrorMessage)
+	}
+	if result.PoweredOn == nil || !*result.PoweredOn {
+		t.Fatalf("PoweredOn = %v, want a non-nil true (the driver-reported state, not the commanded false)", result.PoweredOn)
+	}
+}
+
+// TestAgentDeployer_PowerOn_GetPowerStateFails_PoweredOnNil covers the
+// read-back itself failing: the PowerOn call already succeeded, so that
+// failure must not surface as Result.ErrorMessage, only as a nil
+// Result.PoweredOn (nothing observed to report).
+func TestAgentDeployer_PowerOn_GetPowerStateFails_PoweredOnNil(t *testing.T) {
+	machine := newTestMachine("default", "node-01")
+	address := testBMCAddress(t)
+	machine.Spec.BMC = &keziov1alpha1.MachineBMC{
+		Address:              address,
+		CredentialsSecretRef: keziov1alpha1.SecretReference{Name: bmcCredsSecretName},
+	}
+	secret := bmcCredsSecret()
+	c := newAgentTestClientWithSecret(t, machine, secret)
+	dep := &agentDeployer{client: c, key: types.NamespacedName{Namespace: "default", Name: "node-01"}, bmcSpec: machine.Spec.BMC}
+
+	fakeKey := strings.TrimPrefix(address, testBMCScheme+"://")
+	testBMCFor(fakeKey).getPowerStateErr = errors.New("bmc: timed out reading power state")
+
+	result, err := dep.PowerOn(context.Background())
+	if err != nil {
+		t.Fatalf("PowerOn: %v", err)
+	}
+	if result.ErrorMessage != "" {
+		t.Fatalf("ErrorMessage = %q, want empty (the PowerOn command itself succeeded)", result.ErrorMessage)
+	}
+	if result.PoweredOn != nil {
+		t.Fatalf("PoweredOn = %v, want nil when the read-back itself fails", *result.PoweredOn)
+	}
+}
+
+// TestAgentDeployer_PowerCycle_WithBMC_CallsThrough covers PowerCycle's
+// BMC-driven path, the same shape as PowerOn/PowerOff.
+func TestAgentDeployer_PowerCycle_WithBMC_CallsThrough(t *testing.T) {
+	machine := newTestMachine("default", "node-01")
+	address := testBMCAddress(t)
+	machine.Spec.BMC = &keziov1alpha1.MachineBMC{
+		Address:              address,
+		CredentialsSecretRef: keziov1alpha1.SecretReference{Name: bmcCredsSecretName},
+	}
+	secret := bmcCredsSecret()
+	c := newAgentTestClientWithSecret(t, machine, secret)
+	dep := &agentDeployer{client: c, key: types.NamespacedName{Namespace: "default", Name: "node-01"}, bmcSpec: machine.Spec.BMC}
+
+	result, err := dep.PowerCycle(context.Background())
+	if err != nil {
+		t.Fatalf("PowerCycle: %v", err)
+	}
+	if result.ErrorMessage != "" {
+		t.Fatalf("ErrorMessage = %q, want empty", result.ErrorMessage)
+	}
+	_, _, _, powerCycle, _ := testBMCFor(strings.TrimPrefix(address, testBMCScheme+"://")).calls()
+	if powerCycle != 1 {
+		t.Errorf("PowerCycle calls = %d, want 1", powerCycle)
+	}
+	if result.PoweredOn == nil || !*result.PoweredOn {
+		t.Fatalf("PoweredOn = %v, want a non-nil true after a successful power-cycle", result.PoweredOn)
+	}
+}
+
+// TestAgentDeployer_PowerCycle_NoBMC_NoOp covers PowerCycle's fallback:
+// without a BMC configured it must stay a no-op that reports success,
+// the same shape PowerOn/PowerOff fall back to - this is what lets
+// reconcileProvisioning's AfterDeploy=Reboot handling leave the reboot to
+// the agent's own "systemctl reboot", and reconcileInspecting's
+// stuck-machine detection simply keep waiting, when no BMC is
+// configured.
+func TestAgentDeployer_PowerCycle_NoBMC_NoOp(t *testing.T) {
+	machine := newTestMachine("default", "node-01")
+	c := newAgentTestClient(t, machine)
+	dep := &agentDeployer{client: c, key: types.NamespacedName{Namespace: "default", Name: "node-01"}}
+
+	result, err := dep.PowerCycle(context.Background())
+	if err != nil {
+		t.Fatalf("PowerCycle: %v", err)
+	}
+	if result.ErrorMessage != "" || !result.Dirty {
+		t.Fatalf("PowerCycle result = %+v, want a dirty success no-op", result)
+	}
+	if result.PoweredOn != nil {
+		t.Fatalf("PoweredOn = %v, want nil (nothing observed without a BMC)", *result.PoweredOn)
+	}
+}
+
+// TestAgentDeployer_PowerCycle_BMCPowerCycleFails_ReportsError covers a
+// BMC PowerCycle call itself failing.
+func TestAgentDeployer_PowerCycle_BMCPowerCycleFails_ReportsError(t *testing.T) {
+	machine := newTestMachine("default", "node-01")
+	address := testBMCAddress(t)
+	machine.Spec.BMC = &keziov1alpha1.MachineBMC{
+		Address:              address,
+		CredentialsSecretRef: keziov1alpha1.SecretReference{Name: bmcCredsSecretName},
+	}
+	secret := bmcCredsSecret()
+	c := newAgentTestClientWithSecret(t, machine, secret)
+	dep := &agentDeployer{client: c, key: types.NamespacedName{Namespace: "default", Name: "node-01"}, bmcSpec: machine.Spec.BMC}
+
+	fakeKey := strings.TrimPrefix(address, testBMCScheme+"://")
+	testBMCFor(fakeKey).powerCycleErr = errors.New("bmc: unsupported action")
+
+	result, err := dep.PowerCycle(context.Background())
+	if err != nil {
+		t.Fatalf("PowerCycle: %v", err)
+	}
+	if result.ErrorMessage == "" {
+		t.Fatal("ErrorMessage = \"\", want a non-empty message when the BMC rejects PowerCycle")
 	}
 }

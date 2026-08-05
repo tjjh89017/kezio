@@ -95,16 +95,17 @@ func (f *AgentFactory) New(machine *keziov1alpha1.Machine) (Deployer, error) {
 // values the reconciler understands, by polling a condition each writes
 // to.
 //
-// Register, PowerOn, and PowerOff drive power and boot order through
-// internal/bmc when the Machine names one (bmcSpec is non-nil with a
-// non-empty Address): see connectBMC. When it does not, they fall back to the
-// pre-BMC behavior each documents on its own: Register arranges the
-// netboot-wait handoff bootserver's own polling relies on, and
-// PowerOn/PowerOff are no-ops, since without a BMC there is nothing this
-// Deployer can drive - the machine's power state is either
-// human-operated or left to the agent's own systemctl calls. Deprovision
-// stays a no-op regardless of a configured BMC; see its own doc comment
-// for why.
+// Register, PowerOn, PowerOff, and PowerCycle drive power and boot order
+// through internal/bmc when the Machine names one (bmcSpec is non-nil
+// with a non-empty Address): see connectBMC. When it does not, they fall
+// back to the pre-BMC behavior each documents on its own: Register
+// arranges the netboot-wait handoff bootserver's own polling relies on,
+// and PowerOn/PowerOff/PowerCycle are no-ops, since without a BMC there
+// is nothing this Deployer can drive - the machine's power state is
+// either human-operated or left to the agent's own systemctl calls (for
+// PowerCycle, specifically its own "systemctl reboot", the
+// reconcileProvisioning AfterDeploy=Reboot fallback). Deprovision stays a
+// no-op regardless of a configured BMC; see its own doc comment for why.
 type agentDeployer struct {
 	client client.Client
 	key    types.NamespacedName
@@ -340,7 +341,10 @@ func (d *agentDeployer) Deprovision(_ context.Context, _ *DeprovisionData) (Resu
 // is either human-operated or left to the agent's own systemctl calls -
 // so letting it succeed as a no-op is what lets a Machine settle in
 // Available (or Provisioned) instead of spinning on power-management
-// retries it has no way to act on.
+// retries it has no way to act on. On the BMC-driven path, the returned
+// Result.PoweredOn carries what GetPowerState reads back afterward
+// (see observedPowerState), rather than assuming PowerOn's success means
+// the machine is actually on.
 func (d *agentDeployer) PowerOn(ctx context.Context) (Result, error) {
 	bmcClient, err := d.connectBMC(ctx)
 	if err != nil {
@@ -352,12 +356,13 @@ func (d *agentDeployer) PowerOn(ctx context.Context) (Result, error) {
 	if err := bmcClient.PowerOn(ctx); err != nil {
 		return Result{ErrorMessage: fmt.Sprintf("agent deployer: powering on machine: %v", err)}, nil
 	}
-	return Result{Dirty: true}, nil
+	return Result{Dirty: true, PoweredOn: observedPowerState(ctx, bmcClient)}, nil
 }
 
 // PowerOff powers the machine off through its BMC when one is configured;
 // see PowerOn for the no-BMC fallback and why it is the honest choice
-// there. BMC.PowerOff is a graceful (orderly OS shutdown) power-down, the
+// there, and for how Result.PoweredOn is filled in on the BMC-driven
+// path. BMC.PowerOff is a graceful (orderly OS shutdown) power-down, the
 // same as an agent-issued "systemctl poweroff" would be - see
 // reconcileProvisioning's afterDeploy=PowerOff handling for how this
 // interacts with the agent's own shutdown path.
@@ -372,5 +377,53 @@ func (d *agentDeployer) PowerOff(ctx context.Context) (Result, error) {
 	if err := bmcClient.PowerOff(ctx); err != nil {
 		return Result{ErrorMessage: fmt.Sprintf("agent deployer: powering off machine: %v", err)}, nil
 	}
-	return Result{Dirty: true}, nil
+	return Result{Dirty: true, PoweredOn: observedPowerState(ctx, bmcClient)}, nil
+}
+
+// PowerCycle forces the machine through an immediate power-on reset
+// through its BMC when one is configured; see PowerOn for the no-BMC
+// fallback and why it is the honest choice there, and for how
+// Result.PoweredOn is filled in on the BMC-driven path. It drives two
+// callers: reconcileProvisioning's AfterDeploy=Reboot handling (in place
+// of leaving that reboot to the agent's own "systemctl reboot") and
+// reconcileInspecting's stuck-machine recovery.
+func (d *agentDeployer) PowerCycle(ctx context.Context) (Result, error) {
+	bmcClient, err := d.connectBMC(ctx)
+	if err != nil {
+		return Result{ErrorMessage: err.Error()}, nil
+	}
+	if bmcClient == nil {
+		return Result{Dirty: true}, nil
+	}
+	if err := bmcClient.PowerCycle(ctx); err != nil {
+		return Result{ErrorMessage: fmt.Sprintf("agent deployer: power-cycling machine: %v", err)}, nil
+	}
+	return Result{Dirty: true, PoweredOn: observedPowerState(ctx, bmcClient)}, nil
+}
+
+// observedPowerState reads bmcClient's current power state back and
+// converts it to the *bool shape Result.PoweredOn (and, downstream,
+// Machine.status.poweredOn) share: true for bmc.PowerStateOn, false for
+// bmc.PowerStateOff, nil for bmc.PowerStateUnknown or a failed read. A
+// nil return is not itself an error: it means the caller (PowerOn,
+// PowerOff, or PowerCycle) already succeeded at the action it took, and
+// only the follow-up observation was inconclusive - the reconciler falls
+// back to the commanded power state in that case rather than treating an
+// unreadable observation as a hard failure of an action that otherwise
+// succeeded.
+func observedPowerState(ctx context.Context, bmcClient bmc.BMC) *bool {
+	state, err := bmcClient.GetPowerState(ctx)
+	if err != nil {
+		return nil
+	}
+	switch state {
+	case bmc.PowerStateOn:
+		on := true
+		return &on
+	case bmc.PowerStateOff:
+		off := false
+		return &off
+	default:
+		return nil
+	}
 }

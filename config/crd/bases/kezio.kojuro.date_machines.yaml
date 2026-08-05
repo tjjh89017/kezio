@@ -529,6 +529,16 @@ spec:
                       type: object
                     type: array
                 type: object
+              inspectingSince:
+                description: |-
+                  InspectingSince records when the machine most recently entered the
+                  Inspecting state (set alongside State transitioning to Inspecting).
+                  The controller uses it to detect a machine stuck waiting for
+                  kezio-agent to register - past a threshold, it forces a power-cycle
+                  through the machine's BMC (when one is configured) to try to
+                  recover it. It is only meaningful while State is Inspecting.
+                format: date-time
+                type: string
               netBoot:
                 description: |-
                   NetBoot records the live-boot token most recently minted for this

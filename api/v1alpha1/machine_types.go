@@ -489,6 +489,14 @@ type MachineStatus struct {
 	// +kubebuilder:validation:Enum=Enrolling;Inspecting;Available;Provisioning;Provisioned;Error
 	// +optional
 	State string `json:"state,omitempty"`
+	// InspectingSince records when the machine most recently entered the
+	// Inspecting state (set alongside State transitioning to Inspecting).
+	// The controller uses it to detect a machine stuck waiting for
+	// kezio-agent to register - past a threshold, it forces a power-cycle
+	// through the machine's BMC (when one is configured) to try to
+	// recover it. It is only meaningful while State is Inspecting.
+	// +optional
+	InspectingSince *metav1.Time `json:"inspectingSince,omitempty"`
 	// Provisioning records what was actually deployed.
 	// +optional
 	Provisioning *MachineProvisioningStatus `json:"provisioning,omitempty"`

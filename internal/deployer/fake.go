@@ -38,6 +38,7 @@ const (
 	PhaseDeprovision Phase = "Deprovision"
 	PhasePowerOn     Phase = "PowerOn"
 	PhasePowerOff    Phase = "PowerOff"
+	PhasePowerCycle  Phase = "PowerCycle"
 )
 
 // FailFunc decides whether a phase call should fail. Returning a non-empty
@@ -189,6 +190,21 @@ func (d *fakeDeployer) PowerOff(_ context.Context) (Result, error) {
 
 	d.factory.mu.Lock()
 	d.state.poweredOn = false
+	d.factory.mu.Unlock()
+
+	return Result{Dirty: true}, nil
+}
+
+// PowerCycle power-cycles the fake machine, landing it powered on -
+// the same observable end state as PowerOn, since the fake has no
+// distinct "cycling" transition to model.
+func (d *fakeDeployer) PowerCycle(_ context.Context) (Result, error) {
+	if msg := d.fail(PhasePowerCycle); msg != "" {
+		return Result{ErrorMessage: msg}, nil
+	}
+
+	d.factory.mu.Lock()
+	d.state.poweredOn = true
 	d.factory.mu.Unlock()
 
 	return Result{Dirty: true}, nil

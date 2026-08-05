@@ -563,6 +563,10 @@ func (in *MachineStatus) DeepCopyInto(out *MachineStatus) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+	if in.InspectingSince != nil {
+		in, out := &in.InspectingSince, &out.InspectingSince
+		*out = (*in).DeepCopy()
+	}
 	if in.Provisioning != nil {
 		in, out := &in.Provisioning, &out.Provisioning
 		*out = new(MachineProvisioningStatus)

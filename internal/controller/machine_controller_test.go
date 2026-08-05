@@ -72,6 +72,34 @@ func (d *signalDeployer) Provision(ctx context.Context, data *deployer.Provision
 	return deployer.Result{Dirty: true}, nil
 }
 
+// stallingInspectDeployer wraps a fake deployer.Deployer, overriding only
+// Inspect to always ask the reconciler to poll again instead of ever
+// completing - the same seam pattern signalDeployer gives Provision,
+// applied to Inspect so a test can exercise reconcileInspecting's
+// stuck-detection (pollInspecting) without a real registration ever
+// landing.
+type stallingInspectDeployer struct {
+	deployer.Deployer
+}
+
+func (d *stallingInspectDeployer) Inspect(context.Context, *deployer.InspectData) (deployer.Result, error) {
+	return deployer.Result{RequeueAfter: time.Millisecond}, nil
+}
+
+// powerOnMismatchDeployer wraps a fake deployer.Deployer, overriding only
+// PowerOn to report success while observing the machine as still off -
+// simulating a BMC whose PowerOn command is acknowledged but never
+// actually lands (see deployer.Result.PoweredOn's doc comment for what a
+// real agentDeployer does with GetPowerState's read-back in this case).
+type powerOnMismatchDeployer struct {
+	deployer.Deployer
+}
+
+func (d *powerOnMismatchDeployer) PowerOn(context.Context) (deployer.Result, error) {
+	off := false
+	return deployer.Result{Dirty: true, PoweredOn: &off}, nil
+}
+
 // newTestMachineSpec builds a minimal, valid MachineSpec for a test
 // resource named name.
 func newTestMachineSpec(name string) keziov1alpha1.MachineSpec {
@@ -574,6 +602,73 @@ var _ = Describe("Machine Controller", func() {
 			By("never having recorded a resolved target disk, since the match failed before any deploy action")
 			Expect(result.Status.Provisioning).To(BeNil())
 		})
+
+		It("moves to Error naming the Image when the referenced Image reaches ImageStateFailed, then resumes once it recovers", func() {
+			const resourceName = "image-failed-machine"
+			namespace := "default"
+			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+
+			image := &keziov1alpha1.Image{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-image", Namespace: namespace},
+				Spec: keziov1alpha1.ImageSpec{
+					Source: keziov1alpha1.ImageSource{Format: keziov1alpha1.ImageFormatQCOW2},
+				},
+			}
+			Expect(k8sClient.Create(ctx, image)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, image)).To(Succeed()) })
+
+			spec := newTestMachineSpec(resourceName)
+			spec.ImageRef = &keziov1alpha1.NameRef{Name: image.Name}
+			machine := &keziov1alpha1.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec:       spec,
+			}
+			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+			DeferCleanup(func() {
+				m := &keziov1alpha1.Machine{}
+				if err := k8sClient.Get(ctx, key, m); err == nil {
+					Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+				}
+			})
+
+			r := &MachineReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				DeployerFactory: deployer.NewFactory().New,
+			}
+
+			By("reconciling to Available")
+			_, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateAvailable
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("driving the referenced Image to ImageStateFailed, as a checksum mismatch would")
+			image.Status.State = keziov1alpha1.ImageStateFailed
+			Expect(k8sClient.Status().Update(ctx, image)).To(Succeed())
+
+			By("reconciling into Provisioning, which stalls forever on the failed Image without this check")
+			result, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateError
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Status.State).To(Equal(keziov1alpha1.MachineStateError))
+			Expect(result.Status.ErrorMessage).To(ContainSubstring(image.Name))
+			Expect(result.Status.ErrorCount).To(BeNumerically(">=", 1))
+			readyCond := apimeta.FindStatusCondition(result.Status.Conditions, keziov1alpha1.ConditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Reason).To(Equal(reasonProvisionFailed))
+
+			By("recovering the Image back to Ready so the existing Error-state retry path can proceed")
+			image.Status.State = keziov1alpha1.ImageStateReady
+			Expect(k8sClient.Status().Update(ctx, image)).To(Succeed())
+
+			result, err = reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateProvisioned
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Status.State).To(Equal(keziov1alpha1.MachineStateProvisioned))
+		})
 	})
 
 	Context("reacting to an agent-reported deploy success", func() {
@@ -718,6 +813,45 @@ var _ = Describe("Machine Controller", func() {
 			Expect(k8sClient.Get(ctx, key, steady)).To(Succeed())
 			Expect(*steady.Status.PoweredOn).To(BeTrue())
 			Expect(powerOnCalls).To(Equal(1))
+		})
+
+		It("records status.poweredOn from the driver-observed state, not spec.online, when they disagree", func() {
+			const resourceName = "power-on-mismatch-machine"
+			namespace := "default"
+			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+
+			machine := &keziov1alpha1.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec:       newPowerOnlyMachineSpec(resourceName, true),
+			}
+			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+			DeferCleanup(func() {
+				m := &keziov1alpha1.Machine{}
+				if err := k8sClient.Get(ctx, key, m); err == nil {
+					Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+				}
+			})
+
+			base := deployer.NewFactory()
+			r := &MachineReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+				DeployerFactory: func(m *keziov1alpha1.Machine) (deployer.Deployer, error) {
+					fake, err := base.New(m)
+					if err != nil {
+						return nil, err
+					}
+					return &powerOnMismatchDeployer{Deployer: fake}, nil
+				},
+			}
+
+			By("reconciling to Available, where spec.online=true but the driver reports the machine still off")
+			result, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateAvailable && m.Status.PoweredOn != nil
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Status.PoweredOn).NotTo(BeNil())
+			Expect(*result.Status.PoweredOn).To(BeFalse(), "status.poweredOn must reflect what the driver observed, not the commanded/desired state")
 		})
 
 		It("calls PowerOff and records status.poweredOn=false when spec.online is false", func() {
@@ -881,6 +1015,206 @@ var _ = Describe("Machine Controller", func() {
 			Expect(result.Status.PoweredOn).NotTo(BeNil())
 			Expect(*result.Status.PoweredOn).To(BeFalse())
 			Expect(powerOffCalls).To(Equal(1))
+		})
+
+		It("power-cycles the machine instead of leaving it to the agent when AfterDeploy is Reboot", func() {
+			const resourceName = "data-only-reboot-machine"
+			namespace := "default"
+			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+			nn := types.NamespacedName{Namespace: namespace, Name: resourceName}
+
+			dataImage := &keziov1alpha1.Image{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-data-image", Namespace: namespace},
+				Spec: keziov1alpha1.ImageSpec{
+					Source: keziov1alpha1.ImageSource{Format: keziov1alpha1.ImageFormatQCOW2},
+				},
+			}
+			Expect(k8sClient.Create(ctx, dataImage)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, dataImage)).To(Succeed()) })
+
+			spec := newTestMachineSpec(resourceName)
+			spec.DataImages = []keziov1alpha1.MachineDataImage{
+				{ImageRef: keziov1alpha1.NameRef{Name: dataImage.Name}},
+			}
+			spec.AfterDeploy = keziov1alpha1.AfterDeployReboot
+			machine := &keziov1alpha1.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec:       spec,
+			}
+			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+			DeferCleanup(func() {
+				m := &keziov1alpha1.Machine{}
+				if err := k8sClient.Get(ctx, key, m); err == nil {
+					Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+				}
+			})
+
+			var powerCycleCalls, powerOffCalls int
+			factory := deployer.NewFactory()
+			factory.Fail = func(m types.NamespacedName, phase deployer.Phase) string {
+				if m == nn {
+					switch phase {
+					case deployer.PhasePowerCycle:
+						powerCycleCalls++
+					case deployer.PhasePowerOff:
+						powerOffCalls++
+					}
+				}
+				return ""
+			}
+
+			r := &MachineReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				DeployerFactory: factory.New,
+			}
+
+			By("reconciling through Provisioning to Provisioned")
+			result, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateProvisioned
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Status.State).To(Equal(keziov1alpha1.MachineStateProvisioned))
+
+			By("routing the AfterDeploy=Reboot handoff through dep.PowerCycle (BMC-driven), not dep.PowerOff")
+			Expect(powerCycleCalls).To(Equal(1))
+			Expect(powerOffCalls).To(BeZero())
+		})
+	})
+
+	Context("detecting a stuck inspection", func() {
+		// stallingInspectDeployer wraps a fake deployer.Deployer,
+		// overriding Inspect to always ask the reconciler to poll again
+		// instead of ever completing, so a test can exercise
+		// reconcileInspecting's stuck-detection (pollInspecting) without
+		// a real registration ever landing.
+		newStallingInspectFactory := func(base *deployer.FakeFactory) deployer.Factory {
+			return func(m *keziov1alpha1.Machine) (deployer.Deployer, error) {
+				fake, err := base.New(m)
+				if err != nil {
+					return nil, err
+				}
+				return &stallingInspectDeployer{Deployer: fake}, nil
+			}
+		}
+
+		It("power-cycles and keeps polling once inspectingStuckThreshold has elapsed", func() {
+			const resourceName = "stuck-inspect-machine"
+			namespace := "default"
+			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+			nn := types.NamespacedName{Namespace: namespace, Name: resourceName}
+
+			machine := &keziov1alpha1.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec:       newTestMachineSpec(resourceName),
+			}
+			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+			DeferCleanup(func() {
+				m := &keziov1alpha1.Machine{}
+				if err := k8sClient.Get(ctx, key, m); err == nil {
+					Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+				}
+			})
+
+			var powerCycleCalls int
+			factory := deployer.NewFactory()
+			factory.Fail = func(m types.NamespacedName, phase deployer.Phase) string {
+				if m == nn && phase == deployer.PhasePowerCycle {
+					powerCycleCalls++
+				}
+				return ""
+			}
+
+			r := &MachineReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				DeployerFactory: newStallingInspectFactory(factory),
+			}
+
+			By("reconciling to Inspecting, where the stalling Inspect never completes")
+			inspecting, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateInspecting && m.Status.InspectingSince != nil
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("polling once more well within the threshold - no power-cycle yet")
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(powerCycleCalls).To(BeZero())
+
+			By("backdating status.inspectingSince past inspectingStuckThreshold")
+			stale := metav1.NewTime(inspecting.Status.InspectingSince.Time.Add(-2 * inspectingStuckThreshold))
+			inspecting.Status.InspectingSince = &stale
+			Expect(k8sClient.Status().Update(ctx, inspecting)).To(Succeed())
+
+			By("reconciling once more, which must power-cycle the stuck machine and keep waiting")
+			powerCycleResult, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(powerCycleResult.RequeueAfter).NotTo(BeZero())
+			Expect(powerCycleCalls).To(Equal(1))
+
+			By("resetting status.inspectingSince so the next threshold window starts fresh")
+			afterCycle := &keziov1alpha1.Machine{}
+			Expect(k8sClient.Get(ctx, key, afterCycle)).To(Succeed())
+			Expect(afterCycle.Status.State).To(Equal(keziov1alpha1.MachineStateInspecting))
+			Expect(afterCycle.Status.InspectingSince).NotTo(BeNil())
+			Expect(afterCycle.Status.InspectingSince.Time).To(BeTemporally(">", stale.Time))
+
+			By("polling again immediately after - no second power-cycle within the new window")
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(powerCycleCalls).To(Equal(1))
+		})
+
+		It("keeps waiting without a BMC, since dep.PowerCycle's no-BMC fallback is itself a no-op", func() {
+			// deployer.FakeFactory never models a BMC at all - every
+			// phase call it services (including the PowerCycle this
+			// stuck-detection now issues) succeeds as a harmless no-op
+			// the same shape agentDeployer.PowerCycle falls back to
+			// without a configured BMC, so driving a stuck machine
+			// through it must still just keep waiting rather than
+			// erroring out or getting stuck itself.
+			const resourceName = "stuck-inspect-no-bmc-machine"
+			namespace := "default"
+			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+
+			spec := newTestMachineSpec(resourceName)
+			spec.BMC = nil
+			machine := &keziov1alpha1.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec:       spec,
+			}
+			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+			DeferCleanup(func() {
+				m := &keziov1alpha1.Machine{}
+				if err := k8sClient.Get(ctx, key, m); err == nil {
+					Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+				}
+			})
+
+			factory := deployer.NewFactory()
+			r := &MachineReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				DeployerFactory: newStallingInspectFactory(factory),
+			}
+
+			inspecting, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateInspecting && m.Status.InspectingSince != nil
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			stale := metav1.NewTime(inspecting.Status.InspectingSince.Time.Add(-2 * inspectingStuckThreshold))
+			inspecting.Status.InspectingSince = &stale
+			Expect(k8sClient.Status().Update(ctx, inspecting)).To(Succeed())
+
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).NotTo(BeZero())
+
+			afterCycle := &keziov1alpha1.Machine{}
+			Expect(k8sClient.Get(ctx, key, afterCycle)).To(Succeed())
+			Expect(afterCycle.Status.State).To(Equal(keziov1alpha1.MachineStateInspecting))
 		})
 	})
 })

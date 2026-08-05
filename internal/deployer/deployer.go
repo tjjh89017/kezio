@@ -49,6 +49,15 @@ type Result struct {
 	// example a context cancellation) that the reconciler should just
 	// requeue without recording a machine-level error.
 	ErrorMessage string
+	// PoweredOn carries the power state actually read back from the BMC
+	// (via GetPowerState) after a successful, BMC-driven PowerOn,
+	// PowerOff, or PowerCycle call. It is nil when no BMC is configured
+	// (the documented no-op fallback those calls take) or when the
+	// read-back state could not be resolved to on/off (bmc.PowerStateUnknown,
+	// or the read itself failed). The reconciler uses it, when set, to
+	// record Machine.status.poweredOn from what the BMC actually observed
+	// rather than assuming the commanded state took effect.
+	PoweredOn *bool
 }
 
 // RegisterData carries what the enroll phase needs to establish contact
@@ -124,6 +133,16 @@ type Deployer interface {
 	PowerOn(ctx context.Context) (Result, error)
 	// PowerOff powers the machine off.
 	PowerOff(ctx context.Context) (Result, error)
+	// PowerCycle forces the machine through an immediate power-on reset.
+	// It drives two callers: reconcileProvisioning's AfterDeploy=Reboot
+	// handling (routing that reboot through the BMC instead of leaving it
+	// to the agent's own reboot) and reconcileInspecting's stuck-machine
+	// recovery (forcing a machine that never actually net booted to try
+	// again). Without a BMC configured it is a no-op that reports success,
+	// the same fallback shape as PowerOn/PowerOff: there is nothing this
+	// Deployer can drive, so the caller's own documented fallback (the
+	// agent's own reboot, or simply continuing to wait) takes over.
+	PowerCycle(ctx context.Context) (Result, error)
 }
 
 // Factory builds a Deployer scoped to one Machine. The reconciler calls it
