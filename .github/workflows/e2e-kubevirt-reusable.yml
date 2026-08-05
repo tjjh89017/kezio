@@ -187,11 +187,11 @@ env:
   # deliberately, not as a side effect of an unrelated change. These are
   # kezio's own cluster-addon versions, not something an external caller
   # needs to choose, so they stay plain env rather than inputs.
-  K3S_VERSION: "v1.33.13+k3s1"
-  CERT_MANAGER_VERSION: "v1.16.2"
-  KUBEVIRT_VERSION: "v1.4.0"
-  CDI_VERSION: "v1.60.3"
-  MULTUS_VERSION: "v4.1.0"
+  K3S_VERSION: "v1.36.2+k3s1"
+  CERT_MANAGER_VERSION: "v1.21.1"
+  KUBEVIRT_VERSION: "v1.9.0"
+  CDI_VERSION: "v1.65.0"
+  MULTUS_VERSION: "v4.3.0"
   # Only installed when bmc_mode is true; see inputs.kubevirtbmc_version.
   KUBEVIRTBMC_VERSION: ${{ inputs.kubevirtbmc_version }}
 
@@ -482,6 +482,9 @@ jobs:
           # Retry: partprobe/udevadm settle can still race the kernel's
           # nbd partition-node creation, so give it a few bounded
           # attempts before treating "no ext4 partition" as real.
+          # Re-validated at this version bump: this is a GitHub Actions
+          # runner kernel/udev race, independent of the KubeVirt/CDI/
+          # Multus/k3s pins above, so it is still needed.
           for attempt in $(seq 1 10); do
             root_part=""
             root_size=0
@@ -627,7 +630,10 @@ jobs:
         # observed as repeated "it needs a privileged namespace to run"
         # FailedCreate events on the VirtualMachineInstance). Enabling the
         # gate makes KubeVirt stamp its pods with an explicit
-        # seccompProfile, satisfying that requirement.
+        # seccompProfile, satisfying that requirement. Re-validated
+        # against KubeVirt v1.9.0: KubevirtSeccompProfile is still Beta
+        # (pkg/virt-config/featuregate/active.go), not default-on, so the
+        # gate and patch are both still required.
         run: |
           set -euo pipefail
           kubectl apply -f "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-operator.yaml"
@@ -661,6 +667,21 @@ jobs:
           kubectl wait cdi cdi --for=condition=Available --timeout=300s
 
       - name: Install Multus
+        # A prior run on Multus v4.1.0 + KubeVirt v1.4.0 (workflow run
+        # 30999047426) failed a bridge-binding VMI with "failed to
+        # configure vmi network: pod link (podXXXX) is missing" - virt-
+        # handler's netpod discovery (pkg/network/setup/netpod/discover.go)
+        # found no pod-side interface for the NAD, consistent with a CNI
+        # ADD/cache race in the multus-daemon thick plugin rather than a
+        # NAD/config problem (the plain "bridge" CNI config below is
+        # unchanged and still resolves against multus-daemonset-thick.yml,
+        # same manifest shape). Multus v4.2.0's release notes call out
+        # "handles pod not found during CNI ADD gracefully" and "avoids
+        # stale cache issues with live pod lookups"; v4.3.0 adds "fix
+        # thick plugin STATUS and GC handling for plugin-level commands"
+        # (k8snetworkplumbingwg/multus-cni PR #1490). Bumping past v4.1.0
+        # to v4.3.0 carries those fixes; no NAD or manifest-shape change
+        # was needed.
         run: |
           set -euo pipefail
           kubectl apply -f "https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/${MULTUS_VERSION}/deployments/multus-daemonset-thick.yml"
@@ -989,6 +1010,8 @@ jobs:
         # yet, so an empty status here is a populate-lag race, not a real
         # power state problem. A Running status, though, is never lag - it
         # means the VM actually came up, which must fail immediately.
+        # Re-validated against KubeVirt v1.9.0: the controller still
+        # populates this field asynchronously, so the bounded wait stays.
         run: |
           set -euo pipefail
           deadline=$(( $(date +%s) + 120 ))
@@ -1071,6 +1094,9 @@ jobs:
         # surfaces as a plain connection refused. kubevirt.io/virtual
         # machinebmc-name is the label KubeVirtBMC's own controller
         # applies to this pod (its VirtualMachineBMCNameLabel constant).
+        # Re-validated at this version bump: kubevirtbmc_version stays
+        # v0.9.0 (already the latest release), so this wait and the
+        # curl-retry step below it are unchanged.
         run: |
           set -euo pipefail
           kubectl -n kezio-system wait --for=condition=Ready pod \
@@ -1101,7 +1127,11 @@ jobs:
           # as curlimages/curl's other initContainer uses in this repo
           # (e.g. config/bootd/deployment.yaml): the image's own USER
           # is the non-numeric "curl_user", which restricted PSA can't
-          # resolve to verify runAsNonRoot.
+          # resolve to verify runAsNonRoot. Re-validated at this version
+          # bump: restricted PSA is a Kubernetes admission policy this
+          # workflow sets on the namespace itself, not something
+          # KubeVirt/CDI/Multus/curl version changes affect, so the
+          # override is still required.
           redfish_overrides="$(jq -n \
             --arg name "kezio-e2e-redfish-check" \
             --arg image "curlimages/curl:8.21.0" \

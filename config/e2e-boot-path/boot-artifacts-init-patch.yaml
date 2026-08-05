@@ -41,6 +41,11 @@
 # this, fetch-boot-artifacts's `mkdir -p "${DEST_DIR}"` (config/
 # boot-artifacts/fetch.sh) fails with EACCES and the initContainer
 # CrashLoopBackOffs before the manager container ever starts.
+#
+# Re-validated at the latest e2e version bump: curl_user's uid/gid come
+# from the curlimages/curl image (curl:8.21.0, unchanged - already
+# latest) and restricted PSA is this repo's own namespace policy, not
+# affected by the KubeVirt/CDI/Multus/k3s bumps, so this patch stays.
 - op: add
   path: /spec/template/spec/securityContext/fsGroup
   value: 101
