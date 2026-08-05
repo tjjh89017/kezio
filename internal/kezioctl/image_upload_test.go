@@ -166,6 +166,36 @@ func TestImageUpload_FromStdin_ChecksumPropagatesIntoCR(t *testing.T) {
 	}
 }
 
+func TestImageUpload_UploadFailureDoesNotCreateImage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "server exploded", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := fake.NewClientBuilder().WithScheme(Scheme).Build()
+
+	_, err := ImageUpload(context.Background(), srv.Client(), c, ImageUploadOptions{
+		File:      StdinArg,
+		Name:      "should-not-exist",
+		Namespace: "default",
+		Format:    keziov1alpha1.ImageFormatRaw,
+		Server:    srv.URL,
+		Token:     "test-token",
+		Stdin:     strings.NewReader("data"),
+	})
+	if err == nil {
+		t.Fatal("expected an error when the upload fails")
+	}
+
+	list := &keziov1alpha1.ImageList{}
+	if err := c.List(context.Background(), list); err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(list.Items) != 0 {
+		t.Fatalf("Image CR created despite upload failure: %+v", list.Items)
+	}
+}
+
 func TestImageUpload_ImageAlreadyExists(t *testing.T) {
 	srv := newFakeUploadServer(t)
 	defer srv.Close()
