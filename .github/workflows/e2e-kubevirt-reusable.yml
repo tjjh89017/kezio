@@ -313,7 +313,13 @@ jobs:
             base_url="https://github.com/${repo}/releases/latest/download"
           fi
           url="${base_url}/sha256sums"
-          code="$(curl -s -o /dev/null -w '%{http_code}' "${url}")"
+          # -L: GitHub always serves a release-asset download as a 302
+          # redirect to a signed CDN URL, never the asset itself at this
+          # URL - matching config/boot-artifacts/fetch.sh's own `curl
+          # -fsSL`, which follows the same redirect to actually fetch it.
+          # Without -L, curl's -w '%{http_code}' reports GitHub's 302
+          # here and this check fails even when the release exists.
+          code="$(curl -s -L -o /dev/null -w '%{http_code}' "${url}")"
           if [ "${code}" != "200" ]; then
             echo "::error::No boot-artifacts release asset at ${url} (HTTP ${code}). Publish one first: push a \"v*\" tag, or dispatch build-live-image.yml with publish=true (see that workflow's own header comment) - a plain workflow_dispatch of build-live-image.yml without publish=true only validates the build and skips the release step." >&2
             exit 1
