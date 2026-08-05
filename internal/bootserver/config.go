@@ -49,10 +49,24 @@ type Config struct {
 	// package only reads from it.
 	ArtifactsDir string
 	// ServerURL is this server's own externally reachable base URL, for
-	// example "http://10.0.0.5:8090". It is used both to build the
-	// kernel/initrd HTTP URLs GRUB fetches and as the kezio.server=
-	// cmdline value the agent reads its registration endpoint from.
+	// example "http://10.0.0.5:8090". It is used to build the
+	// kernel/initrd/squashfs HTTP URLs GRUB and live-boot's initrd fetch.
 	ServerURL string
+	// AgentServerURL is internal/agentserver's own externally reachable
+	// base URL, for example "http://10.0.0.5:8091" - a different address
+	// from ServerURL whenever the boot config server and the agent
+	// registration server are reachable on different ports or hosts (the
+	// ordinary case: they are two different Services in front of the
+	// same controller-manager Pod, on two different container ports).
+	// It is used as the kezio.server= cmdline value the agent reads its
+	// registration endpoint from. Empty means ServerURL, which is only
+	// correct when both servers genuinely share the exact same address
+	// (for example, a single reverse proxy in front of both) - using it
+	// as a silent default otherwise sends every kezio-agent registration
+	// to a server that never mounts internal/agentserver's routes, which
+	// then fails without ever surfacing an error server-side (see
+	// renderNetBootConfig's doc comment).
+	AgentServerURL string
 	// KernelPath, InitrdPath, and SquashfsPath name the live boot
 	// artifacts under ArtifactsDir. Empty means DefaultKernelPath /
 	// DefaultInitrdPath / DefaultSquashfsPath. SquashfsPath is not served
@@ -94,6 +108,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.EFIDir == "" {
 		c.EFIDir = c.ArtifactsDir
+	}
+	if c.AgentServerURL == "" {
+		c.AgentServerURL = c.ServerURL
 	}
 	return c
 }

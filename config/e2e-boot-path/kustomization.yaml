@@ -19,8 +19,9 @@
 # boot-server-service.yaml's header comment for why they are local copies
 # rather than relative-path references to the originals).
 #
-# BOOT_SERVER_ADDR, BOOT_ARTIFACTS_DIR, BOOT_SERVER_URL, AGENT_SERVER_ADDR,
-# and DEPLOYER are NOT set here (they need per-run values kustomize's
+# BOOT_SERVER_ADDR, BOOT_ARTIFACTS_DIR, BOOT_SERVER_URL,
+# BOOT_AGENT_SERVER_URL, AGENT_SERVER_ADDR, and DEPLOYER are NOT set here
+# (they need per-run values kustomize's
 # static YAML cannot express, the same reasoning config/e2e-image-path
 # uses for INGEST_IMAGE/SEEDER_*) - the e2e suite sets them with
 # `kubectl set env` after applying this overlay; see the "Boot path

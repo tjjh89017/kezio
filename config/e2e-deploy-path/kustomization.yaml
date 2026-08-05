@@ -24,8 +24,9 @@
 # origin if that file changes.
 #
 # INGEST_IMAGE, SEEDER_*, BOOT_SERVER_ADDR, BOOT_ARTIFACTS_DIR,
-# BOOT_SERVER_URL, AGENT_SERVER_ADDR, and DEPLOYER are NOT set here (same
-# reasoning as config/e2e-image-path and config/e2e-boot-path: they need
+# BOOT_SERVER_URL, BOOT_AGENT_SERVER_URL, AGENT_SERVER_ADDR, and DEPLOYER
+# are NOT set here (same reasoning as config/e2e-image-path and
+# config/e2e-boot-path: they need
 # per-run values kustomize's static YAML cannot express) - the workflow
 # sets them with `kubectl set env` after applying this overlay.
 resources:

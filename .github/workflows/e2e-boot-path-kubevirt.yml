@@ -376,6 +376,7 @@ jobs:
             BOOT_ARTIFACTS_DIR=/boot-artifacts \
             BOOT_SERVER_URL="http://kezio-boot-server.kezio-system.svc.cluster.local:8090" \
             AGENT_SERVER_ADDR=:8091 \
+            BOOT_AGENT_SERVER_URL="http://kezio-agent-server.kezio-system.svc.cluster.local:8091" \
             DEPLOYER=agent
           # config/e2e-boot-path deliberately does not wire the
           # fetch-boot-artifacts initContainer into its own

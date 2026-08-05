@@ -41,11 +41,14 @@ kustomize build config/bootserver | kubectl apply -f -
      manager -c fetch-boot-artifacts BOOT_ARTIFACTS_VERSION=v0.1.0` (or
      a further kustomize patch) instead.
    - `BOOT_SERVER_URL` - this server's own externally reachable base
-     URL, for example `http://10.0.0.5:8090`. GRUB and the live agent
-     both fetch from it directly from the boot network, so it must name
-     wherever this Service (or whatever the operator fronts it with -
-     see `service.yaml`'s comment) is actually reachable from there, not
-     the Service's in-cluster ClusterIP.
+     URL, for example `http://10.0.0.5:8090`. GRUB and the live
+     environment's initrd both fetch the kernel/initrd/squashfs from it
+     directly from the boot network, so it must name wherever this
+     Service (or whatever the operator fronts it with - see
+     `service.yaml`'s comment) is actually reachable from there, not the
+     Service's in-cluster ClusterIP. It is *not* where the agent
+     registers - see `BOOT_AGENT_SERVER_URL` in `config/agentserver`'s
+     README.
    - `BOOT_KERNEL_PATH` / `BOOT_INITRD_PATH` - optional, override the
      artifact file names under `BOOT_ARTIFACTS_DIR` (default `vmlinuz` /
      `initrd.img`).

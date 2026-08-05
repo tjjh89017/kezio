@@ -492,9 +492,12 @@ type MachineStatus struct {
 	// InspectingSince records when the machine most recently entered the
 	// Inspecting state (set alongside State transitioning to Inspecting).
 	// The controller uses it to detect a machine stuck waiting for
-	// kezio-agent to register - past a threshold, it forces a power-cycle
-	// through the machine's BMC (when one is configured) to try to
-	// recover it. It is only meaningful while State is Inspecting.
+	// kezio-agent to register - past a threshold, it reports the machine
+	// as failed (MachineStateError) rather than continuing to wait
+	// silently or taking an automatic recovery action, since nothing
+	// observable at that layer can tell a machine that never booted
+	// apart from one whose agent is alive and still working. It is only
+	// meaningful while State is Inspecting.
 	// +optional
 	InspectingSince *metav1.Time `json:"inspectingSince,omitempty"`
 	// Provisioning records what was actually deployed.

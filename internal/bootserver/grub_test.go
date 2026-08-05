@@ -42,6 +42,34 @@ func TestRenderNetBootConfig_FetchParam(t *testing.T) {
 	}
 }
 
+// TestRenderNetBootConfig_KezioServerUsesAgentServerURL pins the fix for
+// a registration handshake that used to never complete: kezio.server=
+// (where the agent registers) must come from Config.AgentServerURL, not
+// ServerURL (the boot config server's own address, used only for the
+// kernel/initrd/squashfs URLs on the same line) - internal/agentserver
+// and internal/bootserver are two different Services on two different
+// container ports fronting the same controller-manager Pod, so
+// collapsing kezio.server= onto ServerURL sends every agent registration
+// to a server that never mounts internal/agentserver's routes.
+func TestRenderNetBootConfig_KezioServerUsesAgentServerURL(t *testing.T) {
+	cfg := Config{
+		ServerURL:      "http://boot.example.test:8090",
+		AgentServerURL: "http://agent.example.test:8091",
+	}.withDefaults()
+
+	got := renderNetBootConfig(cfg, "deadbeef")
+
+	if !containsAll(got, "kezio.server=http://agent.example.test:8091 kezio.token=deadbeef") {
+		t.Fatalf("net-boot config kezio.server= did not use AgentServerURL: %q", got)
+	}
+	if containsAll(got, "kezio.server=http://boot.example.test:8090") {
+		t.Fatalf("net-boot config kezio.server= incorrectly used ServerURL: %q", got)
+	}
+	if !containsAll(got, "linux http://boot.example.test:8090/boot/artifacts/vmlinuz") {
+		t.Fatalf("net-boot config kernel URL should still use ServerURL: %q", got)
+	}
+}
+
 // TestRenderNetBootConfig_CustomSquashfsPath proves fetch= tracks
 // Config.SquashfsPath rather than being hardcoded to the default
 // filename, the same way KernelPath and InitrdPath already do.

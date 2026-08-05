@@ -55,14 +55,23 @@ const (
 )
 
 // inspectingStuckThreshold is how long a machine may sit in Inspecting,
-// waiting for kezio-agent to register, before reconcileInspecting treats
-// it as stuck and forces a power-cycle through the machine's BMC (when
-// one is configured) to try to recover it - for example a machine whose
-// PXE boot silently failed and is sitting at a firmware prompt instead of
-// running the live environment. It is comfortably longer than
-// agentInspectPollInterval's few-second poll cadence, so a machine still
-// legitimately booting the live environment over the network is never
-// mistaken for stuck.
+// waiting for kezio-agent to register, before reconcileInspecting gives up
+// and reports it as failed (see pollInspecting). It is comfortably longer
+// than agentInspectPollInterval's few-second poll cadence, so a machine
+// still legitimately booting the live environment over the network is
+// never mistaken for stuck.
+//
+// pollInspecting deliberately does not try to recover the machine itself
+// (for example, by forcing a BMC power-cycle) once this threshold trips:
+// nothing observable at this layer can tell "the live environment never
+// booted" apart from "kezio-agent is alive and working but has not
+// finished collecting inventory yet", so an automatic, unconditional power
+// action is as likely to interrupt real progress as to fix a genuinely
+// stuck machine - and can then repeat forever, since destroying the
+// machine's progress makes it no more likely to register the second time
+// than the first. Reporting the failure and stopping is the safer
+// default; a human who can see what is actually happening on the machine
+// decides whether a power-cycle is the right recovery.
 const inspectingStuckThreshold = 10 * time.Minute
 
 // MachineReconciler reconciles a Machine object
@@ -166,8 +175,8 @@ func (r *MachineReconciler) reconcileEnrolling(ctx context.Context, machine *kez
 
 // reconcileInspecting collects hardware inventory from the deployer,
 // driving Inspecting -> Available. While still waiting, it also watches
-// for a stuck machine (see pollInspecting) and forces a BMC power-cycle
-// once inspectingStuckThreshold has elapsed.
+// for a stuck machine (see pollInspecting) and reports it as failed once
+// inspectingStuckThreshold has elapsed.
 func (r *MachineReconciler) reconcileInspecting(ctx context.Context, machine *keziov1alpha1.Machine, dep deployer.Deployer) (ctrl.Result, error) {
 	data := &deployer.InspectData{}
 	result, err := dep.Inspect(ctx, data)
@@ -178,7 +187,7 @@ func (r *MachineReconciler) reconcileInspecting(ctx context.Context, machine *ke
 		return r.recordPhaseError(ctx, machine, reasonInspectFailed, result.ErrorMessage)
 	}
 	if result.RequeueAfter > 0 {
-		return r.pollInspecting(ctx, machine, dep, result.RequeueAfter)
+		return r.pollInspecting(ctx, machine, result.RequeueAfter)
 	}
 
 	machine.Status.Hardware = data.Hardware
@@ -187,36 +196,26 @@ func (r *MachineReconciler) reconcileInspecting(ctx context.Context, machine *ke
 }
 
 // pollInspecting requeues an in-progress inspection after requeueAfter,
-// same as before this stuck-detection existed, unless the machine has now
-// spent longer than inspectingStuckThreshold waiting for kezio-agent to
-// register (status.inspectingSince, set when the machine entered
-// Inspecting - see reconcileEnrolling). Once past the threshold it calls
-// dep.PowerCycle to try to recover the machine, then resets
-// status.inspectingSince so the next threshold window starts fresh
-// instead of power-cycling on every subsequent poll. Without a BMC
-// configured, dep.PowerCycle is the documented no-op every other power
-// call falls back to (see agentDeployer.PowerCycle), so the sensible
-// fallback here is unchanged: keep waiting.
-func (r *MachineReconciler) pollInspecting(ctx context.Context, machine *keziov1alpha1.Machine, dep deployer.Deployer, requeueAfter time.Duration) (ctrl.Result, error) {
+// unless the machine has now spent longer than inspectingStuckThreshold
+// waiting for kezio-agent to register (status.inspectingSince, set when
+// the machine entered Inspecting - see reconcileEnrolling), in which case
+// it reports the failure through recordPhaseError instead of continuing to
+// wait silently. See inspectingStuckThreshold's doc comment for why this
+// deliberately takes no automatic recovery action (such as a BMC
+// power-cycle): status.inspectingSince is left untouched, both because
+// there is no fresh window to start without a power action resetting the
+// machine's state, and so it stays available for the operator (or
+// reconcileError's retry, which resumes here) to see exactly how long the
+// machine has been stuck.
+func (r *MachineReconciler) pollInspecting(ctx context.Context, machine *keziov1alpha1.Machine, requeueAfter time.Duration) (ctrl.Result, error) {
 	since := machine.Status.InspectingSince
 	if since == nil || time.Since(since.Time) < inspectingStuckThreshold {
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 
-	result, err := dep.PowerCycle(ctx)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if result.ErrorMessage != "" {
-		return r.recordPhaseError(ctx, machine, reasonInspectFailed, result.ErrorMessage)
-	}
-
-	now := metav1.Now()
-	machine.Status.InspectingSince = &now
-	if err := r.Status().Update(ctx, machine); err != nil {
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+	return r.recordPhaseError(ctx, machine, reasonInspectFailed, fmt.Sprintf(
+		"kezio-agent did not register within %s of entering Inspecting; power-cycle the machine manually or check that it can reach the boot/agent services over the network",
+		inspectingStuckThreshold))
 }
 
 // reconcileAvailable checks whether spec differs from the last successful

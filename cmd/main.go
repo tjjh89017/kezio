@@ -486,9 +486,19 @@ func ezioTuningFromEnv(maxUploadsVar, maxConnectionsVar string) (*keziov1alpha1.
 //     /boot/artifacts/... serves from - a volume mounted into the
 //     manager container out of band (see config/bootserver's README).
 //   - BOOT_SERVER_URL is this server's own externally reachable base
-//     URL, for example "http://10.0.0.5:8090": GRUB and the live agent
-//     both need to reach it from the target machine's network, which is
+//     URL, for example "http://10.0.0.5:8090": GRUB and the live
+//     environment's initrd both need to reach it from the target
+//     machine's network to fetch the kernel/initrd/squashfs, which is
 //     never something this process can discover on its own.
+//   - BOOT_AGENT_SERVER_URL is internal/agentserver's own externally
+//     reachable base URL, for example "http://10.0.0.5:8091" - see
+//     bootserver.Config.AgentServerURL's doc comment for why this is
+//     ordinarily a different address from BOOT_SERVER_URL (a different
+//     Service, on a different container port, fronting the same
+//     controller-manager Pod), and why leaving it unset to silently fall
+//     back to BOOT_SERVER_URL is only correct when both servers truly
+//     share one address. A deployment that sets AGENT_SERVER_ADDR (see
+//     agentServerConfigFromEnv) should set this too.
 //   - BOOT_KERNEL_PATH / BOOT_INITRD_PATH optionally override the
 //     artifact file names under BOOT_ARTIFACTS_DIR (default "vmlinuz" /
 //     "initrd.img").
@@ -518,12 +528,13 @@ func bootServerConfigFromEnv() (*bootserver.Config, error) {
 	}
 
 	cfg := &bootserver.Config{
-		Addr:         addr,
-		ArtifactsDir: artifactsDir,
-		ServerURL:    serverURL,
-		KernelPath:   os.Getenv("BOOT_KERNEL_PATH"),
-		InitrdPath:   os.Getenv("BOOT_INITRD_PATH"),
-		EFIDir:       os.Getenv("BOOT_EFI_DIR"),
+		Addr:           addr,
+		ArtifactsDir:   artifactsDir,
+		ServerURL:      serverURL,
+		AgentServerURL: os.Getenv("BOOT_AGENT_SERVER_URL"),
+		KernelPath:     os.Getenv("BOOT_KERNEL_PATH"),
+		InitrdPath:     os.Getenv("BOOT_INITRD_PATH"),
+		EFIDir:         os.Getenv("BOOT_EFI_DIR"),
 	}
 	if ttl := os.Getenv("BOOT_TOKEN_TTL"); ttl != "" {
 		d, err := time.ParseDuration(ttl)

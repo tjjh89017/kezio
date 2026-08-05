@@ -1214,11 +1214,10 @@ var _ = Describe("Machine Controller", func() {
 			}
 		}
 
-		It("power-cycles and keeps polling once inspectingStuckThreshold has elapsed", func() {
+		It("keeps polling while within inspectingStuckThreshold", func() {
 			const resourceName = "stuck-inspect-machine"
 			namespace := "default"
 			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
-			nn := types.NamespacedName{Namespace: namespace, Name: resourceName}
 
 			machine := &keziov1alpha1.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
@@ -1232,15 +1231,7 @@ var _ = Describe("Machine Controller", func() {
 				}
 			})
 
-			var powerCycleCalls int
 			factory := deployer.NewFactory()
-			factory.Fail = func(m types.NamespacedName, phase deployer.Phase) string {
-				if m == nn && phase == deployer.PhasePowerCycle {
-					powerCycleCalls++
-				}
-				return ""
-			}
-
 			r := &MachineReconciler{
 				Client:          k8sClient,
 				Scheme:          k8sClient.Scheme(),
@@ -1248,93 +1239,36 @@ var _ = Describe("Machine Controller", func() {
 			}
 
 			By("reconciling to Inspecting, where the stalling Inspect never completes")
-			inspecting, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+			_, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
 				return m.Status.State == keziov1alpha1.MachineStateInspecting && m.Status.InspectingSince != nil
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("polling once more well within the threshold - no power-cycle yet")
+			By("polling once more well within the threshold - still Inspecting")
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(powerCycleCalls).To(BeZero())
 
-			By("backdating status.inspectingSince past inspectingStuckThreshold")
-			stale := metav1.NewTime(inspecting.Status.InspectingSince.Add(-2 * inspectingStuckThreshold))
-			inspecting.Status.InspectingSince = &stale
-			Expect(k8sClient.Status().Update(ctx, inspecting)).To(Succeed())
-
-			By("reconciling once more, which must power-cycle the stuck machine and keep waiting")
-			powerCycleResult, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(powerCycleResult.RequeueAfter).NotTo(BeZero())
-			Expect(powerCycleCalls).To(Equal(1))
-
-			By("resetting status.inspectingSince so the next threshold window starts fresh")
-			afterCycle := &keziov1alpha1.Machine{}
-			Expect(k8sClient.Get(ctx, key, afterCycle)).To(Succeed())
-			Expect(afterCycle.Status.State).To(Equal(keziov1alpha1.MachineStateInspecting))
-			Expect(afterCycle.Status.InspectingSince).NotTo(BeNil())
-			Expect(afterCycle.Status.InspectingSince.Time).To(BeTemporally(">", stale.Time))
-
-			By("polling again immediately after - no second power-cycle within the new window")
-			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(powerCycleCalls).To(Equal(1))
+			stillInspecting := &keziov1alpha1.Machine{}
+			Expect(k8sClient.Get(ctx, key, stillInspecting)).To(Succeed())
+			Expect(stillInspecting.Status.State).To(Equal(keziov1alpha1.MachineStateInspecting))
 		})
 
-		It("keeps waiting without a BMC, since dep.PowerCycle's no-BMC fallback is itself a no-op", func() {
-			// deployer.FakeFactory never models a BMC at all - every
-			// phase call it services (including the PowerCycle this
-			// stuck-detection now issues) succeeds as a harmless no-op
-			// the same shape agentDeployer.PowerCycle falls back to
-			// without a configured BMC, so driving a stuck machine
-			// through it must still just keep waiting rather than
-			// erroring out or getting stuck itself.
-			const resourceName = "stuck-inspect-no-bmc-machine"
-			namespace := "default"
-			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
-
-			spec := newTestMachineSpec(resourceName)
-			spec.BMC = nil
-			machine := &keziov1alpha1.Machine{
-				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
-				Spec:       spec,
-			}
-			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
-			DeferCleanup(func() {
-				m := &keziov1alpha1.Machine{}
-				if err := k8sClient.Get(ctx, key, m); err == nil {
-					Expect(k8sClient.Delete(ctx, m)).To(Succeed())
-				}
-			})
-
-			factory := deployer.NewFactory()
-			r := &MachineReconciler{
-				Client:          k8sClient,
-				Scheme:          k8sClient.Scheme(),
-				DeployerFactory: newStallingInspectFactory(factory),
-			}
-
-			inspecting, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
-				return m.Status.State == keziov1alpha1.MachineStateInspecting && m.Status.InspectingSince != nil
-			})
-			Expect(err).NotTo(HaveOccurred())
-
-			stale := metav1.NewTime(inspecting.Status.InspectingSince.Add(-2 * inspectingStuckThreshold))
-			inspecting.Status.InspectingSince = &stale
-			Expect(k8sClient.Status().Update(ctx, inspecting)).To(Succeed())
-
-			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(result.RequeueAfter).NotTo(BeZero())
-
-			afterCycle := &keziov1alpha1.Machine{}
-			Expect(k8sClient.Get(ctx, key, afterCycle)).To(Succeed())
-			Expect(afterCycle.Status.State).To(Equal(keziov1alpha1.MachineStateInspecting))
-		})
-
-		It("moves to Error with reasonInspectFailed when the recovery power-cycle itself fails", func() {
-			const resourceName = "stuck-inspect-powercycle-fail-machine"
+		It("moves to Error, without taking any power action, once inspectingStuckThreshold has elapsed", func() {
+			// Regression test: reconcileInspecting used to force a BMC
+			// power-cycle once a machine sat in Inspecting past
+			// inspectingStuckThreshold, on the theory that this could
+			// recover a machine whose PXE boot silently failed. In
+			// practice nothing observable at this layer can tell that
+			// case apart from kezio-agent being alive and still working
+			// (for example, still fetching the live environment's
+			// squashfs over a slow link) - so the power-cycle was just as
+			// likely to interrupt real progress, and since interrupting
+			// it does not make the next attempt any more likely to
+			// register in time, it could repeat forever. pollInspecting
+			// must instead report the failure through recordPhaseError
+			// and take no automatic recovery action, leaving it to a
+			// human who can see what the machine is actually doing.
+			const resourceName = "stuck-inspect-error-machine"
 			namespace := "default"
 			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
 			nn := types.NamespacedName{Namespace: namespace, Name: resourceName}
@@ -1351,10 +1285,11 @@ var _ = Describe("Machine Controller", func() {
 				}
 			})
 
+			var powerCalls int
 			factory := deployer.NewFactory()
 			factory.Fail = func(m types.NamespacedName, phase deployer.Phase) string {
-				if m == nn && phase == deployer.PhasePowerCycle {
-					return "injected power-cycle failure"
+				if m == nn && (phase == deployer.PhasePowerCycle || phase == deployer.PhasePowerOn || phase == deployer.PhasePowerOff) {
+					powerCalls++
 				}
 				return ""
 			}
@@ -1370,32 +1305,34 @@ var _ = Describe("Machine Controller", func() {
 				return m.Status.State == keziov1alpha1.MachineStateInspecting && m.Status.InspectingSince != nil
 			})
 			Expect(err).NotTo(HaveOccurred())
+			powerCallsAfterRegister := powerCalls
 
 			By("backdating status.inspectingSince past inspectingStuckThreshold")
 			stale := metav1.NewTime(inspecting.Status.InspectingSince.Add(-2 * inspectingStuckThreshold))
 			inspecting.Status.InspectingSince = &stale
 			Expect(k8sClient.Status().Update(ctx, inspecting)).To(Succeed())
 
-			By("reconciling once more, where the stuck-recovery power-cycle itself fails")
-			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			By("reconciling once more, which must give up instead of taking any power action")
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
-			afterFirstError := &keziov1alpha1.Machine{}
-			Expect(k8sClient.Get(ctx, key, afterFirstError)).To(Succeed())
-			Expect(afterFirstError.Status.State).To(Equal(keziov1alpha1.MachineStateError))
-			Expect(afterFirstError.Status.ErrorCount).To(Equal(int32(1)))
-			Expect(afterFirstError.Status.ErrorMessage).To(Equal("injected power-cycle failure"))
-			readyCond := apimeta.FindStatusCondition(afterFirstError.Status.Conditions, keziov1alpha1.ConditionReady)
+			Expect(powerCalls).To(Equal(powerCallsAfterRegister), "pollInspecting must not call any power phase")
+
+			afterGivingUp := &keziov1alpha1.Machine{}
+			Expect(k8sClient.Get(ctx, key, afterGivingUp)).To(Succeed())
+			Expect(afterGivingUp.Status.State).To(Equal(keziov1alpha1.MachineStateError))
+			readyCond := apimeta.FindStatusCondition(afterGivingUp.Status.Conditions, keziov1alpha1.ConditionReady)
 			Expect(readyCond).NotTo(BeNil())
 			Expect(readyCond.Reason).To(Equal(reasonInspectFailed))
+			Expect(readyCond.Message).To(ContainSubstring("did not register"))
 
-			By("retrying from Error, which stays stuck and keeps increasing errorCount")
+			By("retrying from Error, which stays stuck and keeps increasing errorCount, still without a power action")
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 			Expect(err).NotTo(HaveOccurred())
 			afterSecondError := &keziov1alpha1.Machine{}
 			Expect(k8sClient.Get(ctx, key, afterSecondError)).To(Succeed())
 			Expect(afterSecondError.Status.State).To(Equal(keziov1alpha1.MachineStateError))
 			Expect(afterSecondError.Status.ErrorCount).To(Equal(int32(2)))
+			Expect(powerCalls).To(Equal(powerCallsAfterRegister))
 		})
 	})
 })

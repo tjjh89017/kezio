@@ -51,7 +51,11 @@ exit
 // artifacts, and a cmdline carrying boot=live plus fetch=<squashfs URL>
 // (the parameters live-boot's initrd reads to fetch the root file
 // system over HTTP instead of a local disk), kezio.server (so the agent
-// knows where to register), and kezio.token (the freshly minted,
+// knows where to register - internal/agentserver's own address,
+// Config.AgentServerURL, not this boot config server's own ServerURL:
+// see Config.AgentServerURL's doc comment for why conflating the two
+// sends every registration to a server that never mounts
+// internal/agentserver's routes), and kezio.token (the freshly minted,
 // single-use credential it registers with). token is the only
 // per-request value that ever appears in this output; everything else
 // comes from Config, which the operator controls, not the requesting
@@ -61,10 +65,11 @@ func renderNetBootConfig(cfg Config, token string) string {
 	kernelURL := fmt.Sprintf("%s/boot/artifacts/%s", base, cfg.KernelPath)
 	initrdURL := fmt.Sprintf("%s/boot/artifacts/%s", base, cfg.InitrdPath)
 	squashfsURL := fmt.Sprintf("%s/boot/artifacts/%s", base, cfg.SquashfsPath)
+	agentServerURL := strings.TrimRight(cfg.AgentServerURL, "/")
 
 	return fmt.Sprintf(`set timeout=5
 linux %s boot=live fetch=%s kezio.server=%s kezio.token=%s
 initrd %s
 boot
-`, kernelURL, squashfsURL, cfg.ServerURL, token, initrdURL)
+`, kernelURL, squashfsURL, agentServerURL, token, initrdURL)
 }
