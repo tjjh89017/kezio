@@ -1,0 +1,51 @@
+# Temporary diagnostic workflow to measure runner free space and reclaim value; safe to delete.
+name: Runner Facts
+
+on:
+  workflow_dispatch:
+
+jobs:
+  facts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Runner image
+        run: |
+          echo "ImageOS=$ImageOS"
+          echo "ImageVersion=$ImageVersion"
+          lsb_release -a
+          uname -r
+          nproc
+          free -h
+
+      - name: Disk before
+        run: |
+          df -h
+          df -h /
+
+      - name: Sizes of commonly-reclaimed dirs
+        run: |
+          sudo du -sh --apparent-size /usr/local/lib/android 2>/dev/null || true
+          sudo du -sh --apparent-size /usr/share/dotnet 2>/dev/null || true
+          sudo du -sh --apparent-size /opt/ghc 2>/dev/null || true
+          sudo du -sh --apparent-size /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          sudo du -sh --apparent-size /opt/hostedtoolcache 2>/dev/null || true
+          sudo du -sh --apparent-size /usr/local/.ghcup 2>/dev/null || true
+          sudo du -sh --apparent-size /usr/lib/jvm 2>/dev/null || true
+          sudo du -sh --apparent-size /usr/local/share/powershell 2>/dev/null || true
+          sudo du -sh --apparent-size /usr/share/swift 2>/dev/null || true
+          sudo du -sh --apparent-size /usr/local/share/chromium 2>/dev/null || true
+          sudo du -sh --apparent-size /usr/local/lib/node_modules 2>/dev/null || true
+
+      - name: Reclaim (same as e2e)
+        run: |
+          time sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+
+      - name: Disk after
+        run: |
+          df -h /
+          df -h
+
+      - name: KVM check
+        run: |
+          ls -la /dev/kvm || echo none
