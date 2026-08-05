@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/tjjh89017/kezio/internal/store"
@@ -346,6 +347,66 @@ func TestPublishContent_SkipsWhenContentAlreadyPublished(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Errorf("got %d content directories, want 1 (deduped)", len(entries))
+	}
+}
+
+// TestPublishContent_ConcurrentIdenticalContentDedups exercises the
+// post-rename recovery branch: two ingest runs publishing byte-identical
+// content race to rename into the same contents/<hash> directory. Whichever
+// loses the rename must observe that the destination now exists and treat it
+// as a successful dedup (not an error), leaving exactly one content directory
+// and no leftover scratch. The two goroutines process identical input through
+// the same deterministic prep before either stats the destination, and are
+// released together, so in practice one wins the rename and the other takes
+// the recovery path; the assertions pin the dedup contract regardless of which
+// internal guard fired, since that is the observable behavior.
+func TestPublishContent_ConcurrentIdenticalContentDedups(t *testing.T) {
+	storeRoot := t.TempDir()
+
+	first := filepath.Join(store.IngestScratchDir(storeRoot, "golden"), "content-1")
+	second := filepath.Join(store.IngestScratchDir(storeRoot, "golden"), "content-2")
+	writeFixtureContentDir(t, first, []byte("same-bytes"))
+	writeFixtureContentDir(t, second, []byte("same-bytes"))
+
+	type outcome struct {
+		hash store.InfoHash
+		err  error
+	}
+	results := make([]outcome, 2)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i, dir := range []string{first, second} {
+		wg.Add(1)
+		go func(i int, dir string) {
+			defer wg.Done()
+			<-start
+			h, _, err := publishContent(storeRoot, dir)
+			results[i] = outcome{hash: h, err: err}
+		}(i, dir)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, r := range results {
+		if r.err != nil {
+			t.Fatalf("publishContent[%d] returned an error, want success (concurrent identical content must dedup): %v", i, r.err)
+		}
+	}
+	if results[0].hash != results[1].hash {
+		t.Fatalf("expected both racing publishes to dedup to the same hash, got %s and %s", results[0].hash, results[1].hash)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(storeRoot, "contents"))
+	if err != nil {
+		t.Fatalf("read contents dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("got %d content directories after concurrent publish, want 1 (deduped)", len(entries))
+	}
+	for _, dir := range []string{first, second} {
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Errorf("expected scratch %s to be removed after concurrent publish, stat err = %v", dir, err)
+		}
 	}
 }
 
