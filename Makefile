@@ -287,6 +287,21 @@ docker-build: ## Build docker image with the manager.
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
 
+# IMG_IPMI is the image tag for the opt-in, ipmitool-enabled manager
+# build (Dockerfile.manager-ipmi). It is a separate tag from IMG because
+# most deployments should stay on the smaller, dependency-free default
+# manager image; only use this build if you have ipmi:// BMCs (see
+# internal/bmc/ipmi's package doc comment and the README).
+IMG_IPMI ?= $(IMAGE_TAG_BASE)-ipmi:latest
+
+.PHONY: docker-build-manager-ipmi
+docker-build-manager-ipmi: ## Build the opt-in ipmitool-enabled manager image (for ipmi:// BMCs).
+	$(CONTAINER_TOOL) build -t ${IMG_IPMI} -f Dockerfile.manager-ipmi .
+
+.PHONY: docker-push-manager-ipmi
+docker-push-manager-ipmi: ## Push the opt-in ipmitool-enabled manager image.
+	$(CONTAINER_TOOL) push ${IMG_IPMI}
+
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
 # - be able to use docker buildx. More info: https://docs.docker.com/build/buildx/

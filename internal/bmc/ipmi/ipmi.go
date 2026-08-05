@@ -43,12 +43,17 @@ limitations under the License.
 // This is a manager-side driver (it runs in the kezio controller, not in
 // the live/deploy image), so the tradeoff this choice accepts is
 // deliberate: the manager's container image must carry the ipmitool
-// binary. As of this driver landing, the manager's Dockerfile still
-// builds FROM a distroless base with no package manager and does not
-// include it - wiring ipmitool into that image is tracked as separate,
-// follow-up work; until it lands, this driver's methods will fail at
-// exec time (a clear "executable file not found" error) rather than at
-// build or Connect time.
+// binary. The default manager image (the repository's Dockerfile) stays
+// on a minimal distroless base with no package manager and does not
+// include it, because redfish:// is the recommended path for hardware
+// that supports it and most deployments should not pay for ipmitool's
+// dynamically-linked C dependencies (glibc, libcrypto) by default.
+// Operators who need ipmi:// must instead build or use the opt-in
+// ipmitool-enabled image (Dockerfile.manager-ipmi; see the repository's
+// README for the matching Makefile target). If ipmitool cannot be found
+// on PATH, this driver's methods fail with a clear, actionable error
+// (see execRunner.Run) rather than a raw exec error or at build/Connect
+// time.
 //
 // # Command mapping
 //

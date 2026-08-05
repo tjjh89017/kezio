@@ -19,10 +19,17 @@ package ipmi
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
 )
+
+// errIpmitoolNotFound is returned (wrapped, with guidance) when execRunner
+// cannot resolve "ipmitool" on PATH. It is a distinct sentinel so callers
+// or tests can identify this specific failure with errors.Is, separate
+// from ipmitool exiting non-zero or a BMC being unreachable.
+var errIpmitoolNotFound = errors.New("ipmitool not found in PATH")
 
 // runner executes one ipmitool invocation and returns its stdout. driver
 // calls ipmitool through this narrow interface instead of calling os/exec
@@ -53,7 +60,18 @@ type execRunner struct {
 func (r execRunner) Run(ctx context.Context, args ...string) (string, error) {
 	path := r.path
 	if path == "" {
-		path = "ipmitool"
+		resolved, err := exec.LookPath("ipmitool")
+		if err != nil {
+			// The default manager image (built FROM distroless/static, see
+			// the repository's Dockerfile) does not carry ipmitool - only
+			// the opt-in ipmitool-enabled image
+			// (Dockerfile.manager-ipmi) does. Surface that as an
+			// actionable error instead of the raw "executable file not
+			// found in $PATH" LookPath gives, so an operator who hits this
+			// knows what to do next rather than having to guess.
+			return "", fmt.Errorf("ipmi: %w: the default manager image is Redfish-only; use the ipmitool-enabled manager image (see Dockerfile.manager-ipmi) or switch this BMC to a redfish:// address: %w", errIpmitoolNotFound, err)
+		}
+		path = resolved
 	}
 
 	cmd := exec.CommandContext(ctx, path, args...)

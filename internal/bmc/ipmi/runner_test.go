@@ -18,6 +18,8 @@ package ipmi
 
 import (
 	"context"
+	"errors"
+	"os"
 	"strings"
 	"testing"
 )
@@ -39,6 +41,47 @@ func TestExecRunnerRedactsCredentialsOnError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "REDACTED") {
 		t.Errorf("Run() error = %q, want it to show the argv with credentials redacted", err.Error())
+	}
+}
+
+// TestExecRunnerReturnsFriendlyErrorWhenIpmitoolNotFound points PATH at an
+// empty directory (so exec.LookPath("ipmitool") fails the way it would on
+// the default, Redfish-only manager image, which never carries the
+// ipmitool binary) and checks execRunner.Run returns a friendly, actionable
+// error instead of a raw "executable file not found" message.
+func TestExecRunnerReturnsFriendlyErrorWhenIpmitoolNotFound(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+
+	r := execRunner{}
+	_, err := r.Run(context.Background(), "-I", "lanplus", "-H", "10.0.0.10", "chassis", "power", "on")
+	if err == nil {
+		t.Fatal("Run() with no ipmitool on PATH succeeded, want an error")
+	}
+	if !errors.Is(err, errIpmitoolNotFound) {
+		t.Errorf("Run() error = %q, want it to wrap errIpmitoolNotFound", err.Error())
+	}
+	if !strings.Contains(err.Error(), "redfish://") {
+		t.Errorf("Run() error = %q, want it to point operators at the redfish:// alternative", err.Error())
+	}
+	if !strings.Contains(err.Error(), "Dockerfile.manager-ipmi") {
+		t.Errorf("Run() error = %q, want it to name the ipmitool-enabled image variant", err.Error())
+	}
+}
+
+// TestExecRunnerFindsIpmitoolOnPath is the inverse of the not-found case:
+// with a fake "ipmitool" executable placed on PATH, execRunner must resolve
+// and run it rather than reporting errIpmitoolNotFound.
+func TestExecRunnerFindsIpmitoolOnPath(t *testing.T) {
+	dir := t.TempDir()
+	fake := dir + "/ipmitool"
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("writing fake ipmitool: %v", err)
+	}
+	t.Setenv("PATH", dir)
+
+	r := execRunner{}
+	if _, err := r.Run(context.Background(), "chassis", "power", "on"); err != nil {
+		t.Fatalf("Run() error = %v, want the fake ipmitool on PATH to be found and run", err)
 	}
 }
 
