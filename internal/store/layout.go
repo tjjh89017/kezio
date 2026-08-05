@@ -38,19 +38,28 @@ func ValidateContentDir(dir string, info *TorrentInfo) error {
 	if err != nil {
 		return fmt.Errorf("read content dir %s: %w", dir, err)
 	}
+	sawInfo, sawContent := false, false
 	for _, e := range entries {
 		switch e.Name() {
 		case TorrentInfoFileName:
 			if e.IsDir() {
 				return fmt.Errorf("content dir %s: %s is a directory, want a regular file", dir, TorrentInfoFileName)
 			}
+			sawInfo = true
 		case contentName:
 			if !e.IsDir() {
 				return fmt.Errorf("content dir %s: %s is a regular file, want a directory", dir, contentName)
 			}
+			sawContent = true
 		default:
 			return fmt.Errorf("content dir %s: unexpected entry %s", dir, e.Name())
 		}
+	}
+	if !sawInfo {
+		return fmt.Errorf("content dir %s: missing %s", dir, TorrentInfoFileName)
+	}
+	if !sawContent {
+		return fmt.Errorf("content dir %s: missing %s directory", dir, contentName)
 	}
 
 	dataDir := ContentDataDir(dir)

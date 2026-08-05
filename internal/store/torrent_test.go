@@ -199,6 +199,25 @@ func TestComputeInfoHash_DiffersForDifferentContent(t *testing.T) {
 	}
 }
 
+func TestComputeInfoHash_DiffersForDifferentPieceHashes(t *testing.T) {
+	info := fixtureTorrentInfo()
+	h1, err := ComputeInfoHash(info)
+	if err != nil {
+		t.Fatalf("ComputeInfoHash: %v", err)
+	}
+
+	changed := fixtureTorrentInfo()
+	changed.PieceHashes[0][0]++
+	h2, err := ComputeInfoHash(changed)
+	if err != nil {
+		t.Fatalf("ComputeInfoHash(changed): %v", err)
+	}
+
+	if h1 == h2 {
+		t.Fatal("ComputeInfoHash did not change when piece hashes changed")
+	}
+}
+
 func TestComputeInfoHash_MatchesSHA1OfInfoDict(t *testing.T) {
 	info := fixtureTorrentInfo()
 

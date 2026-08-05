@@ -158,6 +158,40 @@ func TestValidateContentDir_UnexpectedTopLevelEntry(t *testing.T) {
 	}
 }
 
+// TestValidateContentDir_MissingTorrentInfo pins that dir must actually
+// contain torrent.info: a content/ data subdirectory on its own, with no
+// torrent.info alongside it, must fail instead of being silently accepted.
+func TestValidateContentDir_MissingTorrentInfo(t *testing.T) {
+	info := fixtureTorrentInfo()
+	dir := writeFixtureContentDir(t, info)
+
+	if err := os.Remove(filepath.Join(dir, TorrentInfoFileName)); err != nil {
+		t.Fatalf("remove torrent.info: %v", err)
+	}
+
+	err := ValidateContentDir(dir, info)
+	if err == nil {
+		t.Fatal("ValidateContentDir: got nil error, want a missing-torrent.info error")
+	}
+}
+
+// TestValidateContentDir_MissingContentDir pins that dir must actually
+// contain the content/ data subdirectory: torrent.info on its own, with no
+// content/ alongside it, must fail instead of being silently accepted.
+func TestValidateContentDir_MissingContentDir(t *testing.T) {
+	info := fixtureTorrentInfo()
+	dir := writeFixtureContentDir(t, info)
+
+	if err := os.RemoveAll(ContentDataDir(dir)); err != nil {
+		t.Fatalf("remove content data dir: %v", err)
+	}
+
+	err := ValidateContentDir(dir, info)
+	if err == nil {
+		t.Fatal("ValidateContentDir: got nil error, want a missing-content-dir error")
+	}
+}
+
 // TestValidateContentDir_DataDirIsFile pins that content/ must be a
 // directory: a regular file at that path (e.g. from a corrupted publish)
 // must fail instead of ValidateContentDir trying to os.ReadDir a file.
