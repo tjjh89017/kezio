@@ -368,6 +368,73 @@ var _ = Describe("Image Controller", func() {
 		})
 	})
 
+	Context("deleting an image referenced only via a Machine's spec.dataImages", func() {
+		It("keeps the finalizer and deletion timestamp until the Machine no longer references it", func() {
+			const resourceName = "datarefd-image"
+			namespace := "default"
+			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+
+			image := &keziov1alpha1.Image{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec: keziov1alpha1.ImageSpec{
+					Source: keziov1alpha1.ImageSource{
+						URL:    "https://example.com/golden.qcow2",
+						Format: keziov1alpha1.ImageFormatQCOW2,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, image)).To(Succeed())
+
+			machine := &keziov1alpha1.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: "datarefd-machine", Namespace: namespace},
+				Spec: keziov1alpha1.MachineSpec{
+					BMC: &keziov1alpha1.MachineBMC{
+						Address:              "redfish://10.0.0.13/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha1.SecretReference{Name: "datarefd-machine-bmc"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:05",
+					DataImages: []keziov1alpha1.MachineDataImage{
+						{ImageRef: keziov1alpha1.NameRef{Name: resourceName}},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, machine)).To(Succeed()) })
+
+			r := &ImageReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+
+			By("attaching the finalizer")
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Delete(ctx, image)).To(Succeed())
+
+			By("reconciling the deletion while the Machine still references the Image via spec.dataImages")
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+
+			By("staying present with a deletion timestamp and its finalizer")
+			blocked := &keziov1alpha1.Image{}
+			Expect(k8sClient.Get(ctx, key, blocked)).To(Succeed())
+			Expect(blocked.DeletionTimestamp).NotTo(BeNil())
+			Expect(controllerutil.ContainsFinalizer(blocked, keziov1alpha1.FinalizerName)).To(BeTrue())
+
+			By("removing the Machine's dataImages reference")
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: machine.Name, Namespace: namespace}, machine)).To(Succeed())
+			machine.Spec.DataImages = nil
+			Expect(k8sClient.Update(ctx, machine)).To(Succeed())
+
+			By("reconciling the deletion again, which now removes the finalizer")
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+
+			gone := &keziov1alpha1.Image{}
+			err = k8sClient.Get(ctx, key, gone)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		})
+	})
+
 	Context("deleting an image a cross-namespace Machine references", func() {
 		It("keeps the finalizer until the referencing Machine in the other namespace releases it", func() {
 			const resourceName = "cross-ns-image"
