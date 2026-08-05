@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package ipmi
+package ipmitool
 
 import (
 	"context"
@@ -46,9 +46,9 @@ func TestExecRunnerRedactsCredentialsOnError(t *testing.T) {
 
 // TestExecRunnerReturnsFriendlyErrorWhenIpmitoolNotFound points PATH at an
 // empty directory (so exec.LookPath("ipmitool") fails the way it would on
-// the default, Redfish-only manager image, which never carries the
-// ipmitool binary) and checks execRunner.Run returns a friendly, actionable
-// error instead of a raw "executable file not found" message.
+// the default manager image, which never carries the ipmitool binary) and
+// checks execRunner.Run returns a friendly, actionable error instead of a
+// raw "executable file not found" message.
 func TestExecRunnerReturnsFriendlyErrorWhenIpmitoolNotFound(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 
@@ -59,6 +59,9 @@ func TestExecRunnerReturnsFriendlyErrorWhenIpmitoolNotFound(t *testing.T) {
 	}
 	if !errors.Is(err, errIpmitoolNotFound) {
 		t.Errorf("Run() error = %q, want it to wrap errIpmitoolNotFound", err.Error())
+	}
+	if !strings.Contains(err.Error(), "ipmi://") {
+		t.Errorf("Run() error = %q, want it to point operators at the ipmi:// (pure-Go) alternative", err.Error())
 	}
 	if !strings.Contains(err.Error(), "redfish://") {
 		t.Errorf("Run() error = %q, want it to point operators at the redfish:// alternative", err.Error())

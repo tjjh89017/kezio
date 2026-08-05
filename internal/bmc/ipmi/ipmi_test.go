@@ -18,147 +18,153 @@ package ipmi
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"strings"
 	"testing"
 
+	ipmilib "github.com/bougou/go-ipmi"
+
 	"github.com/tjjh89017/kezio/internal/bmc"
 )
 
-// fakeRunner is a runner that records every argv it was asked to execute
-// and returns canned output/error, so a test can assert on the exact
-// ipmitool invocation a driver method issued without a real ipmitool
-// binary or BMC.
-type fakeRunner struct {
-	calls  [][]string
-	output string
-	err    error
+// fakeSession is a session that records every call it was asked to make and
+// returns canned output/error, so a test can assert on the exact IPMI
+// command a driver method issued without a real BMC or network.
+type fakeSession struct {
+	chassisControlCalls []ipmilib.ChassisControl
+	chassisControlErr   error
+
+	getChassisStatusOn  bool
+	getChassisStatusErr error
+
+	setBootDeviceCalls []setBootDeviceCall
+	setBootDeviceErr   error
+
+	closed bool
 }
 
-func (f *fakeRunner) Run(_ context.Context, args ...string) (string, error) {
-	call := make([]string, len(args))
-	copy(call, args)
-	f.calls = append(f.calls, call)
-	return f.output, f.err
+type setBootDeviceCall struct {
+	selector ipmilib.BootDeviceSelector
+	bootType ipmilib.BIOSBootType
+	persist  bool
 }
 
-func newTestDriver(run *fakeRunner) *driver {
+func (f *fakeSession) ChassisControl(_ context.Context, control ipmilib.ChassisControl) (*ipmilib.ChassisControlResponse, error) {
+	f.chassisControlCalls = append(f.chassisControlCalls, control)
+	if f.chassisControlErr != nil {
+		return nil, f.chassisControlErr
+	}
+	return &ipmilib.ChassisControlResponse{}, nil
+}
+
+func (f *fakeSession) GetChassisStatus(_ context.Context) (*ipmilib.GetChassisStatusResponse, error) {
+	if f.getChassisStatusErr != nil {
+		return nil, f.getChassisStatusErr
+	}
+	return &ipmilib.GetChassisStatusResponse{PowerIsOn: f.getChassisStatusOn}, nil
+}
+
+func (f *fakeSession) SetBootDevice(_ context.Context, selector ipmilib.BootDeviceSelector, bootType ipmilib.BIOSBootType, persist bool) error {
+	f.setBootDeviceCalls = append(f.setBootDeviceCalls, setBootDeviceCall{selector: selector, bootType: bootType, persist: persist})
+	return f.setBootDeviceErr
+}
+
+func (f *fakeSession) Close(context.Context) error {
+	f.closed = true
+	return nil
+}
+
+// newTestDriver returns a driver whose dial always returns s, so a test can
+// drive driver's bmc.BMC methods against a fakeSession without a real
+// network dial.
+func newTestDriver(s *fakeSession) *driver {
 	return &driver{
-		run:   run,
 		host:  "10.0.0.10",
-		port:  "",
+		port:  defaultPort,
 		creds: bmc.Credentials{Username: "admin", Password: "hunter2"},
+		dial: func(context.Context, string, int, bmc.Credentials) (session, error) {
+			return s, nil
+		},
 	}
 }
 
-// lastCall returns the last argv fakeRunner recorded, failing the test if
-// none was recorded.
-func lastCall(t *testing.T, run *fakeRunner) []string {
-	t.Helper()
-	if len(run.calls) == 0 {
-		t.Fatal("runner was not invoked")
-	}
-	return run.calls[len(run.calls)-1]
-}
-
-// hasSubsequence reports whether want appears, in order and contiguously,
-// somewhere in got - used to check the command-specific tail of an argv
-// without over-specifying the connection flags that precede it.
-func hasSubsequence(got, want []string) bool {
-	if len(want) > len(got) {
-		return false
-	}
-	for i := 0; i+len(want) <= len(got); i++ {
-		match := true
-		for j, w := range want {
-			if got[i+j] != w {
-				match = false
-				break
-			}
-		}
-		if match {
-			return true
-		}
-	}
-	return false
-}
-
-func TestPowerOnIssuesChassisPowerOn(t *testing.T) {
-	run := &fakeRunner{}
-	d := newTestDriver(run)
+func TestPowerOnIssuesChassisControlPowerUp(t *testing.T) {
+	s := &fakeSession{}
+	d := newTestDriver(s)
 
 	if err := d.PowerOn(context.Background()); err != nil {
 		t.Fatalf("PowerOn() error = %v", err)
 	}
-
-	call := lastCall(t, run)
-	if !hasSubsequence(call, []string{"chassis", "power", "on"}) {
-		t.Errorf("argv = %v, want it to end with chassis power on", call)
+	if got := s.chassisControlCalls; len(got) != 1 || got[0] != ipmilib.ChassisControlPowerUp {
+		t.Errorf("ChassisControl calls = %v, want exactly [PowerUp]", got)
+	}
+	if !s.closed {
+		t.Error("PowerOn() did not close the session")
 	}
 }
 
-func TestPowerOffIssuesChassisPowerSoft(t *testing.T) {
-	run := &fakeRunner{}
-	d := newTestDriver(run)
+func TestPowerOffIssuesChassisControlSoftShutdown(t *testing.T) {
+	s := &fakeSession{}
+	d := newTestDriver(s)
 
 	if err := d.PowerOff(context.Background()); err != nil {
 		t.Fatalf("PowerOff() error = %v", err)
 	}
-
-	call := lastCall(t, run)
-	if !hasSubsequence(call, []string{"chassis", "power", "soft"}) {
-		t.Errorf("argv = %v, want it to end with chassis power soft (graceful ACPI shutdown), not power off (hard)", call)
+	if got := s.chassisControlCalls; len(got) != 1 || got[0] != ipmilib.ChassisControlSoftShutdown {
+		t.Errorf("ChassisControl calls = %v, want exactly [SoftShutdown] (a graceful ACPI shutdown, not a hard power-down)", got)
 	}
 }
 
-func TestPowerCycleIssuesChassisPowerCycle(t *testing.T) {
-	run := &fakeRunner{}
-	d := newTestDriver(run)
+func TestPowerCycleIssuesChassisControlPowerCycle(t *testing.T) {
+	s := &fakeSession{}
+	d := newTestDriver(s)
 
 	if err := d.PowerCycle(context.Background()); err != nil {
 		t.Fatalf("PowerCycle() error = %v", err)
 	}
-
-	call := lastCall(t, run)
-	if !hasSubsequence(call, []string{"chassis", "power", "cycle"}) {
-		t.Errorf("argv = %v, want it to end with chassis power cycle", call)
+	if got := s.chassisControlCalls; len(got) != 1 || got[0] != ipmilib.ChassisControlPowerCycle {
+		t.Errorf("ChassisControl calls = %v, want exactly [PowerCycle]", got)
 	}
 }
 
-func TestSetOneTimePXEBootIssuesBootdevPxeWithoutPersistentOption(t *testing.T) {
-	run := &fakeRunner{}
-	d := newTestDriver(run)
+func TestSetOneTimePXEBootEncodesEFIForceOnceOverride(t *testing.T) {
+	s := &fakeSession{}
+	d := newTestDriver(s)
 
 	if err := d.SetOneTimePXEBoot(context.Background()); err != nil {
 		t.Fatalf("SetOneTimePXEBoot() error = %v", err)
 	}
 
-	call := lastCall(t, run)
-	if !hasSubsequence(call, []string{"chassis", "bootdev", "pxe"}) {
-		t.Errorf("argv = %v, want it to end with chassis bootdev pxe", call)
+	if len(s.setBootDeviceCalls) != 1 {
+		t.Fatalf("SetBootDevice calls = %v, want exactly 1 call", s.setBootDeviceCalls)
 	}
-	for _, arg := range call {
-		if strings.Contains(arg, "persistent") {
-			t.Errorf("argv = %v, must not request a persistent boot override for a one-time PXE boot", call)
-		}
+	call := s.setBootDeviceCalls[0]
+	if call.selector != ipmilib.BootDeviceSelectorForcePXE {
+		t.Errorf("SetBootDevice selector = %v, want BootDeviceSelectorForcePXE", call.selector)
+	}
+	if call.bootType != ipmilib.BIOSBootTypeEFI {
+		t.Errorf("SetBootDevice bootType = %v, want BIOSBootTypeEFI (the pure-Go equivalent of ipmitool's options=efiboot)", call.bootType)
+	}
+	if call.persist {
+		t.Error("SetBootDevice persist = true, want false: a one-time PXE boot must not survive across boots")
 	}
 }
 
-func TestGetPowerStateParsesChassisPowerStatus(t *testing.T) {
+func TestGetPowerStateMapsChassisStatus(t *testing.T) {
 	tests := []struct {
-		name   string
-		output string
-		want   bmc.PowerState
+		name string
+		on   bool
+		want bmc.PowerState
 	}{
-		{name: "on", output: "Chassis Power is on\n", want: bmc.PowerStateOn},
-		{name: "off", output: "Chassis Power is off\n", want: bmc.PowerStateOff},
-		{name: "unrecognized output maps to unknown", output: "Chassis Power Control: Unknown\n", want: bmc.PowerStateUnknown},
+		{name: "power is on", on: true, want: bmc.PowerStateOn},
+		{name: "power is off", on: false, want: bmc.PowerStateOff},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			run := &fakeRunner{output: tt.output}
-			d := newTestDriver(run)
+			s := &fakeSession{getChassisStatusOn: tt.on}
+			d := newTestDriver(s)
 
 			got, err := d.GetPowerState(context.Background())
 			if err != nil {
@@ -167,58 +173,75 @@ func TestGetPowerStateParsesChassisPowerStatus(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("GetPowerState() = %v, want %v", got, tt.want)
 			}
-
-			call := lastCall(t, run)
-			if !hasSubsequence(call, []string{"chassis", "power", "status"}) {
-				t.Errorf("argv = %v, want it to end with chassis power status", call)
-			}
 		})
 	}
 }
 
-func TestBaseArgsUsesLanplusAndAdministratorPrivilege(t *testing.T) {
-	d := newTestDriver(&fakeRunner{})
+func TestGetPowerStateReturnsUnknownOnReadError(t *testing.T) {
+	s := &fakeSession{getChassisStatusErr: errors.New("simulated BMC failure")}
+	d := newTestDriver(s)
 
-	args := d.baseArgs()
-	if !hasSubsequence(args, []string{"-I", "lanplus"}) {
-		t.Errorf("baseArgs() = %v, want -I lanplus", args)
+	got, err := d.GetPowerState(context.Background())
+	if err == nil {
+		t.Fatal("GetPowerState() succeeded, want an error")
 	}
-	if !hasSubsequence(args, []string{"-L", "ADMINISTRATOR"}) {
-		t.Errorf("baseArgs() = %v, want -L ADMINISTRATOR", args)
-	}
-	if !hasSubsequence(args, []string{"-H", d.host}) {
-		t.Errorf("baseArgs() = %v, want -H %s", args, d.host)
-	}
-	for _, arg := range args {
-		if arg == "-C" {
-			t.Errorf("baseArgs() = %v, must not override the cipher suite", args)
-		}
+	if got != bmc.PowerStateUnknown {
+		t.Errorf("GetPowerState() = %v, want PowerStateUnknown on a failed read", got)
 	}
 }
 
-func TestBaseArgsOmitsPortFlagWhenAddressHasNoPort(t *testing.T) {
-	d := newTestDriver(&fakeRunner{})
-	args := d.baseArgs()
-	for _, arg := range args {
-		if arg == "-p" {
-			t.Errorf("baseArgs() = %v, want no -p flag when no port was given", args)
-		}
+func TestPowerStateMapping(t *testing.T) {
+	if got := powerState(true); got != bmc.PowerStateOn {
+		t.Errorf("powerState(true) = %v, want PowerStateOn", got)
+	}
+	if got := powerState(false); got != bmc.PowerStateOff {
+		t.Errorf("powerState(false) = %v, want PowerStateOff", got)
 	}
 }
 
-func TestBaseArgsIncludesPortFlagWhenAddressHasPort(t *testing.T) {
-	d := newTestDriver(&fakeRunner{})
-	d.port = "6230"
+func TestWithSessionClosesSessionEvenWhenFnFails(t *testing.T) {
+	s := &fakeSession{}
+	d := newTestDriver(s)
 
-	if !hasSubsequence(d.baseArgs(), []string{"-p", "6230"}) {
-		t.Errorf("baseArgs() = %v, want -p 6230", d.baseArgs())
+	err := d.withSession(context.Background(), func(session) error {
+		return errors.New("simulated failure")
+	})
+	if err == nil {
+		t.Fatal("withSession() succeeded, want the wrapped error")
+	}
+	if !s.closed {
+		t.Error("withSession() did not close the session after fn returned an error")
+	}
+}
+
+func TestWithSessionPropagatesDialError(t *testing.T) {
+	d := &driver{
+		host: "10.0.0.10", port: defaultPort,
+		creds: bmc.Credentials{Username: "admin", Password: "hunter2"},
+		dial: func(context.Context, string, int, bmc.Credentials) (session, error) {
+			return nil, errors.New("simulated dial failure")
+		},
+	}
+
+	if err := d.PowerOn(context.Background()); err == nil {
+		t.Fatal("PowerOn() succeeded, want the dial error to propagate")
 	}
 }
 
 func TestErrorsDoNotContainCredentials(t *testing.T) {
 	const password = "correct-horse-battery-staple"
-	run := &fakeRunner{err: errFromRunner()}
-	d := &driver{run: run, host: "10.0.0.10", creds: bmc.Credentials{Username: "admin", Password: password}}
+	s := &fakeSession{
+		chassisControlErr:   errors.New("simulated failure"),
+		getChassisStatusErr: errors.New("simulated failure"),
+		setBootDeviceErr:    errors.New("simulated failure"),
+	}
+	d := &driver{
+		host: "10.0.0.10", port: defaultPort,
+		creds: bmc.Credentials{Username: "admin", Password: password},
+		dial: func(context.Context, string, int, bmc.Credentials) (session, error) {
+			return s, nil
+		},
+	}
 
 	methods := map[string]func() error{
 		"PowerOn":           func() error { return d.PowerOn(context.Background()) },
@@ -244,23 +267,15 @@ func TestErrorsDoNotContainCredentials(t *testing.T) {
 	}
 }
 
-func errFromRunner() error {
-	return &runnerError{"simulated ipmitool failure"}
-}
-
-type runnerError struct{ msg string }
-
-func (e *runnerError) Error() string { return e.msg }
-
-func TestHostPortParsesHostAndOptionalPort(t *testing.T) {
+func TestHostPortParsesHostAndDefaultsPort(t *testing.T) {
 	tests := []struct {
 		name     string
 		address  string
 		wantHost string
-		wantPort string
+		wantPort int
 	}{
-		{name: "host only", address: "ipmi://10.0.0.10", wantHost: "10.0.0.10", wantPort: ""},
-		{name: "host and port", address: "ipmi://10.0.0.10:6230", wantHost: "10.0.0.10", wantPort: "6230"},
+		{name: "host only defaults to 623", address: "ipmi://10.0.0.10", wantHost: "10.0.0.10", wantPort: defaultPort},
+		{name: "host and port", address: "ipmi://10.0.0.10:6230", wantHost: "10.0.0.10", wantPort: 6230},
 	}
 
 	for _, tt := range tests {
@@ -274,7 +289,7 @@ func TestHostPortParsesHostAndOptionalPort(t *testing.T) {
 				t.Fatalf("hostPort() error = %v", err)
 			}
 			if host != tt.wantHost || port != tt.wantPort {
-				t.Errorf("hostPort() = (%q, %q), want (%q, %q)", host, port, tt.wantHost, tt.wantPort)
+				t.Errorf("hostPort() = (%q, %d), want (%q, %d)", host, port, tt.wantHost, tt.wantPort)
 			}
 		})
 	}
@@ -300,10 +315,29 @@ func TestHostPortRejectsAddressWithPath(t *testing.T) {
 	}
 }
 
+// TestHostPortAcceptsPortAtUint16Range checks the parsed port survives the
+// full valid TCP/UDP port range without truncation or overflow: url.URL
+// already rejects a non-numeric port for us (Port() returns "" for one), so
+// the only value this driver itself must parse correctly is a numeric
+// string up to 65535.
+func TestHostPortAcceptsPortAtUint16Range(t *testing.T) {
+	u, err := url.Parse("ipmi://10.0.0.10:65535")
+	if err != nil {
+		t.Fatalf("parsing test address: %v", err)
+	}
+	_, port, err := hostPort(u)
+	if err != nil {
+		t.Fatalf("hostPort() error = %v", err)
+	}
+	if port != 65535 {
+		t.Errorf("hostPort() port = %d, want 65535", port)
+	}
+}
+
 // TestConnectRegistersIPMIScheme confirms importing this package makes
 // bmc.Connect resolve "ipmi://" to this driver: Connect does not itself
 // talk to the BMC (see connect's doc comment), so this only needs to
-// succeed without touching a real ipmitool binary or BMC.
+// succeed without touching a real network or BMC.
 func TestConnectRegistersIPMIScheme(t *testing.T) {
 	b, err := bmc.Connect(context.Background(), "ipmi://10.0.0.10:6230", bmc.Credentials{Username: "admin", Password: "hunter2"}, bmc.Options{})
 	if err != nil {

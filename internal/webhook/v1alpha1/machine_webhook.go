@@ -41,6 +41,7 @@ import (
 	// the registry populated on its own, in every binary that links this
 	// webhook (including its own test binary).
 	_ "github.com/tjjh89017/kezio/internal/bmc/ipmi"
+	_ "github.com/tjjh89017/kezio/internal/bmc/ipmitool"
 	_ "github.com/tjjh89017/kezio/internal/bmc/redfish"
 )
 

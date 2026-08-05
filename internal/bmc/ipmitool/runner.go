@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package ipmi
+package ipmitool
 
 import (
 	"bytes"
@@ -62,14 +62,16 @@ func (r execRunner) Run(ctx context.Context, args ...string) (string, error) {
 	if path == "" {
 		resolved, err := exec.LookPath("ipmitool")
 		if err != nil {
-			// The default manager image (built FROM distroless/static, see
-			// the repository's Dockerfile) does not carry ipmitool - only
-			// the opt-in ipmitool-enabled image
-			// (docker/manager-ipmi/Dockerfile) does. Surface that as an
-			// actionable error instead of the raw "executable file not
-			// found in $PATH" LookPath gives, so an operator who hits this
-			// knows what to do next rather than having to guess.
-			return "", fmt.Errorf("ipmi: %w: the default manager image is Redfish-only; use the ipmitool-enabled manager image (see docker/manager-ipmi/Dockerfile) or switch this BMC to a redfish:// address: %w", errIpmitoolNotFound, err)
+			// The default manager image does not carry ipmitool - only the
+			// opt-in ipmitool-enabled image (docker/manager-ipmi/Dockerfile)
+			// does. Surface that as an actionable error instead of the raw
+			// "executable file not found in $PATH" LookPath gives, so an
+			// operator who hits this knows what to do next rather than
+			// having to guess: switch this Machine to ipmi:// (the pure-Go
+			// driver, works in the default image), or to redfish://, or
+			// deploy the ipmitool-enabled manager image if ipmitool://
+			// itself is genuinely needed.
+			return "", fmt.Errorf("ipmitool: %w: the default manager image does not carry ipmitool; use ipmi:// (pure-Go) or redfish://, or deploy the ipmitool-enabled manager image (see docker/manager-ipmi/Dockerfile): %w", errIpmitoolNotFound, err)
 		}
 		path = resolved
 	}

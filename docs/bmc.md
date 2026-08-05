@@ -7,8 +7,13 @@ address you configure:
 - `redfish://` (`internal/bmc/redfish`): talks Redfish over HTTPS using
   the pure-Go `gofish` library. It needs no external binary and works
   in the default manager image.
-- `ipmi://` (`internal/bmc/ipmi`): shells out to the `ipmitool` binary
-  for every call. It needs `ipmitool` on the manager container's PATH.
+- `ipmi://` (`internal/bmc/ipmi`): talks IPMI directly using the
+  pure-Go `bougou/go-ipmi` library. It needs no external binary and
+  works in the default manager image.
+- `ipmitool://` (`internal/bmc/ipmitool`): shells out to the
+  `ipmitool` binary for every call. It needs `ipmitool` on the manager
+  container's PATH, so it only works with the opt-in ipmitool-enabled
+  manager image (see below).
 
 ## Redfish is the recommended path
 
@@ -16,26 +21,25 @@ Use `redfish://` when the BMC supports it. It has no extra binary
 dependency, so it works with the default manager image, and it is the
 protocol modern BMC hardware prefers over IPMI.
 
-## The default manager image is Redfish-only
+## ipmi:// is the recommended path for IPMI-only BMCs
 
-The manager's container image (built from the repository's
-`Dockerfile`) is `FROM gcr.io/distroless/static:nonroot`: a minimal
-base with no package manager and no libc. `ipmitool` is a
-dynamically-linked C binary (it needs glibc and libcrypto), so it
-cannot be installed into, or run from, that image. Forcing every kezio
-deployment onto a heavier, glibc-capable base just so the minority
-that use IPMI get `ipmitool` was judged the wrong default; the default
-image stays minimal.
+Use `ipmi://` for a BMC that only supports IPMI. Like `redfish://`, it
+has no extra binary dependency and works with the default manager
+image: `internal/bmc/ipmi` opens an IPMI 2.0/RMCP+ session directly
+over the network using `bougou/go-ipmi`, without shelling out to any
+external tool.
 
-If an `ipmi://` BMC is configured against the default manager image,
-`internal/bmc/ipmi`'s driver returns a clear error the first time it
-tries to run `ipmitool` and cannot find it on PATH, naming both
-alternatives below.
+## Using ipmitool:// as a fallback
 
-## Using ipmi:// BMCs
+`ipmitool://` exists as an operator-selectable escape hatch, not the
+default IPMI path: IPMI's long history of inconsistent vendor firmware
+means a specific BMC can occasionally misbehave against the pure-Go
+`ipmi://` driver while working fine against `ipmitool`'s
+battle-tested reference implementation. Reach for `ipmitool://` only
+when a specific BMC demonstrably needs it.
 
-If you have BMCs that only support IPMI, build and deploy the opt-in,
-ipmitool-enabled manager image instead of the default one:
+`ipmitool://` requires the opt-in, ipmitool-enabled manager image
+instead of the default one:
 
 ```sh
 make docker-build-manager-ipmi   # builds docker/manager-ipmi/Dockerfile, tag: $(IMG_IPMI)
@@ -46,5 +50,12 @@ make docker-push-manager-ipmi
 default `Dockerfile`, but finishes on `debian:stable-slim` with
 `ipmitool` installed via `apt-get`, instead of on distroless. Deploy
 the resulting image the same way as the default manager image (e.g.
-`make deploy IMG=<your-ipmitool-enabled-tag>`), and `ipmi://` BMCs work
-as normal from there.
+`make deploy IMG=<your-ipmitool-enabled-tag>`), and `ipmitool://` BMCs
+work as normal from there.
+
+If an `ipmitool://` BMC is configured against the default manager
+image, `internal/bmc/ipmitool`'s driver returns a clear error the
+first time it tries to run `ipmitool` and cannot find it on PATH,
+naming both `ipmi://` and `redfish://` as alternatives that already
+work in that image, alongside the ipmitool-enabled image if
+`ipmitool://` itself is genuinely required.

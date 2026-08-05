@@ -52,6 +52,7 @@ import (
 	// internal/bmc/registry.go's Register), which deployerFactoryFromEnv's
 	// AgentFactory path resolves Machine.spec.bmc.address against.
 	_ "github.com/tjjh89017/kezio/internal/bmc/ipmi"
+	_ "github.com/tjjh89017/kezio/internal/bmc/ipmitool"
 	_ "github.com/tjjh89017/kezio/internal/bmc/redfish"
 	"github.com/tjjh89017/kezio/internal/controller"
 	"github.com/tjjh89017/kezio/internal/deployer"

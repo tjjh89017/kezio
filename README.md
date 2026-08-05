@@ -23,9 +23,10 @@ See `make help` for the full list of targets.
 
 ## Documentation
 
-- [`docs/bmc.md`](docs/bmc.md): the `redfish://` and `ipmi://` BMC
-  drivers, why the default manager image is Redfish-only, and how to
-  build the opt-in ipmitool-enabled manager image for `ipmi://` BMCs.
+- [`docs/bmc.md`](docs/bmc.md): the `redfish://`, `ipmi://`, and
+  `ipmitool://` BMC drivers, why `redfish://` and `ipmi://` both work
+  in the default manager image, and how to build the opt-in
+  ipmitool-enabled manager image for `ipmitool://` BMCs.
 - [`docs/secure-boot.md`](docs/secure-boot.md): the UEFI Secure Boot
   signature chain the network boot path relies on, the kernel-signing
   story, and what CI does and does not verify.
