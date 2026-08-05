@@ -1163,7 +1163,17 @@ jobs:
           # step just requested is only bootd's *request*, not proof the
           # attachment happened), rather than only trusting the
           # deployment's own template annotation.
-          bootd_pod="$(kubectl -n kezio-system get pods -l app.kubernetes.io/component=bootd -o jsonpath='{.items[0].metadata.name}')"
+          # Exclude terminating pods: `rollout status` returning does not
+          # mean the OLD ReplicaSet's pod is already gone, and a
+          # terminating pod still reports phase=Running - so a bare
+          # .items[0] can race onto the pre-patch pod that legitimately
+          # lacks the attachment, failing this check spuriously.
+          bootd_pod="$(kubectl -n kezio-system get pods -l app.kubernetes.io/component=bootd -o json \
+            | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)][0].metadata.name')"
+          if [ -z "${bootd_pod}" ] || [ "${bootd_pod}" = "null" ]; then
+            echo "::error::no non-terminating bootd pod found" >&2
+            exit 1
+          fi
           network_status="$(kubectl -n kezio-system get pod "${bootd_pod}" \
             -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}')"
           if ! grep -q 'kezio-boot-network' <<<"${network_status}"; then
@@ -1820,7 +1830,15 @@ jobs:
         # `virtctl guestexec` subcommand to reach for instead).
         run: |
           set -euo pipefail
-          launcher_pod="$(kubectl get pods -n kezio-system -l "kubevirt.io/vm=${TARGET_VM_NAME}" -o jsonpath='{.items[0].metadata.name}')"
+          # Exclude terminating pods so a lingering old virt-launcher pod
+          # (still phase=Running while it shuts down) cannot shadow the
+          # live one.
+          launcher_pod="$(kubectl get pods -n kezio-system -l "kubevirt.io/vm=${TARGET_VM_NAME}" -o json \
+            | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)][0].metadata.name')"
+          if [ -z "${launcher_pod}" ] || [ "${launcher_pod}" = "null" ]; then
+            echo "::error::no non-terminating virt-launcher pod found for VM ${TARGET_VM_NAME}" >&2
+            exit 1
+          fi
           domain="kezio-system_${TARGET_VM_NAME}"
 
           qga_exec() {
