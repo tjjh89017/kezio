@@ -960,14 +960,28 @@ jobs:
 
       - name: "Assert the VM is off before any Machine is created (the harness did not start it)"
         if: ${{ inputs.bmc_mode }}
+        # Bounded wait, not a one-shot check: right after `kubectl apply`,
+        # KubeVirt's controller may not have populated status.printableStatus
+        # yet, so an empty status here is a populate-lag race, not a real
+        # power state problem. A Running status, though, is never lag - it
+        # means the VM actually came up, which must fail immediately.
         run: |
           set -euo pipefail
-          status="$(kubectl get vm "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.status.printableStatus}')"
-          echo "VM printableStatus: ${status}"
-          if [ "${status}" != "Stopped" ]; then
-            echo "::error::VM ${TARGET_VM_NAME} printableStatus = ${status}, want Stopped - it must be off until kezio's controller powers it on through the BMC." >&2
-            exit 1
-          fi
+          deadline=$(( $(date +%s) + 120 ))
+          while true; do
+            status="$(kubectl get vm "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.status.printableStatus}' || true)"
+            echo "$(date -Is) VM printableStatus: ${status:-<none>}"
+            [ "${status}" = "Stopped" ] && break
+            if [ "${status}" = "Running" ]; then
+              echo "::error::VM ${TARGET_VM_NAME} printableStatus = Running, want Stopped - it must be off until kezio's controller powers it on through the BMC." >&2
+              exit 1
+            fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::VM ${TARGET_VM_NAME} printableStatus = ${status:-<none>}, want Stopped - it must be off until kezio's controller powers it on through the BMC." >&2
+              exit 1
+            fi
+            sleep 5
+          done
           if kubectl get vmi "${TARGET_VM_NAME}" -n kezio-system >/dev/null 2>&1; then
             echo "::error::A VirtualMachineInstance already exists for ${TARGET_VM_NAME}; the VM must not be running yet." >&2
             exit 1
