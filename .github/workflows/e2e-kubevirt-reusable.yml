@@ -1035,10 +1035,47 @@ jobs:
           BMC_PASSWORD="$(kubectl get secret "${BMC_CREDS_SECRET}" -n kezio-system -o jsonpath='{.data.password}' | base64 -d)"
           echo "::add-mask::${BMC_PASSWORD}"
 
+          # --overrides carries the whole container spec (image,
+          # command, stdin) because a restricted-PSA securityContext
+          # must be merged in via the generated pod's JSON - kubectl
+          # run has no flag for it. Same numeric runAsUser/runAsGroup
+          # as curlimages/curl's other initContainer uses in this repo
+          # (e.g. config/bootd/deployment.yaml): the image's own USER
+          # is the non-numeric "curl_user", which restricted PSA can't
+          # resolve to verify runAsNonRoot.
+          redfish_overrides="$(jq -n \
+            --arg name "kezio-e2e-redfish-check" \
+            --arg image "curlimages/curl:8.21.0" \
+            --arg auth "${BMC_USERNAME}:${BMC_PASSWORD}" \
+            --arg url "http://${TARGET_VM_NAME}-virtbmc.kezio-system.svc.cluster.local/redfish/v1/Systems/1" \
+            '{
+              apiVersion: "v1",
+              kind: "Pod",
+              spec: {
+                securityContext: {
+                  runAsNonRoot: true,
+                  seccompProfile: {type: "RuntimeDefault"}
+                },
+                containers: [{
+                  name: $name,
+                  image: $image,
+                  stdin: true,
+                  command: ["curl", "-sf", "-u", $auth, $url],
+                  securityContext: {
+                    allowPrivilegeEscalation: false,
+                    runAsNonRoot: true,
+                    runAsUser: 100,
+                    runAsGroup: 101,
+                    capabilities: {drop: ["ALL"]},
+                    seccompProfile: {type: "RuntimeDefault"}
+                  }
+                }]
+              }
+            }')"
+
           redfish_body="$(kubectl run kezio-e2e-redfish-check -n kezio-system \
-            --rm -i --restart=Never --image=curlimages/curl:8.11.0 --quiet -- \
-            curl -sf -u "${BMC_USERNAME}:${BMC_PASSWORD}" \
-            "http://${TARGET_VM_NAME}-virtbmc.kezio-system.svc.cluster.local/redfish/v1/Systems/1")"
+            --rm -i --restart=Never --image=curlimages/curl:8.21.0 --quiet \
+            --overrides="${redfish_overrides}")"
           echo "Redfish ComputerSystem response: ${redfish_body}"
 
           power_state="$(jq -r '.PowerState' <<<"${redfish_body}")"
