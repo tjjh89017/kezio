@@ -54,20 +54,19 @@ func (execPartclone) Clone(ctx context.Context, fsType, source, targetDir string
 	binary := partcloneBinary(fsType)
 
 	// partclone defaults its logfile to /var/log/partclone.log and
-	// always opens it (`open_log` in partclone.c), exiting immediately
-	// if the open fails; the ingest container runs as nonroot uid
-	// 65532, which cannot write to /var/log. -L/--logfile redirects it
-	// next to targetDir, inside the already-writable work dir, named
-	// after the partition's content directory so concurrent partitions
-	// (if this ever parallelizes) cannot collide on one logfile.
+	// always opens it, exiting immediately if the open fails; the
+	// ingest container runs as nonroot uid 65532, which cannot write
+	// to /var/log. -L/--logfile redirects it next to targetDir, inside
+	// the already-writable work dir, named after the partition's
+	// content directory so concurrent partitions (if this ever
+	// parallelizes) cannot collide on one logfile.
 	logPath := filepath.Join(filepath.Dir(targetDir), "partclone."+filepath.Base(targetDir)+".log")
 
 	// partclone.dd has no -c/--clone flag: its getopt short-option
-	// string (see `sopt` in partclone.c, compiled with -DDD) omits 'c'
-	// entirely - passing it makes partclone.dd dump its usage and
-	// exit(1) instead of cloning. partclone.<fs> needs -c to pick
-	// clone mode among clone/restore/dev-to-dev/domain, so it stays for
-	// every binary except the dd fallback.
+	// string omits 'c' entirely - passing it makes partclone.dd dump
+	// its usage and exit(1) instead of cloning. partclone.<fs> needs
+	// -c to pick clone mode among clone/restore/dev-to-dev/domain, so
+	// it stays for every binary except the dd fallback.
 	args := []string{"-F", "-s", source, "-o", targetDir, "-T", "-L", logPath}
 	if binary != ddFallbackBinary {
 		args = append([]string{"-c"}, args...)

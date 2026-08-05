@@ -37,11 +37,10 @@ import (
 //     must redirect the logfile into the writable work dir alongside
 //     targetDir.
 //  2. partclone.dd has no -c/--clone flag: its getopt short-option
-//     string (see `sopt` in partclone.c, compiled with -DDD) omits 'c'
-//     entirely, unlike partclone.<fs>, which needs -c to select clone
-//     mode among clone/restore/dev-to-dev/domain. Passing -c to
-//     partclone.dd makes it dump its usage and exit(1) instead of
-//     cloning - this broke the BIOS-boot-partition (no filesystem)
+//     string omits 'c' entirely, unlike partclone.<fs>, which needs
+//     -c to select clone mode among clone/restore/dev-to-dev/domain.
+//     Passing -c to partclone.dd makes it dump its usage and exit(1)
+//     instead of cloning - this broke the BIOS-boot-partition (no filesystem)
 //     path of the image-path e2e, which routes to the dd fallback.
 //
 // This test also pins -T (btfiles - the extent-slice output mode
