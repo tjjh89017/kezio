@@ -18,7 +18,8 @@ package bootd
 
 import (
 	"context"
-	"net"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,40 +38,68 @@ func machine(name, mac string) *keziov1alpha1.Machine {
 	}
 }
 
-func newTestMACCache() *MACCache {
-	c := &MACCache{counts: make(map[string]int)}
-	c.synced.Store(true)
-	return c
+// macSinkRecorder records every push it receives, so tests can assert
+// both the final allowlist and that a push happened at all.
+type macSinkRecorder struct {
+	mu     sync.Mutex
+	pushes [][]string
 }
 
-func TestMACCache_DeniesUntilSynced(t *testing.T) {
-	c := &MACCache{counts: make(map[string]int)}
-	c.add("aa:bb:cc:dd:ee:01")
-	if c.Allow(knownMAC) {
-		t.Error("Allow returned true before the cache reported synced")
+func (s *macSinkRecorder) SetAllowedMACs(macs []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pushes = append(s.pushes, slices.Clone(macs))
+}
+
+func (s *macSinkRecorder) last() ([]string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.pushes) == 0 {
+		return nil, false
 	}
+	return s.pushes[len(s.pushes)-1], true
+}
+
+func newTestMACCache() (*MACCache, *macSinkRecorder) {
+	sink := &macSinkRecorder{}
+	c := &MACCache{counts: make(map[string]int), sink: sink}
 	c.synced.Store(true)
-	if !c.Allow(knownMAC) {
-		t.Error("Allow returned false for an enrolled MAC once synced")
+	return c, sink
+}
+
+func wantLast(t *testing.T, sink *macSinkRecorder, want []string) {
+	t.Helper()
+	got, ok := sink.last()
+	if !ok {
+		t.Fatalf("no push received, want %v", want)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("last push = %v, want %v", got, want)
+	}
+}
+
+func TestMACCache_NoPushUntilSynced(t *testing.T) {
+	sink := &macSinkRecorder{}
+	c := &MACCache{counts: make(map[string]int), sink: sink}
+
+	c.onAdd(machine("m1", "aa:bb:cc:dd:ee:01"))
+	if _, ok := sink.last(); ok {
+		t.Error("sink received a push before the cache reported synced")
+	}
+	if got := c.Snapshot(); got != nil {
+		t.Errorf("Snapshot() = %v before sync, want nil", got)
 	}
 }
 
 func TestMACCache_AddAndDelete(t *testing.T) {
-	c := newTestMACCache()
+	c, sink := newTestMACCache()
 	m := machine("m1", "AA:BB:CC:DD:EE:01")
 
 	c.onAdd(m)
-	if !c.Allow(knownMAC) {
-		t.Fatal("Allow false after onAdd for an enrolled MAC")
-	}
-	if c.Allow(unknownMAC) {
-		t.Fatal("Allow true for a MAC that was never added")
-	}
+	wantLast(t, sink, []string{"aa:bb:cc:dd:ee:01"})
 
 	c.onDelete(m)
-	if c.Allow(knownMAC) {
-		t.Fatal("Allow true after onDelete for the only Machine claiming this MAC")
-	}
+	wantLast(t, sink, []string{})
 }
 
 func TestMACCache_SharedMACSurvivesOneDelete(t *testing.T) {
@@ -78,106 +107,87 @@ func TestMACCache_SharedMACSurvivesOneDelete(t *testing.T) {
 	// lookupMachine also refuses to arbitrate between - but the cache
 	// must not let deleting one revoke access for the other still-live
 	// Machine (see add/remove's doc comment on refcounting).
-	c := newTestMACCache()
+	c, sink := newTestMACCache()
 	m1 := machine("m1", "aa:bb:cc:dd:ee:01")
 	m2 := machine("m2", "aa:bb:cc:dd:ee:01")
 
 	c.onAdd(m1)
 	c.onAdd(m2)
 	c.onDelete(m1)
-	if !c.Allow(knownMAC) {
-		t.Fatal("Allow false after deleting only one of two Machines sharing a MAC")
-	}
+	wantLast(t, sink, []string{"aa:bb:cc:dd:ee:01"})
 	c.onDelete(m2)
-	if c.Allow(knownMAC) {
-		t.Fatal("Allow true after deleting every Machine claiming this MAC")
-	}
+	wantLast(t, sink, []string{})
 }
 
 func TestMACCache_UpdateMovesMAC(t *testing.T) {
-	c := newTestMACCache()
+	c, sink := newTestMACCache()
 	old := machine("m1", "aa:bb:cc:dd:ee:01")
 	updated := machine("m1", "aa:bb:cc:dd:ee:02")
 
 	c.onAdd(old)
 	c.onUpdate(old, updated)
-
-	if c.Allow(knownMAC) {
-		t.Error("Allow true for the old MAC after the Machine's bootMACAddress changed")
-	}
-	if !c.Allow(net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x02}) {
-		t.Error("Allow false for the new MAC after the Machine's bootMACAddress changed")
-	}
+	wantLast(t, sink, []string{"aa:bb:cc:dd:ee:02"})
 }
 
 // TestMACCache_CaseInsensitiveMAC is a table-driven check of the case
 // variant this cache must not be fooled by: Machine.spec.bootMACAddress
 // is validated case-insensitively (see keziov1alpha1.MACAddressPattern)
-// so an operator or seeder can write it in either case, while the
-// value looked up on the wire always comes from net.HardwareAddr.String
-// (see Allow), which is always lower-case. add/remove and Allow all
-// normalize through bootserver.NormalizeMAC, so every case combination
-// below must resolve to the same enrolled MAC.
+// so an operator or seeder can write it in either case, while dnsmasq's
+// dhcp-hostsfile matching wants one canonical spelling. add/remove
+// normalize through bootserver.NormalizeMAC, so every case variant
+// below must land in the pushed allowlist as the same lower-case MAC.
 func TestMACCache_CaseInsensitiveMAC(t *testing.T) {
-	lookup := net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01}
-
 	tests := []struct {
-		name          string
-		specMAC       string
-		wantAllowedOn net.HardwareAddr
+		name    string
+		specMAC string
 	}{
-		{"lowercase spec, lowercase lookup", "aa:bb:cc:dd:ee:01", lookup},
-		{"uppercase spec, lowercase lookup", "AA:BB:CC:DD:EE:01", lookup},
-		{"mixed-case spec, lowercase lookup", "Aa:bB:Cc:dD:eE:01", lookup},
+		{"lowercase spec", "aa:bb:cc:dd:ee:01"},
+		{"uppercase spec", "AA:BB:CC:DD:EE:01"},
+		{"mixed-case spec", "Aa:bB:Cc:dD:eE:01"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			c := newTestMACCache()
+			c, sink := newTestMACCache()
 			c.onAdd(machine("m1", tc.specMAC))
-			if !c.Allow(tc.wantAllowedOn) {
-				t.Errorf("Allow(%v) = false after enrolling bootMACAddress %q, want true", tc.wantAllowedOn, tc.specMAC)
-			}
+			wantLast(t, sink, []string{"aa:bb:cc:dd:ee:01"})
 		})
 	}
 }
 
 func TestMACCache_DeleteTombstoneUnwrapped(t *testing.T) {
-	c := newTestMACCache()
+	c, sink := newTestMACCache()
 	m := machine("m1", "aa:bb:cc:dd:ee:01")
 	c.onAdd(m)
 
 	c.onDelete(toolscache.DeletedFinalStateUnknown{Key: "default/m1", Obj: m})
-	if c.Allow(knownMAC) {
-		t.Error("Allow true after a DeletedFinalStateUnknown delete event")
-	}
+	wantLast(t, sink, []string{})
 }
 
 func TestMACCache_MalformedMACIgnored(t *testing.T) {
-	c := newTestMACCache()
+	c, _ := newTestMACCache()
 	c.onAdd(machine("m1", "not-a-mac"))
-	// Nothing to assert beyond "did not panic and added nothing"; a
-	// non-matching MAC lookup below confirms the map stayed empty.
 	if len(c.counts) != 0 {
 		t.Errorf("counts = %v, want empty (malformed MAC must not be indexed)", c.counts)
 	}
 }
 
 // TestMACCache_StartGatesOnSync exercises NewMACCache/Start end to end
-// against a fake Informers implementation: Allow must stay false until
-// WaitForCacheSync succeeds, and an Add event delivered through the
-// informer (not through the unexported onAdd helper directly) must
-// still reach Allow.
+// against a fake Informers implementation: nothing may reach the sink
+// until WaitForCacheSync succeeds, and the first post-sync push must
+// carry a Machine added through the informer (not through the
+// unexported onAdd helper directly) before Start observed sync.
 func TestMACCache_StartGatesOnSync(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := keziov1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("building scheme: %v", err)
 	}
 	fakeInformers := &informertest.FakeInformers{Scheme: scheme}
+	sink := &macSinkRecorder{}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	c, err := NewMACCache(ctx, fakeInformers)
+	c, err := NewMACCache(ctx, fakeInformers, sink)
 	if err != nil {
 		t.Fatalf("NewMACCache: %v", err)
 	}
@@ -188,8 +198,8 @@ func TestMACCache_StartGatesOnSync(t *testing.T) {
 	}
 	fakeInformer.Add(machine("m1", "aa:bb:cc:dd:ee:01"))
 
-	if c.Allow(knownMAC) {
-		t.Fatal("Allow true before Start/WaitForCacheSync ran")
+	if _, ok := sink.last(); ok {
+		t.Fatal("sink received a push before Start/WaitForCacheSync ran")
 	}
 
 	fakeInformer.Synced = true
@@ -205,9 +215,7 @@ func TestMACCache_StartGatesOnSync(t *testing.T) {
 		}
 	}
 
-	if !c.Allow(knownMAC) {
-		t.Error("Allow false for a MAC added through the informer before Start observed sync")
-	}
+	wantLast(t, sink, []string{"aa:bb:cc:dd:ee:01"})
 
 	cancel()
 	if err := <-startErrCh; err != nil {

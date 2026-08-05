@@ -14,16 +14,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Command bootd runs kezio-bootd: the proxyDHCP and TFTP services a
-// UEFI firmware talks to at the start of a network boot (see
-// internal/bootd's package doc comment for the full design). Unlike the
-// controller-manager binary (cmd/main.go), bootd does not reconcile
-// anything - it runs a minimal controller-runtime manager purely to get
-// a live-updated cache of Machine boot MAC addresses (internal/bootd's
-// MACCache), with no leader election, no webhook server, and metrics
-// disabled by default, since none of those apply to a per-site,
-// non-reconciling process that is meant to run one replica per boot
-// segment, not compete for leadership across sites.
+// Command bootd runs kezio-bootd: the dnsmasq-based proxyDHCP service
+// and the TFTP server a UEFI firmware talks to at the start of a
+// network boot (see internal/bootd's package doc comment for the full
+// design). Unlike the controller-manager binary (cmd/main.go), bootd
+// does not reconcile anything - it runs a minimal controller-runtime
+// manager purely to get a live-updated cache of Machine boot MAC
+// addresses (internal/bootd's MACCache), with no leader election, no
+// webhook server, and metrics disabled by default, since none of those
+// apply to a per-site, non-reconciling process that is meant to run one
+// replica per boot segment, not compete for leadership across sites.
 package main
 
 import (
@@ -89,7 +89,13 @@ func main() {
 
 	ctx := ctrl.SetupSignalHandler()
 
-	macCache, err := bootd.NewMACCache(ctx, mgr.GetCache())
+	dnsmasq := &bootd.Dnsmasq{
+		Config:     cfg.Server,
+		RunDir:     cfg.RunDir,
+		BinaryPath: cfg.DnsmasqPath,
+	}
+
+	macCache, err := bootd.NewMACCache(ctx, mgr.GetCache(), dnsmasq)
 	if err != nil {
 		setupLog.Error(err, "unable to set up Machine MAC cache")
 		os.Exit(1)
@@ -99,8 +105,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := mgr.Add(&bootd.Server{Config: cfg.Server, Gate: macCache}); err != nil {
-		setupLog.Error(err, "unable to add proxyDHCP/PXE server")
+	if err := mgr.Add(dnsmasq); err != nil {
+		setupLog.Error(err, "unable to add dnsmasq supervisor")
 		os.Exit(1)
 	}
 
@@ -109,7 +115,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupLog.Info("starting bootd", "answerAll", cfg.Server.AnswerAll, "tftpDir", cfg.TFTPDir)
+	setupLog.Info("starting bootd",
+		"answerAll", cfg.Server.AnswerAll,
+		"tftpDir", cfg.TFTPDir,
+		"provisioningNet", cfg.Server.ProvisioningNet.String(),
+		"relay", cfg.Server.RelayServerIP)
 	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running bootd")
 		os.Exit(1)
@@ -122,50 +132,86 @@ type bootdConfig struct {
 	TFTPDir string
 	// TFTPAddr optionally overrides bootd.DefaultTFTPAddr.
 	TFTPAddr string
+	// RunDir optionally overrides bootd.DefaultRunDir.
+	RunDir string
+	// DnsmasqPath optionally overrides bootd.DefaultDnsmasqPath.
+	DnsmasqPath string
 }
 
 // bootdConfigFromEnv builds bootdConfig from the process environment.
 // Every variable below is required unless noted, since bootd - unlike
 // the controller-manager's optional bootserver/seeder subsystems - has
-// no useful inert default: a bootd process that fails to bind its
-// listeners or serve TFTP files is not doing anything at all.
+// no useful inert default: a bootd process whose dnsmasq cannot answer
+// the provisioning segment is not doing anything at all.
 //
-//   - BOOTD_SERVER_IP: bootd's own IP address on the boot network, sent
-//     as the DHCP Server Identifier and (unless BOOTD_NEXT_SERVER_IP is
-//     set) the PXE next-server. Required.
-//   - BOOTD_NEXT_SERVER_IP: overrides the next-server address handed to
-//     clients, when the TFTP service is reachable at a different
-//     address than BOOTD_SERVER_IP. Optional, defaults to
+//   - BOOTD_SERVER_IP: bootd's own IPv4 address on the provisioning
+//     network, advertised as the PXE boot server (unless
+//     BOOTD_NEXT_SERVER_IP overrides it) and used as the relay source
+//     address when relaying is enabled. Required.
+//   - BOOTD_PROVISIONING_CIDR: the provisioning network's IPv4 subnet
+//     in CIDR form, for example "192.0.2.0/24" - rendered as dnsmasq's
+//     proxyDHCP dhcp-range. Required.
+//   - BOOTD_DHCP_INTERFACE: optional interface name dnsmasq binds its
+//     DHCP sockets to exclusively (the pod's provisioning attachment,
+//     typically "net1"). Unset means dnsmasq listens on every
+//     interface in the pod's network namespace.
+//   - BOOTD_DHCP_RELAY_SERVER: optional IPv4 address of the site's
+//     existing DHCP server. Set, bootd's dnsmasq additionally relays
+//     every DHCP request on the segment to it (dhcp-relay), so a
+//     provisioning segment without its own DHCP server still gets
+//     leases. Unset (the default): proxyDHCP only, bootd never touches
+//     lease traffic.
+//   - BOOTD_NEXT_SERVER_IP: overrides the PXE boot-server address
+//     handed to clients, when the TFTP service is reachable at a
+//     different address than BOOTD_SERVER_IP. Optional, defaults to
 //     BOOTD_SERVER_IP.
 //   - BOOTD_TFTP_DIR: local directory containing shimx64.efi and
 //     grubx64.efi (see internal/bootd.ShimFilename/GrubFilename).
 //     Required.
-//   - BOOTD_DHCP_ADDR / BOOTD_PXE_ADDR / BOOTD_TFTP_ADDR: optional
-//     overrides for the three listen addresses (default ":67", ":4011",
-//     ":69").
+//   - BOOTD_TFTP_ADDR: optional override for the TFTP listen address
+//     (default ":69").
 //   - BOOTD_BOOT_FILENAME: optional override for the PXE boot filename
 //     handed out (default internal/bootd.DefaultBootFilename,
 //     "shimx64.efi").
-//   - BOOTD_HTTP_BOOT_URL: optional full HTTP(S) URL handed out to a
-//     client advertising UEFI HTTP Boot (option 60 "HTTPClient")
-//     instead of PXE, for example
-//     "http://10.0.0.5/boot/http/shimx64.efi". Unset (the default)
-//     disables HTTP Boot entirely and does not affect the PXE path;
-//     see internal/bootd's package doc comment for what must serve the
-//     artifact at that URL before this is set.
+//   - BOOTD_RUN_DIR: optional writable directory for the rendered
+//     dnsmasq config, dhcp-hostsfile, and leasefile (default
+//     internal/bootd.DefaultRunDir, "/run/bootd").
+//   - BOOTD_DNSMASQ_PATH: optional path to the dnsmasq binary (default
+//     internal/bootd.DefaultDnsmasqPath, "/usr/sbin/dnsmasq").
 //   - BOOTD_ANSWER_ALL: set to "true" to disable the MAC gate (see
 //     internal/bootd's package doc comment and MACCache) and answer
-//     every architecture-matching client regardless of Machine
-//     enrollment. Defaults to "false" - the fail-secure, known-MACs-only
-//     mode.
+//     every PXE client regardless of Machine enrollment. Defaults to
+//     "false" - the fail-secure, known-MACs-only mode.
+//
+// BOOTD_HTTP_BOOT_URL, BOOTD_DHCP_ADDR, and BOOTD_PXE_ADDR are no
+// longer supported (dnsmasq's proxyDHCP engine does not answer UEFI
+// HTTP Boot clients, and its DHCP ports are the well-known 67/4011
+// only); setting any of them is an error rather than a silent no-op,
+// so a deployment relying on the removed behavior fails loudly.
 func bootdConfigFromEnv() (bootdConfig, error) {
+	for _, removed := range []string{"BOOTD_HTTP_BOOT_URL", "BOOTD_DHCP_ADDR", "BOOTD_PXE_ADDR"} {
+		if os.Getenv(removed) != "" {
+			return bootdConfig{}, fmt.Errorf(
+				"%s is no longer supported (see cmd/bootd's bootdConfigFromEnv doc comment); unset it", removed)
+		}
+	}
+
 	serverIPStr := os.Getenv("BOOTD_SERVER_IP")
 	if serverIPStr == "" {
 		return bootdConfig{}, fmt.Errorf("BOOTD_SERVER_IP is required")
 	}
 	serverIP := net.ParseIP(serverIPStr)
-	if serverIP == nil {
-		return bootdConfig{}, fmt.Errorf("BOOTD_SERVER_IP %q is not a valid IP address", serverIPStr)
+	if serverIP == nil || serverIP.To4() == nil {
+		return bootdConfig{}, fmt.Errorf("BOOTD_SERVER_IP %q is not a valid IPv4 address", serverIPStr)
+	}
+
+	cidrStr := os.Getenv("BOOTD_PROVISIONING_CIDR")
+	if cidrStr == "" {
+		return bootdConfig{}, fmt.Errorf("BOOTD_PROVISIONING_CIDR is required")
+	}
+	_, provisioningNet, err := net.ParseCIDR(cidrStr)
+	if err != nil {
+		return bootdConfig{}, fmt.Errorf("BOOTD_PROVISIONING_CIDR %q is not a valid CIDR: %w", cidrStr, err)
 	}
 
 	tftpDir := os.Getenv("BOOTD_TFTP_DIR")
@@ -176,23 +222,33 @@ func bootdConfigFromEnv() (bootdConfig, error) {
 	var nextServerIP net.IP
 	if s := os.Getenv("BOOTD_NEXT_SERVER_IP"); s != "" {
 		nextServerIP = net.ParseIP(s)
-		if nextServerIP == nil {
-			return bootdConfig{}, fmt.Errorf("BOOTD_NEXT_SERVER_IP %q is not a valid IP address", s)
+		if nextServerIP == nil || nextServerIP.To4() == nil {
+			return bootdConfig{}, fmt.Errorf("BOOTD_NEXT_SERVER_IP %q is not a valid IPv4 address", s)
+		}
+	}
+
+	var relayServerIP net.IP
+	if s := os.Getenv("BOOTD_DHCP_RELAY_SERVER"); s != "" {
+		relayServerIP = net.ParseIP(s)
+		if relayServerIP == nil || relayServerIP.To4() == nil {
+			return bootdConfig{}, fmt.Errorf("BOOTD_DHCP_RELAY_SERVER %q is not a valid IPv4 address", s)
 		}
 	}
 
 	return bootdConfig{
 		Server: bootd.Config{
-			DHCPAddr:     os.Getenv("BOOTD_DHCP_ADDR"),
-			PXEAddr:      os.Getenv("BOOTD_PXE_ADDR"),
-			ServerIP:     serverIP,
-			NextServerIP: nextServerIP,
-			BootFilename: os.Getenv("BOOTD_BOOT_FILENAME"),
-			HTTPBootURL:  os.Getenv("BOOTD_HTTP_BOOT_URL"),
-			TFTPDir:      tftpDir,
-			AnswerAll:    os.Getenv("BOOTD_ANSWER_ALL") == "true",
+			Interface:       os.Getenv("BOOTD_DHCP_INTERFACE"),
+			ServerIP:        serverIP,
+			NextServerIP:    nextServerIP,
+			ProvisioningNet: provisioningNet,
+			BootFilename:    os.Getenv("BOOTD_BOOT_FILENAME"),
+			RelayServerIP:   relayServerIP,
+			TFTPDir:         tftpDir,
+			AnswerAll:       os.Getenv("BOOTD_ANSWER_ALL") == "true",
 		},
-		TFTPDir:  tftpDir,
-		TFTPAddr: os.Getenv("BOOTD_TFTP_ADDR"),
+		TFTPDir:     tftpDir,
+		TFTPAddr:    os.Getenv("BOOTD_TFTP_ADDR"),
+		RunDir:      os.Getenv("BOOTD_RUN_DIR"),
+		DnsmasqPath: os.Getenv("BOOTD_DNSMASQ_PATH"),
 	}, nil
 }

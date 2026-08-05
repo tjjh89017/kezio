@@ -14,87 +14,62 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package bootd implements kezio-bootd: the proxyDHCP and TFTP services a
-// UEFI firmware talks to at the very start of a network boot, before
+// Package bootd implements kezio-bootd: the proxyDHCP and TFTP services
+// a UEFI firmware talks to at the very start of a network boot, before
 // grub or the boot config server (internal/bootserver) ever come into
 // the picture.
 //
-// bootd is deliberately not a DHCP server: the site's production DHCP
-// server keeps sole ownership of IP lease assignment. bootd only ever
-// answers the PXE portion of the exchange - "which file do I TFTP, and
-// from which next-server" - as defined by the Preboot Execution
-// Environment (PXE) Specification and RFC 4578 (DHCP options for PXE).
-// Concretely:
+// The DHCP side is dnsmasq, not a homegrown responder: bootd renders a
+// dnsmasq configuration (render.go), supervises dnsmasq as a foreground
+// child process (dnsmasq.go), and feeds it a MAC allowlist derived from
+// enrolled Machine objects (maccache.go). dnsmasq brings the
+// battle-tested parts - the proxyDHCP exchange on ports 67/4011, PXE
+// option handling across firmware quirks, and optional DHCP relaying -
+// while bootd keeps the parts that are kezio's own:
 //
-//   - UDP/67 (proxyDHCPServer in the PXE spec's terms): listens
-//     alongside the production DHCP server for DHCPDISCOVER broadcasts
-//     that carry PXE options (option 60 "PXEClient", option 93 client
-//     system architecture). It answers with a DHCPOFFER-shaped packet
-//     that carries no yiaddr (it never leases an address) but does carry
-//     the next-server and boot filename the firmware needs.
-//   - UDP/4011 (the PXE "boot server" port): handles the second-phase
-//     DHCPREQUEST a PXE client sends once it already has a real lease
-//     from production DHCP but still needs the boot server's file list.
+//   - Config rendering (RenderDnsmasqConf): one proxyDHCP dhcp-range
+//     for the provisioning subnet, a tag-gated pxe-service handing out
+//     shimx64.efi, and dhcp-ignore so unknown MACs get nothing at all.
+//     bootd is deliberately not a DHCP (lease) server: the site's
+//     production DHCP server keeps sole ownership of IP assignment.
+//     When Config.RelayServerIP is set, the same dnsmasq instance also
+//     relays lease traffic to that server (dhcp-relay) - useful when
+//     the provisioning segment has no DHCP server of its own; unset,
+//     bootd never touches lease traffic.
+//   - The MAC gate (MACCache): a controller-runtime informer over
+//     Machine objects maintains the set of enrolled boot MACs and
+//     pushes every change into the dnsmasq dhcp-hostsfile
+//     (Dnsmasq.SetAllowedMACs), followed by a SIGHUP - dnsmasq re-reads
+//     hostsfiles on SIGHUP without restarting, so enrolling or deleting
+//     a Machine takes effect in-place. Fail-secure: the hostsfile
+//     starts empty and stays empty until the informer's first sync
+//     completes, and no snapshot is ever pushed if the sync fails - an
+//     unreachable API server means nothing boots, not "everything
+//     boots".
+//   - Process supervision (Dnsmasq): dnsmasq runs with --no-daemon as
+//     a direct child, its log lines (including per-request log-dhcp
+//     decisions) forwarded into bootd's logger, restarted with backoff
+//     on crash, and escalated to a fatal error (crashing the pod,
+//     visibly) when it cannot stay up at all.
 //
-// Both listeners share one packet-handling core (BuildResponse in
-// dhcp.go), which is a pure function from a parsed request to an
-// optional response: it opens no socket and blocks on nothing, so the
-// PXE/DHCP option logic is unit-testable without a network namespace.
-// server.go is the thin socket loop around that core.
+// TFTP (tftp.go) stays in-process rather than delegated to dnsmasq's
+// enable-tftp: it is a strictly read-only, two-file server allowlisting
+// exactly shimx64.efi and grubx64.efi and rejecting any other name,
+// including path traversal - dnsmasq's TFTP would serve anything under
+// its tftp-root and add a second code path to the same directory
+// without removing any Go code worth removing.
 //
-// Two gates apply before bootd ever answers a discovering client:
+// UEFI HTTP Boot (option 60 "HTTPClient") is not supported: dnsmasq's
+// proxyDHCP engine only engages for PXEClient requests, so an
+// HTTPClient request receives no proxy answer (lab-verified). Sites
+// needing HTTP Boot must configure their production DHCP server to
+// hand out the boot URL; internal/bootserver's GET /boot/http/<name>
+// route still serves the artifacts themselves.
 //
-//   - Client System Architecture (option 93) must name x86-64 UEFI
-//     (arch 7, EFI_X86_64) or EFI Byte Code (arch 9, EFI_BC) - every
-//     other architecture is logged and ignored, since this deployment
-//     only ships shimx64.efi/grubx64.efi.
-//   - The requesting MAC address must match an enrolled Machine's
-//     spec.bootMACAddress, unless MACGate is configured to answer all
-//     (AnswerAllMode - default off). See maccache.go: bootd runs
-//     per-site, outside the manager, so this is a locally cached watch
-//     of Machine objects, not a per-packet API call. The cache
-//     fail-secure defaults to "answer nothing" until its first sync
-//     completes and for as long as the watch cannot reach the API
-//     server - a stale "yes" that boots a machine which was since
-//     removed is a worse failure mode than a delayed "no".
-//
-// server.go's listeners bind 0.0.0.0 (required for receiving broadcast
-// DHCPDISCOVERs at all) but must not rely on the process's default
-// route to pick a reply's egress interface: a pod running bootd
-// typically has a second interface for cluster traffic (its Machine
-// watch, for example) whose default route has nothing to do with the
-// boot network. Every reply is therefore pinned, at the socket level,
-// to leave by the same interface its request arrived on - see
-// serveUDP's doc comment.
-//
-// TFTP (tftp.go) is a strictly read-only, two-file server: it serves
-// exactly shimx64.efi and grubx64.efi from a configured directory and
-// accepts no writes and no other filename, including any path-traversal
-// attempt - see ReadHandler's doc comment.
-//
-// # UEFI HTTP Boot (alternative to PXE+TFTP)
-//
-// Some UEFI firmware supports fetching its boot loader directly over
-// HTTP(S) instead of PXE+TFTP: it advertises option 60 as "HTTPClient"
-// (rather than "PXEClient", optionally suffixed per the UEFI spec, for
-// example "HTTPClient:Arch:00016") and expects the DHCP reply's boot
-// filename to be a full HTTP(S) URL, with option 60 echoing "HTTPClient"
-// back - firmware requires that exact echo to accept the offer at all.
-// BuildResponse recognizes this alongside PXEClient (see its doc
-// comment); it is enabled per-deployment by setting Config.HTTPBootURL,
-// and is otherwise off - an unset HTTPBootURL leaves the PXEClient path
-// completely unaffected, and any HTTPClient request is declined rather
-// than answered with a TFTP filename that firmware asking for HTTP Boot
-// cannot use.
-//
-// Not every UEFI implementation supports HTTP Boot, and it generally
-// requires a routed L3 network to be worth enabling (PXE+TFTP works on
-// a flat L2 segment without any routing consideration); PXE+TFTP remains
-// the default and the one every deployment can rely on. Where HTTP Boot
-// is enabled, this package still only decides *which URL to hand out* -
-// it does not itself serve the EFI binary at that URL. Wire
-// Config.HTTPBootURL at internal/bootserver's GET /boot/http/<name>
-// route (for example "http://10.0.0.5:8090/boot/http/shimx64.efi"),
-// which serves the same shim/grub allowlist this package's TFTP server
-// does; see that package's doc comment for the endpoint.
+// Capabilities: dnsmasq refuses to serve DHCP without CAP_NET_ADMIN
+// and CAP_NET_RAW (checked explicitly at its startup), plus
+// CAP_NET_BIND_SERVICE for ports 67/4011 - see caps.go, which raises
+// the pod-granted capabilities into the ambient set so they survive
+// execve into the non-root dnsmasq child, and config/bootd's
+// deployment for the Pod Security consequences.
 package bootd

@@ -30,25 +30,33 @@ see `internal/bootd`'s package doc comment for the exact proxyDHCP
 can - and are meant to - run on the same broadcast domain without
 conflicting.
 
-## DHCP relay support
+The DHCP protocol work is done by a dnsmasq child process that bootd
+renders the configuration for, supervises, and feeds the MAC allowlist
+to (see `internal/bootd`'s package doc comment); TFTP stays served by
+bootd itself.
 
-bootd answers correctly whether a DHCPDISCOVER/DHCPREQUEST arrived by
-direct L2 broadcast or by unicast through a DHCP relay agent (`giaddr`
-set): a relayed request's reply is unicast back to the relay's own
-address on the DHCP server port, exactly as RFC 2131 requires, and the
-relay is responsible for delivering it on to the client from there. See
-`internal/bootd.BuildResponse`'s doc comment and `destinationFor` for
-the exact rule, and `internal/bootd/dhcp_test.go` for the packet-level
-test covering both the relayed and non-relayed cases.
+## DHCP relay support (optional)
+
+When the boot segment has no DHCP server of its own, set
+`BOOTD_DHCP_RELAY_SERVER` to the site's existing DHCP server address:
+bootd's dnsmasq then also relays every DHCP request heard on the
+segment to that server (`dhcp-relay`), whose replies are relayed back
+to the client. The relay path is independent of the MAC gate below -
+denied MACs still get their leases relayed, they just receive no PXE
+boot information. Leave it unset (the default) for proxyDHCP only:
+bootd never touches lease traffic, and the site must make its DHCP
+server reachable on the segment by other means.
 
 ## Before applying
 
-1. **Set `BOOTD_SERVER_IP`.** `deployment.yaml`'s env has a
-   `REPLACE_WITH_BOOTD_BOOT_NETWORK_IP` placeholder - this must be the
-   pod's actual reachable IP address on the boot L2 segment (the Multus
-   attachment below), not a cluster-internal address. Firmware reads it
-   back as both the DHCP Server Identifier and (unless
-   `BOOTD_NEXT_SERVER_IP` overrides it) the TFTP next-server address.
+1. **Set `BOOTD_SERVER_IP` and `BOOTD_PROVISIONING_CIDR`.**
+   `deployment.yaml`'s env has `REPLACE_WITH_BOOTD_BOOT_NETWORK_IP` and
+   `REPLACE_WITH_BOOT_NETWORK_CIDR` placeholders - the pod's actual
+   reachable IP address on the boot L2 segment (the Multus attachment
+   below, not a cluster-internal address) and that segment's IPv4
+   subnet. Firmware reads the address back as the PXE boot server and
+   (unless `BOOTD_NEXT_SERVER_IP` overrides it) the TFTP next-server;
+   the subnet becomes dnsmasq's proxyDHCP `dhcp-range`.
 2. **Attach the boot L2 segment.** See
    `networkattachmentdefinition.example.yaml` and its extended comments
    on why this uses Multus rather than `hostNetwork`. Copy it, fill in
@@ -84,80 +92,62 @@ test covering both the relayed and non-relayed cases.
    attachment and, if the segments are on different subnets, its own
    overlay), not by raising this replica count.
 
-## UEFI HTTP Boot (optional, alternative to PXE+TFTP)
+## UEFI HTTP Boot is not supported
 
-Some UEFI firmware can fetch its boot loader directly over HTTP(S)
-instead of PXE+TFTP - useful mainly on a routed L3 boot network, where
-TFTP's broadcast-friendly assumptions are more awkward than a plain
-HTTP fetch. Set `BOOTD_HTTP_BOOT_URL` to the full URL of the EFI binary
-firmware should fetch (for example
-`http://10.0.0.5/boot/http/shimx64.efi`) to enable it. Leaving it unset
-(the default) disables HTTP Boot entirely and leaves the PXE+TFTP path
-above completely unaffected - the two are independent, not a
-replacement of one by the other.
-
-Not every UEFI implementation supports HTTP Boot, so PXE+TFTP remains
-the path every deployment can rely on; enable HTTP Boot as an addition
-for machines/firmware that support it, not as a substitute. See
-`internal/bootd`'s package doc comment for the option 60 (Vendor Class
-Identifier) negotiation this relies on.
-
-**Setting `BOOTD_HTTP_BOOT_URL` only decides which URL bootd hands out -
-it does not itself serve anything there.** Point it at
-`internal/bootserver`'s `GET /boot/http/<name>` route, which serves the
-same signed `shimx64.efi`/`grubx64.efi` allowlist as the TFTP service
-above (see `internal/bootserver`'s package doc comment and
-`config/bootserver/README.md`), for example:
-
-```
-BOOTD_HTTP_BOOT_URL=http://10.0.0.5:8090/boot/http/shimx64.efi
-```
-
-`internal/bootserver`'s `EFIDir` config (env `BOOT_EFI_DIR`) defaults to
-its existing artifacts directory (`BOOT_ARTIFACTS_DIR`), so adding
-`shimx64.efi`/`grubx64.efi` to that same fetch is enough to make this
-route usable - no separate volume required unless you want one.
+dnsmasq's proxyDHCP engine only answers `PXEClient` requests; a
+firmware asking for UEFI HTTP Boot (option 60 `HTTPClient`) receives no
+proxy answer from bootd at all. A site that needs HTTP Boot must
+configure its production DHCP server to hand out the boot URL;
+`internal/bootserver`'s `GET /boot/http/<name>` route still serves the
+signed `shimx64.efi`/`grubx64.efi` artifacts themselves. The former
+`BOOTD_HTTP_BOOT_URL` variable is rejected at startup rather than
+silently ignored.
 
 ## Replies stay on the boot network, even with a second pod interface
 
 Because this pod normally has two network interfaces - the cluster's
 default one (used for the Kubernetes API traffic bootd's Machine watch
-needs) and the Multus-attached boot L2 segment above - a reply sent
-from a socket bound to `0.0.0.0` cannot rely on the process's default
-route to pick the right egress interface: the default route almost
-always points at the cluster interface, not the boot segment. bootd
-avoids that by pinning every reply's egress interface to whichever
-interface the request itself arrived on, so a DHCPOFFER/DHCPACK always
-leaves by the same interface the DHCPDISCOVER/DHCPREQUEST came in on -
-see `internal/bootd/server.go`'s `serveUDP` doc comment for the
-socket-level mechanism. This needs no extra capability: it is a plain
-socket option, unrelated to the `NET_BIND_SERVICE` capability below
-(which exists solely to bind the two privileged ports).
+needs) and the Multus-attached boot L2 segment above - DHCP must not
+follow the process's default route, which almost always points at the
+cluster interface. `BOOTD_DHCP_INTERFACE` (default `net1` in
+`deployment.yaml`) makes dnsmasq bind its DHCP sockets to the boot
+segment's interface exclusively (`bind-interfaces`), so every offer
+leaves by the same interface the DHCPDISCOVER came in on.
 
 ## MAC gating: fail-secure by default
 
-bootd only answers a client whose MAC address matches an enrolled
-Machine's `spec.bootMACAddress` - it never net-boots an unrecognized
-device on the segment unless `BOOTD_ANSWER_ALL=true` is set (off by
-default). The enrolled-MAC set is a locally cached watch of Machine
-objects (`internal/bootd.MACCache`), not a per-packet API call, since
-bootd runs per-site and a proxyDHCP responder that hit the API server
-once per broadcast would be both slow and unwanted load. That cache
-fails secure: it answers nothing at all until its first sync completes,
-and permanently denies everything if the sync never completes (API
-server unreachable at startup) - restart bootd once connectivity is
-restored. See `internal/bootd/maccache.go`'s doc comment for the full
-reasoning.
+bootd only hands boot information to a client whose MAC address matches
+an enrolled Machine's `spec.bootMACAddress` - it never net-boots an
+unrecognized device on the segment unless `BOOTD_ANSWER_ALL=true` is
+set (off by default). The enrolled-MAC set is a locally cached watch of
+Machine objects (`internal/bootd.MACCache`) that bootd renders into a
+dnsmasq `dhcp-hostsfile` and applies with a SIGHUP - enrolling or
+deleting a Machine takes effect without a dnsmasq restart. The gate
+fails secure: the hostsfile starts empty (nothing boots) until the
+watch's first sync completes, and stays empty forever if the sync never
+completes (API server unreachable at startup) - restart bootd once
+connectivity is restored. See `internal/bootd/maccache.go`'s doc
+comment for the full reasoning. A denied MAC receives nothing from
+bootd on either DHCP port; if relaying is enabled, its lease traffic is
+still relayed.
 
-## Privileged ports and Pod Security Admission
+## Capabilities and Pod Security Admission
 
-Ports 67 (proxyDHCP) and 69 (TFTP) are privileged (<1024). Rather than
-run as root - which restricted Pod Security Admission forbids outright
-- `deployment.yaml` keeps the container `runAsNonRoot` (matching every
-other kezio image) and adds only the `NET_BIND_SERVICE` capability,
-which restricted PSA still permits a container to add (every other
-capability is dropped). No other privilege is granted: no
-`hostNetwork`, no `hostPort`, no elevated capability beyond that one.
+dnsmasq refuses to serve DHCP without `NET_ADMIN` and `NET_RAW`
+(checked explicitly at its startup), and binding ports 67/4011/69 needs
+`NET_BIND_SERVICE`. `deployment.yaml` keeps the container
+`runAsNonRoot` (uid 65532, matching every other kezio image), drops all
+other capabilities, and adds exactly those three; bootd raises them
+into the ambient capability set before exec'ing dnsmasq so they survive
+into the non-root child (see `internal/bootd/caps.go`).
+
+The Pod Security Admission consequence: `NET_ADMIN` is outside both the
+`restricted` and `baseline` profiles' allowed capability lists, so the
+namespace bootd deploys into must be labeled
+`pod-security.kubernetes.io/enforce=privileged`. That label relaxes
+admission-time enforcement only - the pod itself still grants nothing
+beyond the three capabilities above: no root, no `privileged: true`, no
+`hostNetwork`, no `hostPort`.
 
 ## RBAC scope
 

@@ -80,8 +80,7 @@ func TestTFTPServer_ServesAllowedFiles(t *testing.T) {
 
 // TestTFTPServer_LogsServedFile pins the observability fix readHandler's
 // success path relies on (see tftp.go): a completed read must log at the
-// default verbosity, matching serveUDP's "answering PXE request" log for
-// the same reason - without it, bootd's log cannot tell an operator
+// default verbosity - without it, bootd's log cannot tell an operator
 // whether a client that got a DHCP offer ever came back to fetch the file
 // it named.
 func TestTFTPServer_LogsServedFile(t *testing.T) {

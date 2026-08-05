@@ -19,7 +19,7 @@ package bootd
 import (
 	"context"
 	"fmt"
-	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -34,42 +34,51 @@ import (
 
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines,verbs=get;list;watch
 
-// MACCache is the Kubernetes-backed MACGate: it keeps a local, live-
-// updated set of every enrolled Machine's normalized boot MAC address,
-// fed by a controller-runtime cache informer rather than a List/Get
-// call per incoming packet - bootd runs per-site, outside the manager
-// process, and a proxyDHCP responder that hit the API server once per
-// DHCPDISCOVER broadcast would both be slow on the hot path and put
-// unwanted load on the API server for traffic that, by definition,
-// includes every foreign device on the segment, not just kezio's own.
+// MACSink receives the current set of allowed boot MAC addresses every
+// time it changes. Dnsmasq implements it by rewriting the
+// dhcp-hostsfile and SIGHUPing dnsmasq (see Dnsmasq.SetAllowedMACs).
+type MACSink interface {
+	SetAllowedMACs(macs []string)
+}
+
+// MACCache keeps a local, live-updated set of every enrolled Machine's
+// normalized boot MAC address, fed by a controller-runtime cache
+// informer rather than a List/Get call per event - bootd runs
+// per-site, outside the manager process, and its MAC allowlist must
+// track Machine churn without putting per-boot load on the API server.
+// Every change is pushed to the configured MACSink, which is how the
+// dnsmasq MAC gate (the dhcp-hostsfile) stays current.
 //
-// Fail-secure by construction: Allow reports false - not "answer
-// unknown" - for every MAC until the informer's first cache sync
-// completes, and permanently if that sync never completes (see Start).
-// A machine that net-boots one cycle late because the cache was not
-// ready yet is an acceptable cost; a machine or intruder net-booted
-// because an unreachable API server was silently treated as "nothing
-// enrolled, so allow" would not be.
+// Fail-secure by construction: nothing is ever pushed to the sink -
+// which therefore keeps its initial, empty allowlist, booting nothing -
+// until the informer's first cache sync completes, and permanently if
+// that sync never completes (see Start). A machine that net-boots one
+// cycle late because the cache was not ready yet is an acceptable
+// cost; a machine or intruder net-booted because an unreachable API
+// server was silently treated as "nothing enrolled, so allow" would
+// not be.
 type MACCache struct {
-	mu     sync.RWMutex
+	mu     sync.Mutex
 	counts map[string]int // normalized MAC -> number of Machines currently claiming it
 
 	synced    atomic.Bool
 	informers ctrlcache.Informers
+	sink      MACSink
 }
 
-var _ MACGate = (*MACCache)(nil)
 var _ manager.Runnable = (*MACCache)(nil)
 
-// NewMACCache builds a MACCache and registers its event handler on
-// informers' Machine informer. It does not block on the initial sync -
-// call mgr.Add on the returned MACCache (it implements manager.Runnable)
-// to have that wait happen as part of the manager's own startup, or
-// call Start directly in a standalone binary.
-func NewMACCache(ctx context.Context, informers ctrlcache.Informers) (*MACCache, error) {
+// NewMACCache builds a MACCache pushing into sink and registers its
+// event handler on informers' Machine informer. It does not block on
+// the initial sync - call mgr.Add on the returned MACCache (it
+// implements manager.Runnable) to have that wait happen as part of the
+// manager's own startup, or call Start directly in a standalone
+// binary.
+func NewMACCache(ctx context.Context, informers ctrlcache.Informers, sink MACSink) (*MACCache, error) {
 	c := &MACCache{
 		counts:    make(map[string]int),
 		informers: informers,
+		sink:      sink,
 	}
 
 	informer, err := informers.GetInformer(ctx, &keziov1alpha1.Machine{})
@@ -87,16 +96,18 @@ func NewMACCache(ctx context.Context, informers ctrlcache.Informers) (*MACCache,
 	return c, nil
 }
 
-// Start implements manager.Runnable: it waits for the Machine informer's
-// initial sync, then marks the cache ready and blocks until ctx is
+// Start implements manager.Runnable: it waits for the Machine
+// informer's initial sync, then marks the cache synced, pushes the
+// first complete snapshot to the sink, and blocks until ctx is
 // cancelled. If the sync never completes (API server unreachable at
-// startup, context cancelled first), the cache is left permanently
-// unsynced - Allow keeps returning false - rather than guessing that an
-// empty, never-synced cache means "nothing is enrolled yet, so deny is
-// safe anyway" (a cache that reports zero Machines because it failed to
-// connect looks identical to one that reports zero Machines because
-// there genuinely are none, and only the fail-secure default treats
-// both cases the same, safe way).
+// startup, context cancelled first), no snapshot is ever pushed - the
+// sink keeps its empty allowlist and nothing boots - rather than
+// guessing that an empty, never-synced cache means "nothing is
+// enrolled yet, so an empty push is accurate anyway" (a cache that
+// reports zero Machines because it failed to connect looks identical
+// to one that reports zero Machines because there genuinely are none,
+// and only the fail-secure default treats both cases the same, safe
+// way).
 func (c *MACCache) Start(ctx context.Context) error {
 	log := logf.FromContext(ctx).WithName("bootd-maccache")
 	if !c.informers.WaitForCacheSync(ctx) {
@@ -104,24 +115,48 @@ func (c *MACCache) Start(ctx context.Context) error {
 		<-ctx.Done()
 		return nil
 	}
+	c.mu.Lock()
 	c.synced.Store(true)
+	c.pushLocked()
+	c.mu.Unlock()
 	log.Info("Machine MAC cache ready")
 	<-ctx.Done()
 	return nil
 }
 
-// Allow implements MACGate.
-func (c *MACCache) Allow(mac net.HardwareAddr) bool {
+// Snapshot returns the sorted set of currently allowed MACs, or nil
+// while the cache has not synced yet (see Start's fail-secure
+// contract).
+func (c *MACCache) Snapshot() []string {
 	if !c.synced.Load() {
-		return false
+		return nil
 	}
-	normalized, ok := bootserver.NormalizeMAC(mac.String())
-	if !ok {
-		return false
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.snapshotLocked()
+}
+
+// snapshotLocked builds the sorted MAC list; callers hold c.mu.
+func (c *MACCache) snapshotLocked() []string {
+	macs := make([]string, 0, len(c.counts))
+	for mac := range c.counts {
+		macs = append(macs, mac)
 	}
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.counts[normalized] > 0
+	slices.Sort(macs)
+	return macs
+}
+
+// pushLocked pushes the current snapshot to the sink if the cache is
+// synced; callers hold c.mu. Holding the lock across the sink call
+// keeps pushes ordered - two racing informer events cannot deliver
+// their snapshots to the sink in reversed order and leave the
+// hostsfile stale. The sink's SetAllowedMACs is non-blocking (see
+// Dnsmasq.SetAllowedMACs), so the lock is never held for long.
+func (c *MACCache) pushLocked() {
+	if !c.synced.Load() || c.sink == nil {
+		return
+	}
+	c.sink.SetAllowedMACs(c.snapshotLocked())
 }
 
 func (c *MACCache) onAdd(obj any) {
@@ -144,8 +179,11 @@ func (c *MACCache) onUpdate(oldObj, newObj any) {
 	if oldMachine.Spec.BootMACAddress == newMachine.Spec.BootMACAddress {
 		return
 	}
-	c.remove(oldMachine.Spec.BootMACAddress)
-	c.add(newMachine.Spec.BootMACAddress)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.removeLocked(oldMachine.Spec.BootMACAddress)
+	c.addLocked(newMachine.Spec.BootMACAddress)
+	c.pushLocked()
 }
 
 func (c *MACCache) onDelete(obj any) {
@@ -174,22 +212,32 @@ func (c *MACCache) onDelete(obj any) {
 // misconfigured cluster, and a plain set would let deleting one of them
 // incorrectly revoke the gate for the other still-enrolled Machine.
 func (c *MACCache) add(rawMAC string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.addLocked(rawMAC)
+	c.pushLocked()
+}
+
+func (c *MACCache) addLocked(rawMAC string) {
 	mac, ok := bootserver.NormalizeMAC(rawMAC)
 	if !ok {
 		return
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.counts[mac]++
 }
 
 func (c *MACCache) remove(rawMAC string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.removeLocked(rawMAC)
+	c.pushLocked()
+}
+
+func (c *MACCache) removeLocked(rawMAC string) {
 	mac, ok := bootserver.NormalizeMAC(rawMAC)
 	if !ok {
 		return
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.counts[mac] <= 1 {
 		delete(c.counts, mac)
 		return

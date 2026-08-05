@@ -57,7 +57,10 @@ spec:
         # volume. Without this, fetch-boot-artifacts's `mkdir -p
         # "${DEST_DIR}"` (config/boot-artifacts/fetch.sh) fails with
         # EACCES and the initContainer CrashLoopBackOffs before bootd's
-        # own container ever starts.
+        # own container ever starts. The "run" emptyDir below relies on
+        # the same group-writability for bootd's own uid (65532, which
+        # gets 101 as a supplemental group via this fsGroup) to write
+        # the rendered dnsmasq config and dhcp-hostsfile.
         fsGroup: 101
       # Fetches shimx64.efi/grubx64.efi (see .github/workflows/
       # build-live-image.yml, which now publishes them alongside the
@@ -115,10 +118,28 @@ spec:
             # actual reachable IP on the boot L2 segment (the Multus
             # net1 address above) - there is no meaningful default for
             # an address that names this host. Firmware reads this back
-            # as both the DHCP Server Identifier and (unless
-            # BOOTD_NEXT_SERVER_IP overrides it) the TFTP next-server.
+            # as the PXE boot server and (unless BOOTD_NEXT_SERVER_IP
+            # overrides it) the TFTP next-server.
             - name: BOOTD_SERVER_IP
               value: "REPLACE_WITH_BOOTD_BOOT_NETWORK_IP"
+            # BOOTD_PROVISIONING_CIDR: SITE-SPECIFIC, the boot L2
+            # segment's IPv4 subnet - dnsmasq only answers proxyDHCP
+            # for subnets it has a matching dhcp-range for.
+            - name: BOOTD_PROVISIONING_CIDR
+              value: "REPLACE_WITH_BOOT_NETWORK_CIDR"
+            # BOOTD_DHCP_INTERFACE: the pod interface on the boot L2
+            # segment. "net1" matches the first (and only) Multus
+            # attachment above; dnsmasq binds its DHCP sockets to this
+            # interface exclusively, so replies always leave on the
+            # boot segment rather than the cluster's default interface.
+            - name: BOOTD_DHCP_INTERFACE
+              value: net1
+            # BOOTD_DHCP_RELAY_SERVER (optional): IPv4 address of the
+            # site's existing DHCP server. Set it to have bootd's
+            # dnsmasq also relay lease traffic from the boot segment to
+            # that server (dhcp-relay); leave unset for proxyDHCP only.
+            # - name: BOOTD_DHCP_RELAY_SERVER
+            #   value: "REPLACE_WITH_SITE_DHCP_SERVER_IP"
             - name: BOOTD_TFTP_DIR
               value: /tftp
           ports:
@@ -137,19 +158,44 @@ spec:
             capabilities:
               drop:
                 - "ALL"
-              # Ports 67 and 69 are privileged (<1024); NET_BIND_SERVICE
-              # is the one capability restricted Pod Security Admission
-              # still allows a container to add (see
-              # https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted),
-              # so bootd stays runAsNonRoot (65532, matching every other
-              # kezio image) instead of the alternative of running as
-              # root, which restricted PSA forbids outright.
+              # The dnsmasq child bootd supervises (see internal/bootd's
+              # Dnsmasq) requires all three capabilities to serve DHCP:
+              # NET_BIND_SERVICE for the privileged ports (67, 4011,
+              # and bootd's own 69), and NET_ADMIN + NET_RAW, which
+              # dnsmasq checks for explicitly at startup and refuses to
+              # run without. The container still runs runAsNonRoot
+              # (65532, matching every other kezio image) with every
+              # other capability dropped, no privileged: true, and no
+              # hostNetwork.
+              #
+              # Pod Security Admission consequence, stated precisely:
+              # NET_ADMIN is not in the allowed capability list of the
+              # "restricted" OR "baseline" profiles (NET_RAW is allowed
+              # by baseline but not restricted; NET_BIND_SERVICE by
+              # both) - see
+              # https://kubernetes.io/docs/concepts/security/pod-security-standards/.
+              # This pod therefore cannot be admitted into a namespace
+              # enforcing restricted or baseline PSA: the namespace
+              # bootd deploys into must set
+              # pod-security.kubernetes.io/enforce=privileged. That
+              # label relaxes admission-time enforcement only - the pod
+              # itself grants nothing beyond these three capabilities.
               add:
                 - NET_BIND_SERVICE
+                - NET_ADMIN
+                - NET_RAW
           volumeMounts:
             - name: tftp
               mountPath: /tftp
               readOnly: true
+            # Writable working directory for the rendered dnsmasq
+            # config, the dhcp-hostsfile the Machine informer rewrites,
+            # and dnsmasq's leasefile (internal/bootd.DefaultRunDir) -
+            # required because the container's root filesystem is
+            # read-only. Writable by bootd's non-root uid through the
+            # pod's fsGroup (see securityContext.fsGroup above).
+            - name: run
+              mountPath: /run/bootd
           resources:
             limits:
               cpu: "1"
@@ -176,6 +222,8 @@ spec:
         # see internal/bootd's package doc comment), it serves a clean
         # per-file error, not a startup crash.
         - name: tftp
+          emptyDir: {}
+        - name: run
           emptyDir: {}
         - name: fetch-script
           configMap:
