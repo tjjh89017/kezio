@@ -39,7 +39,7 @@ bin/
 /dist/
 
 # hack/live-image/build.sh populates this with the kezio-agent binary and
-# the ezio source-build inputs (pinned ref + patches, consumed by
+# the ezio source-build inputs (pinned ref, consumed by
 # hooks/live/0400-build-ezio.hook.chroot) at build time (see the script's
 # stage_ezio_build_inputs / build_agent / cleanup_includes functions) -
 # never committed, only the static includes.chroot.static tree is.
