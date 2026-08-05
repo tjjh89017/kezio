@@ -834,9 +834,9 @@ jobs:
             SEEDER_SERVICE_NAME=kezio-ezio-seeder \
             BOOT_SERVER_ADDR=:8090 \
             BOOT_ARTIFACTS_DIR=/boot-artifacts \
-            BOOT_SERVER_URL="http://kezio-boot-server.kezio-system.svc.cluster.local:8090" \
+            BOOT_SERVER_URL="http://${PROVISIONING_BOOTD_IP%%/*}:8090" \
             AGENT_SERVER_ADDR=:8091 \
-            BOOT_AGENT_SERVER_URL="http://kezio-agent-server.kezio-system.svc.cluster.local:8091" \
+            BOOT_AGENT_SERVER_URL="http://${PROVISIONING_BOOTD_IP%%/*}:8091" \
             DEPLOYER=agent
 
           kubectl -n kezio-system create configmap boot-artifacts-fetch-script \
@@ -853,6 +853,76 @@ jobs:
           for d in kezio-image-service kezio-ezio-seeder kezio-opentracker; do
             kubectl rollout status deployment/"${d}" -n kezio-system --timeout=180s
           done
+
+      - name: Forward the boot/agent servers onto the provisioning bridge
+        # kezio-boot-server and kezio-agent-server (both just created
+        # above, BOOT_SERVER_URL/BOOT_AGENT_SERVER_URL already pointing at
+        # this bridge address) are plain ClusterIP Services - reachable
+        # only from inside the cluster network. config/bootserver/
+        # README.md's and config/agentserver/README.md's own "Make the
+        # Service reachable from the boot network" steps call this out as
+        # something every real deployment still has to patch in (NodePort,
+        # LoadBalancer, hostNetwork, or a reverse proxy); this e2e lane
+        # was shipping neither, so the target VM - which lives on the raw
+        # kezio-prov0 bridge with no cluster DNS and no route to a
+        # ClusterIP - could reach neither the boot config server (so GRUB
+        # never actually fetched a kernel to boot) nor the agent
+        # registration server (so a live-booted kezio-agent would 404
+        # forever - see 439f7a7's commit message for that half of the
+        # bug). kezio-bootd solves the equivalent problem for its own
+        # proxyDHCP/TFTP traffic by running as a Multus-attached pod
+        # directly on this bridge (see config/bootd/
+        # networkattachmentdefinition.example.yaml's "Why Multus, not
+        # hostNetwork" section) - not reused here because kezio-system is
+        # labeled pod-security.kubernetes.io/enforce=restricted (see
+        # "Deploy CRDs and the controller-manager" above), which forbids
+        # hostPort outright, and because attaching the whole
+        # controller-manager Pod (leader election, the mutating/
+        # validating webhooks, every other controller) onto an isolated
+        # test L2 segment is a much bigger blast radius than this narrow
+        # reachability gap needs.
+        #
+        # Plain host-level TCP forwarding instead: the runner *is* the
+        # bridge's host network namespace (the "Create the provisioning
+        # bridge" step above ran `ip addr add` directly on the runner,
+        # not inside any container), so it already sits on the same
+        # broadcast domain as the target VM's provisioning NIC and can
+        # reach each Service's ClusterIP over the cluster's own pod
+        # network. socat listens on that shared bridge address
+        # (${PROVISIONING_BOOTD_IP%%/*}, the same address kezio-bootd
+        # already advertises as its own TFTP next-server) and relays to
+        # each Service's ClusterIP rather than a specific Pod IP, so a
+        # Pod restart does not stop the forward from working - the same
+        # property kube-proxy's own iptables rules would give a Pod
+        # reaching the Service normally.
+        run: |
+          set -euo pipefail
+          command -v socat >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq socat)
+
+          bridge_ip="${PROVISIONING_BOOTD_IP%%/*}"
+          boot_clusterip="$(kubectl -n kezio-system get svc kezio-boot-server -o jsonpath='{.spec.clusterIP}')"
+          agent_clusterip="$(kubectl -n kezio-system get svc kezio-agent-server -o jsonpath='{.spec.clusterIP}')"
+
+          # nohup + disown: these must keep running for the rest of the
+          # job (through however long the VM takes to net-boot and
+          # register), well past this step's own shell exiting - the same
+          # backgrounding this workflow already relies on for the
+          # image-service port-forward below, except that one is torn
+          # down right after its one use and these are not, since every
+          # later step depends on them staying up.
+          nohup socat TCP-LISTEN:8090,bind="${bridge_ip}",fork,reuseaddr "TCP:${boot_clusterip}:8090" \
+            >/tmp/socat-boot-server.log 2>&1 &
+          disown
+          nohup socat TCP-LISTEN:8091,bind="${bridge_ip}",fork,reuseaddr "TCP:${agent_clusterip}:8091" \
+            >/tmp/socat-agent-server.log 2>&1 &
+          disown
+
+          sleep 1
+          if ! curl -sf -o /dev/null "http://${bridge_ip}:8090/boot/artifacts/manifest.json"; then
+            echo "::error::boot config server not reachable at ${bridge_ip}:8090 through the socat forward" >&2
+            cat /tmp/socat-boot-server.log >&2 || true
+            exit 1
+          fi
 
       - name: Deploy kezio-bootd on the provisioning bridge
         env:

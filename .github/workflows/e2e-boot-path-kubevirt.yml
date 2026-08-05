@@ -374,9 +374,9 @@ jobs:
           kubectl -n kezio-system set env deployment/kezio-controller-manager \
             BOOT_SERVER_ADDR=:8090 \
             BOOT_ARTIFACTS_DIR=/boot-artifacts \
-            BOOT_SERVER_URL="http://kezio-boot-server.kezio-system.svc.cluster.local:8090" \
+            BOOT_SERVER_URL="http://${PROVISIONING_BOOTD_IP%%/*}:8090" \
             AGENT_SERVER_ADDR=:8091 \
-            BOOT_AGENT_SERVER_URL="http://kezio-agent-server.kezio-system.svc.cluster.local:8091" \
+            BOOT_AGENT_SERVER_URL="http://${PROVISIONING_BOOTD_IP%%/*}:8091" \
             DEPLOYER=agent
           # config/e2e-boot-path deliberately does not wire the
           # fetch-boot-artifacts initContainer into its own
@@ -398,6 +398,35 @@ jobs:
               -c fetch-boot-artifacts "BOOT_ARTIFACTS_VERSION=${BOOT_ARTIFACTS_VERSION}"
           fi
           kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
+
+      - name: Forward the boot/agent servers onto the provisioning bridge
+        # Same gap, same fix as .github/workflows/e2e-kubevirt-
+        # reusable.yml's step of the same name - see that step's own
+        # comment for the full reasoning (ClusterIP-only Services, no
+        # cluster DNS on the raw kezio-prov0 bridge, restricted Pod
+        # Security ruling out hostPort, and why this reuses plain
+        # host-level socat forwarding rather than a Multus attachment).
+        run: |
+          set -euo pipefail
+          command -v socat >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq socat)
+
+          bridge_ip="${PROVISIONING_BOOTD_IP%%/*}"
+          boot_clusterip="$(kubectl -n kezio-system get svc kezio-boot-server -o jsonpath='{.spec.clusterIP}')"
+          agent_clusterip="$(kubectl -n kezio-system get svc kezio-agent-server -o jsonpath='{.spec.clusterIP}')"
+
+          nohup socat TCP-LISTEN:8090,bind="${bridge_ip}",fork,reuseaddr "TCP:${boot_clusterip}:8090" \
+            >/tmp/socat-boot-server.log 2>&1 &
+          disown
+          nohup socat TCP-LISTEN:8091,bind="${bridge_ip}",fork,reuseaddr "TCP:${agent_clusterip}:8091" \
+            >/tmp/socat-agent-server.log 2>&1 &
+          disown
+
+          sleep 1
+          if ! curl -sf -o /dev/null "http://${bridge_ip}:8090/boot/artifacts/manifest.json"; then
+            echo "::error::boot config server not reachable at ${bridge_ip}:8090 through the socat forward" >&2
+            cat /tmp/socat-boot-server.log >&2 || true
+            exit 1
+          fi
 
       - name: Deploy kezio-bootd on the provisioning bridge
         env:
