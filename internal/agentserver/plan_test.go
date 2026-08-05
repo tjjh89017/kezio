@@ -388,4 +388,112 @@ func TestBuildDeployPlan_MissingLayoutConfigMapIsAnError(t *testing.T) {
 	}
 }
 
+func TestBuildDeployPlan_ImageRefResolvesToRefNamespaceNotMachineNamespace(t *testing.T) {
+	storeRoot, hash := writeFixtureContent(t)
+
+	partitions := []keziov1alpha1.ImagePartitionStatus{
+		{Number: 1, Role: keziov1alpha1.PartitionRoleESP, FSType: "vfat", InfoHash: hash.String()},
+	}
+	image, cm := readyImage("os-image", `{"partitiontable":{"label":"gpt"}}`, partitions)
+	image.Namespace = "images-ns"
+	cm.Namespace = "images-ns"
+
+	machine := &keziov1alpha1.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-01", Namespace: "default"},
+		Spec: keziov1alpha1.MachineSpec{
+			ImageRef: &keziov1alpha1.NameRef{Name: "os-image", Namespace: "images-ns"},
+		},
+		Status: keziov1alpha1.MachineStatus{
+			State: keziov1alpha1.MachineStateProvisioning,
+			Provisioning: &keziov1alpha1.MachineProvisioningStatus{
+				Image: &keziov1alpha1.MachineProvisionedImage{
+					ImageRef:   keziov1alpha1.NameRef{Name: "os-image", Namespace: "images-ns"},
+					TargetDisk: "/dev/nvme0n1",
+				},
+			},
+		},
+	}
+
+	c := newPlanTestClient(t, image, cm, machine)
+	cfg := Config{StoreRoot: storeRoot, TrackerURL: testTrackerURL}
+
+	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
+	if err != nil {
+		t.Fatalf("buildDeployPlan: %v", err)
+	}
+	if plan == nil {
+		t.Fatal("buildDeployPlan returned a nil plan; want a ready plan built from the ref's namespace (images-ns), not machine.Namespace (default)")
+	}
+	if plan.OS == nil {
+		t.Fatal("plan.OS is nil")
+	}
+	if plan.OS.Disk != "/dev/nvme0n1" {
+		t.Errorf("OS.Disk = %q, want /dev/nvme0n1", plan.OS.Disk)
+	}
+	if len(plan.OS.Partitions) != 1 {
+		t.Fatalf("len(OS.Partitions) = %d, want 1", len(plan.OS.Partitions))
+	}
+}
+
+func TestBuildDeployPlan_MissingStoreContentForRecordedInfoHashIsAnError(t *testing.T) {
+	// storeRoot is a fresh, empty temp dir: the InfoHash below is
+	// well-formed but its content directory was never written, so
+	// buildPartitionTorrent's LoadContentDirTorrentInfo call must fail.
+	storeRoot := t.TempDir()
+	_, hash := writeFixtureContent(t) // only used to mint a well-formed InfoHash
+
+	partitions := []keziov1alpha1.ImagePartitionStatus{
+		{Number: 1, Role: keziov1alpha1.PartitionRoleESP, FSType: "vfat", InfoHash: hash.String()},
+	}
+	image, cm := readyImage("os-image", `{"partitiontable":{"label":"gpt"}}`, partitions)
+
+	machine := &keziov1alpha1.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-01", Namespace: "default"},
+		Spec:       keziov1alpha1.MachineSpec{ImageRef: &keziov1alpha1.NameRef{Name: "os-image"}},
+		Status: keziov1alpha1.MachineStatus{
+			State: keziov1alpha1.MachineStateProvisioning,
+			Provisioning: &keziov1alpha1.MachineProvisioningStatus{
+				Image: &keziov1alpha1.MachineProvisionedImage{
+					ImageRef:   keziov1alpha1.NameRef{Name: "os-image"},
+					TargetDisk: "/dev/nvme0n1",
+				},
+			},
+		},
+	}
+
+	c := newPlanTestClient(t, image, cm, machine)
+	cfg := Config{StoreRoot: storeRoot, TrackerURL: testTrackerURL}
+
+	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
+	if err == nil {
+		t.Fatal("buildDeployPlan: want an error for a recorded InfoHash whose content was never written to the store")
+	}
+	if plan != nil {
+		t.Fatalf("plan = %+v, want nil alongside the error", plan)
+	}
+}
+
+func TestBuildDeployPlan_NoOSImageOrDataImagesReturnsNilPlan(t *testing.T) {
+	storeRoot := t.TempDir()
+
+	machine := &keziov1alpha1.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-01", Namespace: "default"},
+		Status: keziov1alpha1.MachineStatus{
+			State:        keziov1alpha1.MachineStateProvisioning,
+			Provisioning: &keziov1alpha1.MachineProvisioningStatus{},
+		},
+	}
+
+	c := newPlanTestClient(t, machine)
+	cfg := Config{StoreRoot: storeRoot, TrackerURL: testTrackerURL}
+
+	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
+	if err != nil {
+		t.Fatalf("buildDeployPlan: %v", err)
+	}
+	if plan != nil {
+		t.Fatalf("plan = %+v, want nil (no OS image, no dataImages)", plan)
+	}
+}
+
 func int32Ptr(v int32) *int32 { return &v }
