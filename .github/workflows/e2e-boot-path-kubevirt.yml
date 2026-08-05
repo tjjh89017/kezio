@@ -266,9 +266,10 @@ jobs:
       - name: Install virtctl
         run: |
           set -euo pipefail
-          curl -sfL -o /usr/local/bin/virtctl \
+          curl -sfL -o /tmp/virtctl \
             "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/virtctl-${KUBEVIRT_VERSION}-linux-amd64"
-          chmod +x /usr/local/bin/virtctl
+          sudo install -m 0755 /tmp/virtctl /usr/local/bin/virtctl
+          rm -f /tmp/virtctl
 
       - name: Install CDI
         run: |
