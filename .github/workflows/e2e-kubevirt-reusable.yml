@@ -666,22 +666,30 @@ jobs:
           kubectl apply -f "https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_VERSION}/cdi-cr.yaml"
           kubectl wait cdi cdi --for=condition=Available --timeout=300s
 
+      - name: Point host CNI paths at k3s's own directories
+        # k3s's kubelet reads CNI config/binaries from
+        # /var/lib/rancher/k3s/agent/etc/cni/net.d and
+        # /var/lib/rancher/k3s/data/cni, not the stock /etc/cni/net.d and
+        # /opt/cni/bin that multus-daemonset-thick.yml mounts from the
+        # host (https://docs.k3s.io/networking/multus-ipams,
+        # k3s-io/k3s#10869) - without this, Multus writes its config
+        # where k3s's kubelet never looks, so the CNI ADD for any
+        # secondary attachment silently never runs (this is what actually
+        # broke workflow runs 30999047426 and 31001958670: the
+        # virt-launcher pod's k8s.v1.cni.cncf.io/network-status annotation
+        # never appeared, meaning Multus never even attempted the ADD -
+        # bumping the Multus version, tried in both those runs, could not
+        # have fixed it). Symlinking before Multus is installed avoids
+        # Kubernetes auto-creating real directories at the missing
+        # hostPath targets.
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /etc/cni /opt/cni
+          sudo rm -rf /etc/cni/net.d /opt/cni/bin
+          sudo ln -s /var/lib/rancher/k3s/agent/etc/cni/net.d /etc/cni/net.d
+          sudo ln -s /var/lib/rancher/k3s/data/cni /opt/cni/bin
+
       - name: Install Multus
-        # A prior run on Multus v4.1.0 + KubeVirt v1.4.0 (workflow run
-        # 30999047426) failed a bridge-binding VMI with "failed to
-        # configure vmi network: pod link (podXXXX) is missing" - virt-
-        # handler's netpod discovery (pkg/network/setup/netpod/discover.go)
-        # found no pod-side interface for the NAD, consistent with a CNI
-        # ADD/cache race in the multus-daemon thick plugin rather than a
-        # NAD/config problem (the plain "bridge" CNI config below is
-        # unchanged and still resolves against multus-daemonset-thick.yml,
-        # same manifest shape). Multus v4.2.0's release notes call out
-        # "handles pod not found during CNI ADD gracefully" and "avoids
-        # stale cache issues with live pod lookups"; v4.3.0 adds "fix
-        # thick plugin STATUS and GC handling for plugin-level commands"
-        # (k8snetworkplumbingwg/multus-cni PR #1490). Bumping past v4.1.0
-        # to v4.3.0 carries those fixes; no NAD or manifest-shape change
-        # was needed.
         run: |
           set -euo pipefail
           kubectl apply -f "https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/${MULTUS_VERSION}/deployments/multus-daemonset-thick.yml"

@@ -493,11 +493,23 @@ jobs:
           kubectl apply -f "https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_VERSION}/cdi-cr.yaml"
           kubectl wait cdi cdi --for=condition=Available --timeout=300s
 
+      - name: Point host CNI paths at k3s's own directories
+        # See e2e-kubevirt-reusable.yml's step of the same name for why:
+        # k3s's kubelet reads CNI config/binaries from
+        # /var/lib/rancher/k3s/agent/etc/cni/net.d and
+        # /var/lib/rancher/k3s/data/cni, not the stock /etc/cni/net.d and
+        # /opt/cni/bin that multus-daemonset-thick.yml mounts from the
+        # host (https://docs.k3s.io/networking/multus-ipams,
+        # k3s-io/k3s#10869); this is what actually broke workflow runs
+        # 30999047426 and 31001958670, not the Multus version.
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /etc/cni /opt/cni
+          sudo rm -rf /etc/cni/net.d /opt/cni/bin
+          sudo ln -s /var/lib/rancher/k3s/agent/etc/cni/net.d /etc/cni/net.d
+          sudo ln -s /var/lib/rancher/k3s/data/cni /opt/cni/bin
+
       - name: Install Multus
-        # See e2e-kubevirt-reusable.yml's "Install Multus" step for the
-        # pod-link-missing failure this version bump addresses (workflow
-        # run 30999047426, Multus v4.1.0 + KubeVirt v1.4.0). Same fixes
-        # apply here: no NAD or manifest-shape change was needed.
         run: |
           set -euo pipefail
           kubectl apply -f "https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/${MULTUS_VERSION}/deployments/multus-daemonset-thick.yml"
