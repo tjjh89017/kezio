@@ -24,11 +24,15 @@ import (
 	"github.com/insomniacslk/dhcp/iana"
 )
 
-// pxeVendorClass is the option 60 (Vendor Class Identifier) value every
-// PXE-capable UEFI firmware sends. bootd only ever answers a request
-// that carries it - anything else is not a PXE boot attempt at all
-// (an ordinary DHCP client sharing the same broadcast domain, for
-// example), and answering it would be pure noise at best.
+// pxeVendorClass is the option 60 (Vendor Class Identifier) prefix a
+// PXE-capable UEFI firmware sends. Real firmware never sends the bare
+// string: it appends its architecture and network-interface identifiers
+// per RFC 4578, for example "PXEClient:Arch:00007:UNDI:003001". bootd
+// therefore matches by prefix (see isPXEBootClass), exactly as it does
+// for the HTTPClient class. A request carrying neither class is not a
+// boot attempt bootd recognizes at all (an ordinary DHCP client sharing
+// the same broadcast domain, for example), and answering it would be
+// pure noise at best.
 const pxeVendorClass = "PXEClient"
 
 // httpClientVendorClass is the option 60 value UEFI firmware sends when
@@ -47,15 +51,29 @@ func isHTTPBootClass(classID string) bool {
 	return classID == httpClientVendorClass || strings.HasPrefix(classID, httpClientVendorClass+":")
 }
 
+// isPXEBootClass reports whether classID (option 60, as read off the
+// wire) marks the request as a PXE boot attempt. Real UEFI firmware
+// sends the RFC 4578 suffixed form ("PXEClient:Arch:...:UNDI:...")
+// rather than the bare string, so this matches by prefix - mirroring
+// isHTTPBootClass - instead of by exact equality, which would reject
+// every legitimate PXE client. See pxeVendorClass's doc comment.
+func isPXEBootClass(classID string) bool {
+	return classID == pxeVendorClass || strings.HasPrefix(classID, pxeVendorClass+":")
+}
+
 // supportedArchs are the RFC 4578 client system architectures
 // (DHCP option 93) this deployment ships a loader for: x86-64 UEFI
-// native and EFI Byte Code, both of which chainload the same
-// shimx64.efi (see DefaultBootFilename). Every other architecture is
-// ignored - not answered, not erred - so a legacy BIOS client or an
+// native, EFI Byte Code, and x86-64 UEFI HTTP Boot, all of which
+// chainload the same shimx64.efi (see DefaultBootFilename). The
+// HTTP-boot arch is listed so an x86-64 firmware advertising it reaches
+// the opt-in HTTP Boot gate (see OutcomeHTTPBootUnconfigured) and is
+// declined for the right reason when HTTP Boot is off, rather than being
+// rejected here as an unsupported architecture. Every other architecture
+// is ignored - not answered, not erred - so a legacy BIOS client or an
 // ARM client on the same segment silently falls through to whatever
 // else might answer it, instead of receiving a boot file that does not
 // exist for its platform.
-var supportedArchs = []iana.Arch{iana.EFI_X86_64, iana.EFI_BC}
+var supportedArchs = []iana.Arch{iana.EFI_X86_64, iana.EFI_BC, iana.EFI_X86_64_HTTP}
 
 // Role names which of the two listeners (see the package doc comment)
 // received a request, since the two ports answer different DHCP
@@ -181,7 +199,7 @@ func BuildResponse(req *dhcpv4.DHCPv4, role Role, srcAddr *net.UDPAddr, cfg Conf
 
 	classID := req.ClassIdentifier()
 	httpBoot := isHTTPBootClass(classID)
-	if classID != pxeVendorClass && !httpBoot {
+	if !isPXEBootClass(classID) && !httpBoot {
 		return nil, nil, OutcomeNotPXE
 	}
 

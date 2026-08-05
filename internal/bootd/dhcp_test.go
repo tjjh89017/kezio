@@ -114,6 +114,35 @@ func TestBuildResponse_AnswersKnownMACSupportedArch(t *testing.T) {
 	}
 }
 
+func TestBuildResponse_SuffixedPXEVendorClassAnswered(t *testing.T) {
+	// Real UEFI firmware never sends the bare "PXEClient": it appends its
+	// architecture and network-interface identifiers per RFC 4578. bootd
+	// must match this suffixed form by prefix, exactly as it does for the
+	// HTTPClient class - matching it by exact string equality would reject
+	// every legitimate PXE client with OutcomeNotPXE and no offer would be
+	// sent.
+	const suffixedClass = "PXEClient:Arch:00007:UNDI:003001"
+	req := pxeDiscover(t, knownMAC, iana.EFI_X86_64,
+		dhcpv4.WithOption(dhcpv4.OptClassIdentifier(suffixedClass)))
+
+	resp, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, testConfig(), knownGate)
+	if outcome != OutcomeAnswered {
+		t.Fatalf("outcome = %v, want %v (suffixed PXE vendor class must be answered)", outcome, OutcomeAnswered)
+	}
+	if resp == nil {
+		t.Fatal("resp is nil")
+	}
+	// Option 60 echoes the bare "PXEClient", and the boot filename is the
+	// TFTP shim - the suffix on the request must not change either.
+	opt60 := resp.GetOneOption(dhcpv4.OptionClassIdentifier)
+	if string(opt60) != pxeVendorClass {
+		t.Errorf("option 60 bytes = %q, want %q", string(opt60), pxeVendorClass)
+	}
+	if resp.BootFileName != DefaultBootFilename {
+		t.Errorf("BootFileName = %q, want %q (TFTP shim)", resp.BootFileName, DefaultBootFilename)
+	}
+}
+
 func TestBuildResponse_RelayAware(t *testing.T) {
 	giaddr := net.IPv4(192, 168, 1, 1)
 	req := pxeDiscover(t, knownMAC, iana.EFI_X86_64, dhcpv4.WithGatewayIP(giaddr))
@@ -282,6 +311,41 @@ func TestBuildResponse_HTTPClientUnsupportedArchIgnored(t *testing.T) {
 	_, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, cfg, knownGate)
 	if outcome != OutcomeUnsupportedArch {
 		t.Errorf("outcome = %v, want %v", outcome, OutcomeUnsupportedArch)
+	}
+}
+
+func TestBuildResponse_HTTPClientArch16UnconfiguredDeclinesForRightReason(t *testing.T) {
+	// x86-64 HTTP Boot firmware advertises client architecture 16, not 7.
+	// That arch must be recognized as supported so an HTTPClient request
+	// reaches the opt-in HTTP Boot gate: with HTTPBootURL unset it is
+	// declined as OutcomeHTTPBootUnconfigured (the right reason), not
+	// rejected earlier as OutcomeUnsupportedArch (the wrong reason).
+	req := httpBootDiscover(t, knownMAC, iana.EFI_X86_64_HTTP, httpClientVendorClass)
+	// testConfig() leaves HTTPBootURL unset.
+	_, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, testConfig(), knownGate)
+	if outcome != OutcomeHTTPBootUnconfigured {
+		t.Errorf("outcome = %v, want %v", outcome, OutcomeHTTPBootUnconfigured)
+	}
+}
+
+func TestBuildResponse_HTTPClientArch16WithURLAnswers(t *testing.T) {
+	req := httpBootDiscover(t, knownMAC, iana.EFI_X86_64_HTTP, "HTTPClient:Arch:00016")
+	cfg := testConfig()
+	cfg.HTTPBootURL = testHTTPBootURL
+
+	resp, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, cfg, knownGate)
+	if outcome != OutcomeAnswered {
+		t.Fatalf("outcome = %v, want %v", outcome, OutcomeAnswered)
+	}
+	if resp == nil {
+		t.Fatal("resp is nil")
+	}
+	if resp.BootFileName != testHTTPBootURL {
+		t.Errorf("BootFileName = %q, want %q", resp.BootFileName, testHTTPBootURL)
+	}
+	opt60 := resp.GetOneOption(dhcpv4.OptionClassIdentifier)
+	if string(opt60) != httpClientVendorClass {
+		t.Errorf("option 60 bytes = %q, want %q", string(opt60), httpClientVendorClass)
 	}
 }
 
