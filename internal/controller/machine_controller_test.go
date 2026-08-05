@@ -569,6 +569,239 @@ var _ = Describe("Machine Controller", func() {
 			Expect(result.Status.Provisioning.Image.TargetDisk).To(Equal("/dev/vda"))
 		})
 	})
+
+	Context("managing power state", func() {
+		// newPowerOnlyMachineSpec builds a Machine spec with no ImageRef
+		// and no DataImages, so needsProvisioning is always false and the
+		// machine reaches Available directly, letting reconcilePower run
+		// on the very first Available reconcile instead of being
+		// preceded by a deployment.
+		newPowerOnlyMachineSpec := func(name string, online bool) keziov1alpha1.MachineSpec {
+			spec := newTestMachineSpec(name)
+			spec.Online = &online
+			return spec
+		}
+
+		It("calls PowerOn and records status.poweredOn=true when spec.online is true", func() {
+			const resourceName = "power-on-machine"
+			namespace := "default"
+			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+			nn := types.NamespacedName{Namespace: namespace, Name: resourceName}
+
+			machine := &keziov1alpha1.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec:       newPowerOnlyMachineSpec(resourceName, true),
+			}
+			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+			DeferCleanup(func() {
+				m := &keziov1alpha1.Machine{}
+				if err := k8sClient.Get(ctx, key, m); err == nil {
+					Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+				}
+			})
+
+			var powerOnCalls, powerOffCalls int
+			factory := deployer.NewFactory()
+			factory.Fail = func(m types.NamespacedName, phase deployer.Phase) string {
+				if m == nn {
+					switch phase {
+					case deployer.PhasePowerOn:
+						powerOnCalls++
+					case deployer.PhasePowerOff:
+						powerOffCalls++
+					}
+				}
+				return ""
+			}
+
+			r := &MachineReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				DeployerFactory: factory.New,
+			}
+
+			By("reconciling to Available, where reconcilePower matches status.poweredOn to spec.online")
+			result, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateAvailable && m.Status.PoweredOn != nil
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Status.PoweredOn).NotTo(BeNil())
+			Expect(*result.Status.PoweredOn).To(BeTrue())
+			Expect(powerOnCalls).To(Equal(1))
+			Expect(powerOffCalls).To(BeZero())
+
+			By("not calling PowerOn again once status.poweredOn already matches spec.online")
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			steady := &keziov1alpha1.Machine{}
+			Expect(k8sClient.Get(ctx, key, steady)).To(Succeed())
+			Expect(*steady.Status.PoweredOn).To(BeTrue())
+			Expect(powerOnCalls).To(Equal(1))
+		})
+
+		It("calls PowerOff and records status.poweredOn=false when spec.online is false", func() {
+			const resourceName = "power-off-machine"
+			namespace := "default"
+			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+			nn := types.NamespacedName{Namespace: namespace, Name: resourceName}
+
+			machine := &keziov1alpha1.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec:       newPowerOnlyMachineSpec(resourceName, false),
+			}
+			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+			DeferCleanup(func() {
+				m := &keziov1alpha1.Machine{}
+				if err := k8sClient.Get(ctx, key, m); err == nil {
+					Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+				}
+			})
+
+			var powerOffCalls int
+			factory := deployer.NewFactory()
+			factory.Fail = func(m types.NamespacedName, phase deployer.Phase) string {
+				if m == nn && phase == deployer.PhasePowerOff {
+					powerOffCalls++
+				}
+				return ""
+			}
+
+			r := &MachineReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				DeployerFactory: factory.New,
+			}
+
+			By("reconciling to Available, where reconcilePower matches status.poweredOn to spec.online")
+			result, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateAvailable && m.Status.PoweredOn != nil
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Status.PoweredOn).NotTo(BeNil())
+			Expect(*result.Status.PoweredOn).To(BeFalse())
+			Expect(powerOffCalls).To(Equal(1))
+		})
+
+		It("requeues at backoffBaseDelay without touching state or errorCount when the power call fails", func() {
+			const resourceName = "power-error-machine"
+			namespace := "default"
+			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+			nn := types.NamespacedName{Namespace: namespace, Name: resourceName}
+
+			machine := &keziov1alpha1.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec:       newPowerOnlyMachineSpec(resourceName, true),
+			}
+			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+			DeferCleanup(func() {
+				m := &keziov1alpha1.Machine{}
+				if err := k8sClient.Get(ctx, key, m); err == nil {
+					Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+				}
+			})
+
+			factory := deployer.NewFactory()
+			factory.Fail = func(m types.NamespacedName, phase deployer.Phase) string {
+				if m == nn && phase == deployer.PhasePowerOn {
+					return "injected power-on failure"
+				}
+				return ""
+			}
+
+			r := &MachineReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				DeployerFactory: factory.New,
+			}
+
+			By("reconciling to Available, where the injected PowerOn failure blocks reconcilePower")
+			result, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateAvailable
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Status.PoweredOn).To(BeNil())
+
+			By("reconciling once more, which drives reconcilePower and hits the injected failure")
+			powerResult, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(powerResult.RequeueAfter).To(Equal(backoffBaseDelay))
+
+			By("leaving state and errorCount untouched, since a power drift is not a phase failure")
+			afterFailure := &keziov1alpha1.Machine{}
+			Expect(k8sClient.Get(ctx, key, afterFailure)).To(Succeed())
+			Expect(afterFailure.Status.State).To(Equal(keziov1alpha1.MachineStateAvailable))
+			Expect(afterFailure.Status.ErrorCount).To(Equal(int32(0)))
+			Expect(afterFailure.Status.PoweredOn).To(BeNil())
+		})
+	})
+
+	Context("deploying data images only, without an OS image", func() {
+		It("deploys DataImages, leaves status.provisioning.image nil, and powers off after PowerOff AfterDeploy", func() {
+			const resourceName = "data-only-machine"
+			namespace := "default"
+			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+			nn := types.NamespacedName{Namespace: namespace, Name: resourceName}
+
+			dataImage := &keziov1alpha1.Image{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-data-image", Namespace: namespace},
+				Spec: keziov1alpha1.ImageSpec{
+					Source: keziov1alpha1.ImageSource{Format: keziov1alpha1.ImageFormatQCOW2},
+				},
+			}
+			Expect(k8sClient.Create(ctx, dataImage)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, dataImage)).To(Succeed()) })
+
+			spec := newTestMachineSpec(resourceName)
+			spec.DataImages = []keziov1alpha1.MachineDataImage{
+				{ImageRef: keziov1alpha1.NameRef{Name: dataImage.Name}},
+			}
+			spec.AfterDeploy = keziov1alpha1.AfterDeployPowerOff
+			machine := &keziov1alpha1.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec:       spec,
+			}
+			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+			DeferCleanup(func() {
+				m := &keziov1alpha1.Machine{}
+				if err := k8sClient.Get(ctx, key, m); err == nil {
+					Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+				}
+			})
+
+			var powerOffCalls int
+			factory := deployer.NewFactory()
+			factory.Fail = func(m types.NamespacedName, phase deployer.Phase) string {
+				if m == nn && phase == deployer.PhasePowerOff {
+					powerOffCalls++
+				}
+				return ""
+			}
+
+			r := &MachineReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				DeployerFactory: factory.New,
+			}
+
+			By("reconciling through Provisioning to Provisioned")
+			result, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateProvisioned
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Status.State).To(Equal(keziov1alpha1.MachineStateProvisioned))
+
+			By("recording DataImages and no OS image in status.provisioning")
+			Expect(result.Status.Provisioning).NotTo(BeNil())
+			Expect(result.Status.Provisioning.Image).To(BeNil())
+			Expect(result.Status.Provisioning.DataImages).To(HaveLen(1))
+			Expect(result.Status.Provisioning.DataImages[0].ImageRef).To(Equal(spec.DataImages[0].ImageRef))
+
+			By("powering off after the data-only deploy, per AfterDeployPowerOff")
+			Expect(result.Status.PoweredOn).NotTo(BeNil())
+			Expect(*result.Status.PoweredOn).To(BeFalse())
+			Expect(powerOffCalls).To(Equal(1))
+		})
+	})
 })
 
 // setProvisioningProgressReasonForTest sets key's
