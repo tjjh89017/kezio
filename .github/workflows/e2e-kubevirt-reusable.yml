@@ -933,14 +933,39 @@ jobs:
           cd ../..
           kubectl apply -k config/bootd
           kubectl -n kezio-system set env deployment/kezio-bootd BOOTD_SERVER_IP="${PROVISIONING_BOOTD_IP%%/*}"
-          kubectl -n kezio-system patch deployment/kezio-bootd --type=json -p='[
-            {"op":"add","path":"/spec/template/metadata/annotations","value":{"k8s.v1.cni.cncf.io/networks":"kezio-boot-network"}}
-          ]'
+          # Strategic-merge (kubectl patch's default type for a built-in
+          # object like Deployment), not --type=json: a JSON Patch "add"
+          # on .../metadata/annotations replaces the whole annotations
+          # map wholesale, so any later change to this same path (a
+          # rerun, a future patch adding a second annotation) would
+          # silently drop this one. A strategic-merge patch merges
+          # map[string]string fields (annotations included) by key
+          # instead, so this attachment survives regardless of what else
+          # ever touches the pod template's annotations.
+          kubectl -n kezio-system patch deployment/kezio-bootd --type=strategic -p='{
+            "spec":{"template":{"metadata":{"annotations":{"k8s.v1.cni.cncf.io/networks":"kezio-boot-network"}}}}
+          }'
           if [ -n "${BOOT_ARTIFACTS_VERSION}" ]; then
             kubectl -n kezio-system set env deployment/kezio-bootd \
               -c fetch-boot-artifacts "BOOT_ARTIFACTS_VERSION=${BOOT_ARTIFACTS_VERSION}"
           fi
           kubectl rollout status deployment/kezio-bootd -n kezio-system --timeout=180s
+
+          # Fail fast here, not 20 minutes later at a PXE-E18 timeout on
+          # the VM console: confirm the live bootd pod actually has the
+          # Multus secondary interface Multus's own
+          # k8s.v1.cni.cncf.io/network-status annotation reports back
+          # (set by Multus after CNI ADD succeeds - the annotation this
+          # step just requested is only bootd's *request*, not proof the
+          # attachment happened), rather than only trusting the
+          # deployment's own template annotation.
+          bootd_pod="$(kubectl -n kezio-system get pods -l app.kubernetes.io/component=bootd -o jsonpath='{.items[0].metadata.name}')"
+          network_status="$(kubectl -n kezio-system get pod "${bootd_pod}" \
+            -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}')"
+          if ! grep -q 'kezio-boot-network' <<<"${network_status}"; then
+            echo "::error::bootd pod ${bootd_pod} has no kezio-boot-network attachment in its network-status; got: ${network_status}" >&2
+            exit 1
+          fi
 
       - name: Ingest the marker-customized Ubuntu image through kezioctl
         run: |
@@ -1662,6 +1687,21 @@ jobs:
             echo "--- ${p} securityContext ---"
             kubectl -n kezio-system get "${p}" \
               -o jsonpath='{.spec.securityContext}{"\n"}{range .spec.initContainers[*]}{.name}{": "}{.securityContext}{"\n"}{end}'
+            # Multus attachment, dumped explicitly: the requested
+            # k8s.v1.cni.cncf.io/networks annotation only proves what was
+            # asked for, not what actually attached, and neither is
+            # visible in the plain pod logs above - a Multus CNI ADD
+            # failure (for example, the NetworkAttachmentDefinition
+            # missing, or the host bridge not existing yet) leaves bootd
+            # itself running normally on eth0 alone while every PXE
+            # request on the boot segment silently times out, with
+            # nothing in bootd's own logs to explain why.
+            echo "--- ${p} k8s.v1.cni.cncf.io/networks annotation (requested) ---"
+            kubectl -n kezio-system get "${p}" \
+              -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/networks}{"\n"}'
+            echo "--- ${p} k8s.v1.cni.cncf.io/network-status annotation (actual, set by Multus) ---"
+            kubectl -n kezio-system get "${p}" \
+              -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}{"\n"}'
             echo "--- ${p} fetch-boot-artifacts logs (--previous) ---"
             kubectl -n kezio-system logs "${p}" -c fetch-boot-artifacts --previous --tail=200 || \
               kubectl -n kezio-system logs "${p}" -c fetch-boot-artifacts --tail=200 || true
