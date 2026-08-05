@@ -1237,25 +1237,49 @@ jobs:
 
           redfish_body=""
           last_err=""
+          last_phase=""
           for attempt in $(seq 1 5); do
-            # A fresh pod name per attempt: kubectl run --rm deletes the
-            # pod once its attached session ends, but that deletion can
-            # still be in flight when a failed attempt returns, and
-            # reusing one fixed name would then race an "already exists"
-            # error on the next attempt instead of a clean retry.
-            if redfish_body="$(kubectl run "kezio-e2e-redfish-check-${attempt}" -n kezio-system \
-              --rm -i --restart=Never --image=curlimages/curl:8.21.0 --quiet \
-              --overrides="${redfish_overrides}" 2>&1)"; then
+            # A fresh pod name per attempt: reusing one fixed name would
+            # race a leftover pod from a failed attempt instead of a
+            # clean retry.
+            #
+            # Output is read from `kubectl logs`, not from an attached
+            # stream: `kubectl run -i --rm --quiet` can exit 0 with empty
+            # captured stdout if the pod's curl finishes before the
+            # attach stream is established, which would otherwise be
+            # misread as a successful-but-empty response. Running
+            # detached (--attach=false) and waiting for the pod phase
+            # before reading its logs avoids that race entirely.
+            pod_name="kezio-e2e-redfish-check-${attempt}"
+            phase=""
+            body=""
+            if kubectl run "${pod_name}" -n kezio-system \
+              --attach=false --restart=Never --image=curlimages/curl:8.21.0 --quiet \
+              --overrides="${redfish_overrides}" 2>&1; then
+              if kubectl wait --for=jsonpath='{.status.phase}'=Succeeded \
+                "pod/${pod_name}" -n kezio-system --timeout=60s >/dev/null 2>&1; then
+                phase="Succeeded"
+              else
+                phase="$(kubectl get "pod/${pod_name}" -n kezio-system -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+              fi
+              body="$(kubectl logs "pod/${pod_name}" -n kezio-system 2>&1 || true)"
+              kubectl delete "pod/${pod_name}" -n kezio-system --ignore-not-found >/dev/null 2>&1
+            else
+              phase="PodCreateFailed"
+            fi
+            last_phase="${phase}"
+            if [ "${phase}" = "Succeeded" ] && [ -n "${body}" ]; then
+              redfish_body="${body}"
               last_err=""
               break
             fi
-            last_err="${redfish_body}"
+            last_err="${body}"
             redfish_body=""
-            echo "attempt ${attempt}/5: curl against the Redfish endpoint failed, retrying in 5s: ${last_err}"
+            echo "attempt ${attempt}/5: curl against the Redfish endpoint failed (pod phase: ${phase}), retrying in 5s: ${last_err}"
             sleep 5
           done
           if [ -z "${redfish_body}" ]; then
-            echo "::error::Redfish endpoint still unreachable after 5 attempts: ${last_err}" >&2
+            echo "::error::Redfish endpoint still unreachable after 5 attempts (last pod phase: ${last_phase}): ${last_err}" >&2
             exit 1
           fi
           echo "Redfish ComputerSystem response: ${redfish_body}"
