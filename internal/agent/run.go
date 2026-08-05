@@ -26,13 +26,13 @@ import (
 	"github.com/tjjh89017/kezio/internal/agentapi"
 )
 
-// registerRetryInterval is how long Run waits between failed
-// registration attempts. Registration can fail for reasons that clear up
-// on their own shortly after boot (the NIC has not finished DHCP yet,
-// the controller is momentarily unreachable), so Run keeps retrying
-// rather than giving up - there is nothing else useful for the live
-// environment to do instead.
-const registerRetryInterval = 5 * time.Second
+// DefaultRegisterRetryInterval is how long Run waits between failed
+// registration attempts, when Config.RegisterRetryInterval is zero.
+// Registration can fail for reasons that clear up on their own shortly
+// after boot (the NIC has not finished DHCP yet, the controller is
+// momentarily unreachable), so Run keeps retrying rather than giving up
+// - there is nothing else useful for the live environment to do instead.
+const DefaultRegisterRetryInterval = 5 * time.Second
 
 // DefaultPollInterval is how often Run polls GET .../next once
 // registered, when Config.PollInterval is zero.
@@ -49,6 +49,10 @@ type Config struct {
 	// PollInterval is how often Run polls GET .../next after
 	// registering. Zero means DefaultPollInterval.
 	PollInterval time.Duration
+	// RegisterRetryInterval is how long registerWithRetry waits between
+	// failed registration attempts. Zero means
+	// DefaultRegisterRetryInterval.
+	RegisterRetryInterval time.Duration
 	// Logf receives progress and error messages in fmt.Printf style.
 	// Nil discards them.
 	Logf func(format string, args ...any)
@@ -104,21 +108,26 @@ func Run(ctx context.Context, cfg Config) error {
 }
 
 // registerWithRetry calls Client.Register until it succeeds or ctx is
-// cancelled. See registerRetryInterval's doc comment for why retrying
-// indefinitely is the right behavior here, rather than giving up after a
-// fixed number of attempts.
+// cancelled. See DefaultRegisterRetryInterval's doc comment for why
+// retrying indefinitely is the right behavior here, rather than giving up
+// after a fixed number of attempts.
 func registerWithRetry(ctx context.Context, client *Client, cfg Config, hardware *keziov1alpha1.MachineHardwareStatus) (RegisterResult, error) {
+	retryInterval := cfg.RegisterRetryInterval
+	if retryInterval <= 0 {
+		retryInterval = DefaultRegisterRetryInterval
+	}
+
 	for {
 		result, err := client.Register(ctx, cfg.Cmdline.Token, hardware)
 		if err == nil {
 			return result, nil
 		}
-		cfg.log("registration failed, retrying in %s: %v", registerRetryInterval, err)
+		cfg.log("registration failed, retrying in %s: %v", retryInterval, err)
 
 		select {
 		case <-ctx.Done():
 			return RegisterResult{}, ctx.Err()
-		case <-time.After(registerRetryInterval):
+		case <-time.After(retryInterval):
 		}
 	}
 }
