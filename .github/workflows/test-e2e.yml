@@ -186,17 +186,6 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Reclaim runner disk space
-        # ubuntu-latest ships several large SDK/toolchain preinstalls this
-        # job never uses (Android, .NET, GHC); removing them is a common,
-        # well-known way to buy back the headroom a multi-GiB-of-images
-        # stage like this one actually needs, without resorting to a
-        # bigger (paid) runner class.
-        run: |
-          set -euo pipefail
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
-
       - name: Resource check (fail fast if the runner is under-resourced)
         run: |
           set -euo pipefail

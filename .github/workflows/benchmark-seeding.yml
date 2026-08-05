@@ -89,16 +89,6 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Reclaim runner disk space
-        # See test-e2e.yml's image-path job: this benchmark's leecher
-        # Pods write real content to emptyDir volumes on this same disk,
-        # on top of the same four locally built images that job already
-        # needs the space for.
-        run: |
-          set -euo pipefail
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
-
       - name: Resource check (fail fast if the runner is under-resourced)
         run: |
           set -euo pipefail
