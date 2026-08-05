@@ -544,6 +544,79 @@ func TestHandleProgress_RejectionsAreConstantShape(t *testing.T) {
 	}
 }
 
+// TestAgentJourney_RegisterThenNextThenProgress walks the real path an
+// agent takes end to end: register with the boot token, capture the
+// session token register actually mints, then use that same token (never
+// a hardcoded fixture) to call next and progress. This guards the seam
+// the other tests in this file don't: every next/progress test above
+// seeds its Machine with newTestMachineWithSession, which hand-installs
+// bootserver.HashToken(testSessionToken) directly via the fake client and
+// so never exercises mintSessionToken()'s write path at all. A regression
+// that mints and validates session hashes inconsistently would pass every
+// one of those tests yet reject every real agent in the field.
+func TestAgentJourney_RegisterThenNextThenProgress(t *testing.T) {
+	now := time.Now()
+	machine := newTestMachine(now)
+	s, c := newTestServer(t, now, machine)
+	handler := s.Handler()
+
+	// Step 1: register with the boot token and capture the session token
+	// the handler actually mints - not testSessionToken.
+	regRec := doRegister(t, handler, testToken, agentapi.RegisterRequest{Hardware: sampleInventory()})
+	if regRec.Code != http.StatusOK {
+		t.Fatalf("register: status = %d, body = %s, want 200", regRec.Code, regRec.Body.String())
+	}
+	var regResp agentapi.RegisterResponse
+	if err := json.Unmarshal(regRec.Body.Bytes(), &regResp); err != nil {
+		t.Fatalf("decoding register response: %v", err)
+	}
+	if regResp.SessionToken == "" {
+		t.Fatal("register: SessionToken is empty; want a fresh session credential")
+	}
+
+	// Step 2: poll next using the register-minted token. The Machine is
+	// still Inspecting (not Provisioning), so a clean 200 ActionWait
+	// proves the token was accepted; only an unexpected 401 would signal
+	// the mint-vs-validate seam is broken.
+	nextRec := doNext(handler, testMachineName, regResp.SessionToken)
+	if nextRec.Code != http.StatusOK {
+		t.Fatalf("next: status = %d, body = %s, want 200 (register-minted session token was rejected)", nextRec.Code, nextRec.Body.String())
+	}
+	var nextResp agentapi.NextResponse
+	if err := json.Unmarshal(nextRec.Body.Bytes(), &nextResp); err != nil {
+		t.Fatalf("decoding next response: %v", err)
+	}
+	if nextResp.Action != agentapi.ActionWait {
+		t.Fatalf("next: Action = %q, want %q", nextResp.Action, agentapi.ActionWait)
+	}
+
+	// Step 3: report progress using the same register-minted token.
+	progRec := doProgress(t, handler, testMachineName, regResp.SessionToken, agentapi.ProgressRequest{
+		Partitions: []agentapi.PartitionProgress{
+			{Disk: "/dev/nvme0n1", Number: 1, Phase: agentapi.PartitionPhaseSeeding, PercentDone: 50},
+		},
+	})
+	if progRec.Code != http.StatusOK {
+		t.Fatalf("progress: status = %d, body = %s, want 200 (register-minted session token was rejected)", progRec.Code, progRec.Body.String())
+	}
+
+	// Step 4: the Machine now carries both the hardware register ingested
+	// and the progress condition recorded via the register-issued
+	// session - proving state survived across all three real handler
+	// calls, chained end to end.
+	var stored keziov1alpha1.Machine
+	if err := c.Get(context.Background(), types.NamespacedName{Name: testMachineName}, &stored); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if stored.Status.Hardware == nil || len(stored.Status.Hardware.Disks) != 1 || stored.Status.Hardware.Disks[0].SerialNumber != "S123" {
+		t.Fatalf("hardware inventory registered earlier in the journey did not survive: %+v", stored.Status.Hardware)
+	}
+	cond := apimeta.FindStatusCondition(stored.Status.Conditions, keziov1alpha1.MachineConditionProvisioningProgress)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Fatalf("ProvisioningProgress condition = %+v, want True (recorded via the register-issued session)", cond)
+	}
+}
+
 func TestHandleNext_RejectionsAreConstantShape(t *testing.T) {
 	now := time.Now()
 
