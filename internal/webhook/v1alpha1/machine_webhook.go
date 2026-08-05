@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"net/url"
 	"reflect"
-	"strconv"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -209,20 +208,24 @@ func validateMachineBMC(machine *keziov1alpha1.Machine) error {
 }
 
 // validateBMCInsecureSkipVerifyAnnotation rejects a
-// AnnotationBMCInsecureSkipVerify value that is not a valid boolean.
-// Only exactly "true" (see the annotation's doc comment) opts a Machine
-// out of TLS verification, and any other value - including absence -
-// already means "verify", so a typo like "yes" or "maybe" would silently
-// fall back to the safe default rather than doing what its author
-// intended. Rejecting it at admission time catches that mistake instead
-// of letting it pass unnoticed.
+// AnnotationBMCInsecureSkipVerify value that is not exactly "true" or
+// "false". Only exactly "true" (see the annotation's doc comment) opts a
+// Machine out of TLS verification, and any other value - including
+// absence - already means "verify"; the runtime that reads this
+// annotation (internal/deployer/agent.go) compares it with a plain "==
+// "true"" string check, not a general boolean parse, so a value like "1"
+// or "TRUE" would be admitted as a valid boolean yet silently fall back to
+// the safe default at runtime rather than doing what its author intended.
+// Rejecting anything but the two exact strings the runtime distinguishes
+// catches that mistake at admission time instead of letting it pass
+// unnoticed.
 func validateBMCInsecureSkipVerifyAnnotation(machine *keziov1alpha1.Machine) error {
 	value, ok := machine.Annotations[keziov1alpha1.AnnotationBMCInsecureSkipVerify]
 	if !ok {
 		return nil
 	}
-	if _, err := strconv.ParseBool(value); err != nil {
-		return fmt.Errorf("annotation %q has value %q, which is not a valid boolean", keziov1alpha1.AnnotationBMCInsecureSkipVerify, value)
+	if value != "true" && value != "false" {
+		return fmt.Errorf("annotation %q has value %q, expected exactly \"true\" or \"false\"", keziov1alpha1.AnnotationBMCInsecureSkipVerify, value)
 	}
 	return nil
 }

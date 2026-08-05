@@ -173,17 +173,25 @@ var _ = Describe("Machine Webhook", func() {
 			Expect(err.Error()).To(ContainSubstring("admin:xxxxx@198.51.100.10"))
 		})
 
-		It("Should admit a valid bmc-insecure-skip-verify annotation value", func() {
+		It("Should admit a bmc-insecure-skip-verify annotation value of \"true\"", func() {
 			obj.Annotations = map[string]string{keziov1alpha1.AnnotationBMCInsecureSkipVerify: "true"}
 			_, err := validator.ValidateCreate(ctx, obj)
 			Expect(err).NotTo(HaveOccurred())
 		})
 
-		It("Should deny an invalid bmc-insecure-skip-verify annotation value", func() {
-			obj.Annotations = map[string]string{keziov1alpha1.AnnotationBMCInsecureSkipVerify: "maybe"}
+		It("Should admit a bmc-insecure-skip-verify annotation value of \"false\"", func() {
+			obj.Annotations = map[string]string{keziov1alpha1.AnnotationBMCInsecureSkipVerify: "false"}
 			_, err := validator.ValidateCreate(ctx, obj)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("not a valid boolean"))
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("Should deny a non-exact bmc-insecure-skip-verify annotation value", func() {
+			for _, value := range []string{"1", "0", "T", "TRUE", "True", "t", "F", "FALSE", "False", "f", "maybe", "yes", ""} {
+				obj.Annotations = map[string]string{keziov1alpha1.AnnotationBMCInsecureSkipVerify: value}
+				_, err := validator.ValidateCreate(ctx, obj)
+				Expect(err).To(HaveOccurred(), "value %q should be rejected", value)
+				Expect(err.Error()).To(ContainSubstring("expected exactly"), "value %q should be rejected", value)
+			}
 		})
 
 		It("Should skip validation on update when the object is being deleted", func() {
