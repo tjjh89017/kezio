@@ -458,6 +458,40 @@ jobs:
           kubectl wait --for=condition=Ready node --all --timeout=300s
           kubectl get nodes -o wide
 
+      - name: Allow bridged traffic on the two boot bridges (bypass canal's FORWARD filtering)
+        # RKE2's canal CNI loads br_netfilter
+        # (net.bridge.bridge-nf-call-iptables=1), which routes every
+        # bridged L2 frame - including these bridges', even though they
+        # carry no cluster pod traffic - through the host's netfilter
+        # FORWARD chain. kube-proxy/canal leave that chain's default
+        # policy at DROP once the cluster is up
+        # (https://github.com/kubernetes/kubernetes/issues/39823,
+        # https://github.com/kubernetes/kubernetes/issues/91545), which
+        # silently eats each site VM's PXE DHCP DISCOVER broadcast
+        # travelling between its Multus port and that site's bootd
+        # Multus port on the same bridge. Run after the node is Ready
+        # (canal has had the chance to program its own FORWARD rules by
+        # then) and idempotently - -C before -I - in case a later canal
+        # reconciliation touches the chain again: add an ACCEPT scoped
+        # to each bridge's own port-to-port traffic only, so cluster
+        # filtering everywhere else is untouched.
+        run: |
+          set -euo pipefail
+          for bridge in "${SITE_A_BRIDGE}" "${SITE_B_BRIDGE}"; do
+            if command -v iptables >/dev/null 2>&1; then
+              sudo iptables -C FORWARD -i "${bridge}" -o "${bridge}" -j ACCEPT 2>/dev/null || \
+                sudo iptables -I FORWARD -i "${bridge}" -o "${bridge}" -j ACCEPT
+            fi
+            # RKE2/canal can also run with the kernel's nf_tables backend
+            # instead of legacy iptables; when the "inet filter" table
+            # exists, mirror the same exemption there so each bridge is
+            # covered regardless of which backend actually owns FORWARD.
+            if command -v nft >/dev/null 2>&1 && sudo nft list table inet filter >/dev/null 2>&1; then
+              sudo nft list chain inet filter FORWARD 2>/dev/null | grep -q "iifname \"${bridge}\" oifname \"${bridge}\" accept" || \
+                sudo nft insert rule inet filter FORWARD iifname "${bridge}" oifname "${bridge}" accept
+            fi
+          done
+
       - name: Install local-path-provisioner and mark it the default StorageClass
         # RKE2 ships no default StorageClass (k3s bundled local-path by
         # default; RKE2 deliberately does not). config/e2e-deploy-path's
@@ -1112,3 +1146,6 @@ jobs:
           kubectl get image e2e-scale-ubuntu -n kezio-system -o yaml
           echo "===== events ====="
           kubectl get events -n kezio-system --sort-by=.lastTimestamp
+          echo "===== host FORWARD chain (canal/br_netfilter can silently drop bridged traffic here) ====="
+          sudo iptables -L FORWARD -v --line-numbers || true
+          sysctl net.bridge.bridge-nf-call-iptables || true
