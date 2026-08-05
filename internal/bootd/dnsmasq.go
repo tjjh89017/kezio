@@ -36,8 +36,7 @@ import (
 
 // DefaultDnsmasqPath is where docker/bootd's image installs
 // dnsmasq-base's binary. An absolute default rather than a bare
-// "dnsmasq" because the container runs as a non-root user whose PATH
-// need not include /usr/sbin.
+// "dnsmasq" so the lookup never depends on the container's PATH.
 const DefaultDnsmasqPath = "/usr/sbin/dnsmasq"
 
 // DefaultRunDir is where the rendered dnsmasq config and its writable
@@ -171,9 +170,11 @@ func (d *Dnsmasq) Start(ctx context.Context) error {
 	}
 
 	// The dnsmasq child needs the same capabilities bootd's own
-	// container was granted (see raiseAmbientCaps for which and why);
-	// only the ambient set survives execve into a non-root child, so
-	// raise them there best-effort before the first spawn.
+	// container was granted (see caps.go for which and why). bootd
+	// runs as uid 0 in the pod, so execve alone re-grants them to the
+	// child from the bounding set; the ambient raise is best-effort
+	// belt-and-braces for any non-root environment (see
+	// raiseAmbientCaps).
 	raiseAmbientCaps(log)
 
 	go d.hostsfileLoop(ctx, log, runDir, initial)
@@ -221,7 +222,18 @@ func (d *Dnsmasq) runChild(ctx context.Context, log logr.Logger, binary, confPat
 	// --no-daemon rather than --keep-in-foreground: stay a direct
 	// child (supervision and SIGHUP need the pid), log to stderr, and
 	// skip the pidfile dance entirely.
-	cmd := exec.Command(binary, "--conf-file="+confPath, "--no-daemon")
+	//
+	// --user=root: started as root, dnsmasq would otherwise drop to
+	// "nobody" after startup - a setuid/setgid that needs
+	// CAP_SETUID/CAP_SETGID, which the pod deliberately does not grant
+	// (its capability set is exactly the three network capabilities in
+	// caps.go, everything else dropped). Without this flag dnsmasq dies
+	// at startup on that failed drop. Keeping the child at uid 0 with
+	// only those three capabilities in its bounding set is the tighter
+	// posture; the same flag kube-dns ran its dnsmasq with, for the
+	// same reason. Started as non-root (the lab's setpriv path),
+	// dnsmasq never attempts a drop and the flag is inert.
+	cmd := exec.Command(binary, "--conf-file="+confPath, "--no-daemon", "--user=root")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("opening dnsmasq stdout pipe: %w", err)

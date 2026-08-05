@@ -68,8 +68,10 @@ limitations under the License.
 //
 // Capabilities: dnsmasq refuses to serve DHCP without CAP_NET_ADMIN
 // and CAP_NET_RAW (checked explicitly at its startup), plus
-// CAP_NET_BIND_SERVICE for ports 67/4011 - see caps.go, which raises
-// the pod-granted capabilities into the ambient set so they survive
-// execve into the non-root dnsmasq child, and config/bootd's
-// deployment for the Pod Security consequences.
+// CAP_NET_BIND_SERVICE for ports 67/4011. The pod runs bootd as uid 0
+// with exactly those three capabilities (all others dropped) because
+// Kubernetes grants added capabilities to a non-root container's
+// bounding set only, where execve cannot recover them - see caps.go
+// and config/bootd's deployment for the full contract, including why
+// dnsmasq runs with --user=root (dnsmasq.go's runChild).
 package bootd

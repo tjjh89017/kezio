@@ -34,10 +34,16 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends dnsmasq-base \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /workspace/bootd /bootd
-# Same non-root uid:gid as every other kezio image (distroless's
-# "nonroot"). dnsmasq runs as this user too - it is exec'd by bootd,
-# never setuid - with the capabilities config/bootd's deployment grants
-# (see internal/bootd's caps.go).
-USER 65532:65532
+# Root, unlike every other kezio image: Kubernetes grants a container's
+# added capabilities to permitted/effective only for uid 0 - for a
+# non-root uid they land in the bounding set alone, execve of a binary
+# with no file capabilities clears permitted, and the pod's
+# allowPrivilegeEscalation=false forbids regaining them via file
+# capabilities. So a non-root bootd can never hand its dnsmasq child
+# the NET_ADMIN/NET_RAW/NET_BIND_SERVICE it refuses to start without
+# (see internal/bootd/caps.go). Confinement comes from the pod's
+# securityContext instead: every capability dropped except those
+# three, no privilege escalation, read-only root filesystem (see
+# config/bootd/deployment.yaml).
 
 ENTRYPOINT ["/bootd"]

@@ -35,8 +35,9 @@ import (
 // packet lab (a netns topology with a PXE-shaped test client) uses to
 // exercise the exact code paths production runs - config rendering,
 // supervision, hostsfile rewrite + SIGHUP - with real packets on real
-// sockets, as a non-root uid holding only the capabilities the pod
-// grants. Skipped unless BOOTD_LAB=1.
+// sockets, holding only the capabilities the pod grants (uid 0 with
+// the three-capability bounding set, per config/bootd's deployment).
+// Skipped unless BOOTD_LAB=1.
 //
 // Environment:
 //

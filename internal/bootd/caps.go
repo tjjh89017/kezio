@@ -29,9 +29,9 @@ var (
 	sigterm = unix.SIGTERM
 )
 
-// dnsmasqCaps are the capabilities dnsmasq requires to serve DHCP as a
-// non-root user (it checks the latter two explicitly at startup and
-// refuses to run without them - lab-verified against dnsmasq 2.91):
+// dnsmasqCaps are the capabilities dnsmasq requires to serve DHCP (it
+// checks the latter two explicitly at startup and refuses to run
+// without them - lab-verified against dnsmasq 2.91):
 //
 //   - CAP_NET_BIND_SERVICE: binding UDP ports 67 and 4011.
 //   - CAP_NET_ADMIN: interface enumeration/config queries its DHCP
@@ -46,20 +46,28 @@ var dnsmasqCaps = []int{
 
 // raiseAmbientCaps copies each of dnsmasqCaps that this process holds
 // in its permitted set into its inheritable and ambient sets, so they
-// survive execve into the dnsmasq child. The container runtime grants
-// the pod's requested capabilities to bootd's own (non-root) process,
-// but only ambient capabilities carry across execve for a non-root
-// child with no file capabilities - and file capabilities on the
-// dnsmasq binary would be discarded anyway under the pod's
-// allowPrivilegeEscalation=false (no_new_privs), which ambient
-// capabilities are exempt from by design.
+// survive execve into the dnsmasq child even when that child is
+// non-root.
+//
+// In the pod this is belt-and-braces, not the load-bearing mechanism:
+// bootd runs as uid 0 there (config/bootd's deployment), because
+// Kubernetes puts a non-root container's added capabilities in the
+// bounding set only - permitted comes out empty after execve of a
+// binary with no file capabilities, and allowPrivilegeEscalation=false
+// (no_new_privs) forbids regaining them via file capabilities, so a
+// non-root bootd has nothing to raise (lab-verified: dnsmasq then dies
+// with "missing required capability NET_ADMIN"). As root, execve
+// re-grants the bounding set's capabilities to the child by itself.
+// The ambient raise still matters for any non-root environment whose
+// runtime does grant permitted capabilities (the containerized lab's
+// setpriv harness): only the ambient set carries them across execve
+// into a capability-less, non-root binary.
 //
 // Best-effort: each failure is logged and skipped rather than
 // returned, because in environments that already put the capability
-// in the ambient set (or run everything as root, like the lab
-// container) there is nothing to do, and the definitive error surface
-// is dnsmasq's own startup check, which names any capability it is
-// missing.
+// in the ambient set there is nothing to do, and the definitive error
+// surface is dnsmasq's own startup check, which names any capability
+// it is missing.
 func raiseAmbientCaps(log logr.Logger) {
 	hdr := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
 	var data [2]unix.CapUserData

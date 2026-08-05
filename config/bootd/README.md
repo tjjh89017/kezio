@@ -135,19 +135,26 @@ still relayed.
 
 dnsmasq refuses to serve DHCP without `NET_ADMIN` and `NET_RAW`
 (checked explicitly at its startup), and binding ports 67/4011/69 needs
-`NET_BIND_SERVICE`. `deployment.yaml` keeps the container
-`runAsNonRoot` (uid 65532, matching every other kezio image), drops all
-other capabilities, and adds exactly those three; bootd raises them
-into the ambient capability set before exec'ing dnsmasq so they survive
-into the non-root child (see `internal/bootd/caps.go`).
+`NET_BIND_SERVICE`. `deployment.yaml` drops all capabilities, adds
+exactly those three, and - unlike every other kezio container - runs
+bootd as uid 0. Root is forced by Kubernetes' capability semantics, not
+chosen: added capabilities reach a container's permitted/effective sets
+only for uid 0; for a non-root uid they land in the bounding set alone,
+execve of a binary without file capabilities clears permitted, and
+`allowPrivilegeEscalation: false` forbids regaining them - so a
+non-root bootd has nothing to hand its dnsmasq child, which dies at
+startup missing `NET_ADMIN` (see `internal/bootd/caps.go`). dnsmasq
+itself runs with `--user=root`: its default privilege drop to `nobody`
+needs `SETUID`/`SETGID`, which the pod deliberately does not grant.
 
 The Pod Security Admission consequence: `NET_ADMIN` is outside both the
 `restricted` and `baseline` profiles' allowed capability lists, so the
 namespace bootd deploys into must be labeled
 `pod-security.kubernetes.io/enforce=privileged`. That label relaxes
 admission-time enforcement only - the pod itself still grants nothing
-beyond the three capabilities above: no root, no `privileged: true`, no
-`hostNetwork`, no `hostPort`.
+beyond root plus the three capabilities above: no `privileged: true`,
+no `hostNetwork`, no `hostPort`, read-only root filesystem, seccomp
+`RuntimeDefault`.
 
 ## RBAC scope
 

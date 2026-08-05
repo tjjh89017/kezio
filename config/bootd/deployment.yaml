@@ -44,7 +44,11 @@ spec:
     spec:
       serviceAccountName: bootd
       securityContext:
-        runAsNonRoot: true
+        # No pod-level runAsNonRoot: the two containers disagree on it,
+        # so each states its own - the fetch-boot-artifacts
+        # initContainer runs non-root as before, while the bootd
+        # container must run as uid 0 (see its securityContext below
+        # for the capability mechanics that force this).
         seccompProfile:
           type: RuntimeDefault
         # Matches curl_user's gid (101, see the fetch-boot-artifacts
@@ -57,10 +61,9 @@ spec:
         # volume. Without this, fetch-boot-artifacts's `mkdir -p
         # "${DEST_DIR}"` (config/boot-artifacts/fetch.sh) fails with
         # EACCES and the initContainer CrashLoopBackOffs before bootd's
-        # own container ever starts. The "run" emptyDir below relies on
-        # the same group-writability for bootd's own uid (65532, which
-        # gets 101 as a supplemental group via this fsGroup) to write
-        # the rendered dnsmasq config and dhcp-hostsfile.
+        # own container ever starts. (The "run" emptyDir below needs no
+        # such help: bootd's container runs as root and writes it
+        # directly.)
         fsGroup: 101
       # Fetches shimx64.efi/grubx64.efi (see .github/workflows/
       # build-live-image.yml, which now publishes them alongside the
@@ -153,6 +156,23 @@ spec:
               containerPort: 69
               protocol: UDP
           securityContext:
+            # Root, unlike every other kezio container, and not by
+            # preference: Kubernetes grants the added capabilities
+            # below to permitted/effective only for uid 0. For a
+            # non-root uid they land in the bounding set alone, execve
+            # of /bootd (no file capabilities) clears permitted, and
+            # allowPrivilegeEscalation=false (no_new_privs) forbids
+            # regaining them via file capabilities - so a non-root
+            # bootd holds nothing to pass its dnsmasq child, which
+            # then dies at startup missing NET_ADMIN (observed
+            # in-cluster and lab-verified; see internal/bootd/caps.go).
+            # Confinement comes from everything else on this context:
+            # all capabilities dropped except the three below, no
+            # privilege escalation, read-only root filesystem, seccomp
+            # RuntimeDefault, no privileged: true, no hostNetwork.
+            runAsUser: 0
+            runAsGroup: 0
+            runAsNonRoot: false
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
@@ -163,10 +183,11 @@ spec:
               # NET_BIND_SERVICE for the privileged ports (67, 4011,
               # and bootd's own 69), and NET_ADMIN + NET_RAW, which
               # dnsmasq checks for explicitly at startup and refuses to
-              # run without. The container still runs runAsNonRoot
-              # (65532, matching every other kezio image) with every
-              # other capability dropped, no privileged: true, and no
-              # hostNetwork.
+              # run without. Deliberately absent: SETUID/SETGID - which
+              # is why bootd runs dnsmasq with --user=root instead of
+              # letting it drop to "nobody" (a setuid it would have no
+              # capability to perform; see internal/bootd/dnsmasq.go's
+              # runChild).
               #
               # Pod Security Admission consequence, stated precisely:
               # NET_ADMIN is not in the allowed capability list of the
@@ -192,8 +213,7 @@ spec:
             # config, the dhcp-hostsfile the Machine informer rewrites,
             # and dnsmasq's leasefile (internal/bootd.DefaultRunDir) -
             # required because the container's root filesystem is
-            # read-only. Writable by bootd's non-root uid through the
-            # pod's fsGroup (see securityContext.fsGroup above).
+            # read-only.
             - name: run
               mountPath: /run/bootd
           resources:
