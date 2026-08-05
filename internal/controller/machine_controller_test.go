@@ -1080,6 +1080,122 @@ var _ = Describe("Machine Controller", func() {
 			Expect(powerCycleCalls).To(Equal(1))
 			Expect(powerOffCalls).To(BeZero())
 		})
+
+		It("moves to Error with reasonProvisionFailed when the AfterDeploy power-off call fails", func() {
+			const resourceName = "data-only-poweroff-fail-machine"
+			namespace := "default"
+			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+			nn := types.NamespacedName{Namespace: namespace, Name: resourceName}
+
+			dataImage := &keziov1alpha1.Image{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-data-image", Namespace: namespace},
+				Spec: keziov1alpha1.ImageSpec{
+					Source: keziov1alpha1.ImageSource{Format: keziov1alpha1.ImageFormatQCOW2},
+				},
+			}
+			Expect(k8sClient.Create(ctx, dataImage)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, dataImage)).To(Succeed()) })
+
+			spec := newTestMachineSpec(resourceName)
+			spec.DataImages = []keziov1alpha1.MachineDataImage{
+				{ImageRef: keziov1alpha1.NameRef{Name: dataImage.Name}},
+			}
+			spec.AfterDeploy = keziov1alpha1.AfterDeployPowerOff
+			machine := &keziov1alpha1.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec:       spec,
+			}
+			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+			DeferCleanup(func() {
+				m := &keziov1alpha1.Machine{}
+				if err := k8sClient.Get(ctx, key, m); err == nil {
+					Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+				}
+			})
+
+			factory := deployer.NewFactory()
+			factory.Fail = func(m types.NamespacedName, phase deployer.Phase) string {
+				if m == nn && phase == deployer.PhasePowerOff {
+					return "injected power-off failure"
+				}
+				return ""
+			}
+
+			r := &MachineReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				DeployerFactory: factory.New,
+			}
+
+			By("reconciling into Provisioning, which fails at the AfterDeploy power-off handoff")
+			result, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateError
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Status.State).To(Equal(keziov1alpha1.MachineStateError))
+			Expect(result.Status.ErrorMessage).To(Equal("injected power-off failure"))
+			readyCond := apimeta.FindStatusCondition(result.Status.Conditions, keziov1alpha1.ConditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Reason).To(Equal(reasonProvisionFailed))
+		})
+
+		It("moves to Error with reasonProvisionFailed when the AfterDeploy power-cycle call fails", func() {
+			const resourceName = "data-only-reboot-fail-machine"
+			namespace := "default"
+			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+			nn := types.NamespacedName{Namespace: namespace, Name: resourceName}
+
+			dataImage := &keziov1alpha1.Image{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-data-image", Namespace: namespace},
+				Spec: keziov1alpha1.ImageSpec{
+					Source: keziov1alpha1.ImageSource{Format: keziov1alpha1.ImageFormatQCOW2},
+				},
+			}
+			Expect(k8sClient.Create(ctx, dataImage)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, dataImage)).To(Succeed()) })
+
+			spec := newTestMachineSpec(resourceName)
+			spec.DataImages = []keziov1alpha1.MachineDataImage{
+				{ImageRef: keziov1alpha1.NameRef{Name: dataImage.Name}},
+			}
+			spec.AfterDeploy = keziov1alpha1.AfterDeployReboot
+			machine := &keziov1alpha1.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec:       spec,
+			}
+			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+			DeferCleanup(func() {
+				m := &keziov1alpha1.Machine{}
+				if err := k8sClient.Get(ctx, key, m); err == nil {
+					Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+				}
+			})
+
+			factory := deployer.NewFactory()
+			factory.Fail = func(m types.NamespacedName, phase deployer.Phase) string {
+				if m == nn && phase == deployer.PhasePowerCycle {
+					return "injected power-cycle failure"
+				}
+				return ""
+			}
+
+			r := &MachineReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				DeployerFactory: factory.New,
+			}
+
+			By("reconciling into Provisioning, which fails at the AfterDeploy power-cycle handoff")
+			result, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateError
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Status.State).To(Equal(keziov1alpha1.MachineStateError))
+			Expect(result.Status.ErrorMessage).To(Equal("injected power-cycle failure"))
+			readyCond := apimeta.FindStatusCondition(result.Status.Conditions, keziov1alpha1.ConditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Reason).To(Equal(reasonProvisionFailed))
+		})
 	})
 
 	Context("detecting a stuck inspection", func() {
@@ -1215,6 +1331,71 @@ var _ = Describe("Machine Controller", func() {
 			afterCycle := &keziov1alpha1.Machine{}
 			Expect(k8sClient.Get(ctx, key, afterCycle)).To(Succeed())
 			Expect(afterCycle.Status.State).To(Equal(keziov1alpha1.MachineStateInspecting))
+		})
+
+		It("moves to Error with reasonInspectFailed when the recovery power-cycle itself fails", func() {
+			const resourceName = "stuck-inspect-powercycle-fail-machine"
+			namespace := "default"
+			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+			nn := types.NamespacedName{Namespace: namespace, Name: resourceName}
+
+			machine := &keziov1alpha1.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec:       newTestMachineSpec(resourceName),
+			}
+			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+			DeferCleanup(func() {
+				m := &keziov1alpha1.Machine{}
+				if err := k8sClient.Get(ctx, key, m); err == nil {
+					Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+				}
+			})
+
+			factory := deployer.NewFactory()
+			factory.Fail = func(m types.NamespacedName, phase deployer.Phase) string {
+				if m == nn && phase == deployer.PhasePowerCycle {
+					return "injected power-cycle failure"
+				}
+				return ""
+			}
+
+			r := &MachineReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				DeployerFactory: newStallingInspectFactory(factory),
+			}
+
+			By("reconciling to Inspecting, where the stalling Inspect never completes")
+			inspecting, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateInspecting && m.Status.InspectingSince != nil
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("backdating status.inspectingSince past inspectingStuckThreshold")
+			stale := metav1.NewTime(inspecting.Status.InspectingSince.Add(-2 * inspectingStuckThreshold))
+			inspecting.Status.InspectingSince = &stale
+			Expect(k8sClient.Status().Update(ctx, inspecting)).To(Succeed())
+
+			By("reconciling once more, where the stuck-recovery power-cycle itself fails")
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+			afterFirstError := &keziov1alpha1.Machine{}
+			Expect(k8sClient.Get(ctx, key, afterFirstError)).To(Succeed())
+			Expect(afterFirstError.Status.State).To(Equal(keziov1alpha1.MachineStateError))
+			Expect(afterFirstError.Status.ErrorCount).To(Equal(int32(1)))
+			Expect(afterFirstError.Status.ErrorMessage).To(Equal("injected power-cycle failure"))
+			readyCond := apimeta.FindStatusCondition(afterFirstError.Status.Conditions, keziov1alpha1.ConditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Reason).To(Equal(reasonInspectFailed))
+
+			By("retrying from Error, which stays stuck and keeps increasing errorCount")
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			afterSecondError := &keziov1alpha1.Machine{}
+			Expect(k8sClient.Get(ctx, key, afterSecondError)).To(Succeed())
+			Expect(afterSecondError.Status.State).To(Equal(keziov1alpha1.MachineStateError))
+			Expect(afterSecondError.Status.ErrorCount).To(Equal(int32(2)))
 		})
 	})
 })
