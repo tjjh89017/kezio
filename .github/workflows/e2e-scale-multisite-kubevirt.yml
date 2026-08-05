@@ -492,6 +492,52 @@ jobs:
             fi
           done
 
+      - name: Fill UDP checksums for PXE DHCP crossing the two boot bridges
+        # See e2e-kubevirt-reusable.yml's step of the same name for the
+        # full "why": each site VM's virtio-net leaves UDP checksums to
+        # "hardware" (CHECKSUM_PARTIAL), and the tap -> bridge -> Multus
+        # veth -> bootd pod netns path this DHCP traffic actually takes
+        # never performs that fill, so that site's bootd drops the
+        # datagram as checksum-invalid before its UDP socket ever sees
+        # it. Same fix libvirt's own virtual networks use for this exact
+        # failure: an iptables mangle CHECKSUM --checksum-fill rule
+        # scoped to each bridge and to both DHCP ports (67 server, 68
+        # client) - libvirt's own rule is `-A POSTROUTING -o virbr0 -p
+        # udp -m udp --dport 68 -j CHECKSUM --checksum-fill` (libvirt
+        # commit "Add iptables rule to fixup DHCP response checksum",
+        # libvir-list 2010-08). nft has no CHECKSUM target equivalent, so
+        # disabling tx checksum offload on the bridge itself is the
+        # fallback when iptables is unavailable. Idempotent (-C before
+        # -A).
+        run: |
+          set -euo pipefail
+          for bridge in "${SITE_A_BRIDGE}" "${SITE_B_BRIDGE}"; do
+            if command -v iptables >/dev/null 2>&1; then
+              for port in 67 68; do
+                sudo iptables -t mangle -C POSTROUTING -o "${bridge}" -p udp --dport "${port}" -j CHECKSUM --checksum-fill 2>/dev/null || \
+                  sudo iptables -t mangle -A POSTROUTING -o "${bridge}" -p udp --dport "${port}" -j CHECKSUM --checksum-fill
+              done
+            else
+              sudo ethtool -K "${bridge}" tx off || true
+            fi
+          done
+
+      - name: Start capturing the two boot bridges (tcpdump)
+        # Definitive instrumentation regardless of whether the checksum
+        # fix above is the actual/only cause - see e2e-kubevirt-reusable.
+        # yml's step of the same name. One capture per site bridge,
+        # backgrounded so both run from before either target VM exists
+        # through however this job ends.
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends tcpdump || true
+          sudo -- sh -c "nohup tcpdump -i '${SITE_A_BRIDGE}' -w '${RUNNER_TEMP}/bridge-site-a.pcap' \
+            udp port 67 or port 68 or port 69 \
+            >/tmp/tcpdump-bridge-site-a.log 2>&1 &"
+          sudo -- sh -c "nohup tcpdump -i '${SITE_B_BRIDGE}' -w '${RUNNER_TEMP}/bridge-site-b.pcap' \
+            udp port 67 or port 68 or port 69 \
+            >/tmp/tcpdump-bridge-site-b.log 2>&1 &"
+
       - name: Install local-path-provisioner and mark it the default StorageClass
         # RKE2 ships no default StorageClass (k3s bundled local-path by
         # default; RKE2 deliberately does not). config/e2e-deploy-path's
@@ -1149,3 +1195,43 @@ jobs:
           echo "===== host FORWARD chain (canal/br_netfilter can silently drop bridged traffic here) ====="
           sudo iptables -L FORWARD -v --line-numbers || true
           sysctl net.bridge.bridge-nf-call-iptables || true
+          echo "===== host mangle table CHECKSUM rules (fills UDP checksums each site VM's virtio-net offloaded) ====="
+          sudo iptables -t mangle -L POSTROUTING -v --line-numbers || true
+          for bridge in "${SITE_A_BRIDGE}" "${SITE_B_BRIDGE}"; do
+            echo "===== ${bridge} offload settings ====="
+            ethtool -k "${bridge}" | head || true
+          done
+
+      - name: Stop the bridge captures and flush them to the artifact
+        if: always()
+        # Runs unconditionally, not just on failure - see
+        # e2e-kubevirt-reusable.yml's step of the same name for why.
+        run: |
+          set +e
+          sudo pkill -TERM -f "tcpdump -i ${SITE_A_BRIDGE}"
+          sudo pkill -TERM -f "tcpdump -i ${SITE_B_BRIDGE}"
+          sleep 2
+          for site_pcap in bridge-site-a bridge-site-b; do
+            if [ -s "${RUNNER_TEMP}/${site_pcap}.pcap" ]; then
+              sudo chmod 0644 "${RUNNER_TEMP}/${site_pcap}.pcap"
+              tcpdump -vvv -r "${RUNNER_TEMP}/${site_pcap}.pcap" > "${RUNNER_TEMP}/${site_pcap}-pcap.txt" 2>&1
+            fi
+          done
+
+      - name: Upload E2E diagnostics artifacts
+        # Always, not just on failure - this lane had no artifact upload
+        # at all before; the bridge captures are worth having on a
+        # passing run too (to confirm a fix actually restored DHCP/TFTP
+        # activity instead of only ever validating this path when it is
+        # hardest to also diagnose).
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-diagnostics-${{ github.job }}
+          path: |
+            ${{ runner.temp }}/bridge-site-a.pcap
+            ${{ runner.temp }}/bridge-site-a-pcap.txt
+            ${{ runner.temp }}/bridge-site-b.pcap
+            ${{ runner.temp }}/bridge-site-b-pcap.txt
+          if-no-files-found: ignore
+          retention-days: 7

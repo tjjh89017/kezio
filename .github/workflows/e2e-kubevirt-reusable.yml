@@ -663,6 +663,63 @@ jobs:
               sudo nft insert rule inet filter FORWARD iifname "${PROVISIONING_BRIDGE}" oifname "${PROVISIONING_BRIDGE}" accept
           fi
 
+      - name: Fill UDP checksums for PXE DHCP crossing the provisioning bridge
+        # The target VM's virtio-net leaves UDP checksums to be filled in
+        # by "hardware" (CHECKSUM_PARTIAL) rather than computing them
+        # itself. That is fine as long as the frame stays on a path that
+        # keeps honouring the offload flag, but this frame's actual path -
+        # tap device -> this Linux bridge -> a Multus veth -> bootd's pod
+        # network namespace - crosses a device boundary that never
+        # performs the fill, so the DHCP DISCOVER/OFFER datagrams arrive
+        # at bootd's UDP socket with a checksum field the kernel considers
+        # invalid and silently drops before the socket ever sees them.
+        # This is the same failure libvirt's own virtual networks hit
+        # (DHCP packets sent to VMs have no checksum due to a longstanding
+        # bug when vhost-net is on the same host as the DHCP service) and
+        # the same fix: an iptables mangle CHECKSUM --checksum-fill rule,
+        # scoped to this bridge and to the two DHCP ports (67 server,
+        # 68 client) - libvirt's own generated rule is
+        # `-A POSTROUTING -o virbr0 -p udp -m udp --dport 68 -j CHECKSUM
+        # --checksum-fill` (see libvirt commit "Add iptables rule to fixup
+        # DHCP response checksum", libvir-list 2010-08); port 67 is added
+        # here too since this bridge carries the DISCOVER direction (VM ->
+        # bootd) as well, not only the reply. nft has no CHECKSUM target
+        # equivalent, so when nft is the active backend and iptables
+        # cannot be used, disabling tx checksum offload on the bridge
+        # itself (`ethtool -K ... tx off`) is the fallback - cruder
+        # (it stops the kernel from ever leaving a partial checksum on
+        # anything forwarded through the bridge, not just DHCP) but it
+        # covers the same failure mode. Idempotent (-C before -A) so a
+        # re-run or a later reconciliation never duplicates the rule.
+        run: |
+          set -euo pipefail
+          if command -v iptables >/dev/null 2>&1; then
+            for port in 67 68; do
+              sudo iptables -t mangle -C POSTROUTING -o "${PROVISIONING_BRIDGE}" -p udp --dport "${port}" -j CHECKSUM --checksum-fill 2>/dev/null || \
+                sudo iptables -t mangle -A POSTROUTING -o "${PROVISIONING_BRIDGE}" -p udp --dport "${port}" -j CHECKSUM --checksum-fill
+            done
+          else
+            sudo ethtool -K "${PROVISIONING_BRIDGE}" tx off || true
+          fi
+
+      - name: Start capturing the provisioning bridge (tcpdump)
+        # Definitive instrumentation regardless of whether the checksum
+        # fix above is the actual/only cause: capture every DHCP/TFTP
+        # frame that crosses the bridge, from before the target VM even
+        # exists through however this job ends, so a future failure has
+        # the real wire contents (including whether the checksum field
+        # is actually zero/invalid) to look at instead of only inference
+        # from the FORWARD counters. Backgrounded the same way the
+        # console capture below is; `|| true` on both the install and the
+        # capture start so a runner without tcpdump (or a permissions
+        # hiccup) never fails the job over an optional diagnostic.
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends tcpdump || true
+          sudo -- sh -c "nohup tcpdump -i '${PROVISIONING_BRIDGE}' -w '${RUNNER_TEMP}/bridge.pcap' \
+            udp port 67 or port 68 or port 69 \
+            >/tmp/tcpdump-bridge.log 2>&1 &"
+
       - name: Install local-path-provisioner and mark it the default StorageClass
         # RKE2 ships no default StorageClass (k3s bundled local-path by
         # default; RKE2 deliberately does not). config/e2e-deploy-path's
@@ -1762,6 +1819,29 @@ jobs:
           echo "===== host FORWARD chain (canal/br_netfilter can silently drop bridged traffic here) ====="
           sudo iptables -L FORWARD -v --line-numbers || true
           sysctl net.bridge.bridge-nf-call-iptables || true
+          echo "===== host mangle table CHECKSUM rules (fills UDP checksums the VM's virtio-net offloaded) ====="
+          sudo iptables -t mangle -L POSTROUTING -v --line-numbers || true
+          echo "===== ${PROVISIONING_BRIDGE} offload settings ====="
+          ethtool -k "${PROVISIONING_BRIDGE}" | head || true
+
+      - name: Stop the bridge capture and flush it to the artifact
+        if: always()
+        # Runs unconditionally (not just on failure) so a passing run
+        # also leaves a record of what actually crossed the bridge -
+        # the same reasoning "Upload E2E diagnostics artifacts" below
+        # gives for uploading unconditionally. tcpdump only flushes its
+        # pcap writer cleanly on SIGTERM, so signal it and give it a
+        # moment before reading the file back; both steps are `|| true`
+        # since a runner where the capture never started (tcpdump
+        # missing) must not fail the job over a missing optional file.
+        run: |
+          set +e
+          sudo pkill -TERM -f "tcpdump -i ${PROVISIONING_BRIDGE}"
+          sleep 2
+          if [ -s "${RUNNER_TEMP}/bridge.pcap" ]; then
+            sudo chmod 0644 "${RUNNER_TEMP}/bridge.pcap"
+            tcpdump -vvv -r "${RUNNER_TEMP}/bridge.pcap" > "${RUNNER_TEMP}/bridge-pcap.txt" 2>&1
+          fi
 
       - name: Dump KubeVirtBMC diagnostics on failure
         if: ${{ failure() && inputs.bmc_mode }}
@@ -1800,5 +1880,7 @@ jobs:
             ${{ runner.temp }}/console.log
             ${{ runner.temp }}/diagnostics-dump.log
             ${{ runner.temp }}/diagnostics-kubevirtbmc-dump.log
+            ${{ runner.temp }}/bridge.pcap
+            ${{ runner.temp }}/bridge-pcap.txt
           if-no-files-found: ignore
           retention-days: 7
