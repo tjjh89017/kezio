@@ -1143,7 +1143,7 @@ var _ = Describe("Machine Controller", func() {
 			Expect(powerCycleCalls).To(BeZero())
 
 			By("backdating status.inspectingSince past inspectingStuckThreshold")
-			stale := metav1.NewTime(inspecting.Status.InspectingSince.Time.Add(-2 * inspectingStuckThreshold))
+			stale := metav1.NewTime(inspecting.Status.InspectingSince.Add(-2 * inspectingStuckThreshold))
 			inspecting.Status.InspectingSince = &stale
 			Expect(k8sClient.Status().Update(ctx, inspecting)).To(Succeed())
 
@@ -1204,7 +1204,7 @@ var _ = Describe("Machine Controller", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			stale := metav1.NewTime(inspecting.Status.InspectingSince.Time.Add(-2 * inspectingStuckThreshold))
+			stale := metav1.NewTime(inspecting.Status.InspectingSince.Add(-2 * inspectingStuckThreshold))
 			inspecting.Status.InspectingSince = &stale
 			Expect(k8sClient.Status().Update(ctx, inspecting)).To(Succeed())
 
