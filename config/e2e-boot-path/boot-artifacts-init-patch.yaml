@@ -56,6 +56,14 @@
         allowPrivilegeEscalation: false
         readOnlyRootFilesystem: true
         runAsNonRoot: true
+        # curlimages/curl's image USER is the non-numeric "curl_user"
+        # (uid 100, gid 101 per its own /etc/passwd); restricted Pod
+        # Security Admission cannot resolve a non-numeric image USER to
+        # verify runAsNonRoot, so it rejects the pod outright
+        # ("cannot verify user is non-root") unless a numeric
+        # runAsUser/runAsGroup is set explicitly here.
+        runAsUser: 100
+        runAsGroup: 101
         capabilities:
           drop: ["ALL"]
 - op: add
