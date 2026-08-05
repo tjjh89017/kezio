@@ -286,6 +286,39 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           ls -l /dev/kvm
 
+      - name: Fail fast unless a boot-artifacts release exists
+        # config/boot-artifacts/fetch.sh's initContainer resolves this
+        # same BOOT_ARTIFACTS_REPO ("tjjh89017/kezio", hardcoded in
+        # config/e2e-boot-path/boot-artifacts-init-patch.yaml and
+        # config/bootserver/boot-artifacts-init-patch.yaml, mirrored
+        # here) / BOOT_ARTIFACTS_VERSION pair into a GitHub Release asset
+        # URL deep inside the "Deploy image-service+seeder..." step
+        # below, after the KVM/cluster/image-build setup above has
+        # already run. A missing release there surfaces only as
+        # fetch-boot-artifacts CrashLoopBackOff-ing and the
+        # controller-manager Deployment rollout timing out - no curl
+        # output, no obvious cause, and this exact shape has previously
+        # been (mis)diagnosed as a pod securityContext bug (see ccfdc28,
+        # 5233263) because nothing checked the release existed until
+        # this step. Fail here instead, before any of that work is
+        # spent, with the actual cause front and center.
+        env:
+          BOOT_ARTIFACTS_VERSION: ${{ inputs.boot_artifacts_version }}
+        run: |
+          set -euo pipefail
+          repo="tjjh89017/kezio"
+          if [ -n "${BOOT_ARTIFACTS_VERSION}" ]; then
+            base_url="https://github.com/${repo}/releases/download/${BOOT_ARTIFACTS_VERSION}"
+          else
+            base_url="https://github.com/${repo}/releases/latest/download"
+          fi
+          url="${base_url}/sha256sums"
+          code="$(curl -s -o /dev/null -w '%{http_code}' "${url}")"
+          if [ "${code}" != "200" ]; then
+            echo "::error::No boot-artifacts release asset at ${url} (HTTP ${code}). Publish one first: push a \"v*\" tag, or dispatch build-live-image.yml with publish=true (see that workflow's own header comment) - a plain workflow_dispatch of build-live-image.yml without publish=true only validates the build and skips the release step." >&2
+            exit 1
+          fi
+
       - name: Raise inotify limits
         run: |
           sudo sysctl -w fs.inotify.max_user_watches=1048576
@@ -1253,19 +1286,43 @@ jobs:
           echo "===== controller-manager fetch-boot-artifacts initContainer logs ====="
           # kubectl logs --all-containers above does not include
           # initContainers, so a fetch-boot-artifacts crash (for example,
-          # a permission error writing into its volume) would otherwise
-          # surface only as a Deployment rollout timeout with no error
-          # text. --previous first, since a CrashLoopBackOff pod's
-          # *current* attempt is usually still starting or already
-          # exited by the time this step runs - the failure output is in
-          # the previous attempt.
-          kubectl -n kezio-system logs deployment/kezio-controller-manager -c fetch-boot-artifacts --previous --tail=200 || \
-            kubectl -n kezio-system logs deployment/kezio-controller-manager -c fetch-boot-artifacts --tail=200 || true
+          # a permission error writing into its volume, or the release
+          # asset itself 404ing) would otherwise surface only as a
+          # Deployment rollout timeout with no error text. --previous
+          # first, since a CrashLoopBackOff pod's *current* attempt is
+          # usually still starting or already exited by the time this
+          # step runs - the failure output is in the previous attempt.
+          #
+          # `deployment/kezio-controller-manager` (a workload reference,
+          # not a pod name) resolves through whichever ReplicaSet
+          # kubectl's own logs-for-a-workload lookup picks - with a
+          # rollout in progress there are two live ReplicaSets, and it
+          # has been observed to pick the OLD one, which has no
+          # fetch-boot-artifacts container at all ("container
+          # fetch-boot-artifacts is not valid for pod ... out of:
+          # manager"). Loop over the actual pods instead, and dump each
+          # one's rendered securityContext so a future patch-application
+          # regression (fsGroup/runAsUser missing from the live spec) is
+          # visible here too, not just guessed at.
+          for p in $(kubectl -n kezio-system get pods -l control-plane=controller-manager -o name); do
+            echo "--- ${p} securityContext ---"
+            kubectl -n kezio-system get "${p}" \
+              -o jsonpath='{.spec.securityContext}{"\n"}{range .spec.initContainers[*]}{.name}{": "}{.securityContext}{"\n"}{end}'
+            echo "--- ${p} fetch-boot-artifacts logs (--previous) ---"
+            kubectl -n kezio-system logs "${p}" -c fetch-boot-artifacts --previous --tail=200 || \
+              kubectl -n kezio-system logs "${p}" -c fetch-boot-artifacts --tail=200 || true
+          done
           echo "===== bootd logs ====="
           kubectl -n kezio-system logs deployment/kezio-bootd --all-containers --tail=1000
           echo "===== bootd fetch-boot-artifacts initContainer logs ====="
-          kubectl -n kezio-system logs deployment/kezio-bootd -c fetch-boot-artifacts --previous --tail=200 || \
-            kubectl -n kezio-system logs deployment/kezio-bootd -c fetch-boot-artifacts --tail=200 || true
+          for p in $(kubectl -n kezio-system get pods -l app.kubernetes.io/component=bootd -o name); do
+            echo "--- ${p} securityContext ---"
+            kubectl -n kezio-system get "${p}" \
+              -o jsonpath='{.spec.securityContext}{"\n"}{range .spec.initContainers[*]}{.name}{": "}{.securityContext}{"\n"}{end}'
+            echo "--- ${p} fetch-boot-artifacts logs (--previous) ---"
+            kubectl -n kezio-system logs "${p}" -c fetch-boot-artifacts --previous --tail=200 || \
+              kubectl -n kezio-system logs "${p}" -c fetch-boot-artifacts --tail=200 || true
+          done
           echo "===== ingest Job(s) ====="
           kubectl get jobs -n kezio-system -l kezio.kojuro.date/image -o wide
           kubectl logs -n kezio-system -l kezio.kojuro.date/image --all-containers --tail=1000
