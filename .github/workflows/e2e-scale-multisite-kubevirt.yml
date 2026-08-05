@@ -1,0 +1,948 @@
+name: E2E Scale (Multi-Site KubeVirt VMs)
+
+# Proves the multi-site BitTorrent swarm topology described in
+# config/seeder/README.md's "Per-site seeders" section: a central
+# tracker + a central seeder that already holds the full image (the
+# "pre-warm" peer), plus a site-local seeder replica at each of two
+# simulated sites, with one leecher VM per site deploying concurrently
+# through the same swarm - not one leecher at a time against the central
+# seeder alone.
+#
+# Builds on the same setup e2e-kubevirt-reusable.yml uses (KubeVirt +
+# CDI + Multus on k3s, the same five locally-built images, the same
+# ingest-through-kezioctl path, the same three-layer verify), but the
+# topology diverges enough that this is a dedicated workflow rather than
+# a `workflow_call` of that file:
+#   - two boot L2 segments (two Multus bridges, two kezio-bootd
+#     Deployments) instead of one - a single reusable-workflow "boot
+#     network" input covers one segment, not a set of them;
+#   - two site-local ezio-seeder replicas added as extra endpoints of
+#     the existing Service, cloned by patching the reusable workflow's
+#     own generated manifest with `jq` (see the "Deploy the two
+#     site-local ezio-seeder replicas" step) - there is no `workflow_call`
+#     input shape that expresses "N seeders" without turning the
+#     reusable workflow itself into a loop, which would complicate its
+#     single-leecher callers (including the ezio repository's own use of
+#     it) for a topology only this lane needs;
+#   - two target VMs/Machines polled concurrently instead of one, and a
+#     swarm-wide peer-count sample gathered while both are leeching.
+# Every step below that has no site-specific content (image builds, k3s
+# install, KubeVirt/CDI/Multus install, ingest) is copied from
+# e2e-kubevirt-reusable.yml verbatim in spirit - keep the two in sync by
+# hand if that workflow's own setup steps change; the alternative (making
+# the reusable workflow itself site-count-parametric) was rejected above.
+#
+# === Honest scope: what a single GitHub-hosted runner can and cannot
+# simulate ===
+#
+# A single runner has one flat pod network - every seeder, the tracker,
+# and both leecher VMs' data traffic all cross the same loopback/veth
+# fabric with no real inter-site latency, bandwidth cap, or routing hop
+# between them. This lane genuinely CANNOT show that "the WAN carries
+# close to one copy of the image" (design doc's cross-network section) -
+# that claim needs real per-network traffic accounting or genuinely
+# separate network segments with different cost, neither of which exists
+# here, and this workflow does not claim it anywhere below.
+#
+# What two Multus bridges + two kezio-bootd Deployments genuinely DO
+# simulate, for real: two separate L2 broadcast domains for PXE/DHCP.
+# Each site's target VM only ever sees its own site's bootd on its own
+# bridge - that part is not faked, it is two real, disjoint Linux
+# bridges with independent proxyDHCP responders, the same mechanism a
+# physically separate site's L2 segment would need locally in
+# production (see config/bootd's own "one replica per boot L2 segment"
+# comment).
+#
+# What this lane actually asserts (see the "Verify" steps near the
+# bottom of the job): both site leechers independently complete a real
+# BitTorrent-transfer deploy - ingest, seed, PXE boot, leech, write,
+# reboot, boot-from-disk, content check - concurrently, against a swarm
+# that has more than one seeder endpoint (the central "pre-warm" seeder
+# plus each site's own seeder replica), not serially against one seeder.
+# It additionally samples each seeder endpoint's live peer count
+# (ezio's own GetTorrentStatus RPC) while both leeches are in flight and
+# reports the observed maximum - explicitly labeled informational, not a
+# pass/fail gate and not a locality proof: a peer count above 1 shows
+# more than one peer was in the swarm at once, which is necessary but
+# not sufficient evidence of the same-site piece exchange BitTorrent
+# does in a real, network-partitioned deployment.
+#
+# === The central seeder as the "pre-warm" peer ===
+#
+# kezio's Option A storage design (see config/seeder's own
+# README.md) means the central `ezio-seeder` Deployment already holds
+# the full image directly - it mounts the ingested store PVC read-only
+# rather than leeching content over BitTorrent first. There is therefore
+# no separate BT-leech "pre-warm" step to perform for the central
+# site: the central seeder already is the full-copy peer from the
+# moment the Image reaches Ready, which is exactly the role a pre-warm
+# leecher-then-seeder plays in config/seeder/README.md's "Per-site
+# seeders" section for a site that has no route to the central storage
+# backend. This lane's two site-local seeder replicas are NOT that
+# storage-isolated pattern either - they mount the very same PVC the
+# central seeder does, because every pod here runs on one k3s node with
+# one storage backend. Proving the storage-isolated leecher-then-seeder
+# pre-warm pattern needs a site with a genuinely separate store, which a
+# single-runner cluster cannot provide; this lane proves the
+# multi-endpoint seeder wiring (`SeederReconciler` syncing content to
+# every Ready endpoint of one Service - see
+# `internal/controller/seeder_controller.go`) instead, which is the part
+# that IS exercised honestly here.
+#
+# workflow_dispatch only, release-gated exactly like
+# e2e-deploy-kubevirt.yml and e2e-boot-path-kubevirt.yml (see those
+# files' own headers for the full "why not on every push" reasoning:
+# PXE over a Multus bridge inside nested KubeVirt is a real risk surface,
+# and a flaky job gating every PR trains reviewers to ignore red checks).
+# This lane adds a second reason on top: it is the heaviest lane in this
+# repository (two full boot+deploy chains sharing one runner's CPU/RAM
+# budget at once), so it is explicitly for pre-release validation of the
+# per-site seeder feature, not routine CI signal.
+on:
+  workflow_dispatch:
+    inputs:
+      boot_artifacts_version:
+        description: >-
+          Boot-artifacts release tag both site VMs net-boot (see
+          .github/workflows/build-live-image.yml). Empty uses the
+          repository's latest published release. Publishing a release is
+          a maintainer action; this input only selects among what is
+          already published.
+        required: false
+        type: string
+      runs_on:
+        description: >-
+          Runner label to run the job on. Defaults to the standard
+          GitHub-hosted runner, but this lane runs two full boot+deploy
+          chains (two VMs, two bootd pods, three seeder pods, KubeVirt +
+          CDI + Multus) at once on top of the five from-source image
+          builds e2e-kubevirt-reusable.yml already needs - noticeably
+          heavier than that single-leecher lane, which is itself already
+          close to the standard hosted runner's 16 GiB RAM ceiling. If
+          this lane is flaky from resource pressure rather than an
+          actual defect, retarget it at a larger or self-hosted
+          KubeVirt-capable runner via this input rather than raising the
+          resource-check floor below to a value the default runner can
+          never satisfy.
+        required: false
+        type: string
+        default: "ubuntu-latest"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Pinned the same way e2e-kubevirt-reusable.yml pins them - bump
+  # deliberately, not as a side effect of an unrelated change.
+  K3S_VERSION: "v1.33.13+k3s1"
+  CERT_MANAGER_VERSION: "v1.16.2"
+  KUBEVIRT_VERSION: "v1.4.0"
+  CDI_VERSION: "v1.60.3"
+  MULTUS_VERSION: "v4.1.0"
+
+  # Two boot L2 segments, one per simulated site - see the header
+  # comment's "Honest scope" section for what these genuinely simulate.
+  SITE_A_BRIDGE: kezio-site-a0
+  SITE_B_BRIDGE: kezio-site-b0
+  SITE_A_BOOTD_IP: 192.0.2.1/24
+  SITE_B_BOOTD_IP: 192.0.3.1/24
+  SITE_A_VM_MAC: "52:54:00:be:ef:0a"
+  SITE_B_VM_MAC: "52:54:00:be:ef:0b"
+  SITE_A_VM_DISK_SERIAL: "KEZIOE2ESCALESITEADISK1"
+  SITE_B_VM_DISK_SERIAL: "KEZIOE2ESCALESITEBDISK1"
+
+  # Same source test-e2e.yml's image-path job and e2e-kubevirt-reusable.yml
+  # use - see either's own comment for why "minimal".
+  UBUNTU_CLOUD_IMAGE_URL: "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img"
+
+  # Fixed at kezio's own current values (unlike e2e-kubevirt-reusable.yml,
+  # this lane is not called by the ezio repository, so it has no
+  # ezio_ref/image-tag inputs to plumb through - it always builds this
+  # repository's own images at the revision under test).
+  EZIO_REF: "v2.0.28"
+  MANAGER_IMG: "example.com/kezio:e2e-scale"
+  BOOTD_IMG: "example.com/kezio-bootd:e2e-scale"
+  INGEST_IMG: "example.com/kezio-ingest:e2e-scale"
+  SEEDER_IMG: "example.com/kezio-seeder:e2e-scale"
+  IMAGE_SERVICE_IMG: "example.com/kezio-image-service:e2e-scale"
+  OPENTRACKER_IMG: "ghcr.io/tunisiano187/opentracker-docker:master"
+
+  MARKER_PATH: "/etc/kezio-build-id"
+
+jobs:
+  scale-multisite-kubevirt:
+    name: Deploy an Image to two simulated sites concurrently over the shared swarm
+    runs-on: ${{ inputs.runs_on }}
+    # Two full boot+deploy chains sharing one runner's budget - see
+    # e2e-kubevirt-reusable.yml's own timeout comment for the
+    # single-leecher cost baseline; this doubles the VM-boot/deploy
+    # portion of it on top of the same fixed setup cost.
+    timeout-minutes: 120
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Fail fast unless /dev/kvm is usable
+        run: |
+          set -euo pipefail
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm does not exist on this runner; KubeVirt VMs need hardware virtualization." >&2
+            exit 1
+          fi
+          sudo usermod -aG kvm "$(whoami)"
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - name: Raise inotify limits
+        run: |
+          sudo sysctl -w fs.inotify.max_user_watches=1048576
+          sudo sysctl -w fs.inotify.max_user_instances=8192
+
+      - name: Reclaim runner disk space
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Resource check (fail fast if the runner is under-resourced)
+        # Same floor e2e-kubevirt-reusable.yml uses. This lane is
+        # genuinely heavier (see the header comment's runs_on
+        # description) but the floor stays at what the default hosted
+        # runner actually has, on purpose - a maintainer who needs more
+        # headroom should point runs_on at a bigger runner, not have
+        # this check fail unconditionally on the default one.
+        run: |
+          set -euo pipefail
+          echo "===== CPU ====="
+          nproc
+          echo "===== Memory ====="
+          free -h
+          echo "===== Disk ====="
+          df -h
+
+          cpus="$(nproc)"
+          mem_mb="$(free -m | awk '/^Mem:/{print $2}')"
+          disk_avail_gb="$(df -BG --output=avail / | tail -1 | tr -dc '0-9')"
+
+          if [ "$cpus" -lt 4 ]; then
+            echo "::error::Runner has only ${cpus} CPU(s); this lane needs at least 4." >&2
+            exit 1
+          fi
+          if [ "$mem_mb" -lt 14000 ]; then
+            echo "::error::Runner has only ${mem_mb} MiB RAM; this lane needs at least 14000 MiB." >&2
+            exit 1
+          fi
+          if [ "$disk_avail_gb" -lt 30 ]; then
+            echo "::error::Runner has only ${disk_avail_gb} GiB free disk; this lane needs at least 30 GiB (two VM disks plus everything the single-leecher lane needs)." >&2
+            exit 1
+          fi
+
+      - name: Create the two simulated sites' boot bridges
+        run: |
+          set -euo pipefail
+          sudo ip link add "${SITE_A_BRIDGE}" type bridge
+          sudo ip addr add "${SITE_A_BOOTD_IP}" dev "${SITE_A_BRIDGE}"
+          sudo ip link set "${SITE_A_BRIDGE}" up
+
+          sudo ip link add "${SITE_B_BRIDGE}" type bridge
+          sudo ip addr add "${SITE_B_BOOTD_IP}" dev "${SITE_B_BRIDGE}"
+          sudo ip link set "${SITE_B_BRIDGE}" up
+
+      - name: Cache the Ubuntu cloud image
+        id: cache-cloud-image
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/ubuntu-cloud.img
+          key: ubuntu-cloud-image-${{ env.UBUNTU_CLOUD_IMAGE_URL }}
+
+      - name: Download the Ubuntu cloud image
+        if: steps.cache-cloud-image.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -sfL -o "${{ runner.temp }}/ubuntu-cloud.img" "${UBUNTU_CLOUD_IMAGE_URL}"
+
+      - name: Customize the Ubuntu cloud image with a marker file and qemu-guest-agent
+        # One Image, ingested once, deployed to both sites concurrently -
+        # see the header comment's "pre-warm" section for why the
+        # central seeder needs no separate warm-up. Same technique
+        # e2e-kubevirt-reusable.yml uses; see that workflow's own step of
+        # this name for the full reasoning (passt/libguestfs-appliance
+        # network issue and why qemu-guest-agent is dpkg-installed
+        # offline instead of via virt-customize --install).
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libguestfs-tools
+          export LIBGUESTFS_BACKEND=direct
+
+          cp "${{ runner.temp }}/ubuntu-cloud.img" "${{ runner.temp }}/ubuntu-cloud-marked.img"
+
+          MARKER_TOKEN="$(openssl rand -hex 16)"
+          echo "MARKER_TOKEN=${MARKER_TOKEN}" >> "$GITHUB_ENV"
+
+          qga_deb_dir="$(mktemp -d)"
+          (cd "${qga_deb_dir}" && apt-get download qemu-guest-agent)
+
+          sudo --preserve-env=LIBGUESTFS_BACKEND virt-customize \
+            -a "${{ runner.temp }}/ubuntu-cloud-marked.img" \
+            --run-command "echo ${MARKER_TOKEN} > ${MARKER_PATH}" \
+            --copy-in "${qga_deb_dir}:/tmp" \
+            --run-command 'dpkg -i /tmp/qemu-guest-agent_*.deb' \
+            --run-command "systemctl enable qemu-guest-agent" \
+            --run-command "rm -f /tmp/qemu-guest-agent_*.deb"
+
+          echo "UBUNTU_CLOUD_IMAGE_PATH=${{ runner.temp }}/ubuntu-cloud-marked.img" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Warm the ingest/seeder/image-service image caches
+        run: |
+          set -euo pipefail
+          for spec in "ingest:Dockerfile.ingest:${INGEST_IMG}" "seeder:Dockerfile.seeder:${SEEDER_IMG}" "image-service:Dockerfile.image-service:${IMAGE_SERVICE_IMG}"; do
+            IFS=: read -r scope dockerfile tag <<< "${spec}"
+            build_args=()
+            if [ "${scope}" = "seeder" ]; then
+              build_args+=(--build-arg "EZIO_REF=${EZIO_REF}")
+            fi
+            docker buildx build \
+              --file "${dockerfile}" \
+              --tag "${tag}" \
+              --cache-from "type=gha,scope=${scope}" \
+              --cache-to "type=gha,mode=max,scope=${scope}" \
+              "${build_args[@]}" \
+              --load \
+              .
+          done
+
+      - name: Build the manager image
+        run: |
+          set -euo pipefail
+          go mod tidy
+          make docker-build IMG="${MANAGER_IMG}"
+
+      - name: Build the bootd image
+        run: |
+          set -euo pipefail
+          make docker-build-bootd BOOTD_IMG="${BOOTD_IMG}"
+
+      - name: Build kezioctl
+        run: |
+          set -euo pipefail
+          make build-kezioctl
+
+      - name: Install grpcurl (informational peer-count sampling only, not a pass/fail gate)
+        run: |
+          set -euo pipefail
+          go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Install k3s (pinned)
+        run: |
+          set -euo pipefail
+          curl -sfL https://get.k3s.io \
+            | INSTALL_K3S_VERSION="${K3S_VERSION}" sh -s - --write-kubeconfig-mode 644
+          echo "KUBECONFIG=/etc/rancher/k3s/k3s.yaml" >> "$GITHUB_ENV"
+          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+          for _ in $(seq 1 60); do
+            [ "$(kubectl get nodes --no-headers 2>/dev/null | wc -l)" -ge 1 ] && break
+            sleep 2
+          done
+          kubectl wait --for=condition=Ready node --all --timeout=120s
+          kubectl get nodes -o wide
+
+      - name: Import images into k3s containerd
+        run: |
+          set -euo pipefail
+          for img in "${MANAGER_IMG}" "${BOOTD_IMG}" "${INGEST_IMG}" "${SEEDER_IMG}" "${IMAGE_SERVICE_IMG}"; do
+            docker save "${img}" | sudo k3s ctr images import -
+          done
+
+      - name: Install cert-manager (pinned)
+        run: |
+          set -euo pipefail
+          kubectl apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"
+          for d in cert-manager cert-manager-webhook cert-manager-cainjector; do
+            kubectl wait deployment.apps/"${d}" --for condition=Available --namespace cert-manager --timeout=180s
+          done
+
+      - name: Install KubeVirt (pinned)
+        run: |
+          set -euo pipefail
+          kubectl apply -f "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-operator.yaml"
+          kubectl apply -f "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-cr.yaml"
+          kubectl -n kubevirt wait kubevirt kubevirt --for=condition=Available --timeout=300s
+
+      - name: Install virtctl
+        run: |
+          set -euo pipefail
+          curl -sfL -o /usr/local/bin/virtctl \
+            "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/virtctl-${KUBEVIRT_VERSION}-linux-amd64"
+          chmod +x /usr/local/bin/virtctl
+
+      - name: Install CDI (pinned)
+        run: |
+          set -euo pipefail
+          kubectl apply -f "https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_VERSION}/cdi-operator.yaml"
+          kubectl apply -f "https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_VERSION}/cdi-cr.yaml"
+          kubectl wait cdi cdi --for=condition=Available --timeout=300s
+
+      - name: Install Multus (pinned)
+        run: |
+          set -euo pipefail
+          kubectl apply -f "https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/${MULTUS_VERSION}/deployments/multus-daemonset-thick.yml"
+          kubectl -n kube-system rollout status daemonset/kube-multus-ds --timeout=180s
+
+      - name: Deploy CRDs and the controller-manager
+        run: |
+          set -euo pipefail
+          make install
+          make deploy IMG="${MANAGER_IMG}"
+          kubectl label --overwrite ns kezio-system pod-security.kubernetes.io/enforce=restricted
+          kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
+
+      - name: Create the two boot NetworkAttachmentDefinitions
+        run: |
+          set -euo pipefail
+          for site in site-a site-b; do
+            case "${site}" in
+              site-a) bridge="${SITE_A_BRIDGE}" ;;
+              site-b) bridge="${SITE_B_BRIDGE}" ;;
+            esac
+            cat <<EOF | kubectl apply -f -
+          apiVersion: k8s.cni.cncf.io/v1
+          kind: NetworkAttachmentDefinition
+          metadata:
+            name: kezio-boot-network-${site}
+            namespace: kezio-system
+          spec:
+            config: |
+              {
+                "cniVersion": "0.3.1",
+                "type": "bridge",
+                "bridge": "${bridge}",
+                "ipam": {}
+              }
+          EOF
+          done
+
+      - name: Create the image-service bearer token Secret
+        run: |
+          set -euo pipefail
+          kubectl -n kezio-system create secret generic kezio-image-service-token \
+            --from-literal=token=kezio-e2e-scale-token \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy image-service+seeder+store+boot/agent servers, wire real ingest/seeding/deploy
+        # Identical shape to e2e-kubevirt-reusable.yml's own step of this
+        # name - see that workflow for the full reasoning behind
+        # config/e2e-deploy-path and the env wiring below. This applies
+        # the ONE central seeder (this lane's "pre-warm" peer - see the
+        # header comment) and the ONE central opentracker; the two
+        # site-local seeder replicas are added afterward, as extra
+        # endpoints of the same Service, in their own step below.
+        env:
+          BOOT_ARTIFACTS_VERSION: ${{ inputs.boot_artifacts_version }}
+        run: |
+          set -euo pipefail
+          cd config/manager && ../../bin/kustomize edit set image controller="${MANAGER_IMG}"
+          cd ../..
+          cd config/image-service && ../../bin/kustomize edit set image "image-service=${IMAGE_SERVICE_IMG}"
+          cd ../..
+          cd config/seeder
+          ../../bin/kustomize edit set image "seeder=${SEEDER_IMG}"
+          ../../bin/kustomize edit set image "ghcr.io/tunisiano187/opentracker-docker=${OPENTRACKER_IMG}"
+          cd ../..
+          bin/kustomize build config/e2e-deploy-path | kubectl apply -f -
+
+          kubectl -n kezio-system set env deployment/kezio-controller-manager \
+            INGEST_IMAGE="${INGEST_IMG}" \
+            INGEST_STORE_PVC=kezio-store \
+            INGEST_STAGING_PVC=kezio-image-service-staging \
+            SEEDER_TRACKER_URL=http://kezio-opentracker.kezio-system.svc.cluster.local:6969/announce \
+            SEEDER_STORE_ROOT=/store \
+            SEEDER_SERVICE_NAMESPACE=kezio-system \
+            SEEDER_SERVICE_NAME=kezio-ezio-seeder \
+            BOOT_SERVER_ADDR=:8090 \
+            BOOT_ARTIFACTS_DIR=/boot-artifacts \
+            BOOT_SERVER_URL="http://kezio-boot-server.kezio-system.svc.cluster.local:8090" \
+            AGENT_SERVER_ADDR=:8091 \
+            DEPLOYER=agent
+
+          kubectl -n kezio-system create configmap boot-artifacts-fetch-script \
+            --from-file=fetch.sh=config/boot-artifacts/fetch.sh \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n kezio-system patch deployment/kezio-controller-manager --type=json \
+            --patch-file=config/e2e-boot-path/boot-artifacts-init-patch.yaml
+          if [ -n "${BOOT_ARTIFACTS_VERSION}" ]; then
+            kubectl -n kezio-system set env deployment/kezio-controller-manager \
+              -c fetch-boot-artifacts "BOOT_ARTIFACTS_VERSION=${BOOT_ARTIFACTS_VERSION}"
+          fi
+
+          kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
+          for d in kezio-image-service kezio-ezio-seeder kezio-opentracker; do
+            kubectl rollout status deployment/"${d}" -n kezio-system --timeout=180s
+          done
+
+      - name: Deploy the two site-local ezio-seeder replicas
+        # Clones config/seeder's own ezio-seeder Deployment (already
+        # applied above, as the central "pre-warm" seeder) into two more
+        # replicas, one per site, following exactly the model
+        # ezio-seeder-site.example.yaml documents: same pod template
+        # labels the Service already selects on
+        # (app.kubernetes.io/component: ezio-seeder), plus one extra
+        # kezio.kojuro.date/network-site label this Deployment's own
+        # selector also carries, so the two clones' selectors do not
+        # collide with each other or with the central Deployment's.
+        # `jq`, not `yq`: every other patch step in this repository's
+        # workflows already uses `jq` against `kubectl ... -o json`
+        # (see e2e-kubevirt-reusable.yml's Machine/VMI verify steps) - no
+        # workflow here uses `yq`, so this stays consistent rather than
+        # adding a second YAML-editing tool for one step.
+        #
+        # Honest limitation restated from the header comment: both
+        # clones mount the identical store PVC the central seeder does
+        # (there is only one storage backend on this single-node
+        # cluster), so this proves the multi-endpoint reconciler wiring
+        # (SeederReconciler syncing content to every Ready endpoint),
+        # not per-site storage isolation or network locality.
+        run: |
+          set -euo pipefail
+          seeder_base_json="$(kubectl get deployment/kezio-ezio-seeder -n kezio-system -o json)"
+          for site in site-a site-b; do
+            echo "${seeder_base_json}" | jq --arg site "${site}" '
+              .metadata.name = "kezio-ezio-seeder-\($site)"
+              | del(.metadata.resourceVersion, .metadata.uid, .metadata.creationTimestamp, .metadata.generation, .status)
+              | .spec.selector.matchLabels["kezio.kojuro.date/network-site"] = $site
+              | .spec.template.metadata.labels["kezio.kojuro.date/network-site"] = $site
+            ' | kubectl apply -f -
+            kubectl rollout status deployment/kezio-ezio-seeder-"${site}" -n kezio-system --timeout=180s
+          done
+
+      - name: Deploy the two site-local kezio-bootd instances
+        # Same cloning technique as the seeder step above, applied to
+        # config/bootd's Deployment - one instance per boot L2 segment
+        # (see config/bootd/deployment.yaml's own "one replica per boot
+        # segment" comment for why this is two Deployments, not two
+        # replicas of one). RBAC (ServiceAccount/Role/RoleBinding) is
+        # shared - both instances run under the same "kezio-bootd"
+        # ServiceAccount, applied once via the plain `kubectl apply -k`
+        # below, exactly like the single-leecher lane's one bootd
+        # instance already does; only the Deployment itself needs a
+        # per-site clone.
+        env:
+          BOOT_ARTIFACTS_VERSION: ${{ inputs.boot_artifacts_version }}
+        run: |
+          set -euo pipefail
+          cd config/bootd && ../../bin/kustomize edit set image bootd="${BOOTD_IMG}"
+          cd ../..
+          bootd_base_json="$(bin/kustomize build config/bootd | kubectl apply --dry-run=client -f - -o json)"
+
+          # Apply the shared RBAC objects once (everything the
+          # kustomization builds except the Deployment itself).
+          echo "${bootd_base_json}" | jq '{apiVersion:"v1", kind:"List", items: [.items[] | select(.kind!="Deployment")]}' \
+            | kubectl apply -f -
+
+          deployment_base_json="$(echo "${bootd_base_json}" | jq '.items[] | select(.kind=="Deployment")')"
+
+          for site in site-a site-b; do
+            case "${site}" in
+              site-a) bootd_ip="${SITE_A_BOOTD_IP%%/*}" ;;
+              site-b) bootd_ip="${SITE_B_BOOTD_IP%%/*}" ;;
+            esac
+            echo "${deployment_base_json}" | jq \
+              --arg site "${site}" --arg ip "${bootd_ip}" --arg net "kezio-boot-network-${site}" '
+              .metadata.name = "kezio-bootd-\($site)"
+              | .spec.selector.matchLabels["kezio.kojuro.date/network-site"] = $site
+              | .spec.template.metadata.labels["kezio.kojuro.date/network-site"] = $site
+              | .spec.template.metadata.annotations["k8s.v1.cni.cncf.io/networks"] = $net
+              | (.spec.template.spec.containers[] | select(.name=="bootd") | .env[] | select(.name=="BOOTD_SERVER_IP") | .value) = $ip
+            ' | kubectl apply -f -
+
+            if [ -n "${BOOT_ARTIFACTS_VERSION}" ]; then
+              kubectl -n kezio-system set env deployment/kezio-bootd-"${site}" \
+                -c fetch-boot-artifacts "BOOT_ARTIFACTS_VERSION=${BOOT_ARTIFACTS_VERSION}"
+            fi
+            kubectl rollout status deployment/kezio-bootd-"${site}" -n kezio-system --timeout=180s
+          done
+
+      - name: Ingest the marker-customized Ubuntu image through kezioctl
+        # One Image, ingested once - both sites' Machines reference it
+        # below. This is the "pre-warm" content: from the moment this
+        # Image reaches Ready, the central seeder already serves it in
+        # full (see the header comment).
+        run: |
+          set -euo pipefail
+          kubectl -n kezio-system port-forward svc/kezio-image-service 18080:8080 &
+          PF_PID=$!
+          echo "PF_PID=${PF_PID}" >> "$GITHUB_ENV"
+          for _ in $(seq 1 30); do
+            curl -sf -o /dev/null "http://127.0.0.1:18080/healthz" && break
+            sleep 1
+          done
+
+          bin/kezioctl image upload "${UBUNTU_CLOUD_IMAGE_PATH}" \
+            --name e2e-scale-ubuntu \
+            --namespace kezio-system \
+            --server http://127.0.0.1:18080 \
+            --token kezio-e2e-scale-token \
+            --format qcow2
+
+      - name: Wait for the Image to reach Ready (real ingest - qemu-img, sfdisk, partclone)
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + 900 ))
+          while true; do
+            state="$(kubectl get image e2e-scale-ubuntu -n kezio-system -o jsonpath='{.status.state}' || true)"
+            echo "$(date -Is) Image state: ${state:-<none>}"
+            [ "${state}" = "Ready" ] && break
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::Image e2e-scale-ubuntu did not reach Ready within the timeout." >&2
+              kubectl get image e2e-scale-ubuntu -n kezio-system -o yaml
+              exit 1
+            fi
+            sleep 5
+          done
+          kubectl get image e2e-scale-ubuntu -n kezio-system -o yaml
+
+      - name: Stop the image-service port-forward
+        if: always()
+        run: kill "${PF_PID}" 2>/dev/null || true
+
+      - name: Create the Machine CRs for both sites' target VMs
+        # spec.networkSite is set to each site's name for documentation
+        # purposes (it is the field a Machine already carries to select
+        # its kezio-bootd zone by design - see api/v1alpha1/machine_types.go's
+        # doc comment); nothing in the boot/deploy path reads it today
+        # (the field is a recorded future-use allowance), so it plays no
+        # part in which bootd instance actually answers a given VM's PXE
+        # request - that is decided entirely by which bridge the VM's
+        # own NIC is attached to (see the VirtualMachine step below).
+        run: |
+          for site in site-a site-b; do
+            case "${site}" in
+              site-a) mac="${SITE_A_VM_MAC}"; serial="${SITE_A_VM_DISK_SERIAL}" ;;
+              site-b) mac="${SITE_B_VM_MAC}"; serial="${SITE_B_VM_DISK_SERIAL}" ;;
+            esac
+            cat <<EOF | kubectl apply -f -
+          apiVersion: kezio.kojuro.date/v1alpha1
+          kind: Machine
+          metadata:
+            name: e2e-scale-${site}
+            namespace: kezio-system
+          spec:
+            bootMACAddress: "${mac}"
+            online: true
+            targetDisk:
+              serialNumber: "${serial}"
+            imageRef:
+              name: e2e-scale-ubuntu
+            networkSite: ${site}
+          EOF
+          done
+
+      - name: Create and start both sites' target KubeVirt VirtualMachines
+        # Same shape as e2e-kubevirt-reusable.yml's single VM (see that
+        # workflow's own step of this name for the boot-order/reboot
+        # reasoning), created twice - each VM's provisioning interface
+        # attaches to its own site's boot NetworkAttachmentDefinition, so
+        # each VM's PXE broadcast only ever reaches its own site's
+        # kezio-bootd instance.
+        run: |
+          for site in site-a site-b; do
+            case "${site}" in
+              site-a) mac="${SITE_A_VM_MAC}"; serial="${SITE_A_VM_DISK_SERIAL}" ;;
+              site-b) mac="${SITE_B_VM_MAC}"; serial="${SITE_B_VM_DISK_SERIAL}" ;;
+            esac
+            cat <<EOF | kubectl apply -f -
+          apiVersion: kubevirt.io/v1
+          kind: VirtualMachine
+          metadata:
+            name: e2e-scale-${site}
+            namespace: kezio-system
+          spec:
+            running: true
+            template:
+              metadata:
+                labels:
+                  kubevirt.io/vm: e2e-scale-${site}
+              spec:
+                domain:
+                  cpu:
+                    cores: 2
+                  resources:
+                    requests:
+                      memory: 3Gi
+                  firmware:
+                    bootloader:
+                      efi:
+                        secureBoot: false
+                  devices:
+                    interfaces:
+                      - name: provisioning
+                        macAddress: "${mac}"
+                        bridge: {}
+                        bootOrder: 1
+                    disks:
+                      - name: data
+                        serial: "${serial}"
+                        bootOrder: 2
+                        disk:
+                          bus: virtio
+                networks:
+                  - name: provisioning
+                    multus:
+                      networkName: kezio-boot-network-${site}
+                volumes:
+                  - name: data
+                    emptyDisk:
+                      capacity: 4Gi
+          EOF
+          done
+          kubectl wait vmi/e2e-scale-site-a -n kezio-system --for=condition=Ready --timeout=180s
+          kubectl wait vmi/e2e-scale-site-b -n kezio-system --for=condition=Ready --timeout=180s
+
+      - name: Wait for both Machines to reach Provisioned, sampling swarm peer counts meanwhile
+        # The main gating wait: both site Machines must independently
+        # reach Provisioned - i.e. both leech the same Image over the
+        # real BitTorrent swarm concurrently, each through its own
+        # site's boot chain. Alongside that gating check, this step also
+        # port-forwards to all three seeder endpoints (central, site-a,
+        # site-b) and samples ezio's own GetTorrentStatus RPC every
+        # iteration, purely as informational evidence that more than one
+        # peer was in the swarm while both leeches were in flight - see
+        # the header comment's "Honest scope" section for exactly what
+        # this sample does and does not prove. It never affects pass/fail.
+        run: |
+          set -euo pipefail
+
+          central_pod="$(kubectl get pod -n kezio-system \
+            -l 'app.kubernetes.io/component=ezio-seeder,!kezio.kojuro.date/network-site' \
+            -o jsonpath='{.items[0].metadata.name}')"
+          site_a_pod="$(kubectl get pod -n kezio-system \
+            -l 'app.kubernetes.io/component=ezio-seeder,kezio.kojuro.date/network-site=site-a' \
+            -o jsonpath='{.items[0].metadata.name}')"
+          site_b_pod="$(kubectl get pod -n kezio-system \
+            -l 'app.kubernetes.io/component=ezio-seeder,kezio.kojuro.date/network-site=site-b' \
+            -o jsonpath='{.items[0].metadata.name}')"
+
+          kubectl -n kezio-system port-forward pod/"${central_pod}" 15001:50051 >/dev/null 2>&1 &
+          PF_CENTRAL=$!
+          kubectl -n kezio-system port-forward pod/"${site_a_pod}" 15002:50051 >/dev/null 2>&1 &
+          PF_SITE_A=$!
+          kubectl -n kezio-system port-forward pod/"${site_b_pod}" 15003:50051 >/dev/null 2>&1 &
+          PF_SITE_B=$!
+          cleanup() { kill "${PF_CENTRAL}" "${PF_SITE_A}" "${PF_SITE_B}" 2>/dev/null || true; }
+          trap cleanup EXIT
+          sleep 3
+
+          max_peers=0
+          sample_swarm() {
+            for port in 15001 15002 15003; do
+              resp="$(grpcurl -plaintext -connect-timeout 2 -proto proto/ezio.proto -import-path proto \
+                -d '{}' "127.0.0.1:${port}" ezio.EZIO/GetTorrentStatus 2>/dev/null || true)"
+              [ -z "${resp}" ] && continue
+              peers="$(jq -r '[.torrents[]?.numPeers // 0] | max // 0' <<<"${resp}" 2>/dev/null || echo 0)"
+              case "${peers}" in ''|*[!0-9]*) peers=0 ;; esac
+              if [ "${peers}" -gt "${max_peers}" ]; then
+                max_peers="${peers}"
+              fi
+            done
+          }
+
+          deadline=$(( $(date +%s) + 1800 ))
+          while true; do
+            state_a="$(kubectl get machine e2e-scale-site-a -n kezio-system -o jsonpath='{.status.state}' || true)"
+            state_b="$(kubectl get machine e2e-scale-site-b -n kezio-system -o jsonpath='{.status.state}' || true)"
+            echo "$(date -Is) site-a: ${state_a:-<none>}  site-b: ${state_b:-<none>}"
+
+            sample_swarm
+
+            if [ "${state_a}" = "Error" ] || [ "${state_b}" = "Error" ]; then
+              echo "::error::A Machine landed in Error while deploying (site-a=${state_a:-<none>}, site-b=${state_b:-<none>})." >&2
+              kubectl get machine e2e-scale-site-a e2e-scale-site-b -n kezio-system -o yaml
+              exit 1
+            fi
+            if [ "${state_a}" = "Provisioned" ] && [ "${state_b}" = "Provisioned" ]; then
+              break
+            fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::Both Machines did not reach Provisioned within the timeout (site-a=${state_a:-<none>}, site-b=${state_b:-<none>})." >&2
+              exit 1
+            fi
+            sleep 10
+          done
+
+          echo "MAX_OBSERVED_SWARM_PEERS=${max_peers}" >> "$GITHUB_ENV"
+          {
+            echo "### Swarm peer-count sample (informational only)"
+            echo
+            echo "Maximum \`num_peers\` observed on any seeder endpoint's torrent"
+            echo "while both site Machines were leeching concurrently: **${max_peers}**."
+            echo
+            echo "This is NOT a same-site locality measurement and NOT a"
+            echo "WAN-copy-count measurement - every seeder and both VMs share one"
+            echo "flat pod network on this single runner. It only shows whether"
+            echo "more than one peer was actually connected to a torrent at once,"
+            echo "which both leechers being active concurrently against the same"
+            echo "swarm implies but this sample independently confirms."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          kubectl get machine e2e-scale-site-a e2e-scale-site-b -n kezio-system -o yaml
+
+      - name: "Verify layer 1 (controller): status.provisioning matches spec, conditions clean (both sites)"
+        run: |
+          set -euo pipefail
+          for site in site-a site-b; do
+            machine_json="$(kubectl get machine e2e-scale-"${site}" -n kezio-system -o json)"
+
+            provisioned_image="$(jq -r '.status.provisioning.image.imageRef.name' <<<"${machine_json}")"
+            if [ "${provisioned_image}" != "e2e-scale-ubuntu" ]; then
+              echo "::error::[${site}] status.provisioning.image.imageRef.name = ${provisioned_image}, want e2e-scale-ubuntu" >&2
+              exit 1
+            fi
+
+            target_disk="$(jq -r '.status.provisioning.image.targetDisk' <<<"${machine_json}")"
+            if [ -z "${target_disk}" ] || [ "${target_disk}" = "null" ]; then
+              echo "::error::[${site}] status.provisioning.image.targetDisk is empty" >&2
+              exit 1
+            fi
+            echo "[${site}] resolved target disk: ${target_disk}"
+
+            ready_status="$(jq -r '.status.conditions[] | select(.type=="Ready") | .status' <<<"${machine_json}")"
+            if [ "${ready_status}" != "True" ]; then
+              echo "::error::[${site}] Ready condition status = ${ready_status}, want True" >&2
+              echo "${machine_json}" | jq '.status.conditions'
+              exit 1
+            fi
+          done
+
+      - name: "Wait for layer 2 (boot): both deployed disks boot and qemu-guest-agent connects"
+        run: |
+          set -euo pipefail
+          for site in site-a site-b; do
+            deadline=$(( $(date +%s) + 600 ))
+            while true; do
+              connected="$(kubectl get vmi e2e-scale-"${site}" -n kezio-system \
+                -o jsonpath='{.status.conditions[?(@.type=="AgentConnected")].status}' || true)"
+              echo "$(date -Is) [${site}] VMI AgentConnected: ${connected:-<none>}"
+              [ "${connected}" = "True" ] && break
+              if [ "$(date +%s)" -ge "${deadline}" ]; then
+                echo "::error::[${site}] qemu-guest-agent never connected within the timeout after Provisioned - the VM did not boot from the deployed disk." >&2
+                exit 1
+              fi
+              sleep 5
+            done
+
+            guest_os_id="$(kubectl get vmi e2e-scale-"${site}" -n kezio-system -o jsonpath='{.status.guestOSInfo.id}')"
+            echo "[${site}] guestOSInfo.id: ${guest_os_id}"
+            if [ "${guest_os_id}" != "ubuntu" ]; then
+              echo "::error::[${site}] guestOSInfo.id = ${guest_os_id}, want ubuntu (the deployed image's OS, not the live-boot environment's)" >&2
+              exit 1
+            fi
+          done
+
+      - name: "Verify layer 3 (content): read the marker file back through QGA and compare (both sites)"
+        run: |
+          set -euo pipefail
+          for site in site-a site-b; do
+            launcher_pod="$(kubectl get pods -n kezio-system -l kubevirt.io/vm=e2e-scale-"${site}" -o jsonpath='{.items[0].metadata.name}')"
+            domain="kezio-system_e2e-scale-${site}"
+
+            qga_exec() {
+              kubectl exec -n kezio-system "${launcher_pod}" -c compute -- \
+                virsh qemu-agent-command "${domain}" "$1"
+            }
+
+            open_reply="$(qga_exec "{\"execute\":\"guest-file-open\",\"arguments\":{\"path\":\"${MARKER_PATH}\",\"mode\":\"r\"}}")"
+            handle="$(jq -r '.return' <<<"${open_reply}")"
+            if [ "${handle}" = "null" ] || [ -z "${handle}" ]; then
+              echo "::error::[${site}] guest-file-open on ${MARKER_PATH} failed: ${open_reply}" >&2
+              exit 1
+            fi
+
+            read_reply="$(qga_exec "{\"execute\":\"guest-file-read\",\"arguments\":{\"handle\":${handle},\"count\":4096}}")"
+            qga_exec "{\"execute\":\"guest-file-close\",\"arguments\":{\"handle\":${handle}}}" >/dev/null
+
+            marker_content="$(jq -r '.return["buf-b64"]' <<<"${read_reply}" | base64 -d | tr -d '\n')"
+            echo "[${site}] marker content: ${marker_content}"
+
+            if [ "${marker_content}" != "${MARKER_TOKEN}" ]; then
+              echo "::error::[${site}] marker file content mismatch: guest has ${marker_content@Q}, expected ${MARKER_TOKEN@Q}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## E2E Scale (Multi-Site KubeVirt VMs)"
+            echo
+            echo "Proves: two site leechers (site-a, site-b), each behind its own"
+            echo "simulated boot L2 segment, deployed the same Image concurrently"
+            echo "through a swarm with more than one seeder endpoint (a central"
+            echo "seeder that already holds the full image, plus one site-local"
+            echo "seeder replica per site) - not one leecher at a time against a"
+            echo "single seeder."
+            echo
+            echo "Does NOT prove: WAN byte savings, or that same-site peers"
+            echo "preferentially exchange pieces over the LAN. This runs on one"
+            echo "GitHub-hosted runner with one flat pod network for all BitTorrent"
+            echo "traffic - there is no real inter-site latency or bandwidth"
+            echo "difference for peer selection to respond to. See this workflow"
+            echo "file's own header comment for the full honest-scope statement."
+            echo
+            echo "Peer-count sample: \`${MAX_OBSERVED_SWARM_PEERS:-<not reached>}\`"
+            echo "(informational only - see the sampling step's own summary output"
+            echo "above for what it does and does not show)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          echo "===== nodes ====="
+          kubectl get nodes -o wide
+          echo "===== kezio-system pods ====="
+          kubectl get pods -n kezio-system -o wide
+          echo "===== controller-manager logs ====="
+          kubectl -n kezio-system logs deployment/kezio-controller-manager --all-containers --tail=1000
+          for site in site-a site-b; do
+            echo "===== bootd logs (${site}) ====="
+            kubectl -n kezio-system logs deployment/kezio-bootd-"${site}" --all-containers --tail=1000
+            echo "===== seeder logs (${site}) ====="
+            kubectl -n kezio-system logs deployment/kezio-ezio-seeder-"${site}" --tail=1000
+          done
+          echo "===== central seeder logs ====="
+          kubectl -n kezio-system logs deployment/kezio-ezio-seeder --tail=1000
+          echo "===== opentracker logs ====="
+          kubectl -n kezio-system logs deployment/kezio-opentracker --tail=1000
+          echo "===== image-service logs ====="
+          kubectl -n kezio-system logs deployment/kezio-image-service --tail=1000
+          echo "===== ingest Job(s) ====="
+          kubectl get jobs -n kezio-system -l kezio.kojuro.date/image -o wide
+          kubectl logs -n kezio-system -l kezio.kojuro.date/image --all-containers --tail=1000
+          echo "===== VirtualMachine / VMI ====="
+          kubectl get vm,vmi -n kezio-system -o yaml
+          for site in site-a site-b; do
+            echo "===== VM console (last output, ${site}) ====="
+            timeout 20 virtctl console e2e-scale-"${site}" -n kezio-system || true
+          done
+          echo "===== Machine CRs ====="
+          kubectl get machine e2e-scale-site-a e2e-scale-site-b -n kezio-system -o yaml
+          echo "===== Image CR ====="
+          kubectl get image e2e-scale-ubuntu -n kezio-system -o yaml
+          echo "===== events ====="
+          kubectl get events -n kezio-system --sort-by=.lastTimestamp

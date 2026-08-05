@@ -30,6 +30,10 @@ See `make help` for the full list of targets.
   to reuse kezio's KubeVirt BT-transfer e2e test as a `workflow_call`
   from another repository (the ezio repository in particular), including
   the input list and defaults.
+- [`docs/e2e-scale-multisite-kubevirt.md`](docs/e2e-scale-multisite-kubevirt.md):
+  the release-gated multi-site scale e2e lane - what it proves about the
+  per-site seeder topology, the 2-site simulation on a single runner, and
+  its honest scope/limitations.
 
 ## License
 
