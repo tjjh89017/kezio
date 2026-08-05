@@ -1,0 +1,24 @@
+# Read by live-build's binary_rootfs stage (scripts/build/binary_rootfs
+# upstream) as an mksquashfs -ef exclude list (wildcards enabled) when it
+# packs chroot/ into filesystem.squashfs - this is live-build's own knob
+# for dropping paths from the image, not a dpkg-level exclude, so it
+# needs no ordering against when packages install: it only ever applies
+# once, at the very end, when the squashfs is written.
+#
+# Every pattern below is documentation/translation data with no runtime
+# role in this image: live-boot, systemd-networkd, kezio-agent, and
+# ezio's runtime libraries read none of it. The live OS here is a
+# headless, non-interactive deploy agent - nothing in the boot/agent
+# path prints a man page, a --help page's own --help text, or a
+# translated string, so English-only source strings (gettext's
+# untranslated fallback, which every one of these packages already
+# carries outside of usr/share/locale) are enough. This is a standard
+# live-image slimming step; see the 100-300 MiB filesystem.squashfs
+# target this build works against (dist/live/manifest.json, reported by
+# .github/workflows/build-live-image.yml).
+usr/share/doc/*
+usr/share/man/*
+usr/share/groff/*
+usr/share/info/*
+usr/share/lintian/*
+usr/share/locale/*

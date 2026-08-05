@@ -5,6 +5,18 @@
 # commit reproduces the same configuration. hack/live-image/build.sh
 # runs `lb config` with no extra flags of its own for that reason - this
 # file is the single source of truth.
+#
+# --chroot-squashfs-compression-type xz: live-build's own build script
+# (scripts/build/binary_rootfs) already falls back to "-comp xz" for
+# mksquashfs when this is left unset, so this flag changes no build
+# behavior today - it exists to pin that choice explicitly against the
+# 100-300 MiB filesystem.squashfs target the CI workflow reports,
+# instead of depending on a default that a future live-build release
+# could change. xz costs more CPU time to compress than gzip (live-build's
+# other implicit default elsewhere), which is a fine tradeoff for a
+# release-gated CI build. See also config/rootfs/excludes, which drops
+# documentation/man/locale data from the squashfs at packing time - the
+# other lever against that same target.
 set -e
 
 lb config noauto \
@@ -18,4 +30,5 @@ lb config noauto \
 	--firmware-chroot false \
 	--memtest none \
 	--win32-loader false \
+	--chroot-squashfs-compression-type xz \
 	"${@}"

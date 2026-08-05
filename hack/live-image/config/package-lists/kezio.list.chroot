@@ -22,10 +22,16 @@ dosfstools
 e2fsprogs
 efibootmgr
 
-# qemu-guest-agent lets the e2e KubeVirt VM be queried/controlled by the
-# hypervisor side once the live OS is up, independent of the kezio
-# control plane under test.
-qemu-guest-agent
+# qemu-guest-agent is deliberately NOT listed here. The KubeVirt e2e
+# lanes (.github/workflows/e2e-kubevirt-reusable.yml and its BMC/
+# multisite variants) inject qemu-guest-agent straight into the
+# *deployed* target disk image before boot, independent of this live
+# image's package set - see e2e-kubevirt-reusable.yml's "Customize the
+# Ubuntu cloud image" step and its "the live environment never runs
+# qemu-guest-agent" comment on the layer-2 boot-wait step. The live
+# environment itself is only ever queried through the kezio control
+# plane (Machine status), never through QGA, so shipping the package
+# here would be squashfs weight with no reader.
 
 # systemd-networkd (part of the systemd package, already pulled in by
 # live-boot's own dependencies) brings up DHCP on every NIC - see
