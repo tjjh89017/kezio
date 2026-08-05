@@ -1104,13 +1104,49 @@ jobs:
         # binary the "Start capturing the provisioning bridge" step above
         # already installed on this host, with no image pull and no
         # dependency on the ephemeral-containers feature being enabled.
+        #
+        # crictl is pointed explicitly at RKE2's own containerd socket
+        # (-r): its default endpoint probe only tries
+        # /run/containerd/containerd.sock, /run/crio/crio.sock and
+        # /var/run/cri-dockerd.sock, none of which exist on an RKE2 node
+        # (RKE2 bundles containerd under /run/k3s/containerd instead, the
+        # same socket "Import images into RKE2 containerd" above already
+        # targets with `ctr -a`) - left unset, every crictl call here
+        # exits non-zero.
+        #
+        # This is a diagnostic instrument only: it must never fail the
+        # job. `set +e` plus an explicit ::warning:: and early exit 0 on
+        # each resolution step guarantee the step always exits 0,
+        # regardless of whether crictl, nsenter or tcpdump are present or
+        # able to resolve bootd's sandbox.
         run: |
-          set -euo pipefail
-          sandbox_id="$(sudo crictl pods --name "${BOOTD_POD_NAME}" -q | head -1)"
-          sandbox_pid="$(sudo crictl inspectp -o go-template --template '{{.info.pid}}' "${sandbox_id}")"
+          set +e
+          crictl_endpoint="unix:///run/k3s/containerd/containerd.sock"
+
+          sandbox_id="$(sudo crictl -r "${crictl_endpoint}" pods --name "${BOOTD_POD_NAME}" -q 2>/tmp/crictl-bootd-netns.log | head -1)"
+          if [ -z "${sandbox_id}" ]; then
+            echo "::warning::bootd pod-netns capture: crictl could not resolve a sandbox ID for pod ${BOOTD_POD_NAME} via ${crictl_endpoint} - skipping this diagnostic capture, it does not affect the e2e result"
+            cat /tmp/crictl-bootd-netns.log >&2
+            exit 0
+          fi
+
+          sandbox_pid="$(sudo crictl -r "${crictl_endpoint}" inspectp -o go-template --template '{{.info.pid}}' "${sandbox_id}" 2>/tmp/crictl-bootd-netns.log)"
+          if [ -z "${sandbox_pid}" ]; then
+            echo "::warning::bootd pod-netns capture: crictl could not resolve the sandbox pid for ${sandbox_id} - skipping this diagnostic capture, it does not affect the e2e result"
+            cat /tmp/crictl-bootd-netns.log >&2
+            exit 0
+          fi
+
+          if ! command -v tcpdump >/dev/null 2>&1; then
+            echo "::warning::bootd pod-netns capture: tcpdump not found on the runner - skipping this diagnostic capture, it does not affect the e2e result"
+            exit 0
+          fi
+
           sudo -- sh -c "nohup nsenter -t '${sandbox_pid}' -n -- tcpdump -i net1 -w '${RUNNER_TEMP}/bootd-netns.pcap' \
             udp port 67 or port 68 or port 69 \
-            >/tmp/tcpdump-bootd-netns.log 2>&1 &"
+            >/tmp/tcpdump-bootd-netns.log 2>&1 &" \
+            || echo "::warning::bootd pod-netns capture: failed to start nsenter/tcpdump inside bootd's netns - skipping this diagnostic capture, it does not affect the e2e result"
+          exit 0
 
       - name: Ingest the marker-customized Ubuntu image through kezioctl
         run: |
@@ -1856,9 +1892,15 @@ jobs:
             # never reaches bootd's UDP socket.
             echo "--- ${p} net1 rp_filter and link state (inside the pod network namespace) ---"
             pod_name="${p#pod/}"
-            sandbox_id="$(sudo crictl pods --name "${pod_name}" -q | head -1)"
+            # Same RKE2 endpoint crictl needs everywhere else in this
+            # workflow (see "Start capturing bootd's pod network
+            # namespace" above) - without -r, crictl's default endpoint
+            # probe finds nothing on an RKE2 node and this whole block
+            # silently produces no output.
+            crictl_endpoint="unix:///run/k3s/containerd/containerd.sock"
+            sandbox_id="$(sudo crictl -r "${crictl_endpoint}" pods --name "${pod_name}" -q | head -1)"
             if [ -n "${sandbox_id}" ]; then
-              sandbox_pid="$(sudo crictl inspectp -o go-template --template '{{.info.pid}}' "${sandbox_id}")"
+              sandbox_pid="$(sudo crictl -r "${crictl_endpoint}" inspectp -o go-template --template '{{.info.pid}}' "${sandbox_id}")"
               sudo nsenter -t "${sandbox_pid}" -n -- sh -c '
                 for f in all default net1; do
                   echo "net.ipv4.conf.${f}.rp_filter = $(cat /proc/sys/net/ipv4/conf/${f}/rp_filter 2>/dev/null || echo "<no such interface>")"
