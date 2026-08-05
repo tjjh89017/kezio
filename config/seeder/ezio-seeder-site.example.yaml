@@ -49,10 +49,10 @@
 # A genuinely storage-isolated site (its own cluster, no route to the
 # central store) cannot use this template as-is: it needs a pod that
 # leeches the content once over BT and then keeps seeding from local
-# disk, the "pre-warm" pattern already described in the design doc's
-# cross-network section. That pattern needs no artifact-sync mechanism
-# either - the BT download itself is the sync - but it is a different
-# pod shape (a plain leecher, added with seed_mode=false, not this
+# disk, already described above: a plain BT leecher with
+# seed_mode=false downloads once and then serves from local disk,
+# needing no artifact-sync mechanism since the BT download itself is
+# the sync. That pod shape is different (added with seed_mode=false, not this
 # store-mounted seed_mode=true template) and is not built by this
 # repository yet.
 apiVersion: apps/v1

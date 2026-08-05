@@ -259,10 +259,8 @@ endpoints of it - not a per-site Service.** Concretely:
 
 - The **tracker stays central and singular.** `SEEDER_TRACKER_URL`
   never varies per site. The tracker is the one shared meeting point of
-  the swarm (see the design doc's cross-network section); a per-site
-  tracker would split the swarm into disconnected islands instead of
-  helping it, since a torrent's peers are only ever the peers *its own*
-  tracker knows about.
+  the swarm (a per-site tracker would split the swarm into disconnected
+  islands, since BT peers only ever come from their own tracker).
 - A site-local seeder is **just another replica of the `ezio-seeder`
   component**, deployed as an additional Deployment whose pod template
   labels match `ezio-seeder-service.yaml`'s selector
@@ -283,9 +281,9 @@ endpoints of it - not a per-site Service.** Concretely:
 - Once a site's seeder is seeding, which peer a same-site leecher's
   libtorrent picks to exchange pieces with is **libtorrent's own peer
   selection over the shared swarm** - not something kezio decides or
-  needs to decide. This is the design doc's point explicitly: "leechers
+  needs to decide. Concretely: "leechers
   in one site exchange pieces with each other locally... this is the
-  normal BT behavior; no extra mechanism is needed." Concretely here:
+  normal BT behavior; no extra mechanism is needed." In practice:
   every peer (site seeder, central seeder, every machine's leecher)
   announces to the one tracker and gets back the swarm's full peer
   list; a site-local seeder is simply reachable at a shorter/cheaper
@@ -317,9 +315,9 @@ node(s) (network-backed storage, or routed L3 to the central storage
 backend - see the cross-network design notes below). A site with no
 route to central storage at all cannot use this template as-is; it
 would instead need a plain BT leecher that downloads the content once
-and keeps seeding from local disk afterward (the design doc's
-"pre-warm" pattern - "with Option A this needs no artifact sync; the
-download itself is the sync"). That pod shape is different (added with
+and keeps seeding from local disk afterward (a "pre-warm" pattern:
+with Option A this needs no artifact sync, since the download itself
+is the sync). That pod shape is different (added with
 `seed_mode=false`, not the `seed_mode=true` this reconciler always
 uses) and is not implemented by this repository yet; it is a genuine
 follow-up, not something the model above already covers.

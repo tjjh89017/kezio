@@ -55,9 +55,8 @@ permissions:
   contents: read
 
 env:
-  # Pin every version this job depends on (PLAN's CI notes call this out
-  # explicitly for the KubeVirt topology) - bump deliberately, not as a
-  # side effect of an unrelated change.
+  # Pin every version this job depends on for the KubeVirt topology -
+  # bump deliberately, not as a side effect of an unrelated change.
   K3S_VERSION: "v1.33.13+k3s1"
   CERT_MANAGER_VERSION: "v1.16.2"
   KUBEVIRT_VERSION: "v1.4.0"
@@ -134,8 +133,8 @@ jobs:
 
           # Higher floor than test-e2e.yml's lanes: this job additionally
           # runs KubeVirt/CDI's control plane and one live-booted VM
-          # (OVMF + initramfs + kezio-agent, see the design doc's "runner
-          # resources" table) on top of everything those lanes need.
+          # (OVMF + initramfs + kezio-agent) on top of everything those
+          # lanes need, hence the higher CPU/RAM floor below.
           if [ "$cpus" -lt 4 ]; then
             echo "::error::Runner has only ${cpus} CPU(s); the KubeVirt boot-path stage needs at least 4." >&2
             exit 1
@@ -190,9 +189,9 @@ jobs:
       - name: Install cert-manager (pinned)
         # Pinned here, unlike test/utils.InstallCertManager's "always
         # latest" (used by the Go e2e suite's other lanes) - this
-        # standalone workflow does not go through that helper, so it
-        # follows PLAN's general CI guidance of pinning every version
-        # this job depends on.
+        # standalone workflow does not go through that helper, so
+        # this job pins every version it depends on instead of tracking
+        # latest.
         run: |
           set -euo pipefail
           kubectl apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"
@@ -369,8 +368,8 @@ jobs:
         # (bootOrder 2) as the local-disk fallback GRUB's "exit" hands
         # control back to. The disk's serial is set explicitly so it
         # matches TARGET_VM_DISK_SERIAL / the Machine's targetDisk hint,
-        # the same "KubeVirt sets a disk serial the targetDisk hint can
-        # match" property PLAN's test topology calls for.
+        # the same disk-serial-matches-targetDisk property this test
+        # topology relies on.
         run: |
           cat <<EOF | kubectl apply -f -
           apiVersion: kubevirt.io/v1

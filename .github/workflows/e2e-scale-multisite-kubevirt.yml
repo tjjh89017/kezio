@@ -39,10 +39,10 @@ name: E2E Scale (Multi-Site KubeVirt VMs)
 # and both leecher VMs' data traffic all cross the same loopback/veth
 # fabric with no real inter-site latency, bandwidth cap, or routing hop
 # between them. This lane genuinely CANNOT show that "the WAN carries
-# close to one copy of the image" (design doc's cross-network section) -
-# that claim needs real per-network traffic accounting or genuinely
-# separate network segments with different cost, neither of which exists
-# here, and this workflow does not claim it anywhere below.
+# close to one copy of the image" - that claim needs real per-network
+# traffic accounting or genuinely separate network segments with
+# different cost, neither of which exists here, and this workflow does
+# not claim it anywhere below.
 #
 # What two Multus bridges + two kezio-bootd Deployments genuinely DO
 # simulate, for real: two separate L2 broadcast domains for PXE/DHCP.

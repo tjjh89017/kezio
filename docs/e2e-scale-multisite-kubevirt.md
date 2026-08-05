@@ -37,9 +37,8 @@ the tracker, and both leecher VMs' BitTorrent traffic cross the same
 loopback/veth fabric, with no real inter-site latency, bandwidth cap, or
 routing hop between them. This lane therefore does **not** claim:
 
-- that the WAN carries close to one copy of the image (the design doc's
-  cross-network claim) - that needs real per-network traffic accounting,
-  which this topology cannot produce;
+- that the WAN carries close to one copy of the image - that needs real
+  per-network traffic accounting, which this topology cannot produce;
 - that same-site peers preferentially exchange pieces over a cheaper
   local path - BitTorrent's own peer selection has no real cost
   difference to respond to here;
