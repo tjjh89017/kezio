@@ -54,6 +54,11 @@ type fakeDaemon struct {
 	// resolved cluster-default/per-Machine tuning actually reached the
 	// daemon.
 	addedTuning map[string][2]int32
+	// addErr, when set, makes AddTorrent fail for this daemon instead of
+	// recording the torrent - simulating one seeder endpoint being
+	// unreachable/erroring while others stay healthy, so tests can
+	// exercise Reconcile's per-target error join without failing fast.
+	addErr error
 }
 
 func newFakeDaemon() *fakeDaemon {
@@ -65,6 +70,9 @@ type fakeSeederClient struct{ d *fakeDaemon }
 func (c fakeSeederClient) AddTorrent(_ context.Context, _ []byte, savePath string, _ bool, maxUploads, maxConnections int32) error {
 	c.d.mu.Lock()
 	defer c.d.mu.Unlock()
+	if c.d.addErr != nil {
+		return c.d.addErr
+	}
 	c.d.addCount++
 	// The content hash is the save_path's leaf directory name (see
 	// addContent: save_path is store.ContentDir(root, hash)).
@@ -327,6 +335,37 @@ var _ = Describe("Seeder Controller", func() {
 			Expect(registry.daemons[central].torrents).To(HaveKey(hash.String()))
 			Expect(registry.daemons[siteLocal]).NotTo(BeNil())
 			Expect(registry.daemons[siteLocal].torrents).To(HaveKey(hash.String()))
+		})
+
+		It("keeps syncing the other endpoints and joins the failing endpoint's error", func() {
+			// Reconcile must not fail-fast: one endpoint erroring
+			// (dial failure, RPC error) must not stop the loop from
+			// reaching the other Ready endpoints (see Reconcile's
+			// errs/errors.Join handling in seeder_controller.go).
+			fixtureRoot, hash := writeFixtureContent()
+			r.Seeder.StoreRoot = fixtureRoot
+
+			image := createReadyImage(ctx, hash)
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, image) })
+
+			healthy := createSeederEndpointSlice(ctx, namespace, r.Seeder.ServiceName, "seeder-eps-healthy", "10.0.2.1")
+			failing := createSeederEndpointSlice(ctx, namespace, r.Seeder.ServiceName, "seeder-eps-failing", "10.0.2.2")
+
+			// Force the failing endpoint's daemon to exist up front so its
+			// addErr is set before Reconcile dials it.
+			failingDaemon := newFakeDaemon()
+			failingDaemon.addErr = fmt.Errorf("injected add failure")
+			registry.mu.Lock()
+			registry.daemons[failing] = failingDaemon
+			registry.mu.Unlock()
+
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: "seeder-sync"}})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring(failing))
+			Expect(result.RequeueAfter).To(Equal(seederRetryInterval))
+
+			Expect(registry.daemons[healthy].torrents).To(HaveKey(hash.String()), "the healthy endpoint must still be synced despite the other endpoint's error")
+			Expect(failingDaemon.torrents).To(BeEmpty(), "the failing endpoint must not have the torrent recorded")
 		})
 
 		It("does not re-add content already present on the endpoint (no duplicate adds)", func() {
