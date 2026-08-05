@@ -19,14 +19,45 @@ package bootd
 import (
 	"context"
 	"net"
+	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/iana"
 )
+
+// recordingSink is a minimal logr.LogSink that appends every message
+// passed to Info, guarded by a mutex since serveUDP's two listener
+// goroutines (RoleProxyDHCP and RolePXE) can log concurrently. Used to
+// assert on log content directly rather than on internal call counts,
+// since the "answering PXE request" / "served TFTP file" lines are the
+// operator-facing signal this package's tests exist to pin (see
+// server.go's serveUDP and tftp.go's readHandler).
+type recordingSink struct {
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (r *recordingSink) messages() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.msgs))
+	copy(out, r.msgs)
+	return out
+}
+
+func newRecordingLogger(sink *recordingSink) logr.Logger {
+	return funcr.NewJSON(func(obj string) {
+		sink.mu.Lock()
+		defer sink.mu.Unlock()
+		sink.msgs = append(sink.msgs, obj)
+	}, funcr.Options{})
+}
 
 // TestListenUDPSocketIsBroadcastCapable documents and guards an
 // assumption bootd's proxyDHCP send path relies on: Go's net stdlib
@@ -128,4 +159,103 @@ func TestServeUDP_PXERoundTrip(t *testing.T) {
 		t.Fatalf("serveUDP reported an error: %v", err)
 	default:
 	}
+}
+
+// TestServeUDP_LogsAnsweredRequest pins the observability fix this test
+// file's recordingSink exists for: a request BuildResponse answers must
+// produce an "answering PXE request" log line at the default verbosity
+// (V(0)), not only at V(1) alongside every declined request - see
+// server.go's serveUDP. Without this, bootd's log is silent on both a
+// working netboot and a client that never reached it at all, which is
+// indistinguishable from the outside.
+func TestServeUDP_LogsAnsweredRequest(t *testing.T) {
+	serverConn, err := listenUDP("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listenUDP() error = %v", err)
+	}
+	defer func() { _ = serverConn.Close() }()
+
+	sink := &recordingSink{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go serveUDP(ctx, newRecordingLogger(sink), serverConn, RolePXE, testConfig(), knownGate, errCh)
+
+	clientConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("client ListenUDP() error = %v", err)
+	}
+	defer func() { _ = clientConn.Close() }()
+
+	req := pxeDiscover(t, knownMAC, iana.EFI_X86_64, dhcpv4.WithMessageType(dhcpv4.MessageTypeRequest))
+	if _, err := clientConn.WriteToUDP(req.ToBytes(), serverConn.LocalAddr().(*net.UDPAddr)); err != nil {
+		t.Fatalf("sending request: %v", err)
+	}
+
+	if err := clientConn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	buf := make([]byte, maxDHCPPacket)
+	if _, _, err := clientConn.ReadFromUDP(buf); err != nil {
+		t.Fatalf("reading reply: %v", err)
+	}
+
+	if !containsSubstring(sink.messages(), "answering PXE request") {
+		t.Errorf("log messages = %v, want one containing %q", sink.messages(), "answering PXE request")
+	}
+}
+
+// TestServeUDP_DoesNotLogDeclinedRequestAtDefaultVerbosity is the
+// counterpart to TestServeUDP_LogsAnsweredRequest: a request BuildResponse
+// declines (here, an unknown MAC) must stay at V(1) - it must not also
+// start appearing in the default-verbosity log, which would drown the
+// one signal that matters in noise from every other device sharing the
+// L2 segment.
+func TestServeUDP_DoesNotLogDeclinedRequestAtDefaultVerbosity(t *testing.T) {
+	serverConn, err := listenUDP("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listenUDP() error = %v", err)
+	}
+	defer func() { _ = serverConn.Close() }()
+
+	sink := &recordingSink{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go serveUDP(ctx, newRecordingLogger(sink), serverConn, RolePXE, testConfig(), knownGate, errCh)
+
+	clientConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("client ListenUDP() error = %v", err)
+	}
+	defer func() { _ = clientConn.Close() }()
+
+	req := pxeDiscover(t, unknownMAC, iana.EFI_X86_64, dhcpv4.WithMessageType(dhcpv4.MessageTypeRequest))
+	if _, err := clientConn.WriteToUDP(req.ToBytes(), serverConn.LocalAddr().(*net.UDPAddr)); err != nil {
+		t.Fatalf("sending request: %v", err)
+	}
+
+	// No reply is expected for a declined request; give serveUDP time to
+	// process and log it before asserting on sink contents.
+	time.Sleep(200 * time.Millisecond)
+
+	if containsSubstring(sink.messages(), "answering PXE request") {
+		t.Errorf("log messages = %v, want none containing %q at default verbosity", sink.messages(), "answering PXE request")
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("serveUDP reported an error: %v", err)
+	default:
+	}
+}
+
+// containsSubstring reports whether any element of msgs contains want.
+func containsSubstring(msgs []string, want string) bool {
+	for _, m := range msgs {
+		if strings.Contains(m, want) {
+			return true
+		}
+	}
+	return false
 }

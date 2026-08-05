@@ -157,6 +157,16 @@ func serveUDP(ctx context.Context, log logr.Logger, conn *net.UDPConn, role Role
 			continue
 		}
 
+		// Logged at the default (non-V(1)) level, unlike the "not
+		// answering" branch above: an answered request is the one event
+		// on this path an operator actually needs to see without raising
+		// verbosity, since it is both low-volume (one per booting
+		// machine, not one per stray broadcast on the segment) and the
+		// single strongest signal that a PXE boot is progressing -
+		// its absence from the log is what first flagged a netboot that
+		// never reached bootd at all.
+		log.Info("answering PXE request", "remote", srcAddr, "dst", dst, "mac", req.ClientHWAddr, "role", role)
+
 		if _, err := conn.WriteToUDP(resp.ToBytes(), dst); err != nil {
 			log.Info("sending response failed", "remote", srcAddr, "dst", dst, "error", err.Error())
 		}

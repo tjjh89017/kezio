@@ -78,6 +78,27 @@ func TestTFTPServer_ServesAllowedFiles(t *testing.T) {
 	}
 }
 
+// TestTFTPServer_LogsServedFile pins the observability fix readHandler's
+// success path relies on (see tftp.go): a completed read must log at the
+// default verbosity, matching serveUDP's "answering PXE request" log for
+// the same reason - without it, bootd's log cannot tell an operator
+// whether a client that got a DHCP offer ever came back to fetch the file
+// it named.
+func TestTFTPServer_LogsServedFile(t *testing.T) {
+	dir := setupTFTPDir(t)
+	srv := &TFTPServer{Dir: dir}
+	sink := &recordingSink{}
+	handler := srv.readHandler(newRecordingLogger(sink))
+
+	if err := handler(ShimFilename, &fakeReaderFrom{}); err != nil {
+		t.Fatalf("reading %s: %v", ShimFilename, err)
+	}
+
+	if !containsSubstring(sink.messages(), "served TFTP file") {
+		t.Errorf("log messages = %v, want one containing %q", sink.messages(), "served TFTP file")
+	}
+}
+
 func TestTFTPServer_RejectsUnlistedFile(t *testing.T) {
 	dir := setupTFTPDir(t)
 	srv := &TFTPServer{Dir: dir}

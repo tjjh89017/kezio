@@ -121,6 +121,12 @@ func (t *TFTPServer) readHandler(log logr.Logger) func(filename string, rf io.Re
 		if _, err := rf.ReadFrom(f); err != nil {
 			return fmt.Errorf("serving %s: %w", base, err)
 		}
+		// Logged at the default level, matching serveUDP's "answering
+		// PXE request" log (server.go): a completed TFTP transfer is the
+		// next low-volume, high-value checkpoint in the same boot
+		// sequence, and its absence is what tells an operator a client
+		// got a DHCP offer but never came back for the file it named.
+		log.Info("served TFTP file", "requested", filename)
 		return nil
 	}
 }

@@ -69,6 +69,15 @@ const (
 	RolePXE
 )
 
+// String implements fmt.Stringer so Role reads as a name rather than a
+// bare int in logs (see server.go's serveUDP).
+func (r Role) String() string {
+	if r == RolePXE {
+		return "pxe"
+	}
+	return "proxy-dhcp"
+}
+
 // MACGate decides whether bootd is willing to answer the client
 // identified by mac. See maccache.go for the Kubernetes-backed
 // implementation; Config.AnswerAll bypasses this decision entirely
