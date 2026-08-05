@@ -46,16 +46,22 @@ type Config struct {
 	// for example ":4011". Empty means DefaultPXEAddr.
 	PXEAddr string
 
-	// ServerIP is bootd's own IP address on the boot network: it is
-	// sent as both the DHCP Server Identifier option and, when
-	// NextServerIP is unset, as the next-server (siaddr) firmware TFTPs
-	// shimx64.efi/grubx64.efi from. It must be set - there is no
-	// meaningful default for an address that names this host.
+	// ServerIP is bootd's own IP address on the boot network: the
+	// fallback for both the DHCP Server Identifier option and, when
+	// NextServerIP is unset, the next-server (siaddr) firmware TFTPs
+	// shimx64.efi/grubx64.efi from. It is a fallback rather than the
+	// primary source because each reply prefers the IPv4 address of the
+	// interface the request actually arrived on (see BuildResponse's
+	// ifaceIP parameter) - ServerIP applies when that interface's
+	// address is unknown, for example an L2-only attachment that
+	// carries no IPv4 address of its own. It must still be set - there
+	// is no meaningful default for an address that names this host.
 	ServerIP net.IP
 	// NextServerIP overrides the next-server (siaddr) advertised to
 	// clients, when the TFTP service is reachable at a different
-	// address than ServerIP (for example, a Service or virtual IP
-	// fronting this pod). Empty means ServerIP.
+	// address than bootd's own (for example, a Service or virtual IP
+	// fronting this pod). Empty means the reply's Server Identifier
+	// address (the arrival interface's address, or ServerIP).
 	NextServerIP net.IP
 
 	// BootFilename is the PXE boot filename handed out to a gated
@@ -102,8 +108,10 @@ func (c Config) withDefaults() Config {
 	if c.BootFilename == "" {
 		c.BootFilename = DefaultBootFilename
 	}
-	if len(c.NextServerIP) == 0 {
-		c.NextServerIP = c.ServerIP
-	}
+	// NextServerIP deliberately has no default here: an unset value
+	// means "follow the reply's Server Identifier", which BuildResponse
+	// resolves per request against the arrival interface's address -
+	// collapsing it to ServerIP up front would erase the distinction
+	// between "explicitly overridden" and "unset".
 	return c
 }

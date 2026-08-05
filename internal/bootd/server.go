@@ -26,6 +26,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"golang.org/x/net/ipv4"
+	"golang.org/x/sys/unix"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
@@ -84,12 +85,20 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("listening on proxyDHCP address %s: %w", cfg.DHCPAddr, err)
 	}
 	defer func() { _ = dhcpConn.Close() }()
+	dhcpPC, err := newInterfaceAwarePacketConn(dhcpConn)
+	if err != nil {
+		return fmt.Errorf("enabling interface control messages on %s: %w", dhcpConn.LocalAddr(), err)
+	}
 
 	pxeConn, err := listenUDP(cfg.PXEAddr)
 	if err != nil {
 		return fmt.Errorf("listening on PXE boot-server address %s: %w", cfg.PXEAddr, err)
 	}
 	defer func() { _ = pxeConn.Close() }()
+	pxePC, err := newInterfaceAwarePacketConn(pxeConn)
+	if err != nil {
+		return fmt.Errorf("enabling interface control messages on %s: %w", pxeConn.LocalAddr(), err)
+	}
 
 	// One deniedMACLog shared by both listeners: a firmware's PXE retry
 	// loop sends the same DHCPDISCOVER (port 67) and, once it holds a
@@ -100,8 +109,8 @@ func (s *Server) Start(ctx context.Context) error {
 	denied := newDeniedMACLog()
 
 	errCh := make(chan error, 2)
-	go serveUDP(ctx, log, dhcpConn, RoleProxyDHCP, cfg, gate, denied, errCh)
-	go serveUDP(ctx, log, pxeConn, RolePXE, cfg, gate, denied, errCh)
+	go serveUDP(ctx, log, dhcpPC, RoleProxyDHCP, cfg, gate, denied, errCh)
+	go serveUDP(ctx, log, pxePC, RolePXE, cfg, gate, denied, errCh)
 
 	select {
 	case <-ctx.Done():
@@ -113,7 +122,9 @@ func (s *Server) Start(ctx context.Context) error {
 
 // listenUDP opens a UDP socket on addr with broadcast sends enabled -
 // required for RoleProxyDHCP's non-relayed replies, which are
-// broadcast to 255.255.255.255:68 (see destinationFor).
+// broadcast to 255.255.255.255:68 (see destinationFor) - and with UDP
+// transmit checksums disabled (see disableUDPTxChecksum for why an
+// absent checksum is safer here than a computed one).
 func listenUDP(addr string) (*net.UDPConn, error) {
 	udpAddr, err := net.ResolveUDPAddr("udp4", addr)
 	if err != nil {
@@ -123,7 +134,43 @@ func listenUDP(addr string) (*net.UDPConn, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := disableUDPTxChecksum(conn); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("disabling UDP transmit checksums: %w", err)
+	}
 	return conn, nil
+}
+
+// disableUDPTxChecksum sets SO_NO_CHECK on conn, so every reply this
+// socket sends carries a zero UDP checksum instead of a computed one.
+// RFC 768 makes the checksum optional for UDP over IPv4 - zero means
+// "not computed" and every conforming receiver (PXE firmware included;
+// EDK2's UDP driver only validates a nonzero checksum field) accepts
+// the datagram without verification.
+//
+// A zero checksum is deliberately preferred over a computed one because
+// of how these replies actually travel in a virtualized boot network:
+// the kernel defers checksumming to the egress device (checksum
+// offload), leaving only a partial pseudo-header value in the field,
+// and a path that crosses a veth pair onto a bridge and into a
+// hypervisor tap device can traverse every hop without any of them
+// performing the deferred fill. The frame then reaches the booting
+// firmware with a checksum field that fails verification, and the
+// firmware silently discards the one OFFER it was waiting for. An
+// absent checksum cannot be mangled in transit this way. dnsmasq
+// applies the same option to its DHCP sockets for the same reason.
+func disableUDPTxChecksum(conn *net.UDPConn) error {
+	rawConn, err := conn.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var optErr error
+	if err := rawConn.Control(func(fd uintptr) {
+		optErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_NO_CHECK, 1)
+	}); err != nil {
+		return err
+	}
+	return optErr
 }
 
 // maxDHCPPacket is a generous upper bound on a DHCPv4 packet's wire
@@ -176,24 +223,22 @@ func (d *deniedMACLog) seen(mac string) bool {
 // segment) - only a read error on the socket itself, or ctx
 // cancellation, ends the loop.
 //
-// conn is wrapped in an ipv4.PacketConn with per-packet interface
-// control messages enabled (see newInterfaceAwarePacketConn) so every
-// reply can be pinned to send out the same network interface the
-// request arrived on. This matters whenever the process has more than
-// one network interface (for example, a pod with both a cluster
+// pc must come from newInterfaceAwarePacketConn - an ipv4.PacketConn
+// with per-packet interface control messages enabled - so every reply
+// can be pinned to send out the same network interface the request
+// arrived on. This matters whenever the process has more than one
+// network interface (for example, a pod with both a cluster
 // default-route interface and a separate provisioning-network
 // interface): a broadcast or unrelayed reply sent from a socket bound
 // to 0.0.0.0 would otherwise be routed by the kernel's default route,
 // which has no reason to point at the interface the request actually
 // came in on. Pinning egress to the arrival interface makes the reply
 // path correct regardless of which interface holds the default route.
-func serveUDP(ctx context.Context, log logr.Logger, conn *net.UDPConn, role Role, cfg Config, gate MACGate, denied *deniedMACLog, errCh chan<- error) {
-	pc, err := newInterfaceAwarePacketConn(conn)
-	if err != nil {
-		errCh <- fmt.Errorf("enabling interface control messages on %s: %w", conn.LocalAddr(), err)
-		return
-	}
-
+// The wrap happens in the caller, before this loop starts, so no
+// packet can ever be received ahead of the control messages being
+// enabled - one read without them and that reply falls back to the
+// default route's interface and address.
+func serveUDP(ctx context.Context, log logr.Logger, pc *ipv4.PacketConn, role Role, cfg Config, gate MACGate, denied *deniedMACLog, errCh chan<- error) {
 	buf := make([]byte, maxDHCPPacket)
 	for {
 		n, cm, srcAddr, err := pc.ReadFrom(buf)
@@ -206,7 +251,7 @@ func serveUDP(ctx context.Context, log logr.Logger, conn *net.UDPConn, role Role
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
-			errCh <- fmt.Errorf("reading from %s: %w", conn.LocalAddr(), err)
+			errCh <- fmt.Errorf("reading from %s: %w", pc.LocalAddr(), err)
 			return
 		}
 		srcUDPAddr, ok := srcAddr.(*net.UDPAddr)
@@ -224,7 +269,16 @@ func serveUDP(ctx context.Context, log logr.Logger, conn *net.UDPConn, role Role
 			continue
 		}
 
-		resp, dst, outcome := BuildResponse(req, role, srcUDPAddr, cfg, gate)
+		// The arrival interface's own IPv4 address (nil when it has
+		// none) feeds both the response's contents - Server Identifier
+		// and next-server, see BuildResponse - and the reply's source
+		// address selection below: the client can only reach bootd on
+		// the segment this request came in on, so every address in the
+		// reply must name that segment, never whichever interface holds
+		// the process's default route.
+		ifaceIP := arrivalInterfaceIP(cm)
+
+		resp, dst, outcome := BuildResponse(req, role, srcUDPAddr, ifaceIP, cfg, gate)
 		if outcome != OutcomeAnswered {
 			// A MAC-gate deny (OutcomeUnknownMAC) is logged once per MAC
 			// at the default verbosity - see deniedMACLog's doc comment.
@@ -252,11 +306,12 @@ func serveUDP(ctx context.Context, log logr.Logger, conn *net.UDPConn, role Role
 		log.Info("answering PXE request", "remote", srcUDPAddr, "dst", dst, "mac", req.ClientHWAddr, "role", role)
 
 		// replyControlMessage pins the reply's egress interface to the
-		// interface the request arrived on (see this function's doc
+		// interface the request arrived on and its source address to
+		// that interface's own IPv4 address (see this function's doc
 		// comment); a nil cm (the platform did not report one) falls
 		// back to letting the kernel choose, the same behavior this
 		// package had before interface pinning existed.
-		if _, err := pc.WriteTo(resp.ToBytes(), replyControlMessage(cm), dst); err != nil {
+		if _, err := pc.WriteTo(resp.ToBytes(), replyControlMessage(cm, ifaceIP), dst); err != nil {
 			log.Info("sending response failed", "remote", srcUDPAddr, "dst", dst, "error", err.Error())
 		}
 	}
@@ -278,18 +333,60 @@ func newInterfaceAwarePacketConn(conn *net.UDPConn) (*ipv4.PacketConn, error) {
 }
 
 // replyControlMessage builds the control message serveUDP's WriteTo
-// call uses to select the reply's egress interface. cm is whatever
-// ReadFrom reported for the received request; when it named an
-// interface, the reply is pinned to leave by that same one, so a
-// broadcast or unrelayed reply from a multi-interface process reaches
+// call uses to select the reply's egress interface and source address.
+// cm is whatever ReadFrom reported for the received request; when it
+// named an interface, the reply is pinned to leave by that same one, so
+// a broadcast or unrelayed reply from a multi-interface process reaches
 // the network the request actually came from rather than following
-// whichever interface holds the process's default route. A nil cm (no
-// interface reported) yields a zero-value ControlMessage, which asks
-// the kernel to pick the egress interface itself - the same behavior
-// this package had before interface pinning existed.
-func replyControlMessage(cm *ipv4.ControlMessage) *ipv4.ControlMessage {
+// whichever interface holds the process's default route.
+//
+// src is the arrival interface's own IPv4 address (see
+// arrivalInterfaceIP); when known, it is set as the reply's source
+// address too. Pinning the egress interface alone does not pin the
+// source: the kernel's source selection can still fall back to another
+// interface's address when the egress interface offers none it
+// prefers, and a booting firmware then sees an OFFER from an address
+// that is not on its own segment. A nil src leaves source selection to
+// the kernel, and a nil cm (no interface reported) yields a zero-value
+// ControlMessage - the kernel picks both, the same behavior this
+// package had before interface pinning existed.
+func replyControlMessage(cm *ipv4.ControlMessage, src net.IP) *ipv4.ControlMessage {
 	if cm == nil {
 		return &ipv4.ControlMessage{}
 	}
-	return &ipv4.ControlMessage{IfIndex: cm.IfIndex}
+	return &ipv4.ControlMessage{IfIndex: cm.IfIndex, Src: src}
+}
+
+// arrivalInterfaceIP resolves the IPv4 address of the interface cm
+// reports a request arrived on, or nil when there is none to resolve:
+// no control message, no interface index in it, the interface gone by
+// lookup time, or an interface with no IPv4 address at all (an L2-only
+// attachment - possible, and the reply then falls back to
+// Config.ServerIP for its contents and to kernel source selection for
+// its source address). The first IPv4 address wins when the interface
+// holds several; a boot-network attachment carrying exactly one
+// address is the configuration this package documents (see
+// config/bootd's NetworkAttachmentDefinition example).
+func arrivalInterfaceIP(cm *ipv4.ControlMessage) net.IP {
+	if cm == nil || cm.IfIndex == 0 {
+		return nil
+	}
+	iface, err := net.InterfaceByIndex(cm.IfIndex)
+	if err != nil {
+		return nil
+	}
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return nil
+	}
+	for _, addr := range addrs {
+		ipNet, ok := addr.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		if ip4 := ipNet.IP.To4(); ip4 != nil {
+			return ip4
+		}
+	}
+	return nil
 }

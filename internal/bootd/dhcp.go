@@ -176,7 +176,15 @@ const (
 // broadcast (the client has no IP yet to unicast to) and port 4011
 // responses are unicast back to srcAddr (the client already holds a
 // lease by the time it reaches this port).
-func BuildResponse(req *dhcpv4.DHCPv4, role Role, srcAddr *net.UDPAddr, cfg Config, gate MACGate) (resp *dhcpv4.DHCPv4, dst *net.UDPAddr, outcome Outcome) {
+// ifaceIP is the IPv4 address of the interface the request arrived on
+// (see server.go's arrivalInterfaceIP), or nil when that interface has
+// no IPv4 address or was not reported. When set, it takes precedence
+// over cfg.ServerIP as the DHCP Server Identifier (option 54) and, when
+// cfg.NextServerIP is unset, as the next-server (siaddr): the client
+// can only reach bootd on the segment its request came in on, so an
+// address on any other interface (a pod's cluster-network address, for
+// example) would name a server the client has no route to.
+func BuildResponse(req *dhcpv4.DHCPv4, role Role, srcAddr *net.UDPAddr, ifaceIP net.IP, cfg Config, gate MACGate) (resp *dhcpv4.DHCPv4, dst *net.UDPAddr, outcome Outcome) {
 	cfg = cfg.withDefaults()
 	switch {
 	case cfg.AnswerAll:
@@ -238,14 +246,30 @@ func BuildResponse(req *dhcpv4.DHCPv4, role Role, srcAddr *net.UDPAddr, cfg Conf
 		bootFilename = cfg.HTTPBootURL
 	}
 
+	// serverID names the address the client should treat as this boot
+	// server: the arrival interface's own address when known (see the
+	// doc comment on ifaceIP above), cfg.ServerIP otherwise. nextServer
+	// (siaddr, the TFTP next-server) follows serverID unless
+	// cfg.NextServerIP explicitly points somewhere else - a Service or
+	// virtual IP fronting the TFTP service, which stays authoritative
+	// regardless of which interface the request came in on.
+	serverID := cfg.ServerIP
+	if ifaceIP != nil {
+		serverID = ifaceIP
+	}
+	nextServer := cfg.NextServerIP
+	if len(nextServer) == 0 {
+		nextServer = serverID
+	}
+
 	modifiers := []dhcpv4.Modifier{
 		dhcpv4.WithMessageType(respType),
 		// No lease: this is the one invariant every response this
 		// package sends must preserve (see the package doc comment) -
 		// bootd is not a DHCP server and never assigns an address.
 		dhcpv4.WithYourIP(net.IPv4zero),
-		dhcpv4.WithServerIP(cfg.NextServerIP),
-		dhcpv4.WithOption(dhcpv4.OptServerIdentifier(cfg.ServerIP)),
+		dhcpv4.WithServerIP(nextServer),
+		dhcpv4.WithOption(dhcpv4.OptServerIdentifier(serverID)),
 		dhcpv4.WithOption(dhcpv4.OptClassIdentifier(respClass)),
 		dhcpv4.WithOption(dhcpv4.OptBootFileName(bootFilename)),
 	}

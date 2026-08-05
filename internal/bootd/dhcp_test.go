@@ -85,7 +85,7 @@ var srcAddr = &net.UDPAddr{IP: net.IPv4(10, 0, 0, 50), Port: dhcpv4.ClientPort}
 func TestBuildResponse_AnswersKnownMACSupportedArch(t *testing.T) {
 	for _, arch := range []iana.Arch{iana.EFI_X86_64, iana.EFI_BC} {
 		req := pxeDiscover(t, knownMAC, arch)
-		resp, dst, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, testConfig(), knownGate)
+		resp, dst, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, nil, testConfig(), knownGate)
 
 		if outcome != OutcomeAnswered {
 			t.Fatalf("arch %v: outcome = %v, want %v", arch, outcome, OutcomeAnswered)
@@ -125,7 +125,7 @@ func TestBuildResponse_SuffixedPXEVendorClassAnswered(t *testing.T) {
 	req := pxeDiscover(t, knownMAC, iana.EFI_X86_64,
 		dhcpv4.WithOption(dhcpv4.OptClassIdentifier(suffixedClass)))
 
-	resp, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, testConfig(), knownGate)
+	resp, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, nil, testConfig(), knownGate)
 	if outcome != OutcomeAnswered {
 		t.Fatalf("outcome = %v, want %v (suffixed PXE vendor class must be answered)", outcome, OutcomeAnswered)
 	}
@@ -147,7 +147,7 @@ func TestBuildResponse_RelayAware(t *testing.T) {
 	giaddr := net.IPv4(192, 168, 1, 1)
 	req := pxeDiscover(t, knownMAC, iana.EFI_X86_64, dhcpv4.WithGatewayIP(giaddr))
 
-	resp, dst, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, testConfig(), knownGate)
+	resp, dst, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, nil, testConfig(), knownGate)
 	if outcome != OutcomeAnswered {
 		t.Fatalf("outcome = %v, want %v", outcome, OutcomeAnswered)
 	}
@@ -161,7 +161,7 @@ func TestBuildResponse_RelayAware(t *testing.T) {
 
 func TestBuildResponse_UnsupportedArchIgnored(t *testing.T) {
 	req := pxeDiscover(t, knownMAC, iana.INTEL_X86PC)
-	resp, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, testConfig(), knownGate)
+	resp, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, nil, testConfig(), knownGate)
 	if outcome != OutcomeUnsupportedArch {
 		t.Errorf("outcome = %v, want %v", outcome, OutcomeUnsupportedArch)
 	}
@@ -172,7 +172,7 @@ func TestBuildResponse_UnsupportedArchIgnored(t *testing.T) {
 
 func TestBuildResponse_UnknownMACIgnoredByDefault(t *testing.T) {
 	req := pxeDiscover(t, unknownMAC, iana.EFI_X86_64)
-	resp, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, testConfig(), knownGate)
+	resp, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, nil, testConfig(), knownGate)
 	if outcome != OutcomeUnknownMAC {
 		t.Errorf("outcome = %v, want %v", outcome, OutcomeUnknownMAC)
 	}
@@ -185,7 +185,7 @@ func TestBuildResponse_AnswerAllBypassesGate(t *testing.T) {
 	req := pxeDiscover(t, unknownMAC, iana.EFI_X86_64)
 	cfg := testConfig()
 	cfg.AnswerAll = true
-	_, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, cfg, knownGate)
+	_, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, nil, cfg, knownGate)
 	if outcome != OutcomeAnswered {
 		t.Errorf("outcome = %v, want %v (AnswerAll should bypass the gate)", outcome, OutcomeAnswered)
 	}
@@ -197,7 +197,7 @@ func TestBuildResponse_NonPXEVendorClassIgnored(t *testing.T) {
 		dhcpv4.WithMessageType(dhcpv4.MessageTypeDiscover),
 		dhcpv4.WithOption(dhcpv4.OptClientArch(iana.EFI_X86_64)),
 	)
-	_, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, testConfig(), knownGate)
+	_, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, nil, testConfig(), knownGate)
 	if outcome != OutcomeNotPXE {
 		t.Errorf("outcome = %v, want %v", outcome, OutcomeNotPXE)
 	}
@@ -207,7 +207,7 @@ func TestBuildResponse_ProxyDHCPPortIgnoresRequest(t *testing.T) {
 	// A DHCPREQUEST on port 67 is production DHCP's lease handshake;
 	// bootd must not answer it there (see BuildResponse's doc comment).
 	req := pxeDiscover(t, knownMAC, iana.EFI_X86_64, dhcpv4.WithMessageType(dhcpv4.MessageTypeRequest))
-	_, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, testConfig(), knownGate)
+	_, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, nil, testConfig(), knownGate)
 	if outcome != OutcomeWrongMessageType {
 		t.Errorf("outcome = %v, want %v", outcome, OutcomeWrongMessageType)
 	}
@@ -215,7 +215,7 @@ func TestBuildResponse_ProxyDHCPPortIgnoresRequest(t *testing.T) {
 
 func TestBuildResponse_PXEPortAnswersRequestUnicast(t *testing.T) {
 	req := pxeDiscover(t, knownMAC, iana.EFI_X86_64, dhcpv4.WithMessageType(dhcpv4.MessageTypeRequest))
-	resp, dst, outcome := BuildResponse(req, RolePXE, srcAddr, testConfig(), knownGate)
+	resp, dst, outcome := BuildResponse(req, RolePXE, srcAddr, nil, testConfig(), knownGate)
 	if outcome != OutcomeAnswered {
 		t.Fatalf("outcome = %v, want %v", outcome, OutcomeAnswered)
 	}
@@ -229,7 +229,7 @@ func TestBuildResponse_PXEPortAnswersRequestUnicast(t *testing.T) {
 
 func TestBuildResponse_PXEPortIgnoresDiscover(t *testing.T) {
 	req := pxeDiscover(t, knownMAC, iana.EFI_X86_64) // MessageTypeDiscover
-	_, _, outcome := BuildResponse(req, RolePXE, srcAddr, testConfig(), knownGate)
+	_, _, outcome := BuildResponse(req, RolePXE, srcAddr, nil, testConfig(), knownGate)
 	if outcome != OutcomeWrongMessageType {
 		t.Errorf("outcome = %v, want %v", outcome, OutcomeWrongMessageType)
 	}
@@ -237,9 +237,76 @@ func TestBuildResponse_PXEPortIgnoresDiscover(t *testing.T) {
 
 func TestBuildResponse_NilGateWithAnswerAllFalseDeniesEverything(t *testing.T) {
 	req := pxeDiscover(t, knownMAC, iana.EFI_X86_64)
-	_, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, testConfig(), nil)
+	_, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, nil, testConfig(), nil)
 	if outcome != OutcomeUnknownMAC {
 		t.Errorf("outcome = %v, want %v (nil gate defaults to deny-all via alwaysAllow{} substitution only under AnswerAll)", outcome, OutcomeUnknownMAC)
+	}
+}
+
+// TestBuildResponse_ArrivalInterfaceIPWinsOverConfigServerIP pins the
+// dual-homed correctness rule: when the request's arrival interface has
+// its own IPv4 address, both the DHCP Server Identifier (option 54) and
+// the next-server (siaddr) must carry that address, not Config.ServerIP
+// - the client can only reach bootd on the segment its request came in
+// on, and an address from any other interface names a server it has no
+// route to.
+func TestBuildResponse_ArrivalInterfaceIPWinsOverConfigServerIP(t *testing.T) {
+	ifaceIP := net.IPv4(192, 0, 2, 10)
+	req := pxeDiscover(t, knownMAC, iana.EFI_X86_64)
+
+	resp, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, ifaceIP, testConfig(), knownGate)
+	if outcome != OutcomeAnswered {
+		t.Fatalf("outcome = %v, want %v", outcome, OutcomeAnswered)
+	}
+	if got := resp.ServerIdentifier(); !got.Equal(ifaceIP) {
+		t.Errorf("Server Identifier (option 54) = %v, want the arrival interface's %v", got, ifaceIP)
+	}
+	if !resp.ServerIPAddr.Equal(ifaceIP) {
+		t.Errorf("ServerIPAddr (siaddr/next-server) = %v, want the arrival interface's %v", resp.ServerIPAddr, ifaceIP)
+	}
+}
+
+// TestBuildResponse_NextServerIPOverrideBeatsArrivalInterfaceIP pins
+// the one exception to the rule above: an explicitly configured
+// NextServerIP (a Service or virtual IP fronting the TFTP service)
+// stays authoritative for siaddr regardless of which interface the
+// request arrived on, while option 54 still names the arrival
+// interface's address.
+func TestBuildResponse_NextServerIPOverrideBeatsArrivalInterfaceIP(t *testing.T) {
+	ifaceIP := net.IPv4(192, 0, 2, 10)
+	nextServer := net.IPv4(10, 0, 0, 99)
+	cfg := testConfig()
+	cfg.NextServerIP = nextServer
+	req := pxeDiscover(t, knownMAC, iana.EFI_X86_64)
+
+	resp, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, ifaceIP, cfg, knownGate)
+	if outcome != OutcomeAnswered {
+		t.Fatalf("outcome = %v, want %v", outcome, OutcomeAnswered)
+	}
+	if got := resp.ServerIdentifier(); !got.Equal(ifaceIP) {
+		t.Errorf("Server Identifier (option 54) = %v, want the arrival interface's %v", got, ifaceIP)
+	}
+	if !resp.ServerIPAddr.Equal(nextServer) {
+		t.Errorf("ServerIPAddr (siaddr/next-server) = %v, want the explicit override %v", resp.ServerIPAddr, nextServer)
+	}
+}
+
+// TestBuildResponse_NilArrivalInterfaceIPFallsBackToConfigServerIP
+// covers the L2-only attachment case (the arrival interface carries no
+// IPv4 address at all): the reply must fall back to Config.ServerIP
+// for both option 54 and siaddr rather than sending empty addresses.
+func TestBuildResponse_NilArrivalInterfaceIPFallsBackToConfigServerIP(t *testing.T) {
+	req := pxeDiscover(t, knownMAC, iana.EFI_X86_64)
+
+	resp, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, nil, testConfig(), knownGate)
+	if outcome != OutcomeAnswered {
+		t.Fatalf("outcome = %v, want %v", outcome, OutcomeAnswered)
+	}
+	if got := resp.ServerIdentifier(); !got.Equal(testConfig().ServerIP) {
+		t.Errorf("Server Identifier (option 54) = %v, want the ServerIP fallback %v", got, testConfig().ServerIP)
+	}
+	if !resp.ServerIPAddr.Equal(testConfig().ServerIP) {
+		t.Errorf("ServerIPAddr (siaddr/next-server) = %v, want the ServerIP fallback %v", resp.ServerIPAddr, testConfig().ServerIP)
 	}
 }
 
@@ -250,7 +317,7 @@ func TestBuildResponse_HTTPClientWithConfiguredURLAnswersWithURL(t *testing.T) {
 	cfg := testConfig()
 	cfg.HTTPBootURL = testHTTPBootURL
 
-	resp, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, cfg, knownGate)
+	resp, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, nil, cfg, knownGate)
 	if outcome != OutcomeAnswered {
 		t.Fatalf("outcome = %v, want %v", outcome, OutcomeAnswered)
 	}
@@ -284,7 +351,7 @@ func TestBuildResponse_HTTPClientSuffixedFormAccepted(t *testing.T) {
 	cfg := testConfig()
 	cfg.HTTPBootURL = testHTTPBootURL
 
-	_, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, cfg, knownGate)
+	_, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, nil, cfg, knownGate)
 	if outcome != OutcomeAnswered {
 		t.Errorf("outcome = %v, want %v", outcome, OutcomeAnswered)
 	}
@@ -293,7 +360,7 @@ func TestBuildResponse_HTTPClientSuffixedFormAccepted(t *testing.T) {
 func TestBuildResponse_HTTPClientWithoutURLConfiguredDeclines(t *testing.T) {
 	req := httpBootDiscover(t, knownMAC, iana.EFI_X86_64, httpClientVendorClass)
 	// testConfig() leaves HTTPBootURL unset: HTTP Boot is opt-in.
-	resp, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, testConfig(), knownGate)
+	resp, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, nil, testConfig(), knownGate)
 	if outcome != OutcomeHTTPBootUnconfigured {
 		t.Errorf("outcome = %v, want %v", outcome, OutcomeHTTPBootUnconfigured)
 	}
@@ -308,7 +375,7 @@ func TestBuildResponse_HTTPClientUnsupportedArchIgnored(t *testing.T) {
 	cfg := testConfig()
 	cfg.HTTPBootURL = testHTTPBootURL
 
-	_, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, cfg, knownGate)
+	_, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, nil, cfg, knownGate)
 	if outcome != OutcomeUnsupportedArch {
 		t.Errorf("outcome = %v, want %v", outcome, OutcomeUnsupportedArch)
 	}
@@ -322,7 +389,7 @@ func TestBuildResponse_HTTPClientArch16UnconfiguredDeclinesForRightReason(t *tes
 	// rejected earlier as OutcomeUnsupportedArch (the wrong reason).
 	req := httpBootDiscover(t, knownMAC, iana.EFI_X86_64_HTTP, httpClientVendorClass)
 	// testConfig() leaves HTTPBootURL unset.
-	_, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, testConfig(), knownGate)
+	_, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, nil, testConfig(), knownGate)
 	if outcome != OutcomeHTTPBootUnconfigured {
 		t.Errorf("outcome = %v, want %v", outcome, OutcomeHTTPBootUnconfigured)
 	}
@@ -333,7 +400,7 @@ func TestBuildResponse_HTTPClientArch16WithURLAnswers(t *testing.T) {
 	cfg := testConfig()
 	cfg.HTTPBootURL = testHTTPBootURL
 
-	resp, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, cfg, knownGate)
+	resp, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, nil, cfg, knownGate)
 	if outcome != OutcomeAnswered {
 		t.Fatalf("outcome = %v, want %v", outcome, OutcomeAnswered)
 	}
@@ -357,7 +424,7 @@ func TestBuildResponse_PXEClientUnaffectedByHTTPBootConfig(t *testing.T) {
 	cfg := testConfig()
 	cfg.HTTPBootURL = testHTTPBootURL
 
-	resp, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, cfg, knownGate)
+	resp, _, outcome := BuildResponse(req, RoleProxyDHCP, srcAddr, nil, cfg, knownGate)
 	if outcome != OutcomeAnswered {
 		t.Fatalf("outcome = %v, want %v", outcome, OutcomeAnswered)
 	}

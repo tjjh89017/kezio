@@ -30,6 +30,7 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/iana"
 	"golang.org/x/net/ipv4"
+	"golang.org/x/sys/unix"
 )
 
 // recordingSink is a minimal logr.LogSink that appends every message
@@ -119,7 +120,11 @@ func TestServeUDP_PXERoundTrip(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
-	go serveUDP(ctx, logr.Discard(), serverConn, RolePXE, testConfig(), knownGate, newDeniedMACLog(), errCh)
+	serverPC, err := newInterfaceAwarePacketConn(serverConn)
+	if err != nil {
+		t.Fatalf("newInterfaceAwarePacketConn() error = %v", err)
+	}
+	go serveUDP(ctx, logr.Discard(), serverPC, RolePXE, testConfig(), knownGate, newDeniedMACLog(), errCh)
 
 	clientConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -148,8 +153,13 @@ func TestServeUDP_PXERoundTrip(t *testing.T) {
 	if resp.MessageType() != dhcpv4.MessageTypeAck {
 		t.Errorf("MessageType = %v, want Ack", resp.MessageType())
 	}
-	if !resp.ServerIPAddr.Equal(testConfig().ServerIP) {
-		t.Errorf("ServerIPAddr = %v, want %v", resp.ServerIPAddr, testConfig().ServerIP)
+	// The request arrived over loopback, so the reply must advertise the
+	// loopback interface's own address as siaddr - not testConfig()'s
+	// ServerIP, which is only the fallback for an arrival interface that
+	// has no IPv4 address (see BuildResponse's ifaceIP parameter).
+	loopback := net.IPv4(127, 0, 0, 1)
+	if !resp.ServerIPAddr.Equal(loopback) {
+		t.Errorf("ServerIPAddr = %v, want the arrival interface's %v", resp.ServerIPAddr, loopback)
 	}
 	if resp.BootFileName != DefaultBootFilename {
 		t.Errorf("BootFileName = %q, want %q", resp.BootFileName, DefaultBootFilename)
@@ -180,7 +190,11 @@ func TestServeUDP_LogsAnsweredRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
-	go serveUDP(ctx, newRecordingLogger(sink), serverConn, RolePXE, testConfig(), knownGate, newDeniedMACLog(), errCh)
+	serverPC, err := newInterfaceAwarePacketConn(serverConn)
+	if err != nil {
+		t.Fatalf("newInterfaceAwarePacketConn() error = %v", err)
+	}
+	go serveUDP(ctx, newRecordingLogger(sink), serverPC, RolePXE, testConfig(), knownGate, newDeniedMACLog(), errCh)
 
 	clientConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -226,7 +240,11 @@ func TestServeUDP_DoesNotLogNonMACGateDeclineAtDefaultVerbosity(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
-	go serveUDP(ctx, newRecordingLogger(sink), serverConn, RolePXE, testConfig(), knownGate, newDeniedMACLog(), errCh)
+	serverPC, err := newInterfaceAwarePacketConn(serverConn)
+	if err != nil {
+		t.Fatalf("newInterfaceAwarePacketConn() error = %v", err)
+	}
+	go serveUDP(ctx, newRecordingLogger(sink), serverPC, RolePXE, testConfig(), knownGate, newDeniedMACLog(), errCh)
 
 	clientConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -276,7 +294,11 @@ func TestServeUDP_LogsMACGateDenialOncePerMAC(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
-	go serveUDP(ctx, newRecordingLogger(sink), serverConn, RolePXE, testConfig(), knownGate, newDeniedMACLog(), errCh)
+	serverPC, err := newInterfaceAwarePacketConn(serverConn)
+	if err != nil {
+		t.Fatalf("newInterfaceAwarePacketConn() error = %v", err)
+	}
+	go serveUDP(ctx, newRecordingLogger(sink), serverPC, RolePXE, testConfig(), knownGate, newDeniedMACLog(), errCh)
 
 	clientConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -323,12 +345,29 @@ func TestServeUDP_LogsMACGateDenialOncePerMAC(t *testing.T) {
 // default route would otherwise pick.
 func TestReplyControlMessage_PinsToArrivalInterface(t *testing.T) {
 	const arrivalIfIndex = 7
-	got := replyControlMessage(&ipv4.ControlMessage{IfIndex: arrivalIfIndex})
+	got := replyControlMessage(&ipv4.ControlMessage{IfIndex: arrivalIfIndex}, nil)
 	if got == nil {
 		t.Fatal("replyControlMessage() = nil, want a non-nil ControlMessage")
 	}
 	if got.IfIndex != arrivalIfIndex {
 		t.Errorf("IfIndex = %d, want %d", got.IfIndex, arrivalIfIndex)
+	}
+}
+
+// TestReplyControlMessage_PinsSourceAddress pins the source half of the
+// dual-homed reply fix: pinning the egress interface alone does not pin
+// the reply's source address (the kernel can still select an address
+// from another interface), so when the arrival interface's own address
+// is known it must ride along in the control message as the reply's
+// source.
+func TestReplyControlMessage_PinsSourceAddress(t *testing.T) {
+	src := net.IPv4(192, 0, 2, 10)
+	got := replyControlMessage(&ipv4.ControlMessage{IfIndex: 7}, src)
+	if got == nil {
+		t.Fatal("replyControlMessage() = nil, want a non-nil ControlMessage")
+	}
+	if !got.Src.Equal(src) {
+		t.Errorf("Src = %v, want %v", got.Src, src)
 	}
 }
 
@@ -338,7 +377,7 @@ func TestReplyControlMessage_PinsToArrivalInterface(t *testing.T) {
 // zero-value ControlMessage, the same "let the kernel pick" behavior
 // this package had before interface pinning existed.
 func TestReplyControlMessage_NilArrivalFallsBackToKernelChoice(t *testing.T) {
-	got := replyControlMessage(nil)
+	got := replyControlMessage(nil, net.IPv4(192, 0, 2, 10))
 	if got == nil {
 		t.Fatal("replyControlMessage(nil) = nil, want a non-nil zero-value ControlMessage")
 	}
@@ -389,6 +428,102 @@ func TestNewInterfaceAwarePacketConn_EnablesInterfaceControlMessages(t *testing.
 	}
 	if cm.IfIndex == 0 {
 		t.Errorf("IfIndex = 0, want the loopback interface's nonzero index")
+	}
+}
+
+// TestListenUDPSocketDisablesTxChecksum guards the SO_NO_CHECK half of
+// the reply path (see disableUDPTxChecksum): every reply socket must
+// send its datagrams with a zero UDP checksum, so a checksum-offloaded
+// partial value can never reach a booting firmware un-filled and make
+// it discard the OFFER. Asserted via getsockopt on the live socket -
+// the actual on-wire zero checksum is a kernel behavior a unit test
+// cannot capture, but the option being set is the entire code-level
+// contract.
+func TestListenUDPSocketDisablesTxChecksum(t *testing.T) {
+	conn, err := listenUDP("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listenUDP() error = %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	rawConn, err := conn.SyscallConn()
+	if err != nil {
+		t.Fatalf("SyscallConn() error = %v", err)
+	}
+
+	var optVal int
+	var optErr error
+	err = rawConn.Control(func(fd uintptr) {
+		optVal, optErr = unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_NO_CHECK)
+	})
+	if err != nil {
+		t.Fatalf("rawConn.Control() error = %v", err)
+	}
+	if optErr != nil {
+		t.Fatalf("GetsockoptInt(SO_NO_CHECK) error = %v", optErr)
+	}
+	if optVal == 0 {
+		t.Fatalf("SO_NO_CHECK not set on listenUDP's socket (got %d, want nonzero); offloaded partial checksums could reach PXE firmware un-filled", optVal)
+	}
+}
+
+// TestArrivalInterfaceIP_ResolvesLoopback exercises arrivalInterfaceIP
+// against a real kernel-reported control message: a packet received
+// over loopback must resolve to the loopback interface's own IPv4
+// address, the address every reply-content and source-selection
+// decision in serveUDP keys off.
+func TestArrivalInterfaceIP_ResolvesLoopback(t *testing.T) {
+	serverConn, err := listenUDP("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listenUDP() error = %v", err)
+	}
+	defer func() { _ = serverConn.Close() }()
+
+	pc, err := newInterfaceAwarePacketConn(serverConn)
+	if err != nil {
+		t.Fatalf("newInterfaceAwarePacketConn() error = %v", err)
+	}
+
+	clientConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("client ListenUDP() error = %v", err)
+	}
+	defer func() { _ = clientConn.Close() }()
+
+	if _, err := clientConn.WriteToUDP([]byte("probe"), serverConn.LocalAddr().(*net.UDPAddr)); err != nil {
+		t.Fatalf("sending probe packet: %v", err)
+	}
+
+	if err := serverConn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	buf := make([]byte, 64)
+	_, cm, _, err := pc.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("ReadFrom() error = %v", err)
+	}
+
+	got := arrivalInterfaceIP(cm)
+	if !got.Equal(net.IPv4(127, 0, 0, 1)) {
+		t.Errorf("arrivalInterfaceIP() = %v, want 127.0.0.1 (the loopback interface's own address)", got)
+	}
+}
+
+// TestArrivalInterfaceIP_NilOrUnresolvableYieldsNil covers every "no
+// address to resolve" input in one place: a nil control message, a
+// zero interface index, and an index no interface holds must all yield
+// nil - the callers' signal to fall back to Config.ServerIP and to
+// kernel source selection.
+func TestArrivalInterfaceIP_NilOrUnresolvableYieldsNil(t *testing.T) {
+	cases := map[string]*ipv4.ControlMessage{
+		"nil control message":  nil,
+		"zero interface index": {IfIndex: 0},
+		"unknown interface":    {IfIndex: 1 << 30},
+	}
+	for name, cm := range cases {
+		if got := arrivalInterfaceIP(cm); got != nil {
+			t.Errorf("%s: arrivalInterfaceIP() = %v, want nil", name, got)
+		}
 	}
 }
 
