@@ -201,6 +201,87 @@ var _ = Describe("Machine Controller", func() {
 			Expect(k8sClient.Get(ctx, key, steady)).To(Succeed())
 			Expect(steady.Status.State).To(Equal(keziov1alpha1.MachineStateProvisioned))
 		})
+
+		It("re-provisions a Provisioned Machine when spec.imageRef changes to a different Image", func() {
+			const resourceName = "reprovision-machine"
+			namespace := "default"
+			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+
+			By("creating the original and replacement target Images")
+			image := &keziov1alpha1.Image{
+				ObjectMeta: metav1.ObjectMeta{Name: "reprovision-machine-image", Namespace: namespace},
+				Spec: keziov1alpha1.ImageSpec{
+					Source: keziov1alpha1.ImageSource{Format: keziov1alpha1.ImageFormatQCOW2},
+				},
+			}
+			Expect(k8sClient.Create(ctx, image)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, image)).To(Succeed()) })
+
+			imageV2 := &keziov1alpha1.Image{
+				ObjectMeta: metav1.ObjectMeta{Name: "reprovision-machine-image-v2", Namespace: namespace},
+				Spec: keziov1alpha1.ImageSpec{
+					Source: keziov1alpha1.ImageSource{Format: keziov1alpha1.ImageFormatQCOW2},
+				},
+			}
+			Expect(k8sClient.Create(ctx, imageV2)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, imageV2)).To(Succeed()) })
+
+			By("creating the Machine referencing the original image")
+			spec := newTestMachineSpec(resourceName)
+			spec.ImageRef = &keziov1alpha1.NameRef{Name: image.Name}
+			machine := &keziov1alpha1.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec:       spec,
+			}
+			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+			DeferCleanup(func() {
+				m := &keziov1alpha1.Machine{}
+				if err := k8sClient.Get(ctx, key, m); err == nil {
+					Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+				}
+			})
+
+			r := &MachineReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				DeployerFactory: deployer.NewFactory().New,
+			}
+
+			By("driving the Machine to Provisioned with the original image")
+			result, err := reconcileUntil(ctx, r, key, 20, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateProvisioned
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Status.State).To(Equal(keziov1alpha1.MachineStateProvisioned))
+			Expect(result.Status.Provisioning).NotTo(BeNil())
+			Expect(result.Status.Provisioning.Image).NotTo(BeNil())
+			Expect(result.Status.Provisioning.Image.ImageRef).To(Equal(*spec.ImageRef))
+
+			By("updating spec.imageRef to the replacement image")
+			toUpdate := &keziov1alpha1.Machine{}
+			Expect(k8sClient.Get(ctx, key, toUpdate)).To(Succeed())
+			newRef := keziov1alpha1.NameRef{Name: imageV2.Name}
+			toUpdate.Spec.ImageRef = &newRef
+			Expect(k8sClient.Update(ctx, toUpdate)).To(Succeed())
+
+			By("reconciling once, which must detect the ref change and move back to Provisioning")
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			reprovisioning := &keziov1alpha1.Machine{}
+			Expect(k8sClient.Get(ctx, key, reprovisioning)).To(Succeed())
+			Expect(reprovisioning.Status.State).To(Equal(keziov1alpha1.MachineStateProvisioning))
+
+			By("reconciling through to Provisioned again, with a fresh deploy recorded for the new image")
+			result, err = reconcileUntil(ctx, r, key, 20, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateProvisioned
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Status.State).To(Equal(keziov1alpha1.MachineStateProvisioned))
+			Expect(result.Status.Provisioning).NotTo(BeNil())
+			Expect(result.Status.Provisioning.Image).NotTo(BeNil())
+			Expect(result.Status.Provisioning.Image.ImageRef).To(Equal(newRef))
+			Expect(result.Status.Provisioning.Image.ImageRef).NotTo(Equal(*spec.ImageRef))
+		})
 	})
 
 	Context("deleting a machine", func() {
