@@ -308,19 +308,33 @@ jobs:
           sudo modprobe nbd max_part=16
           sudo qemu-nbd --connect=/dev/nbd0 "${{ runner.temp }}/ubuntu-cloud-marked.img"
           sudo partprobe /dev/nbd0
+          sudo udevadm settle
 
           # Largest ext4 partition on the disk - see
           # e2e-kubevirt-reusable.yml's step of this name for why size/fs
           # detection is used instead of a hardcoded partition number.
           root_part=""
           root_size=0
-          while read -r part_name part_fstype part_size; do
-            [ "${part_fstype}" = "ext4" ] || continue
-            if [ "${part_size}" -gt "${root_size}" ]; then
-              root_size="${part_size}"
-              root_part="/dev/${part_name}"
-            fi
-          done < <(lsblk -rno NAME,FSTYPE,SIZE --bytes /dev/nbd0)
+          # Retry: partprobe/udevadm settle can still race the kernel's
+          # nbd partition-node creation, so give it a few bounded
+          # attempts before treating "no ext4 partition" as real.
+          for attempt in $(seq 1 10); do
+            root_part=""
+            root_size=0
+            while read -r part_name part_fstype part_size; do
+              [ "${part_fstype}" = "ext4" ] || continue
+              if [ "${part_size}" -gt "${root_size}" ]; then
+                root_size="${part_size}"
+                root_part="/dev/${part_name}"
+              fi
+            done < <(lsblk -rno NAME,FSTYPE,SIZE --bytes /dev/nbd0)
+
+            [ -n "${root_part}" ] && break
+            [ "${attempt}" -eq 10 ] && break
+            sleep 2
+            sudo partprobe /dev/nbd0
+            sudo udevadm settle
+          done
 
           if [ -z "${root_part}" ]; then
             echo "::error::no ext4 partition found on /dev/nbd0" >&2
