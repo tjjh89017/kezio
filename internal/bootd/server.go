@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 
 	"github.com/go-logr/logr"
 	"github.com/insomniacslk/dhcp/dhcpv4"
@@ -89,9 +90,17 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	defer func() { _ = pxeConn.Close() }()
 
+	// One deniedMACLog shared by both listeners: a firmware's PXE retry
+	// loop sends the same DHCPDISCOVER (port 67) and, once it holds a
+	// lease, the same DHCPREQUEST (port 4011) every few seconds, and a
+	// MAC gate deny is the same story on either port - "log the first
+	// one at default verbosity, then quiet down" should apply once per
+	// MAC across the whole server, not once per port.
+	denied := newDeniedMACLog()
+
 	errCh := make(chan error, 2)
-	go serveUDP(ctx, log, dhcpConn, RoleProxyDHCP, cfg, gate, errCh)
-	go serveUDP(ctx, log, pxeConn, RolePXE, cfg, gate, errCh)
+	go serveUDP(ctx, log, dhcpConn, RoleProxyDHCP, cfg, gate, denied, errCh)
+	go serveUDP(ctx, log, pxeConn, RolePXE, cfg, gate, denied, errCh)
 
 	select {
 	case <-ctx.Done():
@@ -122,13 +131,50 @@ func listenUDP(addr string) (*net.UDPConn, error) {
 // well past any real request without accepting an unbounded read).
 const maxDHCPPacket = 4096
 
+// deniedMACLog rate-limits MAC-gate deny logging to the default
+// verbosity (Info), rather than leaving every deny at V(1) where the
+// default zap level (see cmd/bootd/main.go) filters it out entirely.
+// The MAC gate is the one deny path most likely to hide a real
+// misconfiguration - a Machine that never got net-booted because bootd
+// silently refused its MAC - and unlike a malformed packet or an
+// unsupported architecture (still logged at V(1) only; those are noise
+// from other devices on the segment, not a kezio Machine failing to
+// boot), a repeated deny for the same MAC across a PXE retry loop
+// (firmware resends its DHCPDISCOVER/DHCPREQUEST every few seconds
+// until it gives up) must not flood the default log. seen reports
+// true, and stays true, only after the first deny for a given MAC is
+// logged.
+type deniedMACLog struct {
+	mu     sync.Mutex
+	logged map[string]struct{}
+}
+
+// newDeniedMACLog returns an empty deniedMACLog, ready to use.
+func newDeniedMACLog() *deniedMACLog {
+	return &deniedMACLog{logged: make(map[string]struct{})}
+}
+
+// seen reports whether mac has already been logged once by this
+// deniedMACLog, and marks it logged if this is the first time - so the
+// caller can tell "log at Info" (first sighting) from "log at V(1)
+// only" (repeat) with a single call.
+func (d *deniedMACLog) seen(mac string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, ok := d.logged[mac]; ok {
+		return true
+	}
+	d.logged[mac] = struct{}{}
+	return false
+}
+
 // serveUDP is one listener's receive loop: read, parse, hand off to
 // BuildResponse, send the answer if any. It never exits on a
 // per-packet error (a malformed or unparsable packet from one client
 // must not take the listener down for every other client on the
 // segment) - only a read error on the socket itself, or ctx
 // cancellation, ends the loop.
-func serveUDP(ctx context.Context, log logr.Logger, conn *net.UDPConn, role Role, cfg Config, gate MACGate, errCh chan<- error) {
+func serveUDP(ctx context.Context, log logr.Logger, conn *net.UDPConn, role Role, cfg Config, gate MACGate, denied *deniedMACLog, errCh chan<- error) {
 	buf := make([]byte, maxDHCPPacket)
 	for {
 		n, srcAddr, err := conn.ReadFromUDP(buf)
@@ -153,7 +199,18 @@ func serveUDP(ctx context.Context, log logr.Logger, conn *net.UDPConn, role Role
 
 		resp, dst, outcome := BuildResponse(req, role, srcAddr, cfg, gate)
 		if outcome != OutcomeAnswered {
-			log.V(1).Info("not answering", "remote", srcAddr, "mac", req.ClientHWAddr, "outcome", string(outcome))
+			// A MAC-gate deny (OutcomeUnknownMAC) is logged once per MAC
+			// at the default verbosity - see deniedMACLog's doc comment.
+			// Every other decline (not a PXE client, unsupported
+			// architecture, HTTP Boot requested but unconfigured, wrong
+			// message type for this port) stays at V(1): those are
+			// expected noise from devices on the segment that were never
+			// going to be answered, not a kezio Machine failing to boot.
+			if outcome == OutcomeUnknownMAC && !denied.seen(req.ClientHWAddr.String()) {
+				log.Info("denying PXE request: MAC not enrolled", "remote", srcAddr, "mac", req.ClientHWAddr, "role", role)
+			} else {
+				log.V(1).Info("not answering", "remote", srcAddr, "mac", req.ClientHWAddr, "outcome", string(outcome))
+			}
 			continue
 		}
 

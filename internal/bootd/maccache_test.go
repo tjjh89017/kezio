@@ -110,6 +110,37 @@ func TestMACCache_UpdateMovesMAC(t *testing.T) {
 	}
 }
 
+// TestMACCache_CaseInsensitiveMAC is a table-driven check of the case
+// variant this cache must not be fooled by: Machine.spec.bootMACAddress
+// is validated case-insensitively (see keziov1alpha1.MACAddressPattern)
+// so an operator or seeder can write it in either case, while the
+// value looked up on the wire always comes from net.HardwareAddr.String
+// (see Allow), which is always lower-case. add/remove and Allow all
+// normalize through bootserver.NormalizeMAC, so every case combination
+// below must resolve to the same enrolled MAC.
+func TestMACCache_CaseInsensitiveMAC(t *testing.T) {
+	lookup := net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01}
+
+	tests := []struct {
+		name          string
+		specMAC       string
+		wantAllowedOn net.HardwareAddr
+	}{
+		{"lowercase spec, lowercase lookup", "aa:bb:cc:dd:ee:01", lookup},
+		{"uppercase spec, lowercase lookup", "AA:BB:CC:DD:EE:01", lookup},
+		{"mixed-case spec, lowercase lookup", "Aa:bB:Cc:dD:eE:01", lookup},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestMACCache()
+			c.onAdd(machine("m1", tc.specMAC))
+			if !c.Allow(tc.wantAllowedOn) {
+				t.Errorf("Allow(%v) = false after enrolling bootMACAddress %q, want true", tc.wantAllowedOn, tc.specMAC)
+			}
+		})
+	}
+}
+
 func TestMACCache_DeleteTombstoneUnwrapped(t *testing.T) {
 	c := newTestMACCache()
 	m := machine("m1", "aa:bb:cc:dd:ee:01")

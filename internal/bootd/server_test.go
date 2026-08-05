@@ -118,7 +118,7 @@ func TestServeUDP_PXERoundTrip(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
-	go serveUDP(ctx, logr.Discard(), serverConn, RolePXE, testConfig(), knownGate, errCh)
+	go serveUDP(ctx, logr.Discard(), serverConn, RolePXE, testConfig(), knownGate, newDeniedMACLog(), errCh)
 
 	clientConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -179,7 +179,7 @@ func TestServeUDP_LogsAnsweredRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
-	go serveUDP(ctx, newRecordingLogger(sink), serverConn, RolePXE, testConfig(), knownGate, errCh)
+	go serveUDP(ctx, newRecordingLogger(sink), serverConn, RolePXE, testConfig(), knownGate, newDeniedMACLog(), errCh)
 
 	clientConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -205,13 +205,16 @@ func TestServeUDP_LogsAnsweredRequest(t *testing.T) {
 	}
 }
 
-// TestServeUDP_DoesNotLogDeclinedRequestAtDefaultVerbosity is the
-// counterpart to TestServeUDP_LogsAnsweredRequest: a request BuildResponse
-// declines (here, an unknown MAC) must stay at V(1) - it must not also
-// start appearing in the default-verbosity log, which would drown the
-// one signal that matters in noise from every other device sharing the
-// L2 segment.
-func TestServeUDP_DoesNotLogDeclinedRequestAtDefaultVerbosity(t *testing.T) {
+// TestServeUDP_DoesNotLogNonMACGateDeclineAtDefaultVerbosity is the
+// counterpart to TestServeUDP_LogsAnsweredRequest for a decline that is
+// not a MAC-gate deny: BuildResponse's OutcomeWrongMessageType branch
+// (a DHCPDISCOVER on the RolePXE port, which only answers
+// DHCPREQUEST) must stay at V(1) - it must not also start appearing in
+// the default-verbosity log, which would drown the one signal that
+// matters in noise from every other device sharing the L2 segment.
+// TestServeUDP_LogsMACGateDenialOncePerMAC below covers the one decline
+// (OutcomeUnknownMAC) that is deliberately promoted to Info.
+func TestServeUDP_DoesNotLogNonMACGateDeclineAtDefaultVerbosity(t *testing.T) {
 	serverConn, err := listenUDP("127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listenUDP() error = %v", err)
@@ -222,7 +225,7 @@ func TestServeUDP_DoesNotLogDeclinedRequestAtDefaultVerbosity(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
-	go serveUDP(ctx, newRecordingLogger(sink), serverConn, RolePXE, testConfig(), knownGate, errCh)
+	go serveUDP(ctx, newRecordingLogger(sink), serverConn, RolePXE, testConfig(), knownGate, newDeniedMACLog(), errCh)
 
 	clientConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -230,7 +233,10 @@ func TestServeUDP_DoesNotLogDeclinedRequestAtDefaultVerbosity(t *testing.T) {
 	}
 	defer func() { _ = clientConn.Close() }()
 
-	req := pxeDiscover(t, unknownMAC, iana.EFI_X86_64, dhcpv4.WithMessageType(dhcpv4.MessageTypeRequest))
+	// A DHCPDISCOVER (not DHCPREQUEST) on the RolePXE port: an ordinary,
+	// expected decline (OutcomeWrongMessageType) that must not raise the
+	// default log's noise floor, unlike the MAC-gate deny below.
+	req := pxeDiscover(t, knownMAC, iana.EFI_X86_64)
 	if _, err := clientConn.WriteToUDP(req.ToBytes(), serverConn.LocalAddr().(*net.UDPAddr)); err != nil {
 		t.Fatalf("sending request: %v", err)
 	}
@@ -239,8 +245,66 @@ func TestServeUDP_DoesNotLogDeclinedRequestAtDefaultVerbosity(t *testing.T) {
 	// process and log it before asserting on sink contents.
 	time.Sleep(200 * time.Millisecond)
 
-	if containsSubstring(sink.messages(), "answering PXE request") {
-		t.Errorf("log messages = %v, want none containing %q at default verbosity", sink.messages(), "answering PXE request")
+	if len(sink.messages()) != 0 {
+		t.Errorf("log messages = %v, want none at default verbosity for a non-MAC-gate decline", sink.messages())
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("serveUDP reported an error: %v", err)
+	default:
+	}
+}
+
+// TestServeUDP_LogsMACGateDenialOncePerMAC pins the fix for the
+// invisible-deny failure mode: a request declined for OutcomeUnknownMAC
+// (BuildResponse's MAC gate) must log at the default verbosity with the
+// denied MAC, since it is the one decline outcome that most plausibly
+// means a kezio Machine is failing to net-boot rather than an unrelated
+// device on the segment being ignored as expected. A repeat deny for
+// the same MAC (a PXE retry loop resending the same DHCPDISCOVER) must
+// not log again at the default verbosity - see deniedMACLog.
+func TestServeUDP_LogsMACGateDenialOncePerMAC(t *testing.T) {
+	serverConn, err := listenUDP("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listenUDP() error = %v", err)
+	}
+	defer func() { _ = serverConn.Close() }()
+
+	sink := &recordingSink{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go serveUDP(ctx, newRecordingLogger(sink), serverConn, RolePXE, testConfig(), knownGate, newDeniedMACLog(), errCh)
+
+	clientConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("client ListenUDP() error = %v", err)
+	}
+	defer func() { _ = clientConn.Close() }()
+
+	req := pxeDiscover(t, unknownMAC, iana.EFI_X86_64, dhcpv4.WithMessageType(dhcpv4.MessageTypeRequest))
+	send := func() {
+		t.Helper()
+		if _, err := clientConn.WriteToUDP(req.ToBytes(), serverConn.LocalAddr().(*net.UDPAddr)); err != nil {
+			t.Fatalf("sending request: %v", err)
+		}
+	}
+
+	// Send the same denied MAC's request twice, simulating a firmware
+	// PXE retry loop; give serveUDP time to process and log each one
+	// before asserting on sink contents.
+	send()
+	time.Sleep(200 * time.Millisecond)
+	send()
+	time.Sleep(200 * time.Millisecond)
+
+	msgs := sink.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("log messages = %v, want exactly 1 default-verbosity line for two denies of the same MAC", msgs)
+	}
+	if !strings.Contains(msgs[0], "denying PXE request") || !strings.Contains(msgs[0], unknownMAC.String()) {
+		t.Errorf("log message = %q, want it to name the denied MAC %q", msgs[0], unknownMAC.String())
 	}
 
 	select {
