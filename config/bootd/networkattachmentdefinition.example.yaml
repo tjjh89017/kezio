@@ -46,28 +46,59 @@
 # NAD assigns net1 - static or a cluster-wide allocator such as
 # whereabouts both work; see config/seeder's own NAD example for the
 # tradeoffs between them, which apply here unchanged.
+#
+# === Reverse-path filtering ===
+#
+# A DHCPDISCOVER arrives on net1 with source address 0.0.0.0 (the
+# booting machine has no address yet) and destination 255.255.255.255 -
+# a source/destination pair a reverse-path filter can still refuse to
+# accept depending on kernel version and whatever sysctl defaults this
+# net1 namespace inherited, silently dropping the DISCOVER before
+# bootd's own UDP socket ever sees it (no line in bootd's log explains
+# this, since the packet never reaches the socket to be logged at all).
+# The chained "tuning" plugin below forces net1's own rp_filter loose
+# (0) for this attachment only, leaving every other interface on the
+# node untouched - a host-wide sysctl would reach far more than this
+# one pod's boot-network leg and still not apply where it matters,
+# since a fresh network namespace does not inherit the host's runtime
+# sysctl values in the first place.
 apiVersion: k8s.cni.cncf.io/v1
 kind: NetworkAttachmentDefinition
 metadata:
   name: kezio-boot-network
   namespace: system
 spec:
-  # SITE-SPECIFIC: replace this config with whatever CNI plugin this
-  # cluster's boot L2 segment actually uses (macvlan, ipvlan, a Multus
-  # bridge onto a VLAN-tagged host interface, ...); this "macvlan"
-  # example is illustrative only, not a recommendation.
+  # SITE-SPECIFIC: replace the first ("macvlan") plugin entry with
+  # whatever CNI plugin this cluster's boot L2 segment actually uses
+  # (macvlan, ipvlan, a Multus bridge onto a VLAN-tagged host
+  # interface, ...); this "macvlan" example is illustrative only, not a
+  # recommendation. Keep the chained "tuning" plugin entry as-is (or
+  # drop it only if this cluster's CNI plugin bundle has no "tuning"
+  # binary) - see the "Reverse-path filtering" note above for why it is
+  # here.
   config: |
     {
       "cniVersion": "0.3.1",
-      "type": "macvlan",
-      "master": "REPLACE_WITH_BOOT_NETWORK_HOST_INTERFACE",
-      "mode": "bridge",
-      "ipam": {
-        "type": "static",
-        "addresses": [
-          {
-            "address": "REPLACE_WITH_STATIC_CIDR/32"
+      "name": "kezio-boot-network",
+      "plugins": [
+        {
+          "type": "macvlan",
+          "master": "REPLACE_WITH_BOOT_NETWORK_HOST_INTERFACE",
+          "mode": "bridge",
+          "ipam": {
+            "type": "static",
+            "addresses": [
+              {
+                "address": "REPLACE_WITH_STATIC_CIDR/32"
+              }
+            ]
           }
-        ]
-      }
+        },
+        {
+          "type": "tuning",
+          "sysctl": {
+            "net.ipv4.conf.IFNAME.rp_filter": "0"
+          }
+        }
+      ]
     }

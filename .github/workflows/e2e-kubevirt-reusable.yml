@@ -861,6 +861,19 @@ jobs:
           kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
 
       - name: Create the provisioning NetworkAttachmentDefinition
+        # Chains the "tuning" CNI plugin onto the plain bridge attachment
+        # to force net1's reverse-path filter loose (rp_filter=0) inside
+        # bootd's own network namespace, IFNAME substituted by the tuning
+        # plugin for whatever interface name the bridge plugin gave this
+        # attachment (net1 here). A DHCPDISCOVER arrives with source
+        # 0.0.0.0, destination 255.255.255.255 - a source address a
+        # strict/loose reverse-path check can still refuse to accept
+        # depending on kernel version and the namespace's inherited
+        # sysctl defaults, and unlike a host-wide sysctl this setting
+        # lives with the attachment itself (config/bootd's own
+        # NetworkAttachmentDefinition example carries the same plugin so
+        # a real deployment gets it too), reaching only bootd's net1
+        # rather than every interface on the node.
         run: |
           cat <<EOF | kubectl apply -f -
           apiVersion: k8s.cni.cncf.io/v1
@@ -872,9 +885,20 @@ jobs:
             config: |
               {
                 "cniVersion": "0.3.1",
-                "type": "bridge",
-                "bridge": "${PROVISIONING_BRIDGE}",
-                "ipam": {}
+                "name": "kezio-boot-network",
+                "plugins": [
+                  {
+                    "type": "bridge",
+                    "bridge": "${PROVISIONING_BRIDGE}",
+                    "ipam": {}
+                  },
+                  {
+                    "type": "tuning",
+                    "sysctl": {
+                      "net.ipv4.conf.IFNAME.rp_filter": "0"
+                    }
+                  }
+                ]
               }
           EOF
 
@@ -1055,6 +1079,38 @@ jobs:
             echo "::error::bootd pod ${bootd_pod} has no kezio-boot-network attachment in its network-status; got: ${network_status}" >&2
             exit 1
           fi
+          echo "BOOTD_POD_NAME=${bootd_pod}" >> "$GITHUB_ENV"
+
+      - name: Start capturing bootd's pod network namespace (nsenter tcpdump on net1)
+        # bridge.pcap (started above) only proves a frame crossed
+        # kezio-prov0's ports on the HOST side - it cannot see whether
+        # that frame then actually entered bootd's own network namespace
+        # over the Multus veth, since that boundary and the kernel's
+        # IP-layer delivery decisions past it (routing, reverse-path
+        # filtering, netns-local firewall rules) are invisible to a
+        # host-side capture. Tapping net1 from inside the pod's own
+        # network namespace is the only way to see whether a DISCOVER
+        # actually reached bootd's interface at all - something bootd's
+        # own logs never mention either way.
+        #
+        # Reached via nsenter into the sandbox's namespace (resolved
+        # through crictl, RKE2's bundled container runtime CLI) rather
+        # than `kubectl debug`: bootd's own image ships no tcpdump, so a
+        # `kubectl debug` ephemeral container would need to pull a
+        # separate debug image before it could start capturing, losing
+        # exactly the early packets this capture exists to catch (it
+        # must be running before the target VM is even created below).
+        # nsenter reaches the same namespace directly using the tcpdump
+        # binary the "Start capturing the provisioning bridge" step above
+        # already installed on this host, with no image pull and no
+        # dependency on the ephemeral-containers feature being enabled.
+        run: |
+          set -euo pipefail
+          sandbox_id="$(sudo crictl pods --name "${BOOTD_POD_NAME}" -q | head -1)"
+          sandbox_pid="$(sudo crictl inspectp -o go-template --template '{{.info.pid}}' "${sandbox_id}")"
+          sudo -- sh -c "nohup nsenter -t '${sandbox_pid}' -n -- tcpdump -i net1 -w '${RUNNER_TEMP}/bootd-netns.pcap' \
+            udp port 67 or port 68 or port 69 \
+            >/tmp/tcpdump-bootd-netns.log 2>&1 &"
 
       - name: Ingest the marker-customized Ubuntu image through kezioctl
         run: |
@@ -1791,6 +1847,26 @@ jobs:
             echo "--- ${p} k8s.v1.cni.cncf.io/network-status annotation (actual, set by Multus) ---"
             kubectl -n kezio-system get "${p}" \
               -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}{"\n"}'
+            # net1 lives only inside this pod's own network namespace, so
+            # its rp_filter setting and link state have to be read from
+            # there (via nsenter/crictl, the same way the pod-netns
+            # capture above reaches it), not from the host - a strict
+            # reverse-path filter on net1 is one of the candidates for a
+            # DISCOVER (source 0.0.0.0) that crosses the host bridge but
+            # never reaches bootd's UDP socket.
+            echo "--- ${p} net1 rp_filter and link state (inside the pod network namespace) ---"
+            pod_name="${p#pod/}"
+            sandbox_id="$(sudo crictl pods --name "${pod_name}" -q | head -1)"
+            if [ -n "${sandbox_id}" ]; then
+              sandbox_pid="$(sudo crictl inspectp -o go-template --template '{{.info.pid}}' "${sandbox_id}")"
+              sudo nsenter -t "${sandbox_pid}" -n -- sh -c '
+                for f in all default net1; do
+                  echo "net.ipv4.conf.${f}.rp_filter = $(cat /proc/sys/net/ipv4/conf/${f}/rp_filter 2>/dev/null || echo "<no such interface>")"
+                done
+                ip -d link show net1 2>&1
+                ip addr show net1 2>&1
+              ' || true
+            fi
             echo "--- ${p} fetch-boot-artifacts logs (--previous) ---"
             kubectl -n kezio-system logs "${p}" -c fetch-boot-artifacts --previous --tail=200 || \
               kubectl -n kezio-system logs "${p}" -c fetch-boot-artifacts --tail=200 || true
@@ -1843,6 +1919,26 @@ jobs:
             tcpdump -vvv -r "${RUNNER_TEMP}/bridge.pcap" > "${RUNNER_TEMP}/bridge-pcap.txt" 2>&1
           fi
 
+      - name: Stop bootd's pod-netns capture and flush it to the artifact
+        if: always()
+        # Same reasoning as "Stop the bridge capture" above, for the
+        # capture "Start capturing bootd's pod network namespace" started
+        # inside bootd's own network namespace: matched on the pcap
+        # output path (nsenter itself is a short-lived wrapper process
+        # that has already exited by the time this step runs - only the
+        # tcpdump it exec'd survives, and pkill -f matches its full
+        # command line including that path) rather than on a saved PID,
+        # since a pod restart between the two steps would make a saved
+        # PID stale.
+        run: |
+          set +e
+          sudo pkill -TERM -f "tcpdump -i net1 -w ${RUNNER_TEMP}/bootd-netns.pcap"
+          sleep 2
+          if [ -s "${RUNNER_TEMP}/bootd-netns.pcap" ]; then
+            sudo chmod 0644 "${RUNNER_TEMP}/bootd-netns.pcap"
+            tcpdump -vvv -r "${RUNNER_TEMP}/bootd-netns.pcap" > "${RUNNER_TEMP}/bootd-netns-pcap.txt" 2>&1
+          fi
+
       - name: Dump KubeVirtBMC diagnostics on failure
         if: ${{ failure() && inputs.bmc_mode }}
         run: |
@@ -1882,5 +1978,7 @@ jobs:
             ${{ runner.temp }}/diagnostics-kubevirtbmc-dump.log
             ${{ runner.temp }}/bridge.pcap
             ${{ runner.temp }}/bridge-pcap.txt
+            ${{ runner.temp }}/bootd-netns.pcap
+            ${{ runner.temp }}/bootd-netns-pcap.txt
           if-no-files-found: ignore
           retention-days: 7
