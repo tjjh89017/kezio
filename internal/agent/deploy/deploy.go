@@ -75,8 +75,7 @@ import (
 
 // DefaultPollInterval is how often Execute polls GetTorrentStatus while
 // content partitions are seeding, when Executor.PollInterval is zero.
-// This matches ezio's own reference client's update cadence
-// (tmp/ezio/utils/ezio_cli.py's UPDATE_INTERVAL).
+// This matches ezio's own reference client's update cadence.
 const DefaultPollInterval = 2 * time.Second
 
 // EzioClient is the subset of *seeder.Client the Executor drives the

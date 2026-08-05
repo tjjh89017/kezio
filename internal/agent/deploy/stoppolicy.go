@@ -20,10 +20,10 @@ import "github.com/tjjh89017/kezio/internal/seeder"
 
 // minFinishedSeconds and minIdleUploadSeconds are the two halves of the
 // "finished and idle" pause condition, both fixed at 15 seconds -
-// matching ezio's own reference client (tmp/ezio/utils/ezio_cli.py's
-// MIN_FINISHED_TIME/MIN_LAST_UPLOAD defaults) exactly, since the target
-// machine seeding to other leechers during a fleet deploy is the same
-// situation Clonezilla's ezio_cli.py already handles this way.
+// matching ezio's own reference client's finished/idle timeout defaults
+// exactly, since the target machine seeding to other leechers during a
+// fleet deploy is the same situation ezio's own reference client
+// already handles this way.
 const (
 	minFinishedSeconds   = 15
 	minIdleUploadSeconds = 15
@@ -32,7 +32,8 @@ const (
 )
 
 // shouldPauseTorrent reports whether t should be paused under the
-// deploy-side stop policy, mirroring ezio_cli.py's check_stop exactly:
+// deploy-side stop policy, mirroring ezio's own stop-policy behavior
+// exactly:
 // a torrent that is not finished, or already paused, is left alone; a
 // finished torrent is paused once its cumulative upload exceeds
 // uploadRatioLimit times its size, or once it has been finished for more

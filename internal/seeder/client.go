@@ -35,9 +35,8 @@ import (
 
 // DefaultMaxUploads is KEZIO's own default for AddTorrent's max_uploads
 // when neither the cluster-wide operator default nor a per-Machine
-// override sets one. It matches ezio's own add_torrent default argument
-// (tmp/ezio/ezio_cli.py) - unlike DefaultMaxConnections, there is no WAN
-// reason to raise it.
+// override sets one. It matches ezio's own add_torrent default argument -
+// unlike DefaultMaxConnections, there is no WAN reason to raise it.
 const DefaultMaxUploads = 3
 
 // DefaultMaxConnections is KEZIO's own default for AddTorrent's
@@ -86,9 +85,8 @@ func ResolveMaxConnections(tuning *keziov1alpha1.MachineEzioTuning) int32 {
 // (internal/agent/deploy): TotalDone/Total for progress percent,
 // TotalPayloadUpload/TotalDone for the "upload > 3x size" pause
 // condition, and FinishedTime/LastUpload for the "finished and idle"
-// pause condition - see ezio's own reference client
-// (tmp/ezio/utils/ezio_cli.py's check_stop) for the exact semantics
-// these mirror.
+// pause condition - these mirror ezio's own stop-policy semantics for
+// a finished, idle torrent.
 type Torrent struct {
 	Hash       string
 	IsFinished bool

@@ -16,8 +16,8 @@ name: E2E Boot Path (KubeVirt VM)
 # request. Reasons, honestly:
 #   - PXE over a Multus bridge network inside a nested KubeVirt VM is
 #     meaningfully riskier than the KubeVirt-in-k3s-in-GitHub-Actions
-#     topology alone (which is proven elsewhere - see tmp/vrouter-operator
-#     referenced by this project's design doc): it adds a real L2
+#     topology alone (proven elsewhere in this project's E2E suite): it
+#     adds a real L2
 #     broadcast domain, a real UEFI firmware PXE ROM, TFTP, GRUB, and a
 #     multi-minute live boot, any one of which can flake for reasons that
 #     have nothing to do with a given pull request's actual change.

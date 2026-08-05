@@ -818,10 +818,9 @@ jobs:
         # No SSH: the marker is read with QGA's
         # guest-file-open/guest-file-read/guest-file-close commands, sent
         # over virtio-serial via `virsh qemu-agent-command` run inside
-        # the VM's own virt-launcher pod - the same mechanism
-        # tmp/vrouter-operator's internal/provider/kubevirt.runQGA uses
-        # (there is no `virtctl guestexec` subcommand to reach for
-        # instead).
+        # the VM's own virt-launcher pod - the same mechanism a
+        # QGA-based guest-file read helper uses (there is no
+        # `virtctl guestexec` subcommand to reach for instead).
         run: |
           set -euo pipefail
           launcher_pod="$(kubectl get pods -n kezio-system -l kubevirt.io/vm=e2e-deploy-vm -o jsonpath='{.items[0].metadata.name}')"

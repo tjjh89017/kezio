@@ -28,8 +28,9 @@ import (
 )
 
 // Collect gathers the full hardware inventory this machine's agent
-// reports at registration (section 6.1's disk hint sources, plus NICs,
-// memory, and CPU count), reading everything under root instead of the
+// reports at registration (the disk hint sources the controller's
+// disk-matching logic consumes, plus NICs, memory, and CPU count),
+// reading everything under root instead of the
 // real "/" - production calls Collect("/"); tests point root at a
 // testdata fixture tree so no real hardware is needed to exercise the
 // parsing logic.
@@ -73,7 +74,7 @@ func Collect(root string) (*keziov1alpha1.MachineHardwareStatus, error) {
 // physical disks worth reporting as a deployment target: loopback
 // devices and RAM disks. Everything else - SCSI/SATA (sdX), NVMe
 // (nvmeXnY), virtio (vdX), and so on - is reported; the controller's
-// disk-hint matching (section 6) is what decides which one is the
+// disk-hint matching logic is what decides which one is the
 // deployment target, not this collector.
 var virtualBlockDevicePrefixes = []string{"loop", "ram"}
 
