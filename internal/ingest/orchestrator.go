@@ -264,7 +264,8 @@ func processPartition(ctx context.Context, cfg Config, deps Dependencies, rawPat
 // path. If a content directory with the same hash already exists (this
 // exact content was ingested before, by this Image or another one), the
 // scratch copy is discarded instead: content is deduplicated by hash,
-// per the design's partition content model.
+// since a slot (a disk position) and its partition content (the
+// immutable, content-addressed payload) are decoupled.
 //
 // Because contentDir is already on storeRoot's filesystem,
 // os.Rename(contentDir, dest) is always a same-filesystem, atomic

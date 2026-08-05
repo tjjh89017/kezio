@@ -11,8 +11,9 @@ spec:
   # ClusterIP is the safe default: it exposes the upload port
   # (containerPort 8080, see deployment.yaml) only inside the cluster
   # network. Reaching it from kezioctl running outside the cluster (or
-  # from another site, per the design's "boot is local, data is global"
-  # split) is the cluster operator's choice — port-forward, an Ingress, a
+  # from another site, where kezio keeps boot infrastructure per-site/local
+  # while image/data storage is shared/global) is the cluster operator's
+  # choice — port-forward, an Ingress, a
   # LoadBalancer type, or a NodePort — made by patching this Service in
   # an overlay, not by this base manifest.
   type: ClusterIP

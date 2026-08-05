@@ -29,7 +29,7 @@ const ImageLayoutSchemaVersion = 1
 
 // ImageLayout is the schema of images/<name>/layout.json (see
 // ImageLayoutPath): an Image's disk-level layout plus its ordered list of
-// slots, matching the design's "partition content model" (a slot is a
+// slots (a slot is a
 // position on the target disk; a partition content is the immutable,
 // content-addressed payload a slot may reference; the two are decoupled so
 // more than one Image can reference the same content). This package only
