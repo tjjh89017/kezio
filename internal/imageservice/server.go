@@ -47,19 +47,22 @@ type Server struct {
 	staging        *Staging
 	auth           *Authenticator
 	maxUploadBytes int64
+	admission      *Admission
 	logger         *slog.Logger
 }
 
 // NewServer builds a Server. maxUploadBytes <= 0 means DefaultMaxUploadBytes.
-// logger nil means slog.Default().
-func NewServer(staging *Staging, auth *Authenticator, maxUploadBytes int64, logger *slog.Logger) *Server {
+// admission nil disables both the physical and logical capacity guards
+// (handleUpload only runs the pre-existing maxUploadBytes checks). logger
+// nil means slog.Default().
+func NewServer(staging *Staging, auth *Authenticator, maxUploadBytes int64, admission *Admission, logger *slog.Logger) *Server {
 	if maxUploadBytes <= 0 {
 		maxUploadBytes = DefaultMaxUploadBytes
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{staging: staging, auth: auth, maxUploadBytes: maxUploadBytes, logger: logger}
+	return &Server{staging: staging, auth: auth, maxUploadBytes: maxUploadBytes, admission: admission, logger: logger}
 }
 
 // Handler returns the routed http.Handler. Every route but /healthz
@@ -105,6 +108,29 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if r.ContentLength > s.maxUploadBytes {
 		http.Error(w, "upload exceeds the maximum allowed size", http.StatusRequestEntityTooLarge)
 		return
+	}
+
+	// Capacity admission: reject before reading a single body byte when
+	// the declared length would not fit the staging volume's available
+	// space, or (if a quota is configured) would push staged usage over
+	// it. This is deliberately separate from the maxUploadBytes checks
+	// above, which bound one request in isolation; admission also
+	// accounts for every other upload currently in flight (see
+	// Admission's doc comment), which is what actually protects against
+	// two individually-fine uploads jointly overflowing the volume.
+	if s.admission != nil {
+		release, err := s.admission.Reserve(r.ContentLength)
+		if err != nil {
+			// 507 Insufficient Storage (RFC 4918), not 413: the request
+			// itself is not too large in the abstract (a smaller
+			// staging volume or a lighter quota would have accepted the
+			// exact same request), so the failure is about this
+			// server's current storage state, not the size of the
+			// upload as such.
+			http.Error(w, err.Error(), http.StatusInsufficientStorage)
+			return
+		}
+		defer release()
 	}
 
 	body := http.MaxBytesReader(w, r.Body, s.maxUploadBytes)

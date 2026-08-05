@@ -175,6 +175,39 @@ func (s *Staging) RemoveUpload(name string) error {
 	return nil
 }
 
+// UsedBytes returns the total size, in bytes, of every completed upload
+// currently on the staging volume. An upload still in progress (its temp
+// file under uploads/.tmp, or a directory whose completion marker has
+// not been written yet) is not counted: its size is instead accounted
+// for through Admission's in-flight reservation ledger, not by scanning
+// disk state here. This is the "already staged" term in Admission's
+// logical quota check.
+func (s *Staging) UsedBytes() (int64, error) {
+	entries, err := os.ReadDir(s.uploadsDir())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("read uploads directory: %w", err)
+	}
+
+	var total int64
+	for _, e := range entries {
+		if !e.IsDir() || e.Name() == filepath.Base(s.tmpDir()) {
+			continue
+		}
+		meta, err := readMeta(filepath.Join(s.uploadsDir(), e.Name()))
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue // upload directory exists but has not completed yet
+			}
+			return 0, fmt.Errorf("read upload metadata for %q: %w", e.Name(), err)
+		}
+		total += meta.SizeBytes
+	}
+	return total, nil
+}
+
 // UploadResult describes a stored upload.
 type UploadResult struct {
 	// Name is the upload's name, as given by the client.

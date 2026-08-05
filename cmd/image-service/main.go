@@ -46,10 +46,11 @@ import (
 
 func main() {
 	var (
-		addr           string
-		stagingDir     string
-		tokenFile      string
-		maxUploadBytes int64
+		addr             string
+		stagingDir       string
+		tokenFile        string
+		maxUploadBytes   int64
+		stagingQuotaByte int64
 	)
 	flag.StringVar(&addr, "addr", ":8080", "address the HTTP server listens on")
 	flag.StringVar(&stagingDir, "staging-dir", "/staging",
@@ -58,17 +59,21 @@ func main() {
 		"path to a file holding the bearer token (typically a mounted Secret key)")
 	flag.Int64Var(&maxUploadBytes, "max-upload-bytes", imageservice.DefaultMaxUploadBytes,
 		"maximum accepted size of a single upload, in bytes")
+	flag.Int64Var(&stagingQuotaByte, "staging-quota-bytes", 0,
+		"maximum total bytes of completed and in-flight uploads allowed on the staging volume at once, "+
+			"0 disables this logical quota (only the physical statfs-based admission check still applies; "+
+			"see config/image-service/pvc.yaml for how to size the staging volume itself)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	if err := run(logger, addr, stagingDir, tokenFile, maxUploadBytes); err != nil {
+	if err := run(logger, addr, stagingDir, tokenFile, maxUploadBytes, stagingQuotaByte); err != nil {
 		logger.Error("image-service exited with an error", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(logger *slog.Logger, addr, stagingDir, tokenFile string, maxUploadBytes int64) error {
+func run(logger *slog.Logger, addr, stagingDir, tokenFile string, maxUploadBytes, stagingQuotaBytes int64) error {
 	token, err := imageservice.LoadToken(tokenFile)
 	if err != nil {
 		return err
@@ -81,10 +86,11 @@ func run(logger *slog.Logger, addr, stagingDir, tokenFile string, maxUploadBytes
 	if err != nil {
 		return err
 	}
+	admission := imageservice.NewAdmission(stagingDir, staging.UsedBytes, stagingQuotaBytes)
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           imageservice.NewServer(staging, auth, maxUploadBytes, logger).Handler(),
+		Handler:           imageservice.NewServer(staging, auth, maxUploadBytes, admission, logger).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

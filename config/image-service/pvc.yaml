@@ -22,4 +22,14 @@ spec:
       # in flight before ingest converts and slices them. The cluster
       # operator should size this to the largest expected concurrent
       # upload volume; overlay this manifest to change it.
+      #
+      # image-service also admits an upload against this volume's actual
+      # free space before it reads a single body byte (see
+      # imageservice.Admission), so an oversize or too-many-concurrent
+      # upload attempt fails fast with 507 Insufficient Storage instead
+      # of running the volume out of space mid-write. Set the
+      # image-service binary's --staging-quota-bytes flag if a tighter,
+      # policy-driven cap below this PVC's actual size is also wanted
+      # (for example, to leave headroom for uploads from more than one
+      # tenant sharing this volume).
       storage: 100Gi

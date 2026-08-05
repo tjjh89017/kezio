@@ -98,3 +98,39 @@ func TestStaging_RemoveUpload(t *testing.T) {
 		t.Errorf("RemoveUpload on never-existed upload: got %v, want nil", err)
 	}
 }
+
+// UsedBytes sums only completed uploads: an in-progress upload (a temp
+// file under uploads/.tmp) must not be counted, since Admission's
+// in-flight reservation ledger - not a disk scan - is what accounts for
+// uploads that have not finished yet.
+func TestStaging_UsedBytes(t *testing.T) {
+	staging, root := newTestStaging(t)
+
+	if got, err := staging.UsedBytes(); err != nil || got != 0 {
+		t.Fatalf("UsedBytes on empty staging: got (%d, %v), want (0, nil)", got, err)
+	}
+
+	first := []byte("golden image bytes")
+	if _, err := staging.Receive("golden", bytes.NewReader(first), ""); err != nil {
+		t.Fatalf("Receive(golden): %v", err)
+	}
+	second := []byte("a second, differently sized upload")
+	if _, err := staging.Receive("other", bytes.NewReader(second), ""); err != nil {
+		t.Fatalf("Receive(other): %v", err)
+	}
+
+	// A partial upload sitting under uploads/.tmp (simulating one still
+	// in flight) must not be counted.
+	if err := os.WriteFile(filepath.Join(root, "uploads", ".tmp", "in-progress"), []byte("partial-bytes-not-yet-complete"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := staging.UsedBytes()
+	if err != nil {
+		t.Fatalf("UsedBytes: %v", err)
+	}
+	want := int64(len(first) + len(second))
+	if got != want {
+		t.Errorf("UsedBytes = %d, want %d (in-progress upload must be excluded)", got, want)
+	}
+}

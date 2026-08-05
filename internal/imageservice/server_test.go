@@ -33,6 +33,15 @@ const testToken = "s3cr3t-test-token" //nolint:gosec // test fixture, not a real
 
 func newTestServer(t *testing.T, maxUploadBytes int64) (*Server, string) {
 	t.Helper()
+	return newTestServerWithAdmission(t, maxUploadBytes, nil)
+}
+
+// newTestServerWithAdmission is like newTestServer but lets a test supply
+// its own Admission (for example, one built with a fake statfsFunc) to
+// exercise the capacity-guard path in handleUpload. admission == nil
+// disables both capacity guards, matching newTestServer.
+func newTestServerWithAdmission(t *testing.T, maxUploadBytes int64, admission *Admission) (*Server, string) {
+	t.Helper()
 	root := t.TempDir()
 	staging, err := NewStaging(root)
 	if err != nil {
@@ -42,7 +51,7 @@ func newTestServer(t *testing.T, maxUploadBytes int64) (*Server, string) {
 	if err != nil {
 		t.Fatalf("NewAuthenticator: %v", err)
 	}
-	return NewServer(staging, auth, maxUploadBytes, nil), root
+	return NewServer(staging, auth, maxUploadBytes, admission, nil), root
 }
 
 func putUpload(t *testing.T, h http.Handler, name string, body []byte, headers map[string]string) *httptest.ResponseRecorder {
@@ -282,6 +291,80 @@ func TestHandleUpload_MissingContentLength(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusLengthRequired {
 		t.Fatalf("got status %d, want %d", rec.Code, http.StatusLengthRequired)
+	}
+}
+
+// An upload whose declared Content-Length would not fit the staging
+// volume's available space is rejected with 507 Insufficient Storage,
+// before any body byte is read, and nothing is written to the staging
+// area.
+func TestHandleUpload_InsufficientStagingSpace(t *testing.T) {
+	admission := NewAdmission("unused", noUsedBytes, 0)
+	admission.statfs = fakeStatfs(4) // far too little for the body below, even with no headroom
+
+	srv, root := newTestServerWithAdmission(t, 1<<20, admission)
+	h := srv.Handler()
+
+	body := bytes.Repeat([]byte("x"), 100)
+	rec := putUpload(t, h, "golden", body, authHeader())
+	if rec.Code != http.StatusInsufficientStorage {
+		t.Fatalf("got status %d, want %d, body %s", rec.Code, http.StatusInsufficientStorage, rec.Body.String())
+	}
+
+	if _, err := os.Stat(filepath.Join(root, "uploads", "golden")); !os.IsNotExist(err) {
+		t.Fatalf("rejected-for-space upload must not be written to the staging area, stat err = %v", err)
+	}
+}
+
+// A configured logical quota is enforced the same way: an upload that
+// would push staged usage over the quota is rejected with 507, even
+// though physical space is plentiful.
+func TestHandleUpload_QuotaExceeded(t *testing.T) {
+	usedBytes := func() (int64, error) { return 90, nil }
+	admission := NewAdmission("unused", usedBytes, 100) // 90 already used, quota 100
+	admission.statfs = fakeStatfs(1 << 40)
+
+	srv, _ := newTestServerWithAdmission(t, 1<<20, admission)
+	h := srv.Handler()
+
+	rec := putUpload(t, h, "golden", bytes.Repeat([]byte("x"), 20), authHeader()) // 90+20 > 100
+	if rec.Code != http.StatusInsufficientStorage {
+		t.Fatalf("got status %d, want %d, body %s", rec.Code, http.StatusInsufficientStorage, rec.Body.String())
+	}
+}
+
+// Concurrent uploads that would each individually fit but jointly exceed
+// available space are caught: the reservation each admitted upload holds
+// while its body streams is what a plain per-request statfs check would
+// miss (see TestAdmission_Reserve_ConcurrentAdmissionNeverOverbooks for
+// the ledger-only version of this scenario). Here the second upload is
+// only actually admitted once the first has released its reservation by
+// completing, since httptest.NewRequest'd bodies stream fully before this
+// handler returns; the ledger is still what makes that release
+// deterministic and race-free.
+func TestHandleUpload_ConcurrentUploadsRespectSharedReservation(t *testing.T) {
+	admission := NewAdmission("unused", noUsedBytes, 0)
+	// Exactly enough for one of the two uploads below, plus headroom -
+	// not enough for both at once.
+	admission.statfs = fakeStatfs(10<<20 + StagingSpaceHeadroom)
+
+	srv, _ := newTestServerWithAdmission(t, 100<<20, admission)
+	h := srv.Handler()
+
+	first := bytes.Repeat([]byte("a"), 10<<20)
+	rec := putUpload(t, h, "first", first, authHeader())
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("first upload: got status %d, want %d, body %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	// The first upload's request has already completed (and released its
+	// reservation) by the time this second call runs, so it succeeds too
+	// - demonstrating the reservation was correctly released rather than
+	// permanently exhausting the volume's reported capacity.
+	second := bytes.Repeat([]byte("b"), 10<<20)
+	rec = putUpload(t, h, "second", second, authHeader())
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("second upload after first released: got status %d, want %d, body %s", rec.Code, http.StatusCreated, rec.Body.String())
 	}
 }
 
