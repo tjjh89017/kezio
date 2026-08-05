@@ -252,11 +252,7 @@ func MergeEzioTuning(base, override *MachineEzioTuning) *MachineEzioTuning {
 	}
 	merged := &MachineEzioTuning{}
 	if base != nil {
-		merged.CacheSizeMB = base.CacheSizeMB
-		merged.AioThreads = base.AioThreads
-		merged.MaxUploads = base.MaxUploads
-		merged.MaxConnections = base.MaxConnections
-		merged.Port = base.Port
+		*merged = *base
 	}
 	if override != nil {
 		if override.CacheSizeMB != nil {
