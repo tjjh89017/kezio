@@ -1,7 +1,10 @@
-# Build the image-service binary. This is a separate image from the
-# controller manager's Dockerfile: image-service mounts the staging
-# volume and scales independently of the reconcile loop, so it ships and
-# is deployed on its own (see config/image-service).
+# Build args:
+#   TARGETOS, TARGETARCH - target platform for cross-compilation, set by buildx
+ARG TARGETOS
+ARG TARGETARCH
+
+# image-service mounts the staging volume and scales independently of the
+# reconcile loop, so it ships separately (see config/image-service).
 FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH
@@ -16,8 +19,7 @@ COPY internal/imageservice/ internal/imageservice/
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o image-service ./cmd/image-service
 
-# Use distroless as minimal base image to package the binary
-# Refer to https://github.com/GoogleContainerTools/distroless for more details
+# distroless/static: minimal, no shell or package manager.
 FROM gcr.io/distroless/static:nonroot
 WORKDIR /
 COPY --from=builder /workspace/image-service .

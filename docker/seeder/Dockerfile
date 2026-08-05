@@ -1,26 +1,22 @@
-# Build the ezio seeder image: upstream ezio plus a minimal,
-# decision-free entrypoint script. This is a separate
-# image from every other kezio component - it ships no kezio Go binary at
-# all. The kezio operator controls a running seeder entirely through
-# ezio's own gRPC API (internal/seeder, proto/ezio.proto); this container
-# stays "dumb" on purpose so there is exactly one place (the operator)
-# that decides what a seeder should be seeding.
+# Build args:
+#   EZIO_REF - ezio git ref (tag/branch/SHA) to build, e.g.
+#     docker build --build-arg EZIO_REF=master -f docker/seeder/Dockerfile .
+ARG EZIO_REF=v2.0.29
+
+# Ships upstream ezio plus a minimal, decision-free entrypoint; no kezio Go
+# binary. The operator drives a running seeder entirely through ezio's own
+# gRPC API (internal/seeder, proto/ezio.proto) so this container stays
+# "dumb" by design.
 #
-# Adapted from ezio's own Dockerfile (upstream, not vendored into this
-# repository) rather than copied verbatim: that Dockerfile's builder
-# stage does `COPY . /usr/src/ezio` because its build context is ezio's
-# own checkout; this one clones upstream instead, since kezio's build
-# context is this repository. The dependency lists and package names
-# below are otherwise unchanged from upstream. Neither Dockerfile pins a
-# base image or package version - both track Debian sid deliberately, so
-# this one does the same rather than inventing a pin upstream does not
-# have. Multi-arch (docker-buildx, see Makefile PLATFORMS) works by
-# letting buildx run this Dockerfile natively per target platform under
-# QEMU emulation; unlike the Go Dockerfiles in this repo, there is no
-# BUILDPLATFORM/TARGETPLATFORM cross-compilation here because cmake's
-# C++ build (libtorrent-rasterbar, boost, grpc) has no equivalent to
-# `GOARCH=... go build`.
+# Adapted from ezio's own Dockerfile: that one does `COPY . /usr/src/ezio`
+# from its own checkout; this one clones upstream instead, since kezio's
+# build context is this repository, not ezio's. Package lists otherwise
+# match upstream, including tracking debian:sid unpinned. No
+# BUILDPLATFORM/TARGETPLATFORM cross-compilation like the Go Dockerfiles:
+# cmake's C++ build has no equivalent to `GOARCH=... go build`; buildx runs
+# this natively per platform under QEMU instead.
 FROM debian:sid AS builder
+ARG EZIO_REF
 
 RUN apt-get -y update && \
     apt-get install -y --no-install-recommends \
@@ -40,43 +36,25 @@ RUN apt-get -y update && \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /usr/src/ezio
-# EZIO_REF selects the ezio revision to build: a tag, branch, or commit
-# SHA. The default pins the latest ezio release tag, so routine builds
-# are reproducible. Override at build time to test another revision:
-#   docker build --build-arg EZIO_REF=master -f docker/seeder/Dockerfile .
-ARG EZIO_REF=v2.0.29
 RUN git clone https://github.com/tjjh89017/ezio.git . \
     && git checkout --detach "${EZIO_REF}"
 
 RUN cmake . && make && make install
 
-# Resolve /app/ezio's full shared-library closure (transitively, via the
-# dynamic linker - not just its direct NEEDED entries) right here in the
-# builder stage, and stage each file at its real absolute path under
-# /out. This stage's apt-get install above and this ldd resolution run
-# against the exact same apt transaction, so the .so files gathered here
-# are guaranteed ABI-consistent with what ezio was just linked against -
-# unlike a second, independent `apt-get install` in the runtime stage
-# below, which is a different Dockerfile instruction with its own build
-# cache entry and can resolve a different, newer debian:sid snapshot
-# than this one did (this is exactly how libfmt.so.10 went missing: the
-# runtime stage's apt-get layer picked up a soname bump this builder
-# layer's cached apt state predates). debian:sid moves fast enough that
-# this skew will recur; copying the closure by construction, instead of
-# re-installing packages by name in the runtime stage, makes the build
-# immune to it permanently rather than papering over one soname.
-# Each dependency is staged twice: once at its ldd-reported path with its
-# directory component canonicalized but its own filename left alone
-# (`cp -a` so a soname symlink like libfmt.so.10 -> libfmt.so.10.1.0
-# copies as a symlink, not its dereferenced content - the dynamic linker
-# looks up the exact soname, not the versioned file it points to), and
-# once at its fully-resolved real path (the regular file the symlink
-# points to, if it is one). Canonicalizing the directory component (but
-# not the final symlink) also turns /lib64/ld-linux-*.so.2 into
-# /usr/lib64/ld-linux-*.so.2 before staging: debian aliases /lib and
-# /lib64 to /usr/lib and /usr/lib64 via top-level symlinks, and COPY-ing
-# a real /out/lib64 directory over that symlink in the runtime stage
-# fails outright, so those two path components always need resolving.
+# Resolve ezio's full shared-library closure in this same builder stage, in
+# the same apt transaction that installed the -dev packages it linked
+# against, and stage each file at its real absolute path under /out. A
+# second, independent apt-get in the runtime stage below can resolve a
+# newer debian:sid snapshot with a bumped soname (this is how libfmt.so.10
+# once went missing); copying the resolved closure avoids that permanently.
+# Each dependency is staged twice: once at its ldd-reported path (`cp -a`
+# preserves a soname symlink like libfmt.so.10 -> libfmt.so.10.1.0 instead
+# of dereferencing it - the dynamic linker looks up the exact soname), and
+# once at its fully-resolved real path. Canonicalizing the directory
+# component (not the final symlink) also turns /lib64/ld-linux-*.so.2 into
+# /usr/lib64/ld-linux-*.so.2: debian aliases /lib* to /usr/lib* via
+# top-level symlinks, and COPY-ing a real /out/lib64 over that symlink in
+# the runtime stage fails outright.
 RUN mkdir -p /out && \
     ldd /usr/local/sbin/ezio | grep -oE '/[^ ]+' | sort -u | while read -r f; do \
         d="$(realpath "$(dirname "$f")")/$(basename "$f")"; \
@@ -87,23 +65,16 @@ RUN mkdir -p /out && \
 
 FROM debian:sid
 
-# No apt-get in this stage on purpose - see the builder stage's /out
-# comment above. Every shared library /app/ezio needs (libc, libstdc++,
-# libfmt, libgrpc, libprotobuf, libtorrent-rasterbar, ...) is copied from
-# there instead, so this stage can never drift from what ezio was
+# No apt-get here: every shared library ezio needs is copied from the
+# builder's /out instead, so this stage can never drift from what ezio was
 # actually linked against.
 COPY --from=builder /out/ /
 COPY --from=builder /usr/local/sbin/ezio /app/ezio
 COPY docker/seeder/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
-# Matches every other kezio image (Dockerfile, docker/image-service/Dockerfile,
-# docker/ingest/Dockerfile all USER 65532:65532): ezio-seeder-deployment.yaml
-# and opentracker-deployment.yaml both set runAsNonRoot: true, which the
-# kubelet enforces by refusing to start a container whose image runs as
-# root when no runAsUser is set. Neither ezio's gRPC/BT listeners nor
-# reading its store mount need a privileged port or root, so there is no
-# reason for this image to be the one exception.
+# Matches every other kezio image: the deployment manifests set
+# runAsNonRoot: true, which the kubelet enforces at image level.
 USER 65532:65532
 
 WORKDIR /app
