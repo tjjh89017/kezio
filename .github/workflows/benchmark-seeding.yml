@@ -157,7 +157,7 @@ jobs:
               .
           done
 
-      - name: Install k3s (pinned)
+      - name: Install k3s
         run: |
           set -euo pipefail
           curl -sfL https://get.k3s.io \

@@ -413,7 +413,7 @@ jobs:
           go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      - name: Install k3s (pinned)
+      - name: Install k3s
         run: |
           set -euo pipefail
           curl -sfL https://get.k3s.io \
@@ -434,7 +434,7 @@ jobs:
             docker save "${img}" | sudo k3s ctr images import -
           done
 
-      - name: Install cert-manager (pinned)
+      - name: Install cert-manager
         run: |
           set -euo pipefail
           kubectl apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"
@@ -442,7 +442,7 @@ jobs:
             kubectl wait deployment.apps/"${d}" --for condition=Available --namespace cert-manager --timeout=180s
           done
 
-      - name: Install KubeVirt (pinned)
+      - name: Install KubeVirt
         run: |
           set -euo pipefail
           kubectl apply -f "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-operator.yaml"
@@ -456,14 +456,14 @@ jobs:
             "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/virtctl-${KUBEVIRT_VERSION}-linux-amd64"
           chmod +x /usr/local/bin/virtctl
 
-      - name: Install CDI (pinned)
+      - name: Install CDI
         run: |
           set -euo pipefail
           kubectl apply -f "https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_VERSION}/cdi-operator.yaml"
           kubectl apply -f "https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_VERSION}/cdi-cr.yaml"
           kubectl wait cdi cdi --for=condition=Available --timeout=300s
 
-      - name: Install Multus (pinned)
+      - name: Install Multus
         run: |
           set -euo pipefail
           kubectl apply -f "https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/${MULTUS_VERSION}/deployments/multus-daemonset-thick.yml"
