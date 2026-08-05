@@ -81,6 +81,11 @@ type Dependencies struct {
 	Sfdisk        Sfdisk
 	Blkid         Blkid
 	Partclone     Partclone
+	// Statfs backs the store-scratch space pre-flight check
+	// (ensureScratchSpace) run before each partition's content is
+	// cloned. nil means the real syscall.Statfs-backed implementation;
+	// tests set it to simulate an arbitrary reported free-space figure.
+	Statfs statfsFunc
 }
 
 // Run executes the full ingest pipeline described in the package doc
@@ -230,6 +235,17 @@ func processPartition(ctx context.Context, cfg Config, deps Dependencies, rawPat
 		slot.SwapUUID = fsInfo.UUID
 		resultPart.UUID = fsInfo.UUID
 		return slot, resultPart, nil
+	}
+
+	// Fail fast, before partclone writes any content byte into store
+	// scratch, if the store volume does not currently have enough
+	// available space for this partition's content (see
+	// ensureScratchSpace for the estimate this compares against). A
+	// clear error here feeds the same failure path as every other step
+	// of this pipeline, rather than partclone dying mid-write with a
+	// harder-to-diagnose ENOSPC.
+	if err := ensureScratchSpace(deps.Statfs, cfg.StoreRoot, part.SizeBytes); err != nil {
+		return store.ImageLayoutSlot{}, ResultPartition{}, fmt.Errorf("check store scratch space: %w", err)
 	}
 
 	// contentDir lives under the store's own per-Image ingest scratch

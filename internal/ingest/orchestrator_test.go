@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -214,6 +215,36 @@ func TestRun_FormatMismatch(t *testing.T) {
 	res := Run(context.Background(), cfg, deps)
 	if res.Success {
 		t.Fatal("expected failure on format mismatch")
+	}
+}
+
+// When the store volume does not have enough available space for even
+// the first partition's content, Run fails fast with a clear error
+// before partclone is ever invoked - not partway through with an
+// ENOSPC-shaped failure from partclone itself.
+func TestRun_InsufficientScratchSpaceFailsFast(t *testing.T) {
+	deps := baseDeps()
+	deps.Statfs = fakeIngestStatfs(1 << 10) // far too little for any real partition
+	partclone := &fakePartclone{}
+	deps.Partclone = partclone
+
+	cfg := Config{
+		ImageName:    "golden",
+		SourceURL:    "https://example.com/golden.qcow2",
+		SourceFormat: "qcow2",
+		StoreRoot:    t.TempDir(),
+		WorkDir:      t.TempDir(),
+	}
+
+	res := Run(context.Background(), cfg, deps)
+	if res.Success {
+		t.Fatal("expected failure when the store volume lacks scratch space")
+	}
+	if !strings.Contains(res.Error, "scratch space") {
+		t.Errorf("Error = %q, want it to mention scratch space", res.Error)
+	}
+	if len(partclone.calls) != 0 {
+		t.Errorf("partclone.calls = %v, want none: the space pre-flight must reject before partclone ever runs", partclone.calls)
 	}
 }
 
