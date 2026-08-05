@@ -1325,13 +1325,31 @@ var _ = Describe("Machine Controller", func() {
 			Expect(readyCond.Reason).To(Equal(reasonInspectFailed))
 			Expect(readyCond.Message).To(ContainSubstring("did not register"))
 
-			By("retrying from Error, which stays stuck and keeps increasing errorCount, still without a power action")
+			By("retrying from Error immediately - the same reconcile a Machine watch fires right after " +
+				"the status update above - must not trip the stuck check again")
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			afterImmediateRetry := &keziov1alpha1.Machine{}
+			Expect(k8sClient.Get(ctx, key, afterImmediateRetry)).To(Succeed())
+			Expect(afterImmediateRetry.Status.State).To(Equal(keziov1alpha1.MachineStateError),
+				"still stuck, so the retry must stay in Error rather than silently drop back to Inspecting")
+			Expect(afterImmediateRetry.Status.ErrorCount).To(Equal(int32(1)),
+				"pollInspecting must have restarted inspectingSince's clock when it first gave up, "+
+					"so an immediate retry observes a fresh window instead of re-tripping the stale one")
+			Expect(powerCalls).To(Equal(powerCallsAfterRegister))
+
+			By("backdating status.inspectingSince past inspectingStuckThreshold a second time")
+			afterImmediateRetry.Status.InspectingSince.Time = afterImmediateRetry.Status.InspectingSince.Add(-2 * inspectingStuckThreshold)
+			Expect(k8sClient.Status().Update(ctx, afterImmediateRetry)).To(Succeed())
+
+			By("reconciling once more, which must report the failure again now that a full window has genuinely elapsed")
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 			Expect(err).NotTo(HaveOccurred())
 			afterSecondError := &keziov1alpha1.Machine{}
 			Expect(k8sClient.Get(ctx, key, afterSecondError)).To(Succeed())
 			Expect(afterSecondError.Status.State).To(Equal(keziov1alpha1.MachineStateError))
-			Expect(afterSecondError.Status.ErrorCount).To(Equal(int32(2)))
+			Expect(afterSecondError.Status.ErrorCount).To(Equal(int32(2)),
+				"errorCount grows by one per inspectingStuckThreshold window, not per reconcile")
 			Expect(powerCalls).To(Equal(powerCallsAfterRegister))
 		})
 	})

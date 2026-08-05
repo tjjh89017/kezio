@@ -202,17 +202,32 @@ func (r *MachineReconciler) reconcileInspecting(ctx context.Context, machine *ke
 // it reports the failure through recordPhaseError instead of continuing to
 // wait silently. See inspectingStuckThreshold's doc comment for why this
 // deliberately takes no automatic recovery action (such as a BMC
-// power-cycle): status.inspectingSince is left untouched, both because
-// there is no fresh window to start without a power action resetting the
-// machine's state, and so it stays available for the operator (or
-// reconcileError's retry, which resumes here) to see exactly how long the
-// machine has been stuck.
+// power-cycle).
+//
+// Reporting the failure also restarts status.inspectingSince's clock (set
+// to now, in the same status update recordPhaseError persists): the
+// Error transition below triggers an immediate re-reconcile (the status
+// update itself is a change to a watched object), and reconcileError's
+// retry for reasonInspectFailed resumes straight back into
+// reconcileInspecting. Leaving inspectingSince at its already-elapsed
+// value would make that immediate retry - and every reconcile after it,
+// since nothing else ever advances inspectingSince - observe the same
+// stale timestamp and re-trip this branch instantly again, recording a
+// new error (and triggering the next immediate re-reconcile) on every
+// single reconcile instead of once per inspectingStuckThreshold window.
+// Restarting the clock here means the next report is at least one full
+// inspectingStuckThreshold away, while still surfacing the failure
+// repeatedly for as long as the machine genuinely never registers - the
+// operator (or reconcileError's retry) still sees exactly how long the
+// current stuck window has run.
 func (r *MachineReconciler) pollInspecting(ctx context.Context, machine *keziov1alpha1.Machine, requeueAfter time.Duration) (ctrl.Result, error) {
 	since := machine.Status.InspectingSince
 	if since == nil || time.Since(since.Time) < inspectingStuckThreshold {
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 
+	now := metav1.Now()
+	machine.Status.InspectingSince = &now
 	return r.recordPhaseError(ctx, machine, reasonInspectFailed, fmt.Sprintf(
 		"kezio-agent did not register within %s of entering Inspecting; power-cycle the machine manually or check that it can reach the boot/agent services over the network",
 		inspectingStuckThreshold))
