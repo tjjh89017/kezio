@@ -40,6 +40,12 @@ type hookFakeRunner struct {
 	calls     []string
 	errByName map[string]error
 	blockName string
+
+	// errByCall, when set, is consulted before errByName so a test can
+	// fail a call based on its args - not just its command name - e.g.
+	// distinguishing a plain "umount x" from "umount --lazy x". Returning
+	// nil falls through to errByName.
+	errByCall func(name string, args []string) error
 }
 
 func newHookFakeRunner() *hookFakeRunner {
@@ -54,6 +60,11 @@ func (f *hookFakeRunner) Run(ctx context.Context, _ []byte, name string, args ..
 	if name == f.blockName {
 		<-ctx.Done()
 		return nil, ctx.Err()
+	}
+	if f.errByCall != nil {
+		if err := f.errByCall(name, args); err != nil {
+			return nil, err
+		}
 	}
 	if err, ok := f.errByName[name]; ok {
 		return nil, err
@@ -350,6 +361,130 @@ func TestRunHooks_MkswapBuiltinRunsMkswapOnEverySwapPartition(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("calls = %v, want an mkswap call carrying the swap partition's UUID", runner.calls)
+	}
+}
+
+func TestRunHooks_UnmountRetriesWithLazyOnPlainUmountFailure(t *testing.T) {
+	runner := newHookFakeRunner()
+	runner.errByCall = func(name string, args []string) error {
+		if name != "umount" {
+			return nil
+		}
+		for _, a := range args {
+			if a == "--lazy" {
+				return nil
+			}
+		}
+		return fmt.Errorf("device is busy")
+	}
+	e := &Executor{Runner: runner}
+
+	plan := planWithOneDataPartition("/dev/nvme0n1p2", []agentapi.ResolvedHook{{
+		Name: "regen-initramfs",
+		Steps: []agentapi.ResolvedHookStep{{
+			Type:           agentapi.HookStepTypeChrootScript,
+			Content:        "update-initramfs -u\n",
+			TimeoutSeconds: 30,
+		}},
+	}})
+
+	if err := e.runHooks(context.Background(), plan); err != nil {
+		t.Fatalf("runHooks: %v (unmount failures must be logged and continued, never abort the deploy)", err)
+	}
+
+	// Every target that got a plain "umount <target>" that failed must
+	// also have a follow-up "umount --lazy <target>".
+	plainTargets := map[string]bool{}
+	lazyTargets := map[string]bool{}
+	for _, c := range runner.calls {
+		fields := strings.Fields(c)
+		if len(fields) < 2 || fields[0] != "umount" {
+			continue
+		}
+		if fields[1] == "--lazy" {
+			if len(fields) >= 3 {
+				lazyTargets[fields[2]] = true
+			}
+			continue
+		}
+		plainTargets[fields[1]] = true
+	}
+	if len(plainTargets) == 0 {
+		t.Fatal("no plain umount calls recorded; test setup is wrong")
+	}
+	for target := range plainTargets {
+		if !lazyTargets[target] {
+			t.Fatalf("target %q had a plain umount call but no follow-up umount --lazy call; calls = %v", target, runner.calls)
+		}
+	}
+}
+
+func TestRunHooks_UnmountLogsWhenLazyAlsoFails(t *testing.T) {
+	runner := newHookFakeRunner()
+	runner.errByCall = func(name string, args []string) error {
+		if name != "umount" {
+			return nil
+		}
+		return fmt.Errorf("device is busy")
+	}
+	var logged strings.Builder
+	e := &Executor{
+		Runner: runner,
+		Logf:   func(format string, args ...any) { fmt.Fprintf(&logged, format+"\n", args...) },
+	}
+
+	plan := planWithOneDataPartition("/dev/nvme0n1p1", []agentapi.ResolvedHook{{
+		Name: "regen-initramfs",
+		Steps: []agentapi.ResolvedHookStep{{
+			Type:           agentapi.HookStepTypeChrootScript,
+			Content:        "update-initramfs -u\n",
+			TimeoutSeconds: 30,
+		}},
+	}})
+
+	if err := e.runHooks(context.Background(), plan); err != nil {
+		t.Fatalf("runHooks: %v (unmount failures must be logged and continued, never abort the deploy)", err)
+	}
+
+	if !strings.Contains(logged.String(), "also failed") {
+		t.Fatalf("log output = %q, want it to mention that the lazy unmount also failed", logged.String())
+	}
+}
+
+func TestRootPartition_ErrorsOnZeroDataPartitions(t *testing.T) {
+	ip := agentapi.ImageDeployPlan{
+		ImageRef: keziov1alpha1.NameRef{Name: "os-image"},
+		Disk:     "/dev/nvme0n1",
+		Partitions: []agentapi.PlanPartition{
+			{Number: 1, Device: "/dev/nvme0n1p1", Role: keziov1alpha1.PartitionRoleESP},
+		},
+	}
+
+	_, err := rootPartition(ip)
+	if err == nil {
+		t.Fatal("rootPartition returned no error for an image plan with no data-role partition")
+	}
+	if !strings.Contains(err.Error(), "no data-role partition") {
+		t.Fatalf("error = %q, want it to mention \"no data-role partition\"", err.Error())
+	}
+}
+
+func TestRootPartition_ErrorsOnMultipleDataPartitions(t *testing.T) {
+	ip := agentapi.ImageDeployPlan{
+		ImageRef: keziov1alpha1.NameRef{Name: "os-image"},
+		Disk:     "/dev/nvme0n1",
+		Partitions: []agentapi.PlanPartition{
+			{Number: 1, Device: "/dev/nvme0n1p1", Role: keziov1alpha1.PartitionRoleData, FSType: "ext4"},
+			{Number: 2, Device: "/dev/nvme0n1p2", Role: keziov1alpha1.PartitionRoleData, FSType: "ext4"},
+		},
+	}
+
+	_, err := rootPartition(ip)
+	if err == nil {
+		t.Fatal("rootPartition returned no error for an image plan with two data-role partitions")
+	}
+	if !strings.Contains(err.Error(), "2 data-role partitions") {
+		t.Fatalf("error = %q, want it to mention \"2 data-role partitions\"", err.Error())
 	}
 }
 
