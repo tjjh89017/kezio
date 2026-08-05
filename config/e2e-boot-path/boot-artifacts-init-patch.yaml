@@ -31,6 +31,19 @@
 # a whole array - a JSON Patch "add" at that same path here would
 # replace, not extend, that array and silently drop every var `kubectl
 # set env` just set.
+#
+# fsGroup below matches curl_user's gid (101, see the initContainer's own
+# securityContext comment) because the "boot-artifacts" emptyDir added
+# further down is otherwise created root:root mode 0755 - a fresh
+# emptyDir gets no group access for a non-root gid unless the pod's
+# fsGroup says so, the same reasoning config/image-service's
+# securityContext.fsGroup comment documents for its Secret volume. Without
+# this, fetch-boot-artifacts's `mkdir -p "${DEST_DIR}"` (config/
+# boot-artifacts/fetch.sh) fails with EACCES and the initContainer
+# CrashLoopBackOffs before the manager container ever starts.
+- op: add
+  path: /spec/template/spec/securityContext/fsGroup
+  value: 101
 - op: add
   path: /spec/template/spec/initContainers
   value:

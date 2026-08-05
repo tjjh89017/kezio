@@ -47,6 +47,18 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
+        # Matches curl_user's gid (101, see the fetch-boot-artifacts
+        # initContainer's own securityContext comment below): the "tftp"
+        # emptyDir this initContainer writes into is otherwise created
+        # root:root mode 0755, and a fresh emptyDir grants no group
+        # access for a non-root gid unless the pod's fsGroup says so -
+        # the same reasoning config/image-service's
+        # securityContext.fsGroup comment documents for its Secret
+        # volume. Without this, fetch-boot-artifacts's `mkdir -p
+        # "${DEST_DIR}"` (config/boot-artifacts/fetch.sh) fails with
+        # EACCES and the initContainer CrashLoopBackOffs before bootd's
+        # own container ever starts.
+        fsGroup: 101
       # Fetches shimx64.efi/grubx64.efi (see .github/workflows/
       # build-live-image.yml, which now publishes them alongside the
       # live kernel/initrd/squashfs) into the "tftp" emptyDir below

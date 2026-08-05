@@ -1250,8 +1250,22 @@ jobs:
           kubectl get pods -n kezio-system -o wide
           echo "===== controller-manager logs ====="
           kubectl -n kezio-system logs deployment/kezio-controller-manager --all-containers --tail=1000
+          echo "===== controller-manager fetch-boot-artifacts initContainer logs ====="
+          # kubectl logs --all-containers above does not include
+          # initContainers, so a fetch-boot-artifacts crash (for example,
+          # a permission error writing into its volume) would otherwise
+          # surface only as a Deployment rollout timeout with no error
+          # text. --previous first, since a CrashLoopBackOff pod's
+          # *current* attempt is usually still starting or already
+          # exited by the time this step runs - the failure output is in
+          # the previous attempt.
+          kubectl -n kezio-system logs deployment/kezio-controller-manager -c fetch-boot-artifacts --previous --tail=200 || \
+            kubectl -n kezio-system logs deployment/kezio-controller-manager -c fetch-boot-artifacts --tail=200 || true
           echo "===== bootd logs ====="
           kubectl -n kezio-system logs deployment/kezio-bootd --all-containers --tail=1000
+          echo "===== bootd fetch-boot-artifacts initContainer logs ====="
+          kubectl -n kezio-system logs deployment/kezio-bootd -c fetch-boot-artifacts --previous --tail=200 || \
+            kubectl -n kezio-system logs deployment/kezio-bootd -c fetch-boot-artifacts --tail=200 || true
           echo "===== ingest Job(s) ====="
           kubectl get jobs -n kezio-system -l kezio.kojuro.date/image -o wide
           kubectl logs -n kezio-system -l kezio.kojuro.date/image --all-containers --tail=1000
