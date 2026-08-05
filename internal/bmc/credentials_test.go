@@ -37,15 +37,16 @@ func TestCredentialsFromSecretData(t *testing.T) {
 
 func TestCredentialsFromSecretDataMissingKeys(t *testing.T) {
 	tests := []struct {
-		name string
-		data map[string][]byte
+		name          string
+		data          map[string][]byte
+		wantErrSubstr string
 	}{
-		{name: "missing both", data: map[string][]byte{}},
-		{name: "missing password", data: map[string][]byte{"username": []byte("admin")}},
-		{name: "missing username", data: map[string][]byte{"password": []byte("hunter2")}},
-		{name: "empty username", data: map[string][]byte{"username": []byte(""), "password": []byte("hunter2")}},
-		{name: "empty password", data: map[string][]byte{"username": []byte("admin"), "password": []byte("")}},
-		{name: "nil map", data: nil},
+		{name: "missing both", data: map[string][]byte{}, wantErrSubstr: `missing "username" and "password" keys`},
+		{name: "missing password", data: map[string][]byte{"username": []byte("admin")}, wantErrSubstr: `missing "password" key`},
+		{name: "missing username", data: map[string][]byte{"password": []byte("hunter2")}, wantErrSubstr: `missing "username" key`},
+		{name: "empty username", data: map[string][]byte{"username": []byte(""), "password": []byte("hunter2")}, wantErrSubstr: `missing "username" key`},
+		{name: "empty password", data: map[string][]byte{"username": []byte("admin"), "password": []byte("")}, wantErrSubstr: `missing "password" key`},
+		{name: "nil map", data: nil, wantErrSubstr: `missing "username" and "password" keys`},
 	}
 
 	for _, tt := range tests {
@@ -53,6 +54,9 @@ func TestCredentialsFromSecretDataMissingKeys(t *testing.T) {
 			_, err := CredentialsFromSecretData(tt.data)
 			if err == nil {
 				t.Fatalf("CredentialsFromSecretData(%v) succeeded, want an error", tt.data)
+			}
+			if !strings.Contains(err.Error(), tt.wantErrSubstr) {
+				t.Errorf("CredentialsFromSecretData(%v) error = %q, want substring %q", tt.data, err.Error(), tt.wantErrSubstr)
 			}
 		})
 	}
