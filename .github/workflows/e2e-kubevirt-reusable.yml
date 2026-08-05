@@ -276,8 +276,8 @@ jobs:
 
       - name: Customize the Ubuntu cloud image with a marker file and qemu-guest-agent
         # Two things this test image needs that the stock download does
-        # not have, both injected offline with libguestfs (no network,
-        # no boot of the image itself needed):
+        # not have, both injected offline (no network into the image, no
+        # boot of the image itself needed):
         #   - MARKER_PATH, containing a token generated fresh by this
         #     run (not baked into the repo) - the content layer's proof
         #     value. See MARKER_PATH's own comment above for why a fresh
@@ -286,33 +286,38 @@ jobs:
         #     itself must carry it; production images never need it,
         #     since the controller/boot layers of the three-layer verify
         #     do not depend on guest content.
-        # Copied into a fresh path first: virt-customize edits the qcow2
-        # in place, and the cache step above must keep the pristine
-        # download so a re-run with a cache hit customizes a clean copy,
-        # not a copy some previous attempt already stamped a marker into.
+        # Copied into a fresh path first: the qcow2 gets edited in place
+        # below, and the cache step above must keep the pristine download
+        # so a re-run with a cache hit customizes a clean copy, not a
+        # copy some previous attempt already stamped a marker into.
         #
-        # qemu-guest-agent is installed from a .deb fetched by the host's
-        # own apt (real network, no issue) and `dpkg -i`'d into the guest
-        # with --copy-in/--run-command, rather than virt-customize's
-        # `--install` (apt-get run from inside the libguestfs appliance
-        # itself). The first triggered run of this workflow hit exactly
-        # that: `--install` needs the appliance's own outbound network
-        # (a "passt" user-mode NAT libguestfs sets up around the
-        # supermin appliance), which failed hard on this runner
-        # ("libguestfs error: passt exited with status 1") - unrelated to
-        # kvm/qemu access, already confirmed working, and unrelated to
-        # the provisioning bridge this job creates for the VM itself.
-        # Fetching the .deb on the host and installing it offline inside
-        # the guest sidesteps the appliance network path entirely.
+        # The qcow2 is edited by connecting it as an NBD block device
+        # (qemu-nbd) and mounting its root partition directly - no guest
+        # boot at all. An earlier revision of this step used libguestfs
+        # (virt-customize), which boots a small "supermin" helper
+        # appliance to make the same edits; that appliance's own boot
+        # time turned out to be the real bottleneck on GitHub-hosted
+        # runners, slow enough to time out this step outright. It also
+        # once hit a second, narrower problem - virt-customize's
+        # `--install` runs apt-get inside the appliance itself, which
+        # needs the appliance's own outbound network (a "passt" user-mode
+        # NAT) and failed hard on this runner
+        # ("libguestfs error: passt exited with status 1"). Fetching the
+        # qemu-guest-agent .deb with the host's own apt (real network, no
+        # issue) sidestepped that second problem, but not the appliance
+        # boot time; dropping libguestfs entirely sidesteps both.
+        #
+        # qemu-guest-agent has no hard package dependencies beyond
+        # libc/libglib that the Ubuntu cloud image already carries, so
+        # unpacking its payload with `dpkg-deb -x` (no maintainer scripts
+        # run) is enough for a working daemon - only the postinst's
+        # systemd-enable step needs to be reproduced by hand, which this
+        # script does by reading the unit's own [Install] WantedBy= and
+        # creating the same wants-symlink(s) dpkg would have.
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libguestfs-tools
-          # libguestfs's default libvirt backend needs a running
-          # libvirtd this runner does not have; "direct" drives qemu
-          # itself, which /dev/kvm (already confirmed usable above)
-          # makes fast.
-          export LIBGUESTFS_BACKEND=direct
+          sudo apt-get install -y --no-install-recommends qemu-utils
 
           cp "${{ runner.temp }}/ubuntu-cloud.img" "${{ runner.temp }}/ubuntu-cloud-marked.img"
 
@@ -321,14 +326,73 @@ jobs:
 
           qga_deb_dir="$(mktemp -d)"
           (cd "${qga_deb_dir}" && apt-get download qemu-guest-agent)
+          qga_deb="$(ls "${qga_deb_dir}"/qemu-guest-agent_*.deb)"
 
-          sudo --preserve-env=LIBGUESTFS_BACKEND virt-customize \
-            -a "${{ runner.temp }}/ubuntu-cloud-marked.img" \
-            --run-command "echo ${MARKER_TOKEN} > ${MARKER_PATH}" \
-            --copy-in "${qga_deb_dir}:/tmp" \
-            --run-command 'dpkg -i /tmp/qemu-guest-agent_*.deb' \
-            --run-command "systemctl enable qemu-guest-agent" \
-            --run-command "rm -f /tmp/qemu-guest-agent_*.deb"
+          mount_dir="$(mktemp -d)"
+
+          # Runs on every exit path (success or failure) so a broken
+          # mount or a still-connected NBD device never wedges the
+          # runner. Order matters: unmount before disconnecting the NBD
+          # device, never the other way round. Both commands are no-ops
+          # (errors suppressed) if their target was never set up, which
+          # is normal when this trap fires early.
+          cleanup() {
+            sudo umount "${mount_dir}" 2>/dev/null || true
+            sudo qemu-nbd --disconnect /dev/nbd0 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          sudo modprobe nbd max_part=16
+          sudo qemu-nbd --connect=/dev/nbd0 "${{ runner.temp }}/ubuntu-cloud-marked.img"
+          sudo partprobe /dev/nbd0
+
+          # The Ubuntu cloud image's root filesystem is the largest ext4
+          # partition on the disk - the image also carries a small
+          # BIOS-boot and/or EFI system partition, neither of which is
+          # ext4. Picking by size/filesystem instead of a hardcoded
+          # partition number (for example /dev/nbd0p1) tolerates an
+          # upstream layout change instead of silently mounting the
+          # wrong partition.
+          root_part=""
+          root_size=0
+          while read -r part_name part_fstype part_size; do
+            [ "${part_fstype}" = "ext4" ] || continue
+            if [ "${part_size}" -gt "${root_size}" ]; then
+              root_size="${part_size}"
+              root_part="/dev/${part_name}"
+            fi
+          done < <(lsblk -rno NAME,FSTYPE,SIZE --bytes /dev/nbd0)
+
+          if [ -z "${root_part}" ]; then
+            echo "::error::no ext4 partition found on /dev/nbd0" >&2
+            lsblk /dev/nbd0
+            blkid /dev/nbd0* || true
+            exit 1
+          fi
+          echo "root partition: ${root_part}"
+
+          sudo mount "${root_part}" "${mount_dir}"
+
+          echo "${MARKER_TOKEN}" | sudo tee "${mount_dir}${MARKER_PATH}" >/dev/null
+
+          sudo dpkg-deb -x "${qga_deb}" "${mount_dir}"
+
+          unit_path="$(find "${mount_dir}/lib/systemd/system" "${mount_dir}/usr/lib/systemd/system" \
+            -maxdepth 1 -name qemu-guest-agent.service 2>/dev/null | head -n1)"
+          if [ -z "${unit_path}" ]; then
+            echo "::error::qemu-guest-agent.service unit not found in the extracted package" >&2
+            exit 1
+          fi
+          unit_rel="${unit_path#"${mount_dir}"}"
+          echo "qemu-guest-agent unit: ${unit_rel}"
+
+          wanted_by="$(grep -oP '^WantedBy=\K.*' "${unit_path}" || true)"
+          wanted_by="${wanted_by:-multi-user.target}"
+
+          for target in ${wanted_by}; do
+            sudo mkdir -p "${mount_dir}/etc/systemd/system/${target}.wants"
+            sudo ln -sf "${unit_rel}" "${mount_dir}/etc/systemd/system/${target}.wants/qemu-guest-agent.service"
+          done
 
           echo "UBUNTU_CLOUD_IMAGE_PATH=${{ runner.temp }}/ubuntu-cloud-marked.img" >> "$GITHUB_ENV"
 
