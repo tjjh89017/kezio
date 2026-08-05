@@ -616,10 +616,34 @@ jobs:
           done
 
       - name: Install KubeVirt
+        # The KubevirtSeccompProfile feature gate plus seccompConfiguration
+        # patch below is required for virt-launcher pods to run at all in
+        # the "Deploy CRDs and the controller-manager" step's
+        # restricted-PSA kezio-system namespace: without it, KubeVirt
+        # renders the compute/guest-console-log containers with no
+        # explicit securityContext.seccompProfile, which the "restricted"
+        # Pod Security Standard rejects outright (every virt-launcher pod
+        # creation then fails admission and the target VM never starts,
+        # observed as repeated "it needs a privileged namespace to run"
+        # FailedCreate events on the VirtualMachineInstance). Enabling the
+        # gate makes KubeVirt stamp its pods with an explicit
+        # seccompProfile, satisfying that requirement.
         run: |
           set -euo pipefail
           kubectl apply -f "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-operator.yaml"
           kubectl apply -f "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-cr.yaml"
+          kubectl patch kubevirt kubevirt -n kubevirt --type=merge -p '{
+            "spec": {
+              "configuration": {
+                "developerConfiguration": {"featureGates": ["KubevirtSeccompProfile"]},
+                "seccompConfiguration": {
+                  "virtualMachineInstanceProfile": {
+                    "customProfile": {"localhostProfile": "kubevirt/kubevirt.json"}
+                  }
+                }
+              }
+            }
+          }'
           kubectl -n kubevirt wait kubevirt kubevirt --for=condition=Available --timeout=300s
 
       - name: Install virtctl
