@@ -29,6 +29,7 @@ import (
 	"github.com/go-logr/logr/funcr"
 	"github.com/insomniacslk/dhcp/dhcpv4"
 	"github.com/insomniacslk/dhcp/iana"
+	"golang.org/x/net/ipv4"
 )
 
 // recordingSink is a minimal logr.LogSink that appends every message
@@ -311,6 +312,83 @@ func TestServeUDP_LogsMACGateDenialOncePerMAC(t *testing.T) {
 	case err := <-errCh:
 		t.Fatalf("serveUDP reported an error: %v", err)
 	default:
+	}
+}
+
+// TestReplyControlMessage_PinsToArrivalInterface pins the core of the
+// dual-homed reply fix: when the received packet named an arrival
+// interface, the reply's control message must carry that same
+// interface index, so the reply is sent out the interface the request
+// actually came in on rather than whatever interface the kernel's
+// default route would otherwise pick.
+func TestReplyControlMessage_PinsToArrivalInterface(t *testing.T) {
+	const arrivalIfIndex = 7
+	got := replyControlMessage(&ipv4.ControlMessage{IfIndex: arrivalIfIndex})
+	if got == nil {
+		t.Fatal("replyControlMessage() = nil, want a non-nil ControlMessage")
+	}
+	if got.IfIndex != arrivalIfIndex {
+		t.Errorf("IfIndex = %d, want %d", got.IfIndex, arrivalIfIndex)
+	}
+}
+
+// TestReplyControlMessage_NilArrivalFallsBackToKernelChoice covers the
+// platform-gap case: ReadFrom reporting no control message at all (nil
+// cm) must not make WriteTo fail or panic - it must fall back to a
+// zero-value ControlMessage, the same "let the kernel pick" behavior
+// this package had before interface pinning existed.
+func TestReplyControlMessage_NilArrivalFallsBackToKernelChoice(t *testing.T) {
+	got := replyControlMessage(nil)
+	if got == nil {
+		t.Fatal("replyControlMessage(nil) = nil, want a non-nil zero-value ControlMessage")
+	}
+	if got.IfIndex != 0 {
+		t.Errorf("IfIndex = %d, want 0 (kernel default)", got.IfIndex)
+	}
+}
+
+// TestNewInterfaceAwarePacketConn_EnablesInterfaceControlMessages
+// guards the setup half of the fix: the wrapped connection must
+// actually report an arrival interface on receive, or
+// replyControlMessage above would have nothing to pin the reply to.
+// This exercises a real loopback socket rather than asserting on
+// internal state, since the behavior under test is a kernel-reported
+// property of the socket, not a Go-level field.
+func TestNewInterfaceAwarePacketConn_EnablesInterfaceControlMessages(t *testing.T) {
+	serverConn, err := listenUDP("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listenUDP() error = %v", err)
+	}
+	defer func() { _ = serverConn.Close() }()
+
+	pc, err := newInterfaceAwarePacketConn(serverConn)
+	if err != nil {
+		t.Fatalf("newInterfaceAwarePacketConn() error = %v", err)
+	}
+
+	clientConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("client ListenUDP() error = %v", err)
+	}
+	defer func() { _ = clientConn.Close() }()
+
+	if _, err := clientConn.WriteToUDP([]byte("probe"), serverConn.LocalAddr().(*net.UDPAddr)); err != nil {
+		t.Fatalf("sending probe packet: %v", err)
+	}
+
+	if err := serverConn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	buf := make([]byte, 64)
+	_, cm, _, err := pc.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("ReadFrom() error = %v", err)
+	}
+	if cm == nil {
+		t.Fatal("ReadFrom() control message = nil, want the arrival interface reported")
+	}
+	if cm.IfIndex == 0 {
+		t.Errorf("IfIndex = 0, want the loopback interface's nonzero index")
 	}
 }
 

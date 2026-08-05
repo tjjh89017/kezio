@@ -25,6 +25,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/insomniacslk/dhcp/dhcpv4"
+	"golang.org/x/net/ipv4"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
@@ -174,10 +175,28 @@ func (d *deniedMACLog) seen(mac string) bool {
 // must not take the listener down for every other client on the
 // segment) - only a read error on the socket itself, or ctx
 // cancellation, ends the loop.
+//
+// conn is wrapped in an ipv4.PacketConn with per-packet interface
+// control messages enabled (see newInterfaceAwarePacketConn) so every
+// reply can be pinned to send out the same network interface the
+// request arrived on. This matters whenever the process has more than
+// one network interface (for example, a pod with both a cluster
+// default-route interface and a separate provisioning-network
+// interface): a broadcast or unrelayed reply sent from a socket bound
+// to 0.0.0.0 would otherwise be routed by the kernel's default route,
+// which has no reason to point at the interface the request actually
+// came in on. Pinning egress to the arrival interface makes the reply
+// path correct regardless of which interface holds the default route.
 func serveUDP(ctx context.Context, log logr.Logger, conn *net.UDPConn, role Role, cfg Config, gate MACGate, denied *deniedMACLog, errCh chan<- error) {
+	pc, err := newInterfaceAwarePacketConn(conn)
+	if err != nil {
+		errCh <- fmt.Errorf("enabling interface control messages on %s: %w", conn.LocalAddr(), err)
+		return
+	}
+
 	buf := make([]byte, maxDHCPPacket)
 	for {
-		n, srcAddr, err := conn.ReadFromUDP(buf)
+		n, cm, srcAddr, err := pc.ReadFrom(buf)
 		if err != nil {
 			select {
 			case <-ctx.Done():
@@ -190,14 +209,22 @@ func serveUDP(ctx context.Context, log logr.Logger, conn *net.UDPConn, role Role
 			errCh <- fmt.Errorf("reading from %s: %w", conn.LocalAddr(), err)
 			return
 		}
-
-		req, err := dhcpv4.FromBytes(buf[:n])
-		if err != nil {
-			log.Info("dropping malformed DHCP packet", "remote", srcAddr, "error", err.Error())
+		srcUDPAddr, ok := srcAddr.(*net.UDPAddr)
+		if !ok {
+			// net.UDPConn.ReadFrom always returns a *net.UDPAddr; this
+			// only guards against a future change to the underlying
+			// connection type rather than a case observed in practice.
+			log.Info("dropping packet from non-UDP source", "remote", srcAddr)
 			continue
 		}
 
-		resp, dst, outcome := BuildResponse(req, role, srcAddr, cfg, gate)
+		req, err := dhcpv4.FromBytes(buf[:n])
+		if err != nil {
+			log.Info("dropping malformed DHCP packet", "remote", srcUDPAddr, "error", err.Error())
+			continue
+		}
+
+		resp, dst, outcome := BuildResponse(req, role, srcUDPAddr, cfg, gate)
 		if outcome != OutcomeAnswered {
 			// A MAC-gate deny (OutcomeUnknownMAC) is logged once per MAC
 			// at the default verbosity - see deniedMACLog's doc comment.
@@ -207,9 +234,9 @@ func serveUDP(ctx context.Context, log logr.Logger, conn *net.UDPConn, role Role
 			// expected noise from devices on the segment that were never
 			// going to be answered, not a kezio Machine failing to boot.
 			if outcome == OutcomeUnknownMAC && !denied.seen(req.ClientHWAddr.String()) {
-				log.Info("denying PXE request: MAC not enrolled", "remote", srcAddr, "mac", req.ClientHWAddr, "role", role)
+				log.Info("denying PXE request: MAC not enrolled", "remote", srcUDPAddr, "mac", req.ClientHWAddr, "role", role)
 			} else {
-				log.V(1).Info("not answering", "remote", srcAddr, "mac", req.ClientHWAddr, "outcome", string(outcome))
+				log.V(1).Info("not answering", "remote", srcUDPAddr, "mac", req.ClientHWAddr, "outcome", string(outcome))
 			}
 			continue
 		}
@@ -222,10 +249,47 @@ func serveUDP(ctx context.Context, log logr.Logger, conn *net.UDPConn, role Role
 		// single strongest signal that a PXE boot is progressing -
 		// its absence from the log is what first flagged a netboot that
 		// never reached bootd at all.
-		log.Info("answering PXE request", "remote", srcAddr, "dst", dst, "mac", req.ClientHWAddr, "role", role)
+		log.Info("answering PXE request", "remote", srcUDPAddr, "dst", dst, "mac", req.ClientHWAddr, "role", role)
 
-		if _, err := conn.WriteToUDP(resp.ToBytes(), dst); err != nil {
-			log.Info("sending response failed", "remote", srcAddr, "dst", dst, "error", err.Error())
+		// replyControlMessage pins the reply's egress interface to the
+		// interface the request arrived on (see this function's doc
+		// comment); a nil cm (the platform did not report one) falls
+		// back to letting the kernel choose, the same behavior this
+		// package had before interface pinning existed.
+		if _, err := pc.WriteTo(resp.ToBytes(), replyControlMessage(cm), dst); err != nil {
+			log.Info("sending response failed", "remote", srcUDPAddr, "dst", dst, "error", err.Error())
 		}
 	}
+}
+
+// newInterfaceAwarePacketConn wraps conn in an ipv4.PacketConn with
+// per-packet arrival-interface reporting turned on, so serveUDP can
+// read back which interface each request came in on (via the
+// *ipv4.ControlMessage ReadFrom returns) and pin the reply to leave by
+// that same interface (see replyControlMessage). Enabling this control
+// message is a plain socket option - it needs no elevated capability
+// beyond what binding the listening port itself already requires.
+func newInterfaceAwarePacketConn(conn *net.UDPConn) (*ipv4.PacketConn, error) {
+	pc := ipv4.NewPacketConn(conn)
+	if err := pc.SetControlMessage(ipv4.FlagInterface, true); err != nil {
+		return nil, err
+	}
+	return pc, nil
+}
+
+// replyControlMessage builds the control message serveUDP's WriteTo
+// call uses to select the reply's egress interface. cm is whatever
+// ReadFrom reported for the received request; when it named an
+// interface, the reply is pinned to leave by that same one, so a
+// broadcast or unrelayed reply from a multi-interface process reaches
+// the network the request actually came from rather than following
+// whichever interface holds the process's default route. A nil cm (no
+// interface reported) yields a zero-value ControlMessage, which asks
+// the kernel to pick the egress interface itself - the same behavior
+// this package had before interface pinning existed.
+func replyControlMessage(cm *ipv4.ControlMessage) *ipv4.ControlMessage {
+	if cm == nil {
+		return &ipv4.ControlMessage{}
+	}
+	return &ipv4.ControlMessage{IfIndex: cm.IfIndex}
 }

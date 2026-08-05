@@ -58,6 +58,15 @@ limitations under the License.
 //     server - a stale "yes" that boots a machine which was since
 //     removed is a worse failure mode than a delayed "no".
 //
+// server.go's listeners bind 0.0.0.0 (required for receiving broadcast
+// DHCPDISCOVERs at all) but must not rely on the process's default
+// route to pick a reply's egress interface: a pod running bootd
+// typically has a second interface for cluster traffic (its Machine
+// watch, for example) whose default route has nothing to do with the
+// boot network. Every reply is therefore pinned, at the socket level,
+// to leave by the same interface its request arrived on - see
+// serveUDP's doc comment.
+//
 // TFTP (tftp.go) is a strictly read-only, two-file server: it serves
 // exactly shimx64.efi and grubx64.efi from a configured directory and
 // accepts no writes and no other filename, including any path-traversal

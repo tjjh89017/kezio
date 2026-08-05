@@ -118,6 +118,22 @@ its existing artifacts directory (`BOOT_ARTIFACTS_DIR`), so adding
 `shimx64.efi`/`grubx64.efi` to that same fetch is enough to make this
 route usable - no separate volume required unless you want one.
 
+## Replies stay on the boot network, even with a second pod interface
+
+Because this pod normally has two network interfaces - the cluster's
+default one (used for the Kubernetes API traffic bootd's Machine watch
+needs) and the Multus-attached boot L2 segment above - a reply sent
+from a socket bound to `0.0.0.0` cannot rely on the process's default
+route to pick the right egress interface: the default route almost
+always points at the cluster interface, not the boot segment. bootd
+avoids that by pinning every reply's egress interface to whichever
+interface the request itself arrived on, so a DHCPOFFER/DHCPACK always
+leaves by the same interface the DHCPDISCOVER/DHCPREQUEST came in on -
+see `internal/bootd/server.go`'s `serveUDP` doc comment for the
+socket-level mechanism. This needs no extra capability: it is a plain
+socket option, unrelated to the `NET_BIND_SERVICE` capability below
+(which exists solely to bind the two privileged ports).
+
 ## MAC gating: fail-secure by default
 
 bootd only answers a client whose MAC address matches an enrolled
