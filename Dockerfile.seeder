@@ -44,20 +44,9 @@ WORKDIR /usr/src/ezio
 # SHA. The default pins the latest ezio release tag, so routine builds
 # are reproducible. Override at build time to test another revision:
 #   docker build --build-arg EZIO_REF=master -f Dockerfile.seeder .
-ARG EZIO_REF=v2.0.28
+ARG EZIO_REF=v2.0.29
 RUN git clone https://github.com/tjjh89017/ezio.git . \
     && git checkout --detach "${EZIO_REF}"
-
-# patches/ezio/*.patch fix bugs in the pinned upstream revision that
-# block kezio's own use of ezio's gRPC API, pending a matching fix
-# landing upstream - see each patch file's own commit-message-style
-# header for what it fixes and why. Applied in name order (numeric
-# prefix) so patch ordering is explicit and reproducible.
-COPY patches/ezio/*.patch /tmp/ezio-patches/
-RUN for p in /tmp/ezio-patches/*.patch; do \
-    echo "applying $p"; \
-    git apply "$p"; \
-    done
 
 RUN cmake . && make && make install
 

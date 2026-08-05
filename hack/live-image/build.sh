@@ -61,7 +61,7 @@ dist_dir="${repo_root}/dist/live"
 # Dockerfile.seeder's own default so the live image ships the same ezio
 # revision as the seeder pods it swarms with, unless a caller
 # deliberately overrides one or the other.
-ezio_ref="${EZIO_REF:-v2.0.28}"
+ezio_ref="${EZIO_REF:-v2.0.29}"
 
 log() {
 	printf '[build-live-image] %s\n' "$*" >&2
@@ -71,8 +71,8 @@ cleanup_includes() {
 	# config/includes.chroot is populated fresh on every run (kezio-agent
 	# plus the ezio source-build inputs staged below) and is never
 	# committed - see .gitignore. Clearing it first keeps a stale
-	# EZIO_REF/patch set or a stale kezio-agent binary from a previous
-	# run from lingering into this build.
+	# EZIO_REF or a stale kezio-agent binary from a previous run from
+	# lingering into this build.
 	rm -rf "${live_dir}/config/includes.chroot"
 	mkdir -p "${live_dir}/config/includes.chroot"
 	cp -a "${live_dir}/config/includes.chroot.static/." "${live_dir}/config/includes.chroot/"
@@ -92,16 +92,13 @@ stage_ezio_build_inputs() {
 	# same lesson Dockerfile.seeder's builder-stage comment already
 	# records for the seeder image.
 	#
-	# All this function does is hand that hook its inputs: the pinned
-	# ref and the patch set (patches/ezio/*.patch is otherwise only
-	# reachable from outside the chroot). Staged under includes.chroot so
-	# they land in the chroot before hooks run; the hook removes them
-	# again once ezio is built.
-	log "staging ezio ${ezio_ref} + patches for the in-chroot build"
+	# All this function does is hand that hook its input: the pinned ref.
+	# Staged under includes.chroot so it lands in the chroot before hooks
+	# run; the hook removes it again once ezio is built.
+	log "staging ezio ${ezio_ref} for the in-chroot build"
 	local stage_dir="${live_dir}/config/includes.chroot/usr/local/src/kezio-ezio"
-	mkdir -p "${stage_dir}/patches"
+	mkdir -p "${stage_dir}"
 	printf '%s' "${ezio_ref}" >"${stage_dir}/ezio_ref"
-	cp "${repo_root}"/patches/ezio/*.patch "${stage_dir}/patches/"
 }
 
 stage_signed_boot_binaries() {

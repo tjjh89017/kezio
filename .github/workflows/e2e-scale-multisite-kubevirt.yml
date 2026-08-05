@@ -163,7 +163,7 @@ env:
   # this lane is not called by the ezio repository, so it has no
   # ezio_ref/image-tag inputs to plumb through - it always builds this
   # repository's own images at the revision under test).
-  EZIO_REF: "v2.0.28"
+  EZIO_REF: "v2.0.29"
   MANAGER_IMG: "example.com/kezio:e2e-scale"
   BOOTD_IMG: "example.com/kezio-bootd:e2e-scale"
   INGEST_IMG: "example.com/kezio-ingest:e2e-scale"

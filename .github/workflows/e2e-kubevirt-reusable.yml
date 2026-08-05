@@ -86,7 +86,7 @@ on:
           kezio's own caller builds the exact revision it always has.
         required: false
         type: string
-        default: "v2.0.28"
+        default: "v2.0.29"
       boot_artifacts_version:
         description: >-
           Boot-artifacts release tag to boot (see

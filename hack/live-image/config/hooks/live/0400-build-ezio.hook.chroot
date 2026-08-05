@@ -1,8 +1,7 @@
 #!/bin/sh
 # Runs inside the chroot during `lb build`, after includes.chroot has been
 # extracted - build.sh's stage_ezio_build_inputs drops the pinned EZIO_REF
-# and patches/ezio/*.patch at /usr/local/src/kezio-ezio/ for this hook to
-# read.
+# at /usr/local/src/kezio-ezio/ for this hook to read.
 #
 # ezio is built right here, inside this chroot, instead of being copied in
 # from a separately built image (Dockerfile.seeder's builder stage, the
@@ -38,10 +37,6 @@ git clone https://github.com/tjjh89017/ezio.git "${src_dir}"
 (
 	cd "${src_dir}"
 	git checkout --detach "${ezio_ref}"
-	for p in /usr/local/src/kezio-ezio/patches/*.patch; do
-		echo "applying ${p}"
-		git apply "${p}"
-	done
 	cmake .
 	make
 	make install
