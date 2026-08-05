@@ -60,6 +60,20 @@ type ImageUploadOptions struct {
 	// Stdin is read from when File == StdinArg. Intended for os.Stdin;
 	// overridable so tests do not depend on process stdin.
 	Stdin io.Reader
+	// Size, when > 0 and File == StdinArg, is trusted as stdin's exact
+	// byte count, letting ImageUpload stream stdin straight to the
+	// image service instead of first spooling it to a temp file to
+	// learn its size (see openUploadSource). If Size is wrong, the
+	// image service's existing Content-Length guards (see
+	// imageservice's handleUpload) catch the mismatch; ImageUpload does
+	// not itself re-verify it.
+	//
+	// Size is meaningless for a file-path upload, whose size is already
+	// known from the filesystem: ImageUpload rejects Size != 0 in that
+	// case rather than silently ignoring a flag the caller explicitly
+	// set, since a --size that does not match the file is far more
+	// likely a mistake than an intentional override.
+	Size int64
 }
 
 // ImageUploadResult reports what ImageUpload created.
@@ -91,7 +105,11 @@ func ImageUpload(ctx context.Context, httpClient *http.Client, k8sClient client.
 		format = detected
 	}
 
-	body, size, cleanup, err := openUploadSource(opts.File, opts.Stdin)
+	if opts.File != StdinArg && opts.Size != 0 {
+		return ImageUploadResult{}, errors.New("--size is only used for stdin uploads (\"-\"); a file upload's size is already known from the file itself")
+	}
+
+	body, size, cleanup, err := openUploadSource(opts.File, opts.Stdin, opts.Size)
 	if err != nil {
 		return ImageUploadResult{}, err
 	}
@@ -138,11 +156,17 @@ func ImageUpload(ctx context.Context, httpClient *http.Client, k8sClient client.
 // openUploadSource resolves an ImageUploadOptions.File value into a
 // ready-to-stream body and its exact size. The image service requires a
 // declared Content-Length (see imageservice's handleUpload), so a stdin
-// source — whose size is not known upfront — is first drained into a
-// temp file to learn its size; that temp file is what actually gets
-// streamed. cleanup removes the temp file, if one was created, and must
-// always be called.
-func openUploadSource(file string, stdin io.Reader) (body io.ReadCloser, size int64, cleanup func(), err error) {
+// source whose size is not given upfront is first drained into a temp
+// file to learn its size; that temp file is what actually gets streamed.
+// cleanup removes the temp file, if one was created, and must always be
+// called.
+//
+// declaredSize, when > 0, is trusted as file's exact byte count and
+// skips the temp-file spool entirely — this is only meaningful when
+// file == StdinArg (see ImageUploadOptions.Size); ImageUpload has
+// already rejected a non-zero declaredSize paired with a real file path
+// before this function is ever called.
+func openUploadSource(file string, stdin io.Reader, declaredSize int64) (body io.ReadCloser, size int64, cleanup func(), err error) {
 	if file != StdinArg {
 		f, err := os.Open(file) //nolint:gosec // file is a CLI-supplied path, the whole point of this command
 		if err != nil {
@@ -159,6 +183,22 @@ func openUploadSource(file string, stdin io.Reader) (body io.ReadCloser, size in
 	if stdin == nil {
 		stdin = os.Stdin
 	}
+
+	if declaredSize < 0 {
+		return nil, 0, func() {}, fmt.Errorf("--size must not be negative, got %d", declaredSize)
+	}
+	if declaredSize > 0 {
+		// Trust the caller-declared size and stream stdin directly: no
+		// spool, no second copy of the upload's bytes ever touches
+		// local disk. A wrong declaredSize is not caught here — it is
+		// caught by the image service's own Content-Length guards (see
+		// this function's doc comment).
+		if rc, ok := stdin.(io.ReadCloser); ok {
+			return rc, declaredSize, func() {}, nil
+		}
+		return io.NopCloser(stdin), declaredSize, func() {}, nil
+	}
+
 	tmp, err := os.CreateTemp("", "kezioctl-upload-*")
 	if err != nil {
 		return nil, 0, func() {}, fmt.Errorf("buffer stdin: %w", err)

@@ -358,6 +358,47 @@ func TestBuildDeployPlan_ImageNotReadyIsNotAnError(t *testing.T) {
 	}
 }
 
+// TestBuildDeployPlan_ImageFailedIsNotThePlanBuildersJob characterizes
+// buildImagePlan's handling of an Image in ImageStateFailed (the state a
+// checksum mismatch or a failed ingest job drives an Image to): it is
+// treated exactly like ImageStateIngesting - "not ready yet", answered
+// with a nil plan and a nil error, never a plan-building error. Detecting
+// that an Image has permanently failed and moving the Machine to
+// MachineStateError is the controller's job (see
+// MachineReconciler.checkReferencedImagesFailed in
+// internal/controller/machine_controller.go), which runs before a Machine
+// referencing a failed Image is ever polled through this path again.
+func TestBuildDeployPlan_ImageFailedIsNotThePlanBuildersJob(t *testing.T) {
+	storeRoot := t.TempDir()
+	image, cm := readyImage("os-image", "{}", nil)
+	image.Status.State = keziov1alpha1.ImageStateFailed
+
+	machine := &keziov1alpha1.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-01", Namespace: "default"},
+		Spec:       keziov1alpha1.MachineSpec{ImageRef: &keziov1alpha1.NameRef{Name: "os-image"}},
+		Status: keziov1alpha1.MachineStatus{
+			State: keziov1alpha1.MachineStateProvisioning,
+			Provisioning: &keziov1alpha1.MachineProvisioningStatus{
+				Image: &keziov1alpha1.MachineProvisionedImage{
+					ImageRef:   keziov1alpha1.NameRef{Name: "os-image"},
+					TargetDisk: "/dev/nvme0n1",
+				},
+			},
+		},
+	}
+
+	c := newPlanTestClient(t, image, cm, machine)
+	cfg := Config{StoreRoot: storeRoot, TrackerURL: testTrackerURL}
+
+	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
+	if err != nil {
+		t.Fatalf("buildDeployPlan: %v", err)
+	}
+	if plan != nil {
+		t.Fatalf("plan = %+v, want nil (Image Failed)", plan)
+	}
+}
+
 func TestBuildDeployPlan_MissingLayoutConfigMapIsAnError(t *testing.T) {
 	storeRoot := t.TempDir()
 	image, _ := readyImage("os-image", "{}", nil) // ConfigMap deliberately not seeded

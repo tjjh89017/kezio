@@ -45,6 +45,7 @@ func newImageUploadCmd(flags *globalFlags) *cobra.Command {
 		token         string
 		tokenFile     string
 		uploadTimeout time.Duration
+		size          int64
 	)
 
 	cmd := &cobra.Command{
@@ -94,6 +95,7 @@ The first source in each list that is set wins.`,
 				Server:    resolvedServer,
 				Token:     resolvedToken,
 				Progress:  cmd.ErrOrStderr(),
+				Size:      size,
 			})
 			if err != nil {
 				return err
@@ -116,6 +118,11 @@ The first source in each list that is set wins.`,
 		"path to a file holding the bearer token (or set "+TokenFileEnvVar+")")
 	cmd.Flags().DurationVar(&uploadTimeout, "upload-timeout", 0,
 		"HTTP timeout for the upload request. 0 disables the timeout, appropriate for large files.")
+	cmd.Flags().Int64Var(&size, "size", 0,
+		"exact size in bytes of a stdin upload (\"-\"), letting it stream directly instead of first "+
+			"spooling to a temp file to learn its size. Ignored (and rejected as an error) for a file-path "+
+			"upload, whose size is already known from the file. A wrong value is caught by the image "+
+			"service's own size checks, not by this command.")
 
 	return cmd
 }

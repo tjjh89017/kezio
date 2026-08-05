@@ -222,3 +222,105 @@ func TestImageUpload_ImageAlreadyExists(t *testing.T) {
 		t.Errorf("error = %q, want it to mention the Image already exists", err.Error())
 	}
 }
+
+// A stdin upload given a correct --size streams straight from stdin: no
+// temp file is created, and the exact byte count declared is what
+// reaches the server.
+func TestImageUpload_FromStdin_WithSize_StreamsWithoutSpooling(t *testing.T) {
+	srv := newFakeUploadServer(t)
+	defer srv.Close()
+
+	content := "streamed straight through, no spool"
+	wantSum := sha256.Sum256([]byte(content))
+	wantChecksum := "sha256:" + hex.EncodeToString(wantSum[:])
+
+	before, err := os.ReadDir(os.TempDir())
+	if err != nil {
+		t.Fatalf("read temp dir before upload: %v", err)
+	}
+
+	c := fake.NewClientBuilder().WithScheme(Scheme).Build()
+	res, err := ImageUpload(context.Background(), srv.Client(), c, ImageUploadOptions{
+		File:      StdinArg,
+		Name:      "from-stdin-sized",
+		Namespace: "default",
+		Format:    keziov1alpha1.ImageFormatRaw,
+		Server:    srv.URL,
+		Token:     "test-token",
+		Stdin:     strings.NewReader(content),
+		Size:      int64(len(content)),
+	})
+	if err != nil {
+		t.Fatalf("ImageUpload() error = %v", err)
+	}
+	if res.Upload.Checksum != wantChecksum {
+		t.Fatalf("Upload.Checksum = %q, want %q", res.Upload.Checksum, wantChecksum)
+	}
+	if res.Upload.SizeBytes != int64(len(content)) {
+		t.Errorf("Upload.SizeBytes = %d, want %d", res.Upload.SizeBytes, len(content))
+	}
+
+	after, err := os.ReadDir(os.TempDir())
+	if err != nil {
+		t.Fatalf("read temp dir after upload: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Errorf("temp dir grew from %d to %d entries: --size must skip the spool-to-temp-file path", len(before), len(after))
+	}
+}
+
+// ImageUpload trusts a caller-declared --size and does not itself
+// re-verify it against stdin's real length (per its doc comment): a
+// --size that overstates the real content promises more bytes than
+// stdin actually has, which surfaces as a transport-level error once the
+// HTTP client notices the body ended short of the declared
+// Content-Length - not a validation ImageUpload performs itself.
+func TestImageUpload_FromStdin_WrongSize_CaughtDownstream(t *testing.T) {
+	srv := newFakeUploadServer(t)
+	defer srv.Close()
+
+	c := fake.NewClientBuilder().WithScheme(Scheme).Build()
+	_, err := ImageUpload(context.Background(), srv.Client(), c, ImageUploadOptions{
+		File:      StdinArg,
+		Name:      "wrong-size",
+		Namespace: "default",
+		Format:    keziov1alpha1.ImageFormatRaw,
+		Server:    srv.URL,
+		Token:     "test-token",
+		Stdin:     strings.NewReader("short"),
+		Size:      1 << 20, // far larger than "short" actually is
+	})
+	if err == nil {
+		t.Fatal("expected an error when --size overstates stdin's real length")
+	}
+}
+
+// --size is rejected outright for a file-path upload: the file's size is
+// already known from the filesystem, so a --size that could silently
+// conflict with it is treated as a caller mistake rather than ignored.
+func TestImageUpload_FromFile_SizeConflict(t *testing.T) {
+	srv := newFakeUploadServer(t)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "golden.raw")
+	if err := os.WriteFile(path, []byte("disk bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c := fake.NewClientBuilder().WithScheme(Scheme).Build()
+	_, err := ImageUpload(context.Background(), srv.Client(), c, ImageUploadOptions{
+		File:      path,
+		Name:      "should-fail",
+		Namespace: "default",
+		Server:    srv.URL,
+		Token:     "test-token",
+		Size:      10,
+	})
+	if err == nil {
+		t.Fatal("expected an error when --size is given for a file-path upload")
+	}
+	if !strings.Contains(err.Error(), "--size") {
+		t.Errorf("error = %q, want it to mention --size", err.Error())
+	}
+}
