@@ -5,9 +5,9 @@ ARG TARGETARCH
 
 # Same manager binary as the repository's default Dockerfile; only the
 # final base image differs (debian:stable-slim + ipmitool, not
-# distroless) so internal/bmc/ipmi's driver can exec ipmitool on PATH.
-# Use only for ipmi:// BMCs - redfish:// needs no external binary and
-# should use the default, smaller distroless image instead.
+# distroless) so internal/bmc/ipmitool's driver can exec ipmitool on PATH.
+# Use only for ipmitool:// BMCs - ipmi:// is handled natively by the
+# default manager and should use the default, smaller distroless image.
 FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH

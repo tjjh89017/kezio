@@ -291,12 +291,12 @@ docker-push: ## Push docker image with the manager.
 # IMG_IPMI is the image tag for the opt-in, ipmitool-enabled manager
 # build (docker/manager-ipmi/Dockerfile). It is a separate tag from IMG because
 # most deployments should stay on the smaller, dependency-free default
-# manager image; only use this build if you have ipmi:// BMCs (see
-# internal/bmc/ipmi's package doc comment and the README).
+# manager image; only use this build if you have ipmitool:// BMCs (see
+# internal/bmc/ipmitool's package doc comment and the README).
 IMG_IPMI ?= $(IMAGE_TAG_BASE)-ipmi:latest
 
 .PHONY: docker-build-manager-ipmi
-docker-build-manager-ipmi: ## Build the opt-in ipmitool-enabled manager image (for ipmi:// BMCs).
+docker-build-manager-ipmi: ## Build the opt-in ipmitool-enabled manager image (for ipmitool:// BMCs).
 	$(CONTAINER_TOOL) build -t ${IMG_IPMI} -f docker/manager-ipmi/Dockerfile .
 
 .PHONY: docker-push-manager-ipmi
