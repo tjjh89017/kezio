@@ -98,7 +98,7 @@ jobs:
       - name: Install RKE2
         run: |
           set -euo pipefail
-          curl -sfL https://get.rke2.io | INSTALL_RKE2_VERSION="${RKE2_VERSION}" sh -
+          curl -sfL https://get.rke2.io | sudo INSTALL_RKE2_VERSION="${RKE2_VERSION}" sh -
           sudo systemctl enable --now rke2-server.service
 
           # kubectl/ctr/crictl ship under /var/lib/rancher/rke2/bin, not on
@@ -286,7 +286,7 @@ jobs:
       - name: Install RKE2
         run: |
           set -euo pipefail
-          curl -sfL https://get.rke2.io | INSTALL_RKE2_VERSION="${RKE2_VERSION}" sh -
+          curl -sfL https://get.rke2.io | sudo INSTALL_RKE2_VERSION="${RKE2_VERSION}" sh -
           sudo systemctl enable --now rke2-server.service
 
           # kubectl/ctr/crictl ship under /var/lib/rancher/rke2/bin, not on
@@ -434,7 +434,7 @@ jobs:
       - name: Install RKE2
         run: |
           set -euo pipefail
-          curl -sfL https://get.rke2.io | INSTALL_RKE2_VERSION="${RKE2_VERSION}" sh -
+          curl -sfL https://get.rke2.io | sudo INSTALL_RKE2_VERSION="${RKE2_VERSION}" sh -
           sudo systemctl enable --now rke2-server.service
 
           # kubectl/ctr/crictl ship under /var/lib/rancher/rke2/bin, not on
