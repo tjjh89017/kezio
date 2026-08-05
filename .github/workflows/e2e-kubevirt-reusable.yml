@@ -1035,6 +1035,23 @@ jobs:
           kubectl -n kezio-system rollout status deployment 2>/dev/null || true
           kubectl -n kezio-system get pods -l app=virtbmc 2>/dev/null || true
 
+      - name: Wait for the virtbmc pod to become Ready
+        if: ${{ inputs.bmc_mode }}
+        # The VirtualMachineBMC Ready condition just checked above only
+        # means KubeVirtBMC's Service got a ClusterIP (reason:
+        # ServiceReady) - it says nothing about whether the virtbmc pod
+        # behind that Service has passed its own readinessProbe on
+        # /redfish/v1 (initialDelaySeconds 2, periodSeconds 10) yet.
+        # Moving straight to the curl check on that signal alone can hit
+        # the Service while it still has zero ready endpoints, which
+        # surfaces as a plain connection refused. kubevirt.io/virtual
+        # machinebmc-name is the label KubeVirtBMC's own controller
+        # applies to this pod (its VirtualMachineBMCNameLabel constant).
+        run: |
+          set -euo pipefail
+          kubectl -n kezio-system wait --for=condition=Ready pod \
+            -l "kubevirt.io/virtualmachinebmc-name=${TARGET_VM_NAME}" --timeout=180s
+
       - name: "Verify the Redfish endpoint is reachable and reports the VM off"
         if: ${{ inputs.bmc_mode }}
         # Exercised from inside the cluster with a throwaway Pod (the
@@ -1042,7 +1059,11 @@ jobs:
         # services); the same call the controller's Register step is
         # about to make, done here by hand first so a broken Redfish
         # endpoint fails with a clear diagnostic instead of surfacing
-        # only as a Machine stuck in Error.
+        # only as a Machine stuck in Error. The curl call itself is
+        # additionally retried a few times: the pod-Ready wait above
+        # closes the main race, but a belt-and-braces retry absorbs a
+        # first-connection blip on an endpoint that only just turned
+        # ready, without masking a real, persistent failure.
         run: |
           set -euo pipefail
           BMC_USERNAME="$(kubectl get secret "${BMC_CREDS_SECRET}" -n kezio-system -o jsonpath='{.data.username}' | base64 -d)"
@@ -1087,9 +1108,29 @@ jobs:
               }
             }')"
 
-          redfish_body="$(kubectl run kezio-e2e-redfish-check -n kezio-system \
-            --rm -i --restart=Never --image=curlimages/curl:8.21.0 --quiet \
-            --overrides="${redfish_overrides}")"
+          redfish_body=""
+          last_err=""
+          for attempt in $(seq 1 5); do
+            # A fresh pod name per attempt: kubectl run --rm deletes the
+            # pod once its attached session ends, but that deletion can
+            # still be in flight when a failed attempt returns, and
+            # reusing one fixed name would then race an "already exists"
+            # error on the next attempt instead of a clean retry.
+            if redfish_body="$(kubectl run "kezio-e2e-redfish-check-${attempt}" -n kezio-system \
+              --rm -i --restart=Never --image=curlimages/curl:8.21.0 --quiet \
+              --overrides="${redfish_overrides}" 2>&1)"; then
+              last_err=""
+              break
+            fi
+            last_err="${redfish_body}"
+            redfish_body=""
+            echo "attempt ${attempt}/5: curl against the Redfish endpoint failed, retrying in 5s: ${last_err}"
+            sleep 5
+          done
+          if [ -z "${redfish_body}" ]; then
+            echo "::error::Redfish endpoint still unreachable after 5 attempts: ${last_err}" >&2
+            exit 1
+          fi
           echo "Redfish ComputerSystem response: ${redfish_body}"
 
           power_state="$(jq -r '.PowerState' <<<"${redfish_body}")"
