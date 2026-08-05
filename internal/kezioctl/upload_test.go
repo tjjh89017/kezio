@@ -162,6 +162,14 @@ func TestUpload_ErrorsSurfaceAsClearMessages(t *testing.T) {
 			body:       "upload exceeds the maximum allowed size",
 			wantSubstr: "maximum upload size",
 		},
+		{
+			name:       "length required",
+			uploadName: "no-length",
+			token:      "tok",
+			status:     http.StatusLengthRequired,
+			body:       "Content-Length header required",
+			wantSubstr: "known content length",
+		},
 	}
 
 	for _, tc := range cases {
