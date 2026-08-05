@@ -221,7 +221,8 @@ func LoadImageToRKE2Containerd(name string) error {
 	// rather than buffering it to disk: docker save (stdout) -> ctr images
 	// import (stdin).
 	saveCmd := exec.Command("docker", "save", name)
-	importCmd := exec.Command("sudo", "ctr", "-a", "/run/k3s/containerd/containerd.sock", "-n", "k8s.io", "images", "import", "-")
+	importCmd := exec.Command("sudo", "ctr", "-a", "/run/k3s/containerd/containerd.sock",
+		"-n", "k8s.io", "images", "import", "-")
 
 	pipe, err := saveCmd.StdoutPipe()
 	if err != nil {
