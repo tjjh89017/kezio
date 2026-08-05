@@ -46,7 +46,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  K3S_VERSION: "v1.33.13+k3s1"
+  K3S_VERSION: "v1.36.2+k3s1"
   # Same minimal Ubuntu cloud image the image-path e2e job uses - see
   # test-e2e.yml's own env block for why the minimal image is preferred
   # here (half the download/convert/partclone time of the full image for

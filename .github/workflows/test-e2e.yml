@@ -27,7 +27,7 @@ concurrency:
 env:
   # k3s version the job installs. Pinned so the e2e cluster doesn't shift
   # under us on a stable branch; bump deliberately.
-  K3S_VERSION: "v1.33.13+k3s1"
+  K3S_VERSION: "v1.36.2+k3s1"
 
 jobs:
   test-e2e:
