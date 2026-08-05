@@ -25,7 +25,7 @@ name: E2E Full Deploy (KubeVirt VM) - reusable
 # carried is now an `inputs.*` value below, defaulted to kezio's own
 # values so kezio's caller is unchanged. `ezio_ref` is the one an ezio
 # caller actually needs to touch - it selects the ezio git revision
-# Dockerfile.seeder builds (see that Dockerfile's own EZIO_REF ARG
+# docker/seeder/Dockerfile builds (see that Dockerfile's own EZIO_REF ARG
 # comment); the image-tag inputs exist so a caller can also swap kezio's
 # own component images (or the third-party opentracker image) without
 # forking this file, but ezio's own reuse only needs to set ezio_ref.
@@ -79,10 +79,10 @@ on:
       ezio_ref:
         description: >-
           ezio git revision (tag, branch, or commit SHA) that
-          Dockerfile.seeder builds into the seeder image. This is the
+          docker/seeder/Dockerfile builds into the seeder image. This is the
           input an ezio-repo caller sets to the revision under test
           (for example, the pull request's head SHA). Defaults to the
-          same pin Dockerfile.seeder's own EZIO_REF ARG carries, so
+          same pin docker/seeder/Dockerfile's own EZIO_REF ARG carries, so
           kezio's own caller builds the exact revision it always has.
         required: false
         type: string
@@ -113,7 +113,7 @@ on:
         type: string
         default: "example.com/kezio-ingest:e2e-deploy"
       seeder_image:
-        description: "Image tag to build/use for the ezio seeder (built from ezio_ref by Dockerfile.seeder)."
+        description: "Image tag to build/use for the ezio seeder (built from ezio_ref by docker/seeder/Dockerfile)."
         required: false
         type: string
         default: "example.com/kezio-seeder:e2e-deploy"
@@ -492,10 +492,10 @@ jobs:
         # debian:sid seeder build cost. The seeder build additionally
         # takes EZIO_REF as a build-arg, so an ezio-repo caller's
         # ezio_ref input actually selects which ezio revision gets built
-        # (see Dockerfile.seeder's own EZIO_REF ARG comment).
+        # (see docker/seeder/Dockerfile's own EZIO_REF ARG comment).
         run: |
           set -euo pipefail
-          for spec in "ingest:Dockerfile.ingest:${INGEST_IMG}" "seeder:Dockerfile.seeder:${SEEDER_IMG}" "image-service:Dockerfile.image-service:${IMAGE_SERVICE_IMG}"; do
+          for spec in "ingest:docker/ingest/Dockerfile:${INGEST_IMG}" "seeder:docker/seeder/Dockerfile:${SEEDER_IMG}" "image-service:docker/image-service/Dockerfile:${IMAGE_SERVICE_IMG}"; do
             IFS=: read -r scope dockerfile tag <<< "${spec}"
             build_args=()
             if [ "${scope}" = "seeder" ]; then

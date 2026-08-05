@@ -43,7 +43,7 @@ spec:
           # stale: build opentracker from its own source (a small,
           # dependency-light C project) into a from-scratch image
           # following the same pattern as this repository's other
-          # Dockerfiles (see Dockerfile.seeder for the two-stage shape).
+          # Dockerfiles (see docker/seeder/Dockerfile for the two-stage shape).
           image: ghcr.io/tunisiano187/opentracker-docker:master
           # The image's own CMD is a shell wrapper (`/bin/sh -c "opentracker
           # -f /etc/opentracker/opentracker.conf"`) and it sets no

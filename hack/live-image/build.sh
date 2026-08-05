@@ -43,9 +43,9 @@
 # supports privileged Docker containers.
 #
 # Determinism: this script pins what upstream itself pins (the ezio
-# release tag Dockerfile.seeder builds by default) and otherwise tracks
-# Debian sid, the same as every other kezio image - see Dockerfile.
-# seeder's own header for why sid, not a snapshot pin, is the right
+# release tag docker/seeder/Dockerfile builds by default) and otherwise tracks
+# Debian sid, the same as every other kezio image - see
+# docker/seeder/Dockerfile's own header for why sid, not a snapshot pin, is the right
 # tradeoff here. A byte-identical rebuild is not a goal; a rebuild from
 # the same commit producing a working image with the same package set
 # is.
@@ -58,7 +58,7 @@ dist_dir="${repo_root}/dist/live"
 
 # EZIO_REF selects the ezio revision built inside the live-build chroot
 # (see hooks/live/0400-build-ezio.hook.chroot). Defaults to
-# Dockerfile.seeder's own default so the live image ships the same ezio
+# docker/seeder/Dockerfile's own default so the live image ships the same ezio
 # revision as the seeder pods it swarms with, unless a caller
 # deliberately overrides one or the other.
 ezio_ref="${EZIO_REF:-v2.0.29}"
@@ -85,11 +85,11 @@ stage_ezio_build_inputs() {
 	# Debian sid system with its own glibc/libstdc++/etc that it is
 	# actively using while `lb build` assembles it, and staging a
 	# separately-built binary's shared-library closure over those system
-	# paths (the approach Dockerfile.seeder's runtime stage uses, which
+	# paths (the approach docker/seeder/Dockerfile's runtime stage uses, which
 	# is fine for that image's empty distroless base) corrupts the
 	# chroot mid-extraction. Building against the chroot's own apt
 	# snapshot instead guarantees ABI consistency by construction, the
-	# same lesson Dockerfile.seeder's builder-stage comment already
+	# same lesson docker/seeder/Dockerfile's builder-stage comment already
 	# records for the seeder image.
 	#
 	# All this function does is hand that hook its input: the pinned ref.

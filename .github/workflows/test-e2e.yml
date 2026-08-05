@@ -231,7 +231,7 @@ jobs:
         # from-source debian:sid seeder build cost, not both.
         run: |
           set -euo pipefail
-          for spec in "ingest:Dockerfile.ingest:${INGEST_IMG}" "seeder:Dockerfile.seeder:${SEEDER_IMG}" "image-service:Dockerfile.image-service:${IMAGE_SERVICE_IMG}"; do
+          for spec in "ingest:docker/ingest/Dockerfile:${INGEST_IMG}" "seeder:docker/seeder/Dockerfile:${SEEDER_IMG}" "image-service:docker/image-service/Dockerfile:${IMAGE_SERVICE_IMG}"; do
             IFS=: read -r scope dockerfile tag <<< "${spec}"
             docker buildx build \
               --file "${dockerfile}" \

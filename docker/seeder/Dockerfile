@@ -43,7 +43,7 @@ WORKDIR /usr/src/ezio
 # EZIO_REF selects the ezio revision to build: a tag, branch, or commit
 # SHA. The default pins the latest ezio release tag, so routine builds
 # are reproducible. Override at build time to test another revision:
-#   docker build --build-arg EZIO_REF=master -f Dockerfile.seeder .
+#   docker build --build-arg EZIO_REF=master -f docker/seeder/Dockerfile .
 ARG EZIO_REF=v2.0.29
 RUN git clone https://github.com/tjjh89017/ezio.git . \
     && git checkout --detach "${EZIO_REF}"
@@ -94,11 +94,11 @@ FROM debian:sid
 # actually linked against.
 COPY --from=builder /out/ /
 COPY --from=builder /usr/local/sbin/ezio /app/ezio
-COPY entrypoint.seeder.sh /app/entrypoint.sh
+COPY docker/seeder/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
-# Matches every other kezio image (Dockerfile, Dockerfile.image-service,
-# Dockerfile.ingest all USER 65532:65532): ezio-seeder-deployment.yaml
+# Matches every other kezio image (Dockerfile, docker/image-service/Dockerfile,
+# docker/ingest/Dockerfile all USER 65532:65532): ezio-seeder-deployment.yaml
 # and opentracker-deployment.yaml both set runAsNonRoot: true, which the
 # kubelet enforces by refusing to start a container whose image runs as
 # root when no runAsUser is set. Neither ezio's gRPC/BT listeners nor

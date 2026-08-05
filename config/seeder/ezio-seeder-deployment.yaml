@@ -88,7 +88,7 @@ spec:
               drop:
                 - "ALL"
           # No probes wired to the gRPC port: this image ships no HTTP/gRPC
-          # health endpoint of its own (see Dockerfile.seeder - it is
+          # health endpoint of its own (see docker/seeder/Dockerfile - it is
           # upstream ezio plus a flag-passthrough entrypoint only, no
           # decision logic and no extra listener). The operator's seeder
           # reconciler already calls GetTorrentStatus/GetVersion over the

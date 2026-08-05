@@ -65,11 +65,11 @@ func (r execRunner) Run(ctx context.Context, args ...string) (string, error) {
 			// The default manager image (built FROM distroless/static, see
 			// the repository's Dockerfile) does not carry ipmitool - only
 			// the opt-in ipmitool-enabled image
-			// (Dockerfile.manager-ipmi) does. Surface that as an
+			// (docker/manager-ipmi/Dockerfile) does. Surface that as an
 			// actionable error instead of the raw "executable file not
 			// found in $PATH" LookPath gives, so an operator who hits this
 			// knows what to do next rather than having to guess.
-			return "", fmt.Errorf("ipmi: %w: the default manager image is Redfish-only; use the ipmitool-enabled manager image (see Dockerfile.manager-ipmi) or switch this BMC to a redfish:// address: %w", errIpmitoolNotFound, err)
+			return "", fmt.Errorf("ipmi: %w: the default manager image is Redfish-only; use the ipmitool-enabled manager image (see docker/manager-ipmi/Dockerfile) or switch this BMC to a redfish:// address: %w", errIpmitoolNotFound, err)
 		}
 		path = resolved
 	}

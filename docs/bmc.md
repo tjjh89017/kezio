@@ -38,11 +38,11 @@ If you have BMCs that only support IPMI, build and deploy the opt-in,
 ipmitool-enabled manager image instead of the default one:
 
 ```sh
-make docker-build-manager-ipmi   # builds Dockerfile.manager-ipmi, tag: $(IMG_IPMI)
+make docker-build-manager-ipmi   # builds docker/manager-ipmi/Dockerfile, tag: $(IMG_IPMI)
 make docker-push-manager-ipmi
 ```
 
-`Dockerfile.manager-ipmi` builds the same manager binary as the
+`docker/manager-ipmi/Dockerfile` builds the same manager binary as the
 default `Dockerfile`, but finishes on `debian:stable-slim` with
 `ipmitool` installed via `apt-get`, instead of on distroless. Deploy
 the resulting image the same way as the default manager image (e.g.

@@ -33,7 +33,7 @@ jobs:
 
 | Input | Type | Default | Purpose |
 |---|---|---|---|
-| `ezio_ref` | string | `v2.0.29` | ezio git revision (tag, branch, or commit SHA) that `Dockerfile.seeder` builds into the seeder image. This is the one input an ezio-repo caller needs to set - to the pull request's head SHA, a branch, or any other revision under test. Default mirrors `Dockerfile.seeder`'s own `EZIO_REF` build arg, so kezio's own caller is unaffected. |
+| `ezio_ref` | string | `v2.0.29` | ezio git revision (tag, branch, or commit SHA) that `docker/seeder/Dockerfile` builds into the seeder image. This is the one input an ezio-repo caller needs to set - to the pull request's head SHA, a branch, or any other revision under test. Default mirrors `docker/seeder/Dockerfile`'s own `EZIO_REF` build arg, so kezio's own caller is unaffected. |
 | `boot_artifacts_version` | string | `""` (latest published release) | Boot-artifacts release tag the target VM net-boots (kernel/initrd/squashfs/shim/GRUB from `build-live-image.yml`). Selects among what kezio has already published; it does not build boot artifacts itself. |
 | `manager_image` | string | `example.com/kezio:e2e-deploy` | Image tag built for the kezio controller-manager. |
 | `bootd_image` | string | `example.com/kezio-bootd:e2e-deploy` | Image tag built for kezio-bootd (the network-boot server). |

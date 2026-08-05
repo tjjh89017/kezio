@@ -10,9 +10,9 @@ data plane:
   image ever goes stale.
 - **ezio-seeder** - the ezio daemon that actually holds and serves
   partition-content torrents (`ezio-seeder-deployment.yaml`,
-  `ezio-seeder-service.yaml`), built by `Dockerfile.seeder`. This
+  `ezio-seeder-service.yaml`), built by `docker/seeder/Dockerfile`. This
   container ships no kezio code at all: it is upstream ezio plus a
-  flag-passthrough entrypoint (`entrypoint.seeder.sh`). The kezio
+  flag-passthrough entrypoint (`docker/seeder/entrypoint.sh`). The kezio
   operator is the only thing that decides what a seeder seeds, entirely
   through ezio's gRPC API (`internal/seeder`, `proto/ezio.proto`) - see
   `internal/controller/seeder_controller.go`'s doc comment for the
@@ -324,7 +324,7 @@ follow-up, not something the model above already covers.
 
 ## Known gap: ezio has no interface-binding flag
 
-`entrypoint.seeder.sh` documents this in more detail, but in short: ezio
+`docker/seeder/entrypoint.sh` documents this in more detail, but in short: ezio
 has no flag to bind libtorrent's outgoing connections or announce IP to a
 specific interface, only the listen *port*. On a pod with two interfaces
 (`eth0` plus the data-network `net1`), libtorrent's own interface

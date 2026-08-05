@@ -4,7 +4,7 @@
 # at /usr/local/src/kezio-ezio/ for this hook to read.
 #
 # ezio is built right here, inside this chroot, instead of being copied in
-# from a separately built image (Dockerfile.seeder's builder stage, the
+# from a separately built image (docker/seeder/Dockerfile's builder stage, the
 # previous approach): this chroot is a full Debian sid system already
 # using its own glibc/libstdc++/etc, and staging a foreign build's
 # shared-library closure over those same system paths corrupts the chroot
@@ -17,7 +17,7 @@ set -eu
 ezio_ref="$(cat /usr/local/src/kezio-ezio/ezio_ref)"
 
 # Packages this hook alone needs: build tools plus the -dev packages ezio
-# links against (mirrors Dockerfile.seeder's builder stage). Their
+# links against (mirrors docker/seeder/Dockerfile's builder stage). Their
 # matching runtime shared libraries - libtorrent-rasterbar, libgrpc(++),
 # libprotobuf, libspdlog, libssl3, boost's program_options - come along as
 # ordinary apt dependencies of these -dev packages and are what ezio

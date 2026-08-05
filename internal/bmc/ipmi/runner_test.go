@@ -63,7 +63,7 @@ func TestExecRunnerReturnsFriendlyErrorWhenIpmitoolNotFound(t *testing.T) {
 	if !strings.Contains(err.Error(), "redfish://") {
 		t.Errorf("Run() error = %q, want it to point operators at the redfish:// alternative", err.Error())
 	}
-	if !strings.Contains(err.Error(), "Dockerfile.manager-ipmi") {
+	if !strings.Contains(err.Error(), "docker/manager-ipmi/Dockerfile") {
 		t.Errorf("Run() error = %q, want it to name the ipmitool-enabled image variant", err.Error())
 	}
 }

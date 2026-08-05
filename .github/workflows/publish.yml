@@ -9,12 +9,12 @@ name: Publish Images
 #
 # Image <-> Dockerfile mapping (must stay in sync with the per-binary
 # docker-build-* targets in the Makefile):
-#   kezio                <- Dockerfile               (controller manager)
-#   kezio-ipmi           <- Dockerfile.manager-ipmi   (opt-in, ipmitool-enabled manager)
-#   kezio-image-service  <- Dockerfile.image-service
-#   kezio-ingest         <- Dockerfile.ingest
-#   kezio-seeder         <- Dockerfile.seeder
-#   kezio-bootd          <- Dockerfile.bootd
+#   kezio                <- Dockerfile                        (controller manager)
+#   kezio-ipmi           <- docker/manager-ipmi/Dockerfile     (opt-in, ipmitool-enabled manager)
+#   kezio-image-service  <- docker/image-service/Dockerfile
+#   kezio-ingest         <- docker/ingest/Dockerfile
+#   kezio-seeder         <- docker/seeder/Dockerfile
+#   kezio-bootd          <- docker/bootd/Dockerfile
 #
 # Architecture: manager, image-service, ingest and bootd cross-compile
 # their Go binary (BUILDPLATFORM/TARGETPLATFORM) and only need apt-get to
@@ -64,24 +64,24 @@ jobs:
             platforms: linux/amd64,linux/arm64
           - name: manager-ipmi
             image: kezio-ipmi
-            dockerfile: Dockerfile.manager-ipmi
+            dockerfile: docker/manager-ipmi/Dockerfile
             platforms: linux/amd64,linux/arm64
           - name: image-service
             image: kezio-image-service
-            dockerfile: Dockerfile.image-service
+            dockerfile: docker/image-service/Dockerfile
             platforms: linux/amd64,linux/arm64
           - name: ingest
             image: kezio-ingest
-            dockerfile: Dockerfile.ingest
+            dockerfile: docker/ingest/Dockerfile
             platforms: linux/amd64,linux/arm64
           - name: seeder
             image: kezio-seeder
-            dockerfile: Dockerfile.seeder
+            dockerfile: docker/seeder/Dockerfile
             # amd64-only: see the architecture note above the `on:` block.
             platforms: linux/amd64
           - name: bootd
             image: kezio-bootd
-            dockerfile: Dockerfile.bootd
+            dockerfile: docker/bootd/Dockerfile
             platforms: linux/amd64,linux/arm64
     steps:
       - name: Clone the code

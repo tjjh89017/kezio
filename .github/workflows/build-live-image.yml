@@ -63,7 +63,7 @@ jobs:
     name: Build
     runs-on: ubuntu-latest
     # `lb build` compiles ezio from source (cmake/make, the same as
-    # Dockerfile.seeder's builder stage) and then assembles a full
+    # docker/seeder/Dockerfile's builder stage) and then assembles a full
     # Debian sid chroot into a squashfs - budget generously.
     timeout-minutes: 90
     # contents: write is only exercised by the "Publish GitHub Release"

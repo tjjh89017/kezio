@@ -49,7 +49,7 @@ limitations under the License.
 // that supports it and most deployments should not pay for ipmitool's
 // dynamically-linked C dependencies (glibc, libcrypto) by default.
 // Operators who need ipmi:// must instead build or use the opt-in
-// ipmitool-enabled image (Dockerfile.manager-ipmi; see the repository's
+// ipmitool-enabled image (docker/manager-ipmi/Dockerfile; see the repository's
 // README for the matching Makefile target). If ipmitool cannot be found
 // on PATH, this driver's methods fail with a clear, actionable error
 // (see execRunner.Run) rather than a raw exec error or at build/Connect

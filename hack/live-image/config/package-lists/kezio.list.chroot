@@ -13,7 +13,7 @@ live-boot
 # Disk cloning and partitioning the deploy flow drives directly. sid
 # tracks current partclone releases; a stable release lags too far
 # behind for the file systems the deploy flow needs to clone (the same
-# reason Dockerfile.ingest pins sid, not sid-slim's stable counterpart).
+# reason docker/ingest/Dockerfile pins sid, not sid-slim's stable counterpart).
 partclone
 gdisk
 util-linux

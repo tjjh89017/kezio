@@ -201,13 +201,13 @@ run-image-service: fmt vet ## Run the image-service from your host.
 
 # IMAGE_SERVICE_IMG is the image tag for the image-service binary. It is a
 # separate image from IMG (the controller manager) because the two ship
-# and deploy independently; see Dockerfile.image-service and
+# and deploy independently; see docker/image-service/Dockerfile and
 # config/image-service.
 IMAGE_SERVICE_IMG ?= $(IMAGE_TAG_BASE)-image-service:latest
 
 .PHONY: docker-build-image-service
 docker-build-image-service: ## Build docker image for image-service.
-	$(CONTAINER_TOOL) build -t ${IMAGE_SERVICE_IMG} -f Dockerfile.image-service .
+	$(CONTAINER_TOOL) build -t ${IMAGE_SERVICE_IMG} -f docker/image-service/Dockerfile .
 
 .PHONY: docker-push-image-service
 docker-push-image-service: ## Push docker image for image-service.
@@ -220,25 +220,26 @@ build-ingest: fmt vet ## Build the kezio-ingest binary (runs inside the Image re
 # INGEST_IMG is the image tag for kezio-ingest. It is a separate image
 # from IMG (the controller manager) and IMAGE_SERVICE_IMG because it runs
 # as a Job pod (not a Deployment) and needs partclone/qemu-img/sfdisk/
-# blkid installed; see Dockerfile.ingest.
+# blkid installed; see docker/ingest/Dockerfile.
 INGEST_IMG ?= $(IMAGE_TAG_BASE)-ingest:latest
 
 .PHONY: docker-build-ingest
 docker-build-ingest: ## Build docker image for kezio-ingest.
-	$(CONTAINER_TOOL) build -t ${INGEST_IMG} -f Dockerfile.ingest .
+	$(CONTAINER_TOOL) build -t ${INGEST_IMG} -f docker/ingest/Dockerfile .
 
 .PHONY: docker-push-ingest
 docker-push-ingest: ## Push docker image for kezio-ingest.
 	$(CONTAINER_TOOL) push ${INGEST_IMG}
 
-# SEEDER_IMG is the image tag for the ezio seeder container (Dockerfile.seeder).
-# It ships no kezio Go binary (see Dockerfile.seeder's header comment), so
-# there is no matching "build-seeder" Go-build target, only the docker one.
+# SEEDER_IMG is the image tag for the ezio seeder container
+# (docker/seeder/Dockerfile). It ships no kezio Go binary (see
+# docker/seeder/Dockerfile's header comment), so there is no matching
+# "build-seeder" Go-build target, only the docker one.
 SEEDER_IMG ?= $(IMAGE_TAG_BASE)-seeder:latest
 
 .PHONY: docker-build-seeder
 docker-build-seeder: ## Build docker image for the ezio seeder.
-	$(CONTAINER_TOOL) build -t ${SEEDER_IMG} -f Dockerfile.seeder .
+	$(CONTAINER_TOOL) build -t ${SEEDER_IMG} -f docker/seeder/Dockerfile .
 
 .PHONY: docker-push-seeder
 docker-push-seeder: ## Push docker image for the ezio seeder.
@@ -251,12 +252,12 @@ build-bootd: fmt vet ## Build the kezio-bootd binary (proxyDHCP/PXE/TFTP, see in
 # BOOTD_IMG is the image tag for kezio-bootd. It is a separate image
 # from IMG (the controller manager) because bootd is not part of the
 # manager process - it is its own per-site binary needing privileged UDP
-# ports; see Dockerfile.bootd and config/bootd.
+# ports; see docker/bootd/Dockerfile and config/bootd.
 BOOTD_IMG ?= $(IMAGE_TAG_BASE)-bootd:latest
 
 .PHONY: docker-build-bootd
 docker-build-bootd: ## Build docker image for kezio-bootd.
-	$(CONTAINER_TOOL) build -t ${BOOTD_IMG} -f Dockerfile.bootd .
+	$(CONTAINER_TOOL) build -t ${BOOTD_IMG} -f docker/bootd/Dockerfile .
 
 .PHONY: docker-push-bootd
 docker-push-bootd: ## Push docker image for kezio-bootd.
@@ -288,7 +289,7 @@ docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
 
 # IMG_IPMI is the image tag for the opt-in, ipmitool-enabled manager
-# build (Dockerfile.manager-ipmi). It is a separate tag from IMG because
+# build (docker/manager-ipmi/Dockerfile). It is a separate tag from IMG because
 # most deployments should stay on the smaller, dependency-free default
 # manager image; only use this build if you have ipmi:// BMCs (see
 # internal/bmc/ipmi's package doc comment and the README).
@@ -296,7 +297,7 @@ IMG_IPMI ?= $(IMAGE_TAG_BASE)-ipmi:latest
 
 .PHONY: docker-build-manager-ipmi
 docker-build-manager-ipmi: ## Build the opt-in ipmitool-enabled manager image (for ipmi:// BMCs).
-	$(CONTAINER_TOOL) build -t ${IMG_IPMI} -f Dockerfile.manager-ipmi .
+	$(CONTAINER_TOOL) build -t ${IMG_IPMI} -f docker/manager-ipmi/Dockerfile .
 
 .PHONY: docker-push-manager-ipmi
 docker-push-manager-ipmi: ## Push the opt-in ipmitool-enabled manager image.
