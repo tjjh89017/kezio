@@ -738,6 +738,22 @@ jobs:
                     emptyDisk:
                       capacity: 2Gi
           EOF
+          # Applying the VirtualMachine above only asks KubeVirt's VM
+          # controller to create a VirtualMachineInstance for it; that
+          # controller reconciles asynchronously, so the VMI object can
+          # still not exist yet at this point ("no matches" for `kubectl
+          # wait`, which errors out immediately on zero matches instead
+          # of polling for existence). Same exists-then-condition shape
+          # as the CRD waits above: poll for the VMI to exist first, then
+          # wait for it to actually report Ready.
+          deadline=$(( $(date +%s) + 60 ))
+          until kubectl get vmi/e2e-boot-path-vm -n kezio-system >/dev/null 2>&1; do
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::VirtualMachineInstance e2e-boot-path-vm did not appear within the timeout - the VM controller may not have reconciled it." >&2
+              exit 1
+            fi
+            sleep 2
+          done
           kubectl wait vmi/e2e-boot-path-vm -n kezio-system --for=condition=Ready --timeout=180s
 
       - name: Wait for the Machine to reach Available with reported hardware
