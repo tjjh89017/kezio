@@ -217,6 +217,13 @@ env:
   PROVISIONING_HOST_IP: 192.0.2.1/24
   PROVISIONING_BOOTD_NET1_IP: 192.0.2.2/24
   PROVISIONING_CIDR: 192.0.2.0/24
+  # The stand-in "existing site DHCP server" lives in its own netns
+  # behind a routed veth off the runner host (see the "Start a
+  # lease-only DHCP server" step), on TEST-NET-2 so it can never be
+  # confused with the provisioning segment. LEASE_SERVER_IP is what
+  # bootd relays to (BOOTD_DHCP_RELAY_SERVER).
+  LEASE_VETH_HOST_IP: 198.51.100.1/30
+  LEASE_SERVER_IP: 198.51.100.2
   TARGET_VM_NAME: ${{ inputs.target_vm_name }}
   TARGET_VM_MAC: ${{ inputs.target_vm_mac }}
   TARGET_VM_DISK_SERIAL: ${{ inputs.target_vm_disk_serial }}
@@ -717,24 +724,41 @@ jobs:
             sudo ethtool -K "${PROVISIONING_BRIDGE}" tx off || true
           fi
 
-      - name: Start a lease-only DHCP server on the runner host (stands in for the site's existing DHCP server)
+      - name: Start a lease-only DHCP server in a netns behind a routed veth (stands in for the site's existing DHCP server)
         # bootd's dnsmasq is proxyDHCP only - it never assigns
         # addresses. A real site keeps its existing DHCP server for
         # leases, and bootd relays the segment's lease traffic to it
-        # (BOOTD_DHCP_RELAY_SERVER -> dnsmasq's dhcp-relay). This host
+        # (BOOTD_DHCP_RELAY_SERVER -> dnsmasq's dhcp-relay). This
         # dnsmasq plays that existing server: port=0 (no DNS), one
         # lease range on the provisioning subnet, nothing else.
         #
-        # It is deliberately bound AWAY from the provisioning bridge:
-        # bind-interfaces plus a listen-address on the default-route
-        # interface's own address means its DHCP socket never hears
-        # the bridge's broadcasts - the only path from the target VM
-        # to this server is bootd's relay (giaddr'd unicast to this
-        # address), which is exactly the path this lane must prove.
-        # Relayed replies go back to the giaddr (bootd's net1 address
-        # on the bridge, reachable from the host through its own
-        # bridge port), and bootd's dnsmasq re-emits them onto the
-        # segment.
+        # It runs in its OWN network namespace behind a routed veth
+        # (LEASE_SERVER_IP), one L3 hop behind the runner host - the
+        # "existing DHCP server reachable via the segment's gateway"
+        # model. Two reasons, both load-bearing:
+        #
+        #  1. It must never hear the bridge's broadcasts - the only
+        #     path from the target VM to this server is bootd's relay
+        #     (giaddr'd unicast), which is exactly the path this lane
+        #     must prove. A netns off the bridge guarantees that
+        #     structurally.
+        #  2. Binding it to the host's uplink address (the previous
+        #     shape) can never receive the relay at all: dnsmasq
+        #     resolves the ARRIVAL interface of every DHCP packet
+        #     (SIOCGIFADDR + iface_check/check_listen_addrs, dhcp.c)
+        #     and silently discards packets arriving on an interface
+        #     its listen config does not cover - and a relayed unicast
+        #     to the uplink address necessarily arrives via the
+        #     provisioning bridge. In the netns the packet arrives on
+        #     lease0, the very interface the listen-address lives on.
+        #
+        # The host forwards between the bridge and the veth
+        # (ip_forward, plus FORWARD accepts scoped to this interface
+        # pair - kube-proxy/canal leave FORWARD's default policy at
+        # DROP, same reason as the bridged-traffic exemption step
+        # above). Relayed replies go back to the giaddr (bootd's net1
+        # address on the bridge), and bootd's dnsmasq re-emits them
+        # onto the segment.
         #
         # dnsmasq-base, not dnsmasq: the -base package ships only the
         # binary, with no distro service unit that would auto-start a
@@ -743,24 +767,40 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get install -y --no-install-recommends dnsmasq-base
-          host_ip="$(ip -4 route get 1.1.1.1 | awk '{for (i=1; i<NF; i++) if ($i=="src") print $(i+1)}' | head -1)"
-          if [ -z "${host_ip}" ]; then
-            echo "::error::could not determine the runner's default-route source address for the lease DHCP server" >&2
-            exit 1
+          sudo ip netns add kezio-lease
+          sudo ip link add kezio-lease0 type veth peer name lease0
+          sudo ip link set lease0 netns kezio-lease
+          sudo ip addr add "${LEASE_VETH_HOST_IP}" dev kezio-lease0
+          sudo ip link set kezio-lease0 up
+          sudo ip netns exec kezio-lease ip link set lo up
+          sudo ip netns exec kezio-lease ip addr add "${LEASE_SERVER_IP}/30" dev lease0
+          sudo ip netns exec kezio-lease ip link set lease0 up
+          sudo ip netns exec kezio-lease ip route add default via "${LEASE_VETH_HOST_IP%%/*}"
+          sudo sysctl -w net.ipv4.ip_forward=1
+          if command -v iptables >/dev/null 2>&1; then
+            sudo iptables -C FORWARD -i "${PROVISIONING_BRIDGE}" -o kezio-lease0 -j ACCEPT 2>/dev/null || \
+              sudo iptables -I FORWARD -i "${PROVISIONING_BRIDGE}" -o kezio-lease0 -j ACCEPT
+            sudo iptables -C FORWARD -i kezio-lease0 -o "${PROVISIONING_BRIDGE}" -j ACCEPT 2>/dev/null || \
+              sudo iptables -I FORWARD -i kezio-lease0 -o "${PROVISIONING_BRIDGE}" -j ACCEPT
           fi
-          echo "host lease DHCP server address: ${host_ip}"
+          if command -v nft >/dev/null 2>&1 && sudo nft list table inet filter >/dev/null 2>&1; then
+            sudo nft list chain inet filter FORWARD 2>/dev/null | grep -q "iifname \"${PROVISIONING_BRIDGE}\" oifname \"kezio-lease0\" accept" || \
+              sudo nft insert rule inet filter FORWARD iifname "${PROVISIONING_BRIDGE}" oifname "kezio-lease0" accept
+            sudo nft list chain inet filter FORWARD 2>/dev/null | grep -q "iifname \"kezio-lease0\" oifname \"${PROVISIONING_BRIDGE}\" accept" || \
+              sudo nft insert rule inet filter FORWARD iifname "kezio-lease0" oifname "${PROVISIONING_BRIDGE}" accept
+          fi
           cat <<EOF | sudo tee /etc/kezio-host-dnsmasq.conf
           port=0
           bind-interfaces
-          listen-address=${host_ip}
+          listen-address=${LEASE_SERVER_IP}
           dhcp-range=192.0.2.10,192.0.2.100,255.255.255.0,12h
           no-ping
           log-dhcp
           log-facility=${RUNNER_TEMP}/host-dnsmasq.log
           dhcp-leasefile=${RUNNER_TEMP}/host-dnsmasq.leases
           EOF
-          sudo dnsmasq --conf-file=/etc/kezio-host-dnsmasq.conf
-          echo "RELAY_DHCP_SERVER_IP=${host_ip}" >> "$GITHUB_ENV"
+          sudo ip netns exec kezio-lease dnsmasq --conf-file=/etc/kezio-host-dnsmasq.conf
+          echo "RELAY_DHCP_SERVER_IP=${LEASE_SERVER_IP}" >> "$GITHUB_ENV"
 
       - name: Start capturing the provisioning bridge (tcpdump)
         # Definitive instrumentation regardless of whether the checksum
@@ -926,14 +966,31 @@ jobs:
           kubectl label --overwrite ns kezio-system pod-security.kubernetes.io/enforce=privileged
           kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
 
-      - name: Create the provisioning NetworkAttachmentDefinition
-        # Static ipam, not "ipam": {}: bootd's net1 must carry a fixed
-        # address (PROVISIONING_BOOTD_NET1_IP) on the provisioning
-        # subnet - dnsmasq binds its DHCP sockets to net1, uses this
-        # address as the dhcp-relay giaddr, and BOOTD_SERVER_IP
-        # advertises it as the TFTP next-server. The runner host keeps
+      - name: Create the provisioning NetworkAttachmentDefinitions
+        # TWO NADs on the SAME bridge, split on purpose:
+        #
+        # kezio-boot-network (static ipam) is for the bootd pod ONLY.
+        # bootd's net1 must carry a fixed address
+        # (PROVISIONING_BOOTD_NET1_IP) on the provisioning subnet -
+        # dnsmasq binds its DHCP sockets to net1, uses this address as
+        # the dhcp-relay giaddr, and BOOTD_SERVER_IP advertises it as
+        # the TFTP next-server. The runner host keeps
         # PROVISIONING_HOST_IP on the same bridge, so the two never
         # collide.
+        #
+        # kezio-boot-network-vm ("ipam": {}) is for the target VM's
+        # provisioning NIC. The VM must NOT attach the static-ipam NAD:
+        # when a KubeVirt bridge-mode interface's network carries IPAM,
+        # virt-launcher starts its own in-pod DHCP server on that NIC
+        # to hand the pod's CNI-assigned address to the guest - and the
+        # static plugin hands EVERY attaching pod the same address, so
+        # that rogue server offers the guest bootd's own
+        # 192.0.2.2 (observed live: a 169.254.75.10 server answered
+        # every DISCOVER before bootd with Your-IP 192.0.2.2, the
+        # firmware took it and PXE died with PXE-E16). With empty ipam
+        # virt-launcher runs no DHCP there, and the guest firmware does
+        # real DHCP on the wire against bootd + the relayed lease
+        # server, which is exactly what this lane must exercise.
         #
         # Chains the "tuning" CNI plugin onto the plain bridge attachment
         # to force net1's reverse-path filter loose (rp_filter=0) inside
@@ -976,6 +1033,29 @@ jobs:
                     "sysctl": {
                       "net.ipv4.conf.IFNAME.rp_filter": "0"
                     }
+                  }
+                ]
+              }
+          EOF
+          # No tuning chain here: the VM's traffic is bridged at L2
+          # straight through virt-launcher's pod into the guest, so the
+          # pod netns's IP-layer reverse-path filter never sees it.
+          cat <<EOF | kubectl apply -f -
+          apiVersion: k8s.cni.cncf.io/v1
+          kind: NetworkAttachmentDefinition
+          metadata:
+            name: kezio-boot-network-vm
+            namespace: kezio-system
+          spec:
+            config: |
+              {
+                "cniVersion": "0.3.1",
+                "name": "kezio-boot-network-vm",
+                "plugins": [
+                  {
+                    "type": "bridge",
+                    "bridge": "${PROVISIONING_BRIDGE}",
+                    "ipam": {}
                   }
                 ]
               }
@@ -1182,6 +1262,26 @@ jobs:
           fi
           echo "BOOTD_POD_NAME=${bootd_pod}" >> "$GITHUB_ENV"
 
+          # Pin the relay leg to the provisioning bridge. dnsmasq
+          # sources its relayed unicasts from the dhcp-relay LOCAL
+          # address (bootd's net1 192.0.2.2), but the pod's default
+          # route goes out eth0 (the CNI pod network), where a
+          # 192.0.2.2-sourced packet to the lease server is dropped as
+          # unroutable - host-dnsmasq never saw a single relayed
+          # message. A /32 route via the host's bridge address sends
+          # the relayed packet over the provisioning bridge instead:
+          # the host owns the bridge gateway address and forwards to
+          # the lease server's veth (rp_filter on the host is
+          # satisfied because the host routes 192.0.2.0/24 on that
+          # bridge), and replies to giaddr 192.0.2.2 return over the
+          # same path. This models a site's existing DHCP server
+          # reachable via the segment's L3 gateway. `ip route replace`
+          # for idempotency; exec inherits the bootd container's
+          # NET_ADMIN, and the image ships iproute2 for exactly this.
+          kubectl -n kezio-system exec "${bootd_pod}" -c bootd -- \
+            ip route replace "${RELAY_DHCP_SERVER_IP}/32" \
+            via "${PROVISIONING_HOST_IP%%/*}" dev net1
+
       - name: Start capturing bootd's pod network namespace (nsenter tcpdump on net1)
         # bridge.pcap (started above) only proves a frame crossed
         # kezio-prov0's ports on the HOST side - it cannot see whether
@@ -1381,7 +1481,7 @@ jobs:
                 networks:
                   - name: provisioning
                     multus:
-                      networkName: kezio-boot-network
+                      networkName: kezio-boot-network-vm
                 volumes:
                   - name: data
                     emptyDisk:
@@ -1436,7 +1536,7 @@ jobs:
                 networks:
                   - name: provisioning
                     multus:
-                      networkName: kezio-boot-network
+                      networkName: kezio-boot-network-vm
                 volumes:
                   - name: data
                     emptyDisk:
