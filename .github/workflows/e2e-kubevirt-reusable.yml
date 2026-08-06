@@ -1654,6 +1654,26 @@ jobs:
                     bootloader:
                       efi:
                         secureBoot: false
+                        # Real bare-metal firmware keeps its NVRAM across
+                        # power cycles, so the boot entry kezio-agent
+                        # writes with efibootmgr during finalize is still
+                        # there when the machine reboots into the
+                        # deployed disk. KubeVirt VMs get a fresh,
+                        # ephemeral EFI variable store on every boot
+                        # unless it is persisted, which threw away that
+                        # entry and left the rebooted firmware with
+                        # nothing but its PXE entry (observed as a PXE
+                        # loop ending in the UiApp setup screen).
+                        # persistent: true stores the variable store on
+                        # a small backend-storage PVC so the e2e models
+                        # real hardware. On KubeVirt v1.9.0 this needs
+                        # no feature gate (VMPersistentState is GA since
+                        # v1.6.0) and no vmStateStorageClass: the
+                        # backend PVC falls back to the cluster-default
+                        # StorageClass (local-path, RWO Filesystem -
+                        # exactly what it asks for when no
+                        # vmStateStorageClass is set).
+                        persistent: true
                   devices:
                     interfaces:
                       - name: provisioning
@@ -1709,6 +1729,12 @@ jobs:
                     bootloader:
                       efi:
                         secureBoot: false
+                        # Persist the EFI variable store for the same
+                        # reason as the non-bmc_mode VM above: real
+                        # bare-metal NVRAM survives power cycles, so the
+                        # efibootmgr boot entry kezio-agent writes at
+                        # finalize must survive the reboot into disk.
+                        persistent: true
                   devices:
                     interfaces:
                       - name: provisioning
