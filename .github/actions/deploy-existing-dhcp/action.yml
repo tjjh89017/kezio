@@ -166,6 +166,20 @@ runs:
               containers:
                 - name: existing-dhcp
                   image: ${IMAGE}
+                  # Bypass the image's default "webproc --config ... --
+                  # dnsmasq --no-daemon" entrypoint: webproc is a
+                  # config-editing web UI with no purpose on this
+                  # provisioning bridge, and it supervises dnsmasq -
+                  # when dnsmasq dies, webproc stays up and the
+                  # container (and pod) stay Ready, so a lane's DHCP
+                  # failure would present as "pod healthy, no lease"
+                  # instead of a restarting/crashed container. Running
+                  # dnsmasq directly makes it PID 1, so its exit status
+                  # is the container's exit status - the same
+                  # direct-child shape bootd runs its own dnsmasq
+                  # child under (see internal/bootd/dnsmasq.go).
+                  command: ["dnsmasq"]
+                  args: ["--no-daemon", "--conf-file=/etc/dnsmasq.conf", "--user=root"]
                   volumeMounts:
                     - name: conf
                       mountPath: /etc/dnsmasq.conf
