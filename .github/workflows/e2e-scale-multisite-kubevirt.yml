@@ -642,14 +642,34 @@ jobs:
           kubectl label --overwrite ns kezio-system pod-security.kubernetes.io/enforce=privileged
           kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
 
-      - name: Create the two boot NetworkAttachmentDefinitions
-        # Static ipam, not "ipam": {}: each site's bootd net1 must carry
-        # a fixed address (that site's BOOTD_NET1_IP) on that site's
-        # subnet - dnsmasq binds its DHCP sockets to net1 and
-        # BOOTD_SERVER_IP advertises it as the TFTP next-server. Each
-        # site's existing-dhcp pod (deployed separately below) keeps its
-        # own static address on the same bridge, so the two never
-        # collide.
+      - name: Create the boot NetworkAttachmentDefinitions
+        # Two NADs per site on that site's bridge, split on purpose (see
+        # e2e-kubevirt-reusable.yml's own step of this name for the same
+        # topology):
+        #
+        # kezio-boot-network-${site} (static ipam) is for that site's
+        # bootd pod ONLY. Each site's bootd net1 must carry a fixed
+        # address (that site's BOOTD_NET1_IP) on that site's subnet -
+        # dnsmasq binds its DHCP sockets to net1 and BOOTD_SERVER_IP
+        # advertises it as the TFTP next-server. Each site's
+        # existing-dhcp pod (deployed separately below) keeps its own
+        # static address on the same bridge, so the two never collide.
+        #
+        # kezio-boot-network-vm-${site} ("ipam": {}) is for that site's
+        # target VM's provisioning NIC. The VM must NOT attach the
+        # static-ipam NAD: when a KubeVirt bridge-mode interface's
+        # network carries IPAM, virt-launcher starts its own in-pod DHCP
+        # server on that NIC to hand the pod's CNI-assigned address to
+        # the guest - and the static plugin hands every attaching pod
+        # the same address, so that rogue server offers the guest
+        # bootd's own address before either bootd or the existing-dhcp
+        # pod ever gets a chance to answer on the wire (the same
+        # interference e2e-boot-path-kubevirt.yml observed live - see
+        # that workflow's own NAD step for the pcap evidence). With
+        # empty ipam virt-launcher runs no DHCP server on this NIC, and
+        # the guest firmware does real DHCP on the wire against that
+        # site's bootd + relayed lease server, which is exactly what
+        # this lane must exercise.
         run: |
           set -euo pipefail
           for site in site-a site-b; do
@@ -675,6 +695,21 @@ jobs:
                     {"address": "${bootd_net1_ip}"}
                   ]
                 }
+              }
+          EOF
+            cat <<EOF | kubectl apply -f -
+          apiVersion: k8s.cni.cncf.io/v1
+          kind: NetworkAttachmentDefinition
+          metadata:
+            name: kezio-boot-network-vm-${site}
+            namespace: kezio-system
+          spec:
+            config: |
+              {
+                "cniVersion": "0.3.1",
+                "type": "bridge",
+                "bridge": "${bridge}",
+                "ipam": {}
               }
           EOF
           done
@@ -1022,7 +1057,7 @@ jobs:
                 networks:
                   - name: provisioning
                     multus:
-                      networkName: kezio-boot-network-${site}
+                      networkName: kezio-boot-network-vm-${site}
                 volumes:
                   - name: data
                     emptyDisk:

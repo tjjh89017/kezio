@@ -487,7 +487,7 @@ jobs:
           kubectl label --overwrite ns kezio-system pod-security.kubernetes.io/enforce=privileged
           kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
 
-      - name: Create the provisioning NetworkAttachmentDefinition
+      - name: Create the provisioning NetworkAttachmentDefinitions
         # Namespaced under kezio-system, so this must run after "Deploy
         # CRDs and the controller-manager" above: that step's `make
         # deploy` is what creates the kezio-system namespace in the
@@ -500,12 +500,37 @@ jobs:
         # workflow failed with exactly that 404
         # ("namespaces \"kezio-system\" not found").
         #
-        # Static ipam, not "ipam": {}: bootd's net1 must carry a fixed
-        # address (PROVISIONING_BOOTD_NET1_IP) on the provisioning
-        # subnet - dnsmasq binds its DHCP sockets to net1 and
-        # BOOTD_SERVER_IP advertises it as the TFTP next-server. The
-        # existing-dhcp pod (deployed separately below) keeps its own
-        # static address on the same bridge, so the two never collide.
+        # Two NADs on the same bridge, split on purpose (see
+        # e2e-kubevirt-reusable.yml's own step of this name for the same
+        # topology):
+        #
+        # kezio-boot-network (static ipam) is for the bootd pod ONLY.
+        # bootd's net1 must carry a fixed address
+        # (PROVISIONING_BOOTD_NET1_IP) on the provisioning subnet -
+        # dnsmasq binds its DHCP sockets to net1 and BOOTD_SERVER_IP
+        # advertises it as the TFTP next-server. The existing-dhcp pod
+        # (deployed separately below) keeps its own static address on
+        # the same bridge, so the two never collide.
+        #
+        # kezio-boot-network-vm ("ipam": {}) is for the target VM's
+        # provisioning NIC. The VM must NOT attach the static-ipam NAD:
+        # when a KubeVirt bridge-mode interface's network carries IPAM,
+        # virt-launcher starts its own in-pod DHCP server on that NIC to
+        # hand the pod's CNI-assigned address to the guest - and the
+        # static plugin hands every attaching pod the same address, so
+        # that rogue server offers the guest bootd's own 192.0.2.2
+        # before either bootd or the existing-dhcp pod ever gets a
+        # chance to answer on the wire (observed live in run
+        # 31128609456: bridge-pcap.txt showed a PXEClient:Arch:00007
+        # DISCOVER answered from 169.254.75.10 - virt-launcher's own
+        # in-pod DHCP server, not bootd's 192.0.2.2 or existing-dhcp's
+        # 192.0.2.3 - while bootd itself only ever logged
+        # HTTPClient:Arch:00016 requests and the segment carried zero
+        # TFTP traffic: the firmware's PXE attempt never reached bootd
+        # at all). With empty ipam virt-launcher runs no DHCP server on
+        # this NIC, and the guest firmware does real DHCP on the wire
+        # against bootd + the relayed lease server, which is exactly
+        # what this lane must exercise.
         run: |
           cat <<EOF | kubectl apply -f -
           apiVersion: k8s.cni.cncf.io/v1
@@ -525,6 +550,21 @@ jobs:
                     {"address": "${PROVISIONING_BOOTD_NET1_IP}"}
                   ]
                 }
+              }
+          EOF
+          cat <<EOF | kubectl apply -f -
+          apiVersion: k8s.cni.cncf.io/v1
+          kind: NetworkAttachmentDefinition
+          metadata:
+            name: kezio-boot-network-vm
+            namespace: kezio-system
+          spec:
+            config: |
+              {
+                "cniVersion": "0.3.1",
+                "type": "bridge",
+                "bridge": "${PROVISIONING_BRIDGE}",
+                "ipam": {}
               }
           EOF
 
@@ -732,7 +772,7 @@ jobs:
                 networks:
                   - name: provisioning
                     multus:
-                      networkName: kezio-boot-network
+                      networkName: kezio-boot-network-vm
                 volumes:
                   - name: data
                     emptyDisk:
