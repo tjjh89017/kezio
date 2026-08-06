@@ -47,6 +47,24 @@ boot information. Leave it unset (the default) for proxyDHCP only:
 bootd never touches lease traffic, and the site must make its DHCP
 server reachable on the segment by other means.
 
+## Own DHCP server mode (optional, isolated segments)
+
+When the boot segment has no DHCP server at all - not even one
+reachable via relay - set `BOOTD_LEASE_MODE=true`: bootd's dnsmasq then
+becomes the segment's own DHCP lease authority, rendering a
+lease-serving `dhcp-range` instead of the proxyDHCP one. The lease
+range defaults to the provisioning subnet's first and last host
+addresses; set `BOOTD_LEASE_RANGE_START` and `BOOTD_LEASE_RANGE_END`
+together to override it. Mutually exclusive with
+`BOOTD_DHCP_RELAY_SERVER`.
+
+The MAC gate below is unchanged: only enrolled MACs receive a lease.
+This mode does not turn bootd into a general-purpose DHCP server for
+the segment - a device that is not an enrolled Machine still gets
+nothing, and a site that also needs to serve unenrolled devices runs
+its own DHCP server for them and reaches it via `BOOTD_DHCP_RELAY_SERVER`
+on a different bootd instance instead.
+
 ## Before applying
 
 1. **Set `BOOTD_SERVER_IP` and `BOOTD_PROVISIONING_CIDR`.**

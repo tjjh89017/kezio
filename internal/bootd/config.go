@@ -73,15 +73,41 @@ type Config struct {
 	// server (see tftp.go) serves shimx64.efi and grubx64.efi from.
 	TFTPDir string
 
-	// AnswerAll disables the MAC gate: the rendered pxe-service drops
-	// its tag:kezio guard and the dhcp-ignore line is omitted, so
-	// every PXE client on the segment is answered regardless of
-	// whether its MAC matches an enrolled Machine. This is off by
-	// default; turning it on trades the fail-secure default for
-	// answering unconditionally, appropriate only for a site that
-	// deliberately wants bootd to net-boot every unknown machine on
-	// the segment (for example, an inventory-only lab).
+	// AnswerAll disables the MAC gate: the rendered pxe-service (or, in
+	// LeaseMode, dhcp-boot) drops its tag:kezio guard and the
+	// dhcp-ignore line is omitted, so every PXE client on the segment
+	// is answered regardless of whether its MAC matches an enrolled
+	// Machine. This is off by default; turning it on trades the
+	// fail-secure default for answering unconditionally, appropriate
+	// only for a site that deliberately wants bootd to net-boot every
+	// unknown machine on the segment (for example, an inventory-only
+	// lab).
 	AnswerAll bool
+
+	// LeaseMode switches the rendered dnsmasq instance from proxyDHCP
+	// to serving full DHCP leases: the segment's own DHCP authority,
+	// for a provisioning segment that has no other DHCP server at all.
+	// Off by default, matching the assumption everywhere else in this
+	// package that lease assignment belongs to a site's existing DHCP
+	// server, reached either directly or via RelayServerIP.
+	//
+	// The MAC gate does not change: dhcp-hostsfile/dhcp-ignore still
+	// answer only enrolled MACs, exactly as in proxy mode. A site that
+	// also needs to hand out addresses to unenrolled devices on the
+	// same segment runs its own DHCP server for them and points bootd
+	// at it with RelayServerIP instead - kezio never becomes the
+	// segment's general-purpose DHCP authority. Mutually exclusive
+	// with RelayServerIP: relaying to an existing lease server makes
+	// no sense once bootd's own dnsmasq is the lease server.
+	LeaseMode bool
+
+	// LeaseRangeStart and LeaseRangeEnd optionally bound the dhcp-range
+	// LeaseMode renders. Leaving both empty (the default) auto-derives
+	// the range from ProvisioningNet: the subnet's first and last host
+	// addresses, e.g. 192.0.2.1-192.0.2.254 for 192.0.2.0/24. Setting
+	// only one of the two is an error. Ignored unless LeaseMode is set.
+	LeaseRangeStart net.IP
+	LeaseRangeEnd   net.IP
 }
 
 // withDefaults returns a copy of c with every zero-valued optional

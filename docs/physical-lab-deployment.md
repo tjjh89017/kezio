@@ -75,22 +75,49 @@ Setup:
 - Set `BOOTD_DHCP_RELAY_SERVER=<site DHCP server IP>`.
 - Confirm bootd's provisioning interface can route to that address.
 
-### Scenario 3: isolated segment - PLANNED, NOT YET AVAILABLE
+### Scenario 3: isolated segment (own DHCP server mode)
 
-A provisioning segment with no DHCP server of its own, and no route to
-one, needs bootd itself to hand out IP leases. **This mode does not
-exist in kezio today.** bootd's `Config` has no field, and `cmd/bootd`
-has no environment variable, that turns dnsmasq into a real DHCP lease
-server; every rendered `dhcp-range` line always carries the `proxy`
-flag (`internal/bootd/render.go`), which makes dnsmasq a proxyDHCP
-responder only, never a lease authority.
+Use this scenario when the provisioning segment has no DHCP server of
+its own, and no route to one - bootd itself must hand out IP leases.
 
-Do not deploy `config/bootd` against a segment with no DHCP server
-reachable by scenario 1 or scenario 2 above - it will not net boot
-anything, because no IP lease will ever be handed out. Isolated-segment
-support is planned separate work. Until it ships, an isolated segment
-needs a temporary DHCP server of the operator's own (making the segment
-scenario 1 in practice) as the only working option.
+Set `BOOTD_LEASE_MODE=true`. bootd's dnsmasq then renders a
+lease-serving `dhcp-range` (start/end host addresses, no `proxy` flag)
+instead of the proxyDHCP range, and becomes the segment's own DHCP
+authority (`internal/bootd/config.go`'s `LeaseMode` field;
+`internal/bootd/render.go`). The lease range defaults to the
+provisioning subnet's first and last host addresses; set
+`BOOTD_LEASE_RANGE_START` and `BOOTD_LEASE_RANGE_END` together to
+override it.
+
+The MAC gate does **not** relax in this mode: only enrolled MACs
+receive a lease, the same `dhcp-hostsfile`/`dhcp-ignore` pair scenario
+1 and 2 use. A device that is not an enrolled Machine gets nothing at
+all, even in an otherwise DHCP-server-less segment - it is out of
+scope for bootd to serve it, and this mode does not turn bootd into
+the segment's general-purpose DHCP server. An operator who also needs
+to hand out addresses to unenrolled devices on the same segment must
+run a separate DHCP server for them and use scenario 2 (relay) toward
+it instead; `BOOTD_LEASE_MODE` and `BOOTD_DHCP_RELAY_SERVER` are
+mutually exclusive.
+
+PXE delivery differs from proxy mode's `pxe-service`, which does not
+work once dnsmasq is not a proxy (it breaks UEFI secure netboot):
+lease mode hands out the boot file via `dhcp-boot`, matched to the
+client's architecture through `dhcp-match` on DHCP option 93 (the same
+signal a future non-x86-64 architecture would extend with one more
+match line).
+
+Setup:
+
+- Set `BOOTD_LEASE_MODE=true`.
+- Leave `BOOTD_LEASE_RANGE_START`/`BOOTD_LEASE_RANGE_END` unset to
+  auto-derive the range, or set both to an explicit sub-range.
+- Do not set `BOOTD_DHCP_RELAY_SERVER` alongside it.
+
+This mode is exercised by the same in-repo packet lab as scenario 1
+(`internal/bootd/lab_test.go`'s `TestDnsmasqLab`, with
+`BOOTD_LAB_LEASE_MODE=1`), and is not covered by a KubeVirt e2e lane -
+see section 8 for what those lanes cover instead.
 
 ## 2. Network prerequisites the operator owns
 
@@ -470,7 +497,7 @@ verify the result.
 | bootd never assigns IP leases; every `dhcp-range` carries `proxy` | `internal/bootd/render.go` |
 | `BOOTD_DHCP_RELAY_SERVER` enables `dhcp-relay`; empty means proxyDHCP only | `internal/bootd/config.go` (`RelayServerIP`), `cmd/bootd/main.go` (`bootdConfigFromEnv`) |
 | Relay is independent of the MAC gate | `internal/bootd/render.go`'s doc comment |
-| No bootd config field implements a self-serving lease/isolated-segment mode | `internal/bootd/config.go`, `internal/bootd/render.go` (no such field or rendered line) |
+| `BOOTD_LEASE_MODE` renders a lease-serving `dhcp-range` and `dhcp-boot`/`dhcp-match` instead of `pxe-service`; the MAC gate is unchanged | `internal/bootd/config.go` (`LeaseMode`), `internal/bootd/render.go`, `internal/bootd/render_test.go` |
 | One bootd replica per segment | `config/bootd/deployment.yaml` (`replicas: 1`) |
 | bootd needs a Multus attachment, not `hostNetwork` | `config/bootd/networkattachmentdefinition.example.yaml` |
 | Namespace needs `pod-security.kubernetes.io/enforce=privileged` | `config/bootd/README.md`, `config/bootd/deployment.yaml` |

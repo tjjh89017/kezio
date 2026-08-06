@@ -46,6 +46,11 @@ import (
 //     provisioning interface/address/subnet inside the lab namespace.
 //   - BOOTD_LAB_RELAY: optional relay target (BOOTD_DHCP_RELAY_SERVER
 //     equivalent).
+//   - BOOTD_LAB_LEASE_MODE=1: enables Config.LeaseMode (mutually
+//     exclusive with BOOTD_LAB_RELAY, same as production).
+//   - BOOTD_LAB_LEASE_RANGE_START, BOOTD_LAB_LEASE_RANGE_END: optional
+//     explicit lease range bounds; both unset auto-derives from
+//     BOOTD_LAB_CIDR.
 //   - BOOTD_LAB_RUN_DIR: writable run directory.
 //   - BOOTD_DNSMASQ_PATH: dnsmasq binary path.
 //   - BOOTD_LAB_CTRL: path of a FIFO carrying one command per line:
@@ -90,6 +95,19 @@ func TestDnsmasqLab(t *testing.T) {
 		cfg.RelayServerIP = net.ParseIP(s)
 		if cfg.RelayServerIP == nil {
 			t.Fatalf("BOOTD_LAB_RELAY %q is not an IP address", s)
+		}
+	}
+	cfg.LeaseMode = os.Getenv("BOOTD_LAB_LEASE_MODE") == "1"
+	if s := os.Getenv("BOOTD_LAB_LEASE_RANGE_START"); s != "" {
+		cfg.LeaseRangeStart = net.ParseIP(s)
+		if cfg.LeaseRangeStart == nil {
+			t.Fatalf("BOOTD_LAB_LEASE_RANGE_START %q is not an IP address", s)
+		}
+	}
+	if s := os.Getenv("BOOTD_LAB_LEASE_RANGE_END"); s != "" {
+		cfg.LeaseRangeEnd = net.ParseIP(s)
+		if cfg.LeaseRangeEnd == nil {
+			t.Fatalf("BOOTD_LAB_LEASE_RANGE_END %q is not an IP address", s)
 		}
 	}
 

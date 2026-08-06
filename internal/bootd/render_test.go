@@ -139,6 +139,103 @@ func TestRenderDnsmasqConf_RangeUsesNetworkAddress(t *testing.T) {
 	}
 }
 
+func TestRenderDnsmasqConf_LeaseModeAutoDerivesRange(t *testing.T) {
+	cfg := testConfig()
+	cfg.LeaseMode = true
+	conf, err := RenderDnsmasqConf(cfg, "/run/bootd")
+	if err != nil {
+		t.Fatalf("RenderDnsmasqConf: %v", err)
+	}
+
+	for _, want := range []string{
+		"dhcp-range=192.0.2.1,192.0.2.254\n",
+		"dhcp-boot=shimx64.efi,,192.0.2.2\n",
+		"dhcp-match=set:efi-x86_64,option:client-arch,7\n",
+		"dhcp-boot=tag:efi-x86_64,shimx64.efi,,192.0.2.2\n",
+		"dhcp-ignore=tag:!kezio\n",
+	} {
+		if !strings.Contains(conf, want) {
+			t.Errorf("lease-mode config missing %q:\n%s", want, conf)
+		}
+	}
+	if strings.Contains(conf, "dhcp-range=192.0.2.0,proxy") {
+		t.Errorf("lease-mode config still renders a proxy dhcp-range:\n%s", conf)
+	}
+	if strings.Contains(conf, "pxe-service=") {
+		t.Errorf("lease-mode config still renders pxe-service, which does not work outside proxy mode:\n%s", conf)
+	}
+}
+
+func TestRenderDnsmasqConf_LeaseModeExplicitRange(t *testing.T) {
+	cfg := testConfig()
+	cfg.LeaseMode = true
+	cfg.LeaseRangeStart = net.ParseIP("192.0.2.50")
+	cfg.LeaseRangeEnd = net.ParseIP("192.0.2.60")
+	conf, err := RenderDnsmasqConf(cfg, "/run/bootd")
+	if err != nil {
+		t.Fatalf("RenderDnsmasqConf: %v", err)
+	}
+	if !strings.Contains(conf, "dhcp-range=192.0.2.50,192.0.2.60\n") {
+		t.Errorf("lease-mode config does not honor the explicit range:\n%s", conf)
+	}
+}
+
+// TestRenderDnsmasqConf_LeaseModeMACGateUnchanged pins the user
+// decision that lease mode is one knob, not two: the same
+// dhcp-hostsfile/dhcp-ignore pair gates lease mode exactly as it gates
+// proxy mode, and AnswerAll drops it the same way in both.
+func TestRenderDnsmasqConf_LeaseModeMACGateUnchanged(t *testing.T) {
+	cfg := testConfig()
+	cfg.LeaseMode = true
+	conf, err := RenderDnsmasqConf(cfg, "/run/bootd")
+	if err != nil {
+		t.Fatalf("RenderDnsmasqConf: %v", err)
+	}
+	if !strings.Contains(conf, "dhcp-hostsfile=/run/bootd/dhcp-hosts.conf\n") {
+		t.Errorf("lease-mode config drops the dhcp-hostsfile MAC gate:\n%s", conf)
+	}
+	if !strings.Contains(conf, "dhcp-ignore=tag:!kezio\n") {
+		t.Errorf("lease-mode config drops dhcp-ignore:\n%s", conf)
+	}
+
+	cfg.AnswerAll = true
+	conf, err = RenderDnsmasqConf(cfg, "/run/bootd")
+	if err != nil {
+		t.Fatalf("RenderDnsmasqConf: %v", err)
+	}
+	if strings.Contains(conf, "dhcp-ignore=") {
+		t.Errorf("lease-mode AnswerAll config still carries dhcp-ignore:\n%s", conf)
+	}
+}
+
+func TestRenderDnsmasqConf_LeaseModeRejectsRelay(t *testing.T) {
+	cfg := testConfig()
+	cfg.LeaseMode = true
+	cfg.RelayServerIP = net.ParseIP("10.0.0.1")
+	if _, err := RenderDnsmasqConf(cfg, "/run/bootd"); err == nil {
+		t.Error("RenderDnsmasqConf accepted LeaseMode together with RelayServerIP")
+	}
+}
+
+func TestRenderDnsmasqConf_LeaseModeRejectsOneSidedRange(t *testing.T) {
+	cfg := testConfig()
+	cfg.LeaseMode = true
+	cfg.LeaseRangeStart = net.ParseIP("192.0.2.50")
+	if _, err := RenderDnsmasqConf(cfg, "/run/bootd"); err == nil {
+		t.Error("RenderDnsmasqConf accepted a LeaseRangeStart with no LeaseRangeEnd")
+	}
+}
+
+func TestRenderDnsmasqConf_LeaseModeRejectsTooSmallSubnet(t *testing.T) {
+	cfg := testConfig()
+	cfg.LeaseMode = true
+	_, ipNet, _ := net.ParseCIDR("192.0.2.0/31")
+	cfg.ProvisioningNet = ipNet
+	if _, err := RenderDnsmasqConf(cfg, "/run/bootd"); err == nil {
+		t.Error("RenderDnsmasqConf accepted auto-derivation on a /31 with no usable host addresses")
+	}
+}
+
 func TestRenderDnsmasqConf_Validation(t *testing.T) {
 	tests := []struct {
 		name   string

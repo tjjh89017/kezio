@@ -143,7 +143,8 @@ func main() {
 		"answerAll", cfg.Server.AnswerAll,
 		"tftpDir", cfg.TFTPDir,
 		"provisioningNet", cfg.Server.ProvisioningNet.String(),
-		"relay", cfg.Server.RelayServerIP)
+		"relay", cfg.Server.RelayServerIP,
+		"leaseMode", cfg.Server.LeaseMode)
 	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running bootd")
 		os.Exit(1)
@@ -193,7 +194,19 @@ type bootdConfig struct {
 //     every DHCP request on the segment to it (dhcp-relay), so a
 //     provisioning segment without its own DHCP server still gets
 //     leases. Unset (the default): proxyDHCP only, bootd never touches
-//     lease traffic.
+//     lease traffic. Mutually exclusive with BOOTD_LEASE_MODE.
+//   - BOOTD_LEASE_MODE: set to "true" to make bootd's dnsmasq the
+//     segment's own DHCP lease server instead of a proxyDHCP front,
+//     for a provisioning segment with no DHCP server of its own. The
+//     MAC gate is unchanged: only enrolled MACs receive a lease, the
+//     same as they receive PXE info in proxy mode - see
+//     internal/bootd.Config.LeaseMode. Defaults to "false". Mutually
+//     exclusive with BOOTD_DHCP_RELAY_SERVER.
+//   - BOOTD_LEASE_RANGE_START, BOOTD_LEASE_RANGE_END: optional IPv4
+//     bounds for the BOOTD_LEASE_MODE dhcp-range. Both unset (the
+//     default) auto-derives the range from BOOTD_PROVISIONING_CIDR's
+//     first and last host addresses. Setting only one is an error.
+//     Ignored unless BOOTD_LEASE_MODE is set.
 //   - BOOTD_NEXT_SERVER_IP: overrides the PXE boot-server address
 //     handed to clients, when the TFTP service is reachable at a
 //     different address than BOOTD_SERVER_IP. Optional, defaults to
@@ -314,6 +327,27 @@ func bootdConfigFromEnv() (bootdConfig, error) {
 		}
 	}
 
+	leaseMode := os.Getenv("BOOTD_LEASE_MODE") == "true"
+	if leaseMode && relayServerIP != nil {
+		return bootdConfig{}, fmt.Errorf("BOOTD_LEASE_MODE and BOOTD_DHCP_RELAY_SERVER are mutually exclusive")
+	}
+	var leaseRangeStart, leaseRangeEnd net.IP
+	startStr, endStr := os.Getenv("BOOTD_LEASE_RANGE_START"), os.Getenv("BOOTD_LEASE_RANGE_END")
+	if (startStr == "") != (endStr == "") {
+		return bootdConfig{}, fmt.Errorf(
+			"BOOTD_LEASE_RANGE_START and BOOTD_LEASE_RANGE_END must both be set, or both left unset")
+	}
+	if startStr != "" {
+		leaseRangeStart = net.ParseIP(startStr)
+		if leaseRangeStart == nil || leaseRangeStart.To4() == nil {
+			return bootdConfig{}, fmt.Errorf("BOOTD_LEASE_RANGE_START %q is not a valid IPv4 address", startStr)
+		}
+		leaseRangeEnd = net.ParseIP(endStr)
+		if leaseRangeEnd == nil || leaseRangeEnd.To4() == nil {
+			return bootdConfig{}, fmt.Errorf("BOOTD_LEASE_RANGE_END %q is not a valid IPv4 address", endStr)
+		}
+	}
+
 	proxyCfg := bootd.ProxyConfig{
 		Addr:             os.Getenv("BOOTD_PROXY_ADDR"),
 		AgentUpstreamURL: os.Getenv("BOOTD_AGENT_UPSTREAM_URL"),
@@ -333,6 +367,9 @@ func bootdConfigFromEnv() (bootdConfig, error) {
 			RelayServerIP:   relayServerIP,
 			TFTPDir:         tftpDir,
 			AnswerAll:       os.Getenv("BOOTD_ANSWER_ALL") == "true",
+			LeaseMode:       leaseMode,
+			LeaseRangeStart: leaseRangeStart,
+			LeaseRangeEnd:   leaseRangeEnd,
 		},
 		TFTPDir:     tftpDir,
 		TFTPAddr:    os.Getenv("BOOTD_TFTP_ADDR"),

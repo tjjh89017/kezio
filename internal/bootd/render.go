@@ -17,6 +17,7 @@ limitations under the License.
 package bootd
 
 import (
+	"encoding/binary"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -52,11 +53,22 @@ func HostsfilePath(runDir string) string {
 // runDir. It is a pure function: no file is touched and no process
 // consulted, so every rendered line is unit-testable.
 //
-// The rendered instance is a proxyDHCP server (dhcp-range ...,proxy):
-// it never assigns addresses, it only answers the PXE portion of the
-// exchange on ports 67 and 4011. Lease assignment stays with the
-// site's own DHCP server, optionally reached via dhcp-relay (see
-// Config.RelayServerIP).
+// The rendered instance is a proxyDHCP server by default (dhcp-range
+// ...,proxy): it never assigns addresses, it only answers the PXE
+// portion of the exchange on ports 67 and 4011. Lease assignment
+// stays with the site's own DHCP server, optionally reached via
+// dhcp-relay (see Config.RelayServerIP).
+//
+// Config.LeaseMode switches to a full lease-serving dhcp-range
+// instead, for a segment with no DHCP server of its own. Proxy mode's
+// pxe-service does not work once dnsmasq stops being a proxy - it
+// fails to support UEFI secure netboot outside proxyDHCP - so lease
+// mode hands out the boot file through dhcp-boot instead, gated by
+// the client architecture dnsmasq reads from DHCP option 93
+// (dhcp-match=...,option:client-arch,N). Everything else (port=0,
+// bind-interfaces/interface, log-dhcp, dhcp-no-override, leasefile,
+// hostsfile, and the MAC gate below) is unchanged between the two
+// modes.
 //
 // The MAC gate works through dnsmasq tags: dhcp-hostsfile sets
 // tag:kezio on enrolled MACs, pxe-service only matches tag:kezio, and
@@ -100,10 +112,23 @@ func RenderDnsmasqConf(cfg Config, runDir string) (string, error) {
 	if len(mask) != net.IPv4len {
 		return "", fmt.Errorf("ProvisioningNet %v does not carry an IPv4 netmask", cfg.ProvisioningNet)
 	}
+	if cfg.LeaseMode && cfg.RelayServerIP != nil {
+		return "", fmt.Errorf("LeaseMode and RelayServerIP are mutually exclusive: " +
+			"bootd cannot both serve leases itself and relay to another lease server")
+	}
 
 	nextServer := cfg.NextServerIP.To4()
 	if nextServer == nil {
 		nextServer = serverIP
+	}
+
+	var leaseStart, leaseEnd net.IP
+	if cfg.LeaseMode {
+		var err error
+		leaseStart, leaseEnd, err = leaseRange(cfg, network, mask)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	var b strings.Builder
@@ -123,15 +148,37 @@ func RenderDnsmasqConf(cfg Config, runDir string) (string, error) {
 		fmt.Fprintf(&b, "interface=%s\n", cfg.Interface)
 	}
 	fmt.Fprintf(&b, "dhcp-leasefile=%s\n", filepath.Join(runDir, leasefileName))
-	fmt.Fprintf(&b, "dhcp-range=%s,proxy,%s\n", network, mask)
+	if cfg.LeaseMode {
+		fmt.Fprintf(&b, "dhcp-range=%s,%s\n", leaseStart, leaseEnd)
+	} else {
+		fmt.Fprintf(&b, "dhcp-range=%s,proxy,%s\n", network, mask)
+	}
 	fmt.Fprintf(&b, "dhcp-hostsfile=%s\n", HostsfilePath(runDir))
-	if cfg.AnswerAll {
-		// No tag guard and no dhcp-ignore: every PXE client is
-		// answered - see Config.AnswerAll for when that trade is
-		// acceptable.
+	if cfg.LeaseMode {
+		// pxe-service is a proxyDHCP-only mechanism; outside proxy
+		// mode it fails to support UEFI secure netboot. dhcp-boot is
+		// the non-proxy equivalent: a plain default (used until a
+		// dhcp-match tags the request) followed by an
+		// architecture-tagged override. kezio serves only x86-64 EFI
+		// today, so both lines carry the same file - the default line
+		// exists so a second architecture (aarch64, client-arch 11)
+		// is one more dhcp-match/dhcp-boot pair, not a restructure.
+		fmt.Fprintf(&b, "dhcp-boot=%s,,%s\n", cfg.BootFilename, nextServer)
+		fmt.Fprintf(&b, "dhcp-match=set:efi-x86_64,option:client-arch,7\n")
+		fmt.Fprintf(&b, "dhcp-boot=tag:efi-x86_64,%s,,%s\n", cfg.BootFilename, nextServer)
+	} else if cfg.AnswerAll {
+		// No tag guard: every PXE client is answered - see
+		// Config.AnswerAll for when that trade is acceptable.
 		fmt.Fprintf(&b, "pxe-service=x86-64_EFI,\"kezio network boot\",%s,%s\n", cfg.BootFilename, nextServer)
 	} else {
 		fmt.Fprintf(&b, "pxe-service=tag:%s,x86-64_EFI,\"kezio network boot\",%s,%s\n", kezioTag, cfg.BootFilename, nextServer)
+	}
+	if !cfg.AnswerAll {
+		// dhcp-ignore is the actual MAC gate in both modes: it drops
+		// the request outright for anything but an enrolled MAC,
+		// independent of how the boot file itself gets selected above
+		// - see Config.LeaseMode and this function's package doc
+		// comment for why lease mode does not relax it.
 		fmt.Fprintf(&b, "dhcp-ignore=tag:!%s\n", kezioTag)
 	}
 	if cfg.RelayServerIP != nil {
@@ -146,6 +193,55 @@ func RenderDnsmasqConf(cfg Config, runDir string) (string, error) {
 	// options 67/66 - the header fields are what PXE firmware reads.
 	b.WriteString("dhcp-no-override\n")
 	return b.String(), nil
+}
+
+// leaseRange resolves the dhcp-range bounds LeaseMode renders: the
+// explicit Config.LeaseRangeStart/End if both are set, otherwise the
+// network's first and last host addresses (network+1 through
+// broadcast-1 - the same HostMin/HostMax an IP calculator would report
+// for the subnet). network and mask are the already-validated,
+// already-masked values RenderDnsmasqConf computed from
+// cfg.ProvisioningNet.
+func leaseRange(cfg Config, network, mask net.IP) (start, end net.IP, err error) {
+	startSet, endSet := cfg.LeaseRangeStart != nil, cfg.LeaseRangeEnd != nil
+	if startSet != endSet {
+		return nil, nil, fmt.Errorf("LeaseRangeStart and LeaseRangeEnd must both be set, or both left empty for auto-derivation")
+	}
+	if startSet {
+		start, end = cfg.LeaseRangeStart.To4(), cfg.LeaseRangeEnd.To4()
+		if start == nil {
+			return nil, nil, fmt.Errorf("LeaseRangeStart %v is not a valid IPv4 address", cfg.LeaseRangeStart)
+		}
+		if end == nil {
+			return nil, nil, fmt.Errorf("LeaseRangeEnd %v is not a valid IPv4 address", cfg.LeaseRangeEnd)
+		}
+		return start, end, nil
+	}
+
+	n := binary.BigEndian.Uint32(network.To4())
+	m := binary.BigEndian.Uint32(mask.To4())
+	usableHosts := ^m - 1 // network and broadcast addresses excluded
+	if usableHosts < 1 {
+		return nil, nil, fmt.Errorf("ProvisioningNet %s/%d has no usable host addresses for an auto-derived lease range; set LeaseRangeStart/LeaseRangeEnd explicitly", network, prefixLen(mask))
+	}
+	start = intToIPv4(n + 1)
+	end = intToIPv4((n | ^m) - 1)
+	return start, end, nil
+}
+
+// intToIPv4 renders a big-endian uint32 host address as a 4-byte
+// net.IP.
+func intToIPv4(v uint32) net.IP {
+	ip := make(net.IP, net.IPv4len)
+	binary.BigEndian.PutUint32(ip, v)
+	return ip
+}
+
+// prefixLen reports the prefix length of an already-validated IPv4
+// netmask, for the auto-derivation error message only.
+func prefixLen(mask net.IP) int {
+	ones, _ := net.IPMask(mask.To4()).Size()
+	return ones
 }
 
 // RenderGrubConfig renders the GRUB bootstrap config TFTPServer serves

@@ -30,12 +30,15 @@ limitations under the License.
 //   - Config rendering (RenderDnsmasqConf): one proxyDHCP dhcp-range
 //     for the provisioning subnet, a tag-gated pxe-service handing out
 //     shimx64.efi, and dhcp-ignore so unknown MACs get nothing at all.
-//     bootd is deliberately not a DHCP (lease) server: the site's
+//     By default bootd is not a DHCP (lease) server: the site's
 //     production DHCP server keeps sole ownership of IP assignment.
 //     When Config.RelayServerIP is set, the same dnsmasq instance also
 //     relays lease traffic to that server (dhcp-relay) - useful when
 //     the provisioning segment has no DHCP server of its own; unset,
-//     bootd never touches lease traffic.
+//     bootd never touches lease traffic. Config.LeaseMode is the third
+//     option, for a segment that has no DHCP server at all and cannot
+//     get one added: bootd's dnsmasq becomes the segment's own lease
+//     server, still MAC-gated exactly as in proxy mode.
 //   - The MAC gate (MACCache): a controller-runtime informer over
 //     Machine objects maintains the set of enrolled boot MACs and
 //     pushes every change into the dnsmasq dhcp-hostsfile
