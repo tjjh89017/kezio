@@ -27,6 +27,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -35,6 +36,12 @@ import (
 	"github.com/tjjh89017/kezio/internal/agent"
 	"github.com/tjjh89017/kezio/internal/agent/deploy"
 )
+
+// consolePath is where deploy.Executor.Console's belt-and-braces boot
+// summary echo is written - see that field's doc comment for why. This
+// is the live boot environment's serial console device, the same one
+// every e2e diagnostics dump's console capture reads from.
+const consolePath = "/dev/console"
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -46,14 +53,31 @@ func main() {
 	}
 	log.Printf("kezio-agent: booted; kezio.server=%s kezio.token=%s", cmdline.Server, redactToken(cmdline.Token))
 
+	// console stays a nil io.Writer (not a typed-nil *os.File) when the
+	// open fails, so deploy.Executor.Console's own nil check - not an
+	// interface holding a nil, non-functional *os.File - is what decides
+	// whether the echo is attempted. A failure to open it is logged and
+	// otherwise ignored: the terminal progress report remains the
+	// primary channel (see deploy.Executor.Console's doc comment), so a
+	// live environment without a usable console device must not fail
+	// the agent over it.
+	var console io.Writer
+	if f, err := os.OpenFile(consolePath, os.O_WRONLY, 0); err != nil {
+		log.Printf("kezio-agent: opening %s for the finalize boot summary echo failed "+
+			"(continuing without it): %v", consolePath, err)
+	} else {
+		console = f
+	}
+
 	err = agent.Run(ctx, agent.Config{
 		Cmdline:       cmdline,
 		InventoryRoot: "/",
 		Logf:          log.Printf,
 		Executor: &deploy.Executor{
-			Runner: execRunner{},
-			Ezio:   ezioLauncher{},
-			Logf:   log.Printf,
+			Runner:  execRunner{},
+			Ezio:    ezioLauncher{},
+			Logf:    log.Printf,
+			Console: console,
 		},
 	})
 	if err != nil && ctx.Err() == nil {

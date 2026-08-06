@@ -17,6 +17,7 @@ limitations under the License.
 package deploy
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -715,6 +716,50 @@ func TestExecute_TerminalReportCarriesFinalizeBootSummary(t *testing.T) {
 	}
 	if !strings.Contains(last.StepMessage, "BootOrder: 0002,0001,0000") {
 		t.Fatalf("StepMessage = %q, want it to carry the post-finalize efibootmgr listing", last.StepMessage)
+	}
+}
+
+// TestExecute_TerminalReportAlsoEchoesBootSummaryToConsole exercises
+// Executor.Console: the same finalize boot summary the terminal
+// progress report's StepMessage carries must also reach a non-nil
+// Console, since that is the channel meant to survive the report itself
+// getting lost to a network or controller-side race (see Console's
+// field doc comment).
+func TestExecute_TerminalReportAlsoEchoesBootSummaryToConsole(t *testing.T) {
+	runner := newFakeRunner()
+	runner.outputs["efibootmgr "] = []byte(
+		"BootCurrent: 0001\n" +
+			"BootOrder: 0002,0001,0000\n" +
+			"Boot0001* kezio:node-01\n",
+	)
+	progress := &fakeProgressReporter{}
+	var console bytes.Buffer
+
+	e := &Executor{Runner: runner, Ezio: &fakeLauncher{}, Progress: progress, Console: &console}
+	if err := e.Execute(context.Background(), espOnlyPlan(keziov1alpha1.AfterDeployReboot, false)); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	if !strings.Contains(console.String(), "removable fallback already present") {
+		t.Fatalf("console output = %q, want it to mention the removable fallback outcome", console.String())
+	}
+	if !strings.Contains(console.String(), "BootOrder: 0002,0001,0000") {
+		t.Fatalf("console output = %q, want it to carry the post-finalize efibootmgr listing", console.String())
+	}
+}
+
+// TestExecute_NilConsoleIsSafe exercises the default (Console left nil,
+// as every other test in this file does): Execute must run to
+// completion exactly as it did before Console existed, never
+// dereferencing it.
+func TestExecute_NilConsoleIsSafe(t *testing.T) {
+	runner := newFakeRunner()
+	runner.outputs["efibootmgr "] = []byte("BootCurrent: 0001\n")
+	progress := &fakeProgressReporter{}
+
+	e := &Executor{Runner: runner, Ezio: &fakeLauncher{}, Progress: progress}
+	if err := e.Execute(context.Background(), espOnlyPlan(keziov1alpha1.AfterDeployReboot, false)); err != nil {
+		t.Fatalf("Execute: %v", err)
 	}
 }
 

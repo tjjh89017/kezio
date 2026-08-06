@@ -69,6 +69,7 @@ package deploy
 import (
 	"context"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -140,6 +141,23 @@ type Executor struct {
 	// Logf receives progress and diagnostic messages in fmt.Printf
 	// style. Nil discards them.
 	Logf func(format string, args ...any)
+	// Console, when non-nil, additionally receives finalize's boot
+	// summary (see finalize's own doc comment) written directly, once,
+	// right after the terminal progress report. That report's
+	// StepMessage is the primary channel for this information; this
+	// exists alongside it as a belt-and-braces echo, because the report
+	// travels over a network request and a Kubernetes API write, either
+	// of which can silently lose the information (a dropped request, a
+	// conflict retry that never lands before the reboot below) with no
+	// second attempt - Execute treats a failed report as logged-and-
+	// ignored, never worth failing an otherwise-complete deploy over
+	// (see report's doc comment). A write to /dev/console (production
+	// wiring: cmd/agent) needs neither the network nor the controller:
+	// it lands in the same serial capture every diagnostics dump already
+	// collects, synchronously, before Execute reboots the machine. Nil
+	// (the default in every test that does not exercise this) means the
+	// echo is skipped entirely - the original StepMessage-only behavior.
+	Console io.Writer
 	// PollInterval is how often the seeding loop polls
 	// GetTorrentStatus. Zero means DefaultPollInterval.
 	PollInterval time.Duration
@@ -293,6 +311,7 @@ func (e *Executor) Execute(ctx context.Context, plan *agentapi.DeployPlan) (err 
 	progress.setStep(agentapi.DeployStepRebootingToDisk)
 	progress.setStepMessage(bootSummary)
 	e.report(ctx, progress)
+	e.writeConsole(bootSummary)
 
 	if err := e.rebootOrPowerOff(ctx, plan.AfterDeploy); err != nil {
 		return fmt.Errorf("after deploy action: %w", err)
@@ -509,6 +528,21 @@ func (e *Executor) report(ctx context.Context, progress *progressTracker) {
 	}
 	if err := e.Progress.ReportProgress(ctx, progress.snapshot()); err != nil {
 		e.log("reporting progress failed: %v", err)
+	}
+}
+
+// writeConsole best-effort echoes msg to e.Console - see that field's
+// doc comment for why this exists alongside the terminal progress
+// report rather than instead of it. A nil Console (every test that does
+// not set one, and any production build that failed to open
+// /dev/console) makes this a no-op; a write error is logged, not
+// propagated, the same as report's ReportProgress error.
+func (e *Executor) writeConsole(msg string) {
+	if e.Console == nil {
+		return
+	}
+	if _, err := fmt.Fprintf(e.Console, "kezio-agent: finalize boot summary: %s\n", msg); err != nil {
+		e.log("writing boot summary to console failed: %v", err)
 	}
 }
 
