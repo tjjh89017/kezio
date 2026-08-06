@@ -273,99 +273,18 @@ jobs:
       - name: Customize the Ubuntu cloud image with a marker file and qemu-guest-agent
         # One Image, ingested once, deployed to both sites concurrently -
         # see the header comment's "pre-warm" section for why the
-        # central seeder needs no separate warm-up. Same technique
-        # e2e-kubevirt-reusable.yml uses - libguestfs (virt-customize),
-        # forced onto /dev/kvm via LIBGUESTFS_BACKEND=direct, offline
-        # (--no-network) with qemu-guest-agent and its full runtime
-        # dependency closure copied in and installed via `dpkg -i`; see
-        # that workflow's own step of this name for the full reasoning,
-        # including why appliance networking (`--network` +
-        # `--install`) was abandoned after failing three different ways
-        # on this runner (passt's AppArmor profile denying its PID-file
-        # write, then the appliance's own dhcpcd never completing a
-        # lease/DNS at all) and why an earlier qemu-nbd-mount revision
-        # of this step was also dropped.
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libguestfs-tools
-
-          cp "${{ runner.temp }}/ubuntu-cloud.img" "${{ runner.temp }}/ubuntu-cloud-marked.img"
-
-          MARKER_TOKEN="$(openssl rand -hex 16)"
-          echo "MARKER_TOKEN=${MARKER_TOKEN}" >> "$GITHUB_ENV"
-
-          echo "::group::Resolving qemu-guest-agent's runtime dependency closure"
-          mapfile -t qga_closure < <(
-            apt-get install --simulate -o Dir::State::status=/dev/null \
-              --no-install-recommends qemu-guest-agent \
-              | awk '/^Inst /{n=$2; sub(/:.*$/, "", n); print n}' \
-              | sort -u
-          )
-          if [ "${#qga_closure[@]}" -eq 0 ]; then
-            echo "::error::apt could not resolve qemu-guest-agent's dependency closure" >&2
-            exit 1
-          fi
-          echo "full closure (${#qga_closure[@]} packages): ${qga_closure[*]}"
-
-          manifest_file="$(mktemp)"
-          curl -sfL -o "${manifest_file}" "${UBUNTU_CLOUD_IMAGE_URL%.img}.manifest"
-
-          mapfile -t qga_missing < <(
-            comm -23 \
-              <(printf '%s\n' "${qga_closure[@]}" | sort -u) \
-              <(awk -F'\t' '{n=$1; sub(/:.*$/, "", n); print n}' "${manifest_file}" | sort -u)
-          )
-          if ! printf '%s\n' "${qga_missing[@]:-}" | grep -qxF qemu-guest-agent; then
-            qga_missing+=("qemu-guest-agent")
-          fi
-          echo "missing from the image manifest, to be downloaded and injected (${#qga_missing[@]} packages): ${qga_missing[*]}"
-          echo "::endgroup::"
-
-          qga_deb_dir="${RUNNER_TEMP}/qga-debs"
-          mkdir -p "${qga_deb_dir}"
-          echo "::group::Downloading resolved+injected packages"
-          (
-            cd "${qga_deb_dir}"
-            for pkg in "${qga_missing[@]}"; do
-              if ! apt-get download "${pkg}"; then
-                echo "::error::apt-get download failed for '${pkg}' (part of qemu-guest-agent's dependency closure, not already carried by the image)" >&2
-                exit 1
-              fi
-            done
-          )
-          echo "::endgroup::"
-
-          export LIBGUESTFS_BACKEND=direct
-          # Ubuntu ships /boot/vmlinuz-* mode 0600 (root-only); since
-          # virt-customize above runs unprivileged, supermin can't read
-          # the host kernel to build its appliance unless it's world-readable.
-          sudo chmod 0644 /boot/vmlinuz-*
-          guestfs_log="$(mktemp)"
-
-          echo "::group::virt-customize: injecting marker + qemu-guest-agent"
-          start_ts="$(date +%s)"
-          # 300s bound: a KVM-backed supermin appliance boot plus one
-          # dpkg -i is normally well under a minute, so this guards
-          # against a silent regression to the TCG fallback rather than
-          # a genuinely slow but successful run.
-          if ! timeout 300 virt-customize -a "${{ runner.temp }}/ubuntu-cloud-marked.img" \
-            --no-network \
-            --write "${MARKER_PATH}:${MARKER_TOKEN}" \
-            --copy-in "${qga_deb_dir}:/tmp" \
-            --run-command 'dpkg -i /tmp/qga-debs/*.deb' \
-            --run-command 'systemctl enable qemu-guest-agent' \
-            --verbose >"${guestfs_log}" 2>&1; then
-            end_ts="$(date +%s)"
-            echo "::error::virt-customize failed or timed out after $((end_ts - start_ts))s; full --verbose output follows" >&2
-            cat "${guestfs_log}" >&2
-            exit 1
-          fi
-          end_ts="$(date +%s)"
-          echo "virt-customize (appliance boot + dpkg -i + all edits) completed in $((end_ts - start_ts))s"
-          echo "::endgroup::"
-
-          echo "UBUNTU_CLOUD_IMAGE_PATH=${{ runner.temp }}/ubuntu-cloud-marked.img" >> "$GITHUB_ENV"
+        # central seeder needs no separate warm-up. Full reasoning for the
+        # technique itself (offline virt-customize, dynamic dependency
+        # closure resolution, LIBGUESTFS_BACKEND=direct, why appliance
+        # networking was abandoned) lives in
+        # .github/actions/customize-cloud-image/action.yml, shared with
+        # e2e-kubevirt-reusable.yml.
+        uses: ./.github/actions/customize-cloud-image
+        with:
+          source-image-path: "${{ runner.temp }}/ubuntu-cloud.img"
+          output-image-path: "${{ runner.temp }}/ubuntu-cloud-marked.img"
+          marker-path: "${{ env.MARKER_PATH }}"
+          cloud-image-url: "${{ env.UBUNTU_CLOUD_IMAGE_URL }}"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
