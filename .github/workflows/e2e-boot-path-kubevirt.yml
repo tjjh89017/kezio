@@ -507,7 +507,14 @@ jobs:
           cd config/bootd && ../../bin/kustomize edit set image bootd=example.com/kezio-bootd:e2e-boot-path
           cd ../..
           kubectl apply -k config/bootd
-          kubectl -n kezio-system set env deployment/kezio-bootd BOOTD_SERVER_IP="${PROVISIONING_BOOTD_IP%%/*}"
+          # BOOTD_BOOT_CONFIG_URL: the boot config server as the VM
+          # reaches it - the socat forward on the bridge address (the
+          # same value BOOT_SERVER_URL was set to above); bootd renders
+          # it into the grub/grub.cfg it serves over TFTP for the
+          # netboot GRUB image.
+          kubectl -n kezio-system set env deployment/kezio-bootd \
+            BOOTD_SERVER_IP="${PROVISIONING_BOOTD_IP%%/*}" \
+            BOOTD_BOOT_CONFIG_URL="http://${PROVISIONING_BOOTD_IP%%/*}:8090"
           # config/bootd already wires its own fetch-boot-artifacts
           # initContainer (see config/boot-artifacts) and a plain
           # emptyDir "tftp" volume it populates - no volume patch needed

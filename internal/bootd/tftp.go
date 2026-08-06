@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/go-logr/logr"
 	tftp "github.com/pin/tftp/v3"
@@ -31,12 +32,10 @@ import (
 	"github.com/tjjh89017/kezio/internal/bootserver"
 )
 
-// ShimFilename and GrubFilename are the only two names the TFTP server
-// (TFTPServer) ever serves: shim (chainloading into grub, see
-// DefaultBootFilename's doc comment) and the grub image it loads,
-// which then fetches its real config over HTTP from the boot config
-// server (internal/bootserver) - TFTP's job in this boot flow ends
-// there. These alias bootserver.ShimFilename / bootserver.GrubFilename
+// ShimFilename and GrubFilename are the two on-disk names the TFTP
+// server (TFTPServer) serves: shim (chainloading into grub, see
+// DefaultBootFilename's doc comment) and the grub image it loads.
+// These alias bootserver.ShimFilename / bootserver.GrubFilename
 // (rather than redefining the two names) so that package's UEFI HTTP
 // Boot route serves exactly the same allowlist TFTP does - see
 // bootserver.ShimFilename's doc comment for why the definition lives
@@ -45,6 +44,20 @@ const (
 	ShimFilename = bootserver.ShimFilename
 	GrubFilename = bootserver.GrubFilename
 )
+
+// GrubConfigPath is the one non-basename path TFTPServer serves:
+// Debian's netboot-signed GRUB image (grub-efi-amd64-signed's
+// grubnetx64.efi.signed, published as grubx64.efi - see
+// hack/live-image/build.sh) is built with the embedded prefix "/grub"
+// resolved against the device it was loaded from, so after shim
+// chainloads it over TFTP it sources (tftp,<next-server>)/grub/grub.cfg
+// (via its embedded memdisk bootstrap config; the image is monolithic,
+// with every module it needs built in, so no x86_64-efi module tree is
+// ever fetched). TFTPServer answers this path from TFTPServer.GrubConfig
+// - rendered in-memory content, not a file under Dir, because it embeds
+// the site-specific boot config server URL (see RenderGrubConfig) that
+// a release-published artifact could never carry.
+const GrubConfigPath = "grub/grub.cfg"
 
 // allowedTFTPFiles is queried by basename only (see readHandler): a
 // fixed allowlist, not a directory listing, is what makes this server
@@ -57,9 +70,9 @@ var allowedTFTPFiles = map[string]bool{
 	GrubFilename: true,
 }
 
-// TFTPServer wraps a read-only, two-file github.com/pin/tftp/v3 server:
-// see the package doc comment's TFTP paragraph for the read-only,
-// path-restricted contract every request goes through.
+// TFTPServer wraps a read-only, allowlisted github.com/pin/tftp/v3
+// server: see the package doc comment's TFTP paragraph for the
+// read-only, path-restricted contract every request goes through.
 type TFTPServer struct {
 	// Dir is the local filesystem directory ShimFilename and
 	// GrubFilename are read from.
@@ -67,6 +80,13 @@ type TFTPServer struct {
 	// Addr is the UDP address to listen on, for example ":69". Empty
 	// means ":69" (the standard TFTP port).
 	Addr string
+	// GrubConfig is the rendered GRUB bootstrap config served at
+	// GrubConfigPath (see that constant's doc comment and
+	// RenderGrubConfig). Empty means the path is not served - GRUB
+	// then falls to its rescue prompt, the same behavior as before
+	// this config existed - and bootd logs the gap at startup (see
+	// cmd/bootd).
+	GrubConfig string
 }
 
 var _ manager.Runnable = (*TFTPServer)(nil)
@@ -97,17 +117,31 @@ func (t *TFTPServer) Start(ctx context.Context) error {
 }
 
 // readHandler returns the RRQ handler passed to tftp.NewServer. filename
-// arrives from the wire exactly as the client requested it; it is
-// validated against allowedTFTPFiles by basename before ever touching
-// the filesystem, which rejects both an unrecognized name and any
+// arrives from the wire exactly as the client requested it; after
+// stripping one optional leading "/" (GRUB requests prefix-relative
+// files as "/grub/grub.cfg", firmware requests the DHCP-advertised name
+// without a slash), it is matched exactly: GrubConfigPath is answered
+// from memory (never the filesystem), and everything else is validated
+// against allowedTFTPFiles by basename before ever touching the
+// filesystem, which rejects both an unrecognized name and any
 // path-traversal attempt (a request for "../../etc/passwd" has
 // filepath.Base "passwd", which is not in the allowlist, so it is
 // rejected the same as any other unknown name - it is never joined onto
 // t.Dir at all).
 func (t *TFTPServer) readHandler(log logr.Logger) func(filename string, rf io.ReaderFrom) error {
 	return func(filename string, rf io.ReaderFrom) error {
-		base := filepath.Base(filename)
-		if !allowedTFTPFiles[base] || base != filename {
+		name := strings.TrimPrefix(filename, "/")
+
+		if name == GrubConfigPath && t.GrubConfig != "" {
+			if _, err := rf.ReadFrom(strings.NewReader(t.GrubConfig)); err != nil {
+				return fmt.Errorf("serving %s: %w", GrubConfigPath, err)
+			}
+			log.Info("served TFTP file", "requested", filename)
+			return nil
+		}
+
+		base := filepath.Base(name)
+		if !allowedTFTPFiles[base] || base != name {
 			log.Info("rejecting TFTP read for disallowed filename", "requested", filename)
 			return fmt.Errorf("file %q not available", filename)
 		}

@@ -110,7 +110,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := mgr.Add(&bootd.TFTPServer{Dir: cfg.TFTPDir, Addr: cfg.TFTPAddr}); err != nil {
+	if cfg.GrubConfig == "" {
+		// Not fatal: DHCP/TFTP for shim+grub still work, but the GRUB
+		// image has no config to source, so every net boot stalls at
+		// the grub> prompt - worth one loud line at startup.
+		setupLog.Info("BOOTD_BOOT_CONFIG_URL is not set; " +
+			"grub/grub.cfg will not be served and netbooting machines will stop at the GRUB prompt")
+	}
+	if err := mgr.Add(&bootd.TFTPServer{Dir: cfg.TFTPDir, Addr: cfg.TFTPAddr, GrubConfig: cfg.GrubConfig}); err != nil {
 		setupLog.Error(err, "unable to add TFTP server")
 		os.Exit(1)
 	}
@@ -136,6 +143,10 @@ type bootdConfig struct {
 	RunDir string
 	// DnsmasqPath optionally overrides bootd.DefaultDnsmasqPath.
 	DnsmasqPath string
+	// GrubConfig is the rendered GRUB bootstrap config the TFTP server
+	// hands the netboot GRUB image (see bootd.GrubConfigPath); empty
+	// when BOOTD_BOOT_CONFIG_URL is unset.
+	GrubConfig string
 }
 
 // bootdConfigFromEnv builds bootdConfig from the process environment.
@@ -170,6 +181,19 @@ type bootdConfig struct {
 //     Required.
 //   - BOOTD_TFTP_ADDR: optional override for the TFTP listen address
 //     (default ":69").
+//   - BOOTD_BOOT_CONFIG_URL: the boot config server's
+//     (internal/bootserver) externally reachable base URL as booting
+//     machines see it, for example "http://192.0.2.1:8090" - the same
+//     value as that server's BOOT_SERVER_URL. Set, bootd serves the
+//     rendered GRUB bootstrap config at grub/grub.cfg over TFTP (see
+//     internal/bootd.GrubConfigPath), which is what hands the netboot
+//     GRUB image off to that server's per-MAC config. Unset, the path
+//     is not served and a netbooting machine stops at the GRUB prompt
+//   - bootd logs the gap at startup rather than failing, so a
+//     deployment that only exercises the DHCP/TFTP front (or predates
+//     this variable) keeps its previous behavior. Must be an http URL
+//     (GRUB's netboot image has no TLS stack); anything else is a
+//     startup error.
 //   - BOOTD_BOOT_FILENAME: optional override for the PXE boot filename
 //     handed out (default internal/bootd.DefaultBootFilename,
 //     "shimx64.efi").
@@ -227,6 +251,15 @@ func bootdConfigFromEnv() (bootdConfig, error) {
 		}
 	}
 
+	var grubConfig string
+	if s := os.Getenv("BOOTD_BOOT_CONFIG_URL"); s != "" {
+		var err error
+		grubConfig, err = bootd.RenderGrubConfig(s)
+		if err != nil {
+			return bootdConfig{}, fmt.Errorf("BOOTD_BOOT_CONFIG_URL %q: %w", s, err)
+		}
+	}
+
 	var relayServerIP net.IP
 	if s := os.Getenv("BOOTD_DHCP_RELAY_SERVER"); s != "" {
 		relayServerIP = net.ParseIP(s)
@@ -250,5 +283,6 @@ func bootdConfigFromEnv() (bootdConfig, error) {
 		TFTPAddr:    os.Getenv("BOOTD_TFTP_ADDR"),
 		RunDir:      os.Getenv("BOOTD_RUN_DIR"),
 		DnsmasqPath: os.Getenv("BOOTD_DNSMASQ_PATH"),
+		GrubConfig:  grubConfig,
 	}, nil
 }

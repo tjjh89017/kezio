@@ -117,10 +117,89 @@ func TestTFTPServer_RejectsPathTraversal(t *testing.T) {
 		"../outside/escape.txt",
 		"../../etc/passwd",
 		"sub/" + ShimFilename,
-		"/" + ShimFilename,
+		"//" + ShimFilename,
 	} {
 		if err := handler(name, &fakeReaderFrom{}); err == nil {
 			t.Errorf("expected an error requesting %q (path traversal / non-basename)", name)
+		}
+	}
+}
+
+// TestTFTPServer_AcceptsLeadingSlash pins the one path normalization
+// readHandler performs: GRUB requests prefix-relative files with a
+// leading "/" ("/grub/grub.cfg", and shim-side fetches can arrive as
+// "/shimx64.efi" depending on how the firmware joins the DHCP boot
+// filename), so exactly one leading slash is stripped before the exact
+// allowlist match - the allowlist itself stays as tight as before.
+func TestTFTPServer_AcceptsLeadingSlash(t *testing.T) {
+	dir := setupTFTPDir(t)
+	srv := &TFTPServer{Dir: dir}
+	handler := srv.readHandler(logf.Log.WithName("test"))
+
+	rf := &fakeReaderFrom{}
+	if err := handler("/"+ShimFilename, rf); err != nil {
+		t.Fatalf("reading /%s: %v", ShimFilename, err)
+	}
+	if got := rf.buf.String(); got != "shim-bytes" {
+		t.Errorf("/%s content = %q, want %q", ShimFilename, got, "shim-bytes")
+	}
+}
+
+// TestTFTPServer_ServesGrubConfigFromMemory proves GrubConfigPath is
+// answered from TFTPServer.GrubConfig (rendered in-memory content, see
+// GrubConfigPath's doc comment) rather than any file under Dir, with
+// and without GRUB's leading slash.
+func TestTFTPServer_ServesGrubConfigFromMemory(t *testing.T) {
+	dir := setupTFTPDir(t)
+	const config = "configfile (http,192.0.2.1:8090)/boot/grub.cfg-${net_default_mac}\n"
+	srv := &TFTPServer{Dir: dir, GrubConfig: config}
+	handler := srv.readHandler(logf.Log.WithName("test"))
+
+	for _, name := range []string{GrubConfigPath, "/" + GrubConfigPath} {
+		rf := &fakeReaderFrom{}
+		if err := handler(name, rf); err != nil {
+			t.Fatalf("reading %q: %v", name, err)
+		}
+		if got := rf.buf.String(); got != config {
+			t.Errorf("%q content = %q, want %q", name, got, config)
+		}
+	}
+}
+
+// TestTFTPServer_RejectsGrubConfigWhenUnset proves an empty GrubConfig
+// keeps the path fail-closed: no BOOTD_BOOT_CONFIG_URL, no file - the
+// request is rejected like any other unknown name instead of serving
+// an empty config that would make GRUB fail one step later with less
+// evidence.
+func TestTFTPServer_RejectsGrubConfigWhenUnset(t *testing.T) {
+	dir := setupTFTPDir(t)
+	srv := &TFTPServer{Dir: dir}
+	handler := srv.readHandler(logf.Log.WithName("test"))
+
+	if err := handler(GrubConfigPath, &fakeReaderFrom{}); err == nil {
+		t.Errorf("expected an error requesting %q with no GrubConfig configured", GrubConfigPath)
+	}
+}
+
+// TestTFTPServer_GrubConfigDoesNotWidenAllowlist proves configuring
+// GrubConfig adds exactly one servable path: neighbors of
+// grub/grub.cfg (the netboot image's memdisk bootstrap probes
+// $prefix/x86_64-efi/grub.cfg and $prefix/grub.cfg-amd64 first) and
+// traversal shaped like the grub directory stay rejected.
+func TestTFTPServer_GrubConfigDoesNotWidenAllowlist(t *testing.T) {
+	dir := setupTFTPDir(t)
+	srv := &TFTPServer{Dir: dir, GrubConfig: "configfile x\n"}
+	handler := srv.readHandler(logf.Log.WithName("test"))
+
+	for _, name := range []string{
+		"grub/x86_64-efi/grub.cfg",
+		"grub/grub.cfg-amd64",
+		"grub/../secret.txt",
+		"grub/grub.cfg/../../secret.txt",
+		"//" + GrubConfigPath,
+	} {
+		if err := handler(name, &fakeReaderFrom{}); err == nil {
+			t.Errorf("expected an error requesting %q", name)
 		}
 	}
 }

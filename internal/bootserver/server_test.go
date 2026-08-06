@@ -136,9 +136,9 @@ func TestHandleGrubConfig_NetBootNeededMintsAndRotatesToken(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	body := rec.Body.String()
-	if !containsAll(body, "linux http://boot.example.test:8090/boot/artifacts/vmlinuz",
+	if !containsAll(body, "linux (http,boot.example.test:8090)/boot/artifacts/vmlinuz",
 		"boot=live fetch=http://boot.example.test:8090/boot/artifacts/filesystem.squashfs",
-		"initrd http://boot.example.test:8090/boot/artifacts/initrd.img",
+		"initrd (http,boot.example.test:8090)/boot/artifacts/initrd.img",
 		"kezio.server=http://boot.example.test:8090") {
 		t.Fatalf("net-boot config missing expected content: %q", body)
 	}

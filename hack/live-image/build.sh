@@ -116,7 +116,26 @@ stage_signed_boot_binaries() {
 	# keeps this one version-pin (Debian sid) the single source of
 	# truth for every package this script touches, rather than adding
 	# a second, host-apt-dependent code path.
-	log "extracting shimx64.efi/grubx64.efi from Debian's signed packages"
+	#
+	# The GRUB build extracted here is grubnetx64.efi.signed - the
+	# NETBOOT variant - published under the name grubx64.efi (the fixed
+	# name shim requests from the directory it was itself loaded from,
+	# so the published name cannot change without patching shim). The
+	# package's plain grubx64.efi.signed is the DISK-boot build: Debian
+	# builds it with the embedded prefix "/EFI/debian" (see the grub2
+	# source's debian/build-efi-images), so loaded over TFTP it looks
+	# for a local disk it cannot have yet, prints "error: unable to
+	# find boot device.", and drops to a bare grub> prompt - the
+	# observed end state of shipping it to a PXE client. The netboot
+	# build instead embeds prefix "/grub" resolved against the device
+	# it was loaded from, i.e. (tftp,<next-server>)/grub, and its
+	# embedded memdisk bootstrap sources grub.cfg from there -
+	# satisfied by kezio-bootd serving its rendered config at
+	# grub/grub.cfg (see internal/bootd.GrubConfigPath). The image is
+	# monolithic (every module in Debian's NET_MODULES list, http and
+	# tftp included, is built in), so no x86_64-efi module tree needs
+	# publishing alongside it.
+	log "extracting shimx64.efi/grubnetx64.efi from Debian's signed packages"
 	docker run --rm \
 		-v "${dist_dir}:/out" \
 		debian:sid \
@@ -143,9 +162,9 @@ stage_signed_boot_binaries() {
 			# against that layout change instead of relying on find(1)
 			# traversal order to prefer the right file.
 			shim_src="$(find extracted -iname "shimx64.efi.signed" -print -quit)"
-			grub_src="$(find extracted -iname "grubx64.efi.signed" -print -quit)"
+			grub_src="$(find extracted -iname "grubnetx64.efi.signed" -print -quit)"
 			if [ -z "${shim_src}" ] || [ -z "${grub_src}" ]; then
-				echo "shimx64.efi.signed / grubx64.efi.signed not found under the extracted shim-signed/grub-efi-amd64-signed packages; package layout may have changed." >&2
+				echo "shimx64.efi.signed / grubnetx64.efi.signed not found under the extracted shim-signed/grub-efi-amd64-signed packages; package layout may have changed." >&2
 				find extracted -iname "*.efi*" >&2
 				exit 1
 			fi
@@ -167,7 +186,11 @@ stage_signed_boot_binaries() {
 			done
 			# internal/bootd.ShimFilename / GrubFilename are fixed names
 			# with no ".signed" suffix - the packages ship them with
-			# one, so normalize on copy.
+			# one, so normalize on copy. The netboot GRUB build is also
+			# renamed grubnetx64 -> grubx64 here: grubx64.efi is the
+			# hard-coded second-stage name shim fetches from the
+			# directory it was loaded from (confirmed in the e2e TFTP
+			# logs), so the netboot build must be published under it.
 			cp "${shim_src}" /out/shimx64.efi
 			cp "${grub_src}" /out/grubx64.efi
 		'

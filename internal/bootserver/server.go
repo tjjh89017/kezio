@@ -216,7 +216,16 @@ func (s *Server) handleGrubConfig(w http.ResponseWriter, r *http.Request, rawMAC
 		return
 	}
 
-	writeNetBoot(w, s.Config, token)
+	config, err := renderNetBootConfig(s.Config, token)
+	if err != nil {
+		// Fail secure, same as every branch above: a ServerURL GRUB
+		// could never fetch from (see GrubNetPath) must not leak a
+		// half-rendered config carrying a live token.
+		log.Error(err, "rendering net boot config failed; boot local disk", "machine", machine.Name)
+		writeBootLocal(w)
+		return
+	}
+	writeNetBoot(w, config)
 }
 
 // lookupMachine resolves mac (already normalized) to the Machine whose
@@ -325,10 +334,11 @@ func writeBootLocal(w http.ResponseWriter) {
 	_, _ = io.WriteString(w, bootLocalConfig)
 }
 
-// writeNetBoot writes the live-environment GRUB config carrying token.
-func writeNetBoot(w http.ResponseWriter, cfg Config, token string) {
+// writeNetBoot writes the already-rendered live-environment GRUB config
+// (see renderNetBootConfig).
+func writeNetBoot(w http.ResponseWriter, config string) {
 	w.Header().Set("Content-Type", grubContentType)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
-	_, _ = io.WriteString(w, renderNetBootConfig(cfg, token))
+	_, _ = io.WriteString(w, config)
 }

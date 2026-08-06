@@ -53,11 +53,12 @@ limitations under the License.
 //     visibly) when it cannot stay up at all.
 //
 // TFTP (tftp.go) stays in-process rather than delegated to dnsmasq's
-// enable-tftp: it is a strictly read-only, two-file server allowlisting
-// exactly shimx64.efi and grubx64.efi and rejecting any other name,
-// including path traversal - dnsmasq's TFTP would serve anything under
-// its tftp-root and add a second code path to the same directory
-// without removing any Go code worth removing.
+// enable-tftp: it is a strictly read-only server allowlisting exactly
+// shimx64.efi, grubx64.efi, and the in-memory grub/grub.cfg bootstrap
+// config (GrubConfigPath) and rejecting any other name, including path
+// traversal - dnsmasq's TFTP would serve anything under its tftp-root
+// and add a second code path to the same directory without removing
+// any Go code worth removing.
 //
 // UEFI HTTP Boot (option 60 "HTTPClient") is not supported: dnsmasq's
 // proxyDHCP engine only engages for PXEClient requests, so an

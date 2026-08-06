@@ -143,6 +143,17 @@ spec:
             # that server (dhcp-relay); leave unset for proxyDHCP only.
             # - name: BOOTD_DHCP_RELAY_SERVER
             #   value: "REPLACE_WITH_SITE_DHCP_SERVER_IP"
+            # BOOTD_BOOT_CONFIG_URL: SITE-SPECIFIC, the boot config
+            # server's (config/bootserver) base URL as machines on the
+            # boot segment reach it - the same value as that server's
+            # BOOT_SERVER_URL, e.g. "http://192.0.2.1:8090". With it
+            # set, bootd serves the GRUB bootstrap config at
+            # grub/grub.cfg over TFTP, which is what hands the netboot
+            # GRUB image (see hack/live-image/build.sh) off to that
+            # server's per-MAC config; without it, a netbooting machine
+            # loads GRUB and then stops at the grub> prompt.
+            # - name: BOOTD_BOOT_CONFIG_URL
+            #   value: "REPLACE_WITH_BOOT_SERVER_URL"
             - name: BOOTD_TFTP_DIR
               value: /tftp
           ports:

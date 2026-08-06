@@ -1213,10 +1213,17 @@ jobs:
           #   - BOOTD_DHCP_RELAY_SERVER: the host lease-only dnsmasq
           #     (see "Start a lease-only DHCP server" above) - the
           #     stand-in for the site's existing DHCP server.
+          #   - BOOTD_BOOT_CONFIG_URL: the boot config server as the VM
+          #     reaches it - the socat forward on the bridge address
+          #     (the same value BOOT_SERVER_URL was set to above). bootd
+          #     renders it into the grub/grub.cfg it serves over TFTP,
+          #     which is how the netboot GRUB image finds its per-MAC
+          #     config.
           kubectl -n kezio-system set env deployment/kezio-bootd \
             BOOTD_SERVER_IP="${PROVISIONING_BOOTD_NET1_IP%%/*}" \
             BOOTD_PROVISIONING_CIDR="${PROVISIONING_CIDR}" \
-            BOOTD_DHCP_RELAY_SERVER="${RELAY_DHCP_SERVER_IP}"
+            BOOTD_DHCP_RELAY_SERVER="${RELAY_DHCP_SERVER_IP}" \
+            BOOTD_BOOT_CONFIG_URL="http://${PROVISIONING_HOST_IP%%/*}:8090"
           # Strategic-merge (kubectl patch's default type for a built-in
           # object like Deployment), not --type=json: a JSON Patch "add"
           # on .../metadata/annotations replaces the whole annotations
