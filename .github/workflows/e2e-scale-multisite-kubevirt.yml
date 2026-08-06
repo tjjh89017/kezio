@@ -299,6 +299,10 @@ jobs:
           echo "MARKER_TOKEN=${MARKER_TOKEN}" >> "$GITHUB_ENV"
 
           export LIBGUESTFS_BACKEND=direct
+          # Ubuntu ships /boot/vmlinuz-* mode 0600 (root-only); since
+          # virt-customize above runs unprivileged, supermin can't read
+          # the host kernel to build its appliance unless it's world-readable.
+          sudo chmod 0644 /boot/vmlinuz-*
           guestfs_log="$(mktemp)"
 
           echo "::group::virt-customize: injecting marker + qemu-guest-agent"
