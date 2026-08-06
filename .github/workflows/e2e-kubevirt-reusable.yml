@@ -130,6 +130,16 @@ on:
         required: false
         type: string
         default: "ghcr.io/tunisiano187/opentracker-docker:master"
+      existing_dhcp_image:
+        description: >-
+          dnsmasq image standing in for the site's existing DHCP server
+          (see .github/actions/deploy-existing-dhcp). Deliberately a
+          different, pinned third-party image from kezio-bootd's own -
+          the two dnsmasq instances must stay distinguishable in logs
+          and pcap.
+        required: false
+        type: string
+        default: "jpillora/dnsmasq:1.1@sha256:78a9c6711031a557d9c6a79a0b6e060c4ac09de3a8755c78d690acb55b4ccd15"
       bmc_mode:
         description: >-
           When true, leave the target VM powered off and drive it through
@@ -200,15 +210,14 @@ env:
   KUBEVIRTBMC_VERSION: ${{ inputs.kubevirtbmc_version }}
 
   # The provisioning L2 segment, same shape as e2e-boot-path-kubevirt.yml.
+  # A flat L2 with no gateway and no host address at all - the host's
+  # only presence on this bridge is the bridge device itself, exactly
+  # the "target VM's real deployment segment" shape (see the "Create the
+  # provisioning bridge" step below).
   PROVISIONING_BRIDGE: kezio-prov0
   # Distinct addresses on that segment, kept apart deliberately (and all
-  # outside the lease server's dhcp-range 192.0.2.10-100 below, so a
+  # outside the existing-dhcp pod's dhcp-range 192.0.2.10-100 below, so a
   # leased address can never collide with any of them):
-  #   - PROVISIONING_HOST_IP: the runner host's own address on the
-  #     bridge. It anchors the host's routed veth to the lease-only DHCP
-  #     server below (BOOTD_DHCP_RELAY_SERVER's return path) - it is NOT
-  #     bootd's address and nothing on the target VM's boot path ever
-  #     reaches it directly.
   #   - PROVISIONING_BOOTD_NET1_IP: the static address the
   #     kezio-boot-network NetworkAttachmentDefinition assigns to
   #     bootd's net1. It is dnsmasq's dhcp-range subnet anchor, the
@@ -220,6 +229,13 @@ env:
   #     boot-to-registration flow (BOOT_SERVER_URL, BOOT_AGENT_SERVER_URL,
   #     BOOTD_BOOT_CONFIG_URL all resolve to it) - no socat forward and no
   #     bare ClusterIP URL anywhere in this lane.
+  #   - PROVISIONING_EXISTING_DHCP_NET1_IP: the static address the
+  #     existing-dhcp pod's own NAD assigns to its net1 (see
+  #     .github/actions/deploy-existing-dhcp). It is on the SAME /24 as
+  #     bootd's net1 - the Clonezilla precedent this lane follows keeps
+  #     the site's existing DHCP server on-segment, not behind a
+  #     gateway, so bootd's relay to it (BOOTD_DHCP_RELAY_SERVER) is a
+  #     plain on-link unicast with no host-side routing at all.
   #   - PROVISIONING_TRACKER_NET1_IP / PROVISIONING_SEEDER_NET1_IP: the
   #     static addresses the kezio-tracker-network / kezio-seeder-network
   #     NetworkAttachmentDefinitions assign to the opentracker and ezio
@@ -232,18 +248,12 @@ env:
   #     NAT/DNAT ever touches the announce path (the no-NAT rule).
   #   - PROVISIONING_CIDR: the whole segment, handed to bootd as
   #     BOOTD_PROVISIONING_CIDR (its proxyDHCP dhcp-range).
-  PROVISIONING_HOST_IP: 192.0.2.1/24
   PROVISIONING_BOOTD_NET1_IP: 192.0.2.2/24
+  PROVISIONING_EXISTING_DHCP_NET1_IP: 192.0.2.3/24
   PROVISIONING_TRACKER_NET1_IP: 192.0.2.4/24
   PROVISIONING_SEEDER_NET1_IP: 192.0.2.5/24
   PROVISIONING_CIDR: 192.0.2.0/24
-  # The stand-in "existing site DHCP server" lives in its own netns
-  # behind a routed veth off the runner host (see the "Start a
-  # lease-only DHCP server" step), on TEST-NET-2 so it can never be
-  # confused with the provisioning segment. LEASE_SERVER_IP is what
-  # bootd relays to (BOOTD_DHCP_RELAY_SERVER).
-  LEASE_VETH_HOST_IP: 198.51.100.1/30
-  LEASE_SERVER_IP: 198.51.100.2
+  PROVISIONING_DHCP_RANGE: "192.0.2.10,192.0.2.100,255.255.255.0,12h"
   TARGET_VM_NAME: ${{ inputs.target_vm_name }}
   TARGET_VM_MAC: ${{ inputs.target_vm_mac }}
   TARGET_VM_DISK_SERIAL: ${{ inputs.target_vm_disk_serial }}
@@ -275,6 +285,7 @@ env:
   SEEDER_IMG: ${{ inputs.seeder_image }}
   IMAGE_SERVICE_IMG: ${{ inputs.image_service_image }}
   OPENTRACKER_IMG: ${{ inputs.opentracker_image }}
+  EXISTING_DHCP_IMG: ${{ inputs.existing_dhcp_image }}
   IMAGE_NAME: ${{ inputs.image_name }}
   IMAGE_SERVICE_TOKEN: ${{ inputs.image_service_token }}
 
@@ -421,10 +432,15 @@ jobs:
           fi
 
       - name: Create the provisioning bridge
+        # No address on the bridge itself: the flat L2 segment this
+        # models has no gateway, and the host has no reason to be a peer
+        # on it - every participant (bootd, the existing-dhcp pod, the
+        # target VM) gets its own Multus-attached address instead.
+        # tcpdump (below) captures on the bridge device with no address
+        # of its own needed to do so.
         run: |
           set -euo pipefail
           sudo ip link add "${PROVISIONING_BRIDGE}" type bridge
-          sudo ip addr add "${PROVISIONING_HOST_IP}" dev "${PROVISIONING_BRIDGE}"
           sudo ip link set "${PROVISIONING_BRIDGE}" up
 
       - name: Cache the Ubuntu cloud image
@@ -626,100 +642,6 @@ jobs:
             sudo ethtool -K "${PROVISIONING_BRIDGE}" tx off || true
           fi
 
-      - name: Start a lease-only DHCP server in a netns behind a routed veth (stands in for the site's existing DHCP server)
-        # bootd's dnsmasq is proxyDHCP only - it never assigns
-        # addresses. A real site keeps its existing DHCP server for
-        # leases, and bootd relays the segment's lease traffic to it
-        # (BOOTD_DHCP_RELAY_SERVER -> dnsmasq's dhcp-relay). This
-        # dnsmasq plays that existing server: port=0 (no DNS), one
-        # lease range on the provisioning subnet, nothing else.
-        #
-        # It runs in its OWN network namespace behind a routed veth
-        # (LEASE_SERVER_IP), one L3 hop behind the runner host - the
-        # "existing DHCP server reachable via the segment's gateway"
-        # model. Two reasons, both load-bearing:
-        #
-        #  1. It must never hear the bridge's broadcasts - the only
-        #     path from the target VM to this server is bootd's relay
-        #     (giaddr'd unicast), which is exactly the path this lane
-        #     must prove. A netns off the bridge guarantees that
-        #     structurally.
-        #  2. Binding it to the host's uplink address (the previous
-        #     shape) can never receive the relay at all: dnsmasq
-        #     resolves the ARRIVAL interface of every DHCP packet
-        #     (SIOCGIFADDR + iface_check/check_listen_addrs, dhcp.c)
-        #     and silently discards packets arriving on an interface
-        #     its listen config does not cover - and a relayed unicast
-        #     to the uplink address necessarily arrives via the
-        #     provisioning bridge. In the netns the packet arrives on
-        #     lease0, the very interface the listen-address lives on.
-        #
-        # The host forwards between the bridge and the veth
-        # (ip_forward, plus FORWARD accepts scoped to this interface
-        # pair - kube-proxy/canal leave FORWARD's default policy at
-        # DROP, same reason as the bridged-traffic exemption step
-        # above). Relayed replies go back to the giaddr (bootd's net1
-        # address on the bridge), and bootd's dnsmasq re-emits them
-        # onto the segment.
-        #
-        # dnsmasq-base, not dnsmasq: the -base package ships only the
-        # binary, with no distro service unit that would auto-start a
-        # port-53 DNS server with the stock config behind our back.
-        # This install happens on the ephemeral CI runner host only.
-        run: |
-          set -euo pipefail
-          sudo apt-get install -y --no-install-recommends dnsmasq-base
-          sudo ip netns add kezio-lease
-          sudo ip link add kezio-lease0 type veth peer name lease0
-          sudo ip link set lease0 netns kezio-lease
-          sudo ip addr add "${LEASE_VETH_HOST_IP}" dev kezio-lease0
-          sudo ip link set kezio-lease0 up
-          sudo ip netns exec kezio-lease ip link set lo up
-          sudo ip netns exec kezio-lease ip addr add "${LEASE_SERVER_IP}/30" dev lease0
-          sudo ip netns exec kezio-lease ip link set lease0 up
-          sudo ip netns exec kezio-lease ip route add default via "${LEASE_VETH_HOST_IP%%/*}"
-          sudo sysctl -w net.ipv4.ip_forward=1
-          if command -v iptables >/dev/null 2>&1; then
-            sudo iptables -C FORWARD -i "${PROVISIONING_BRIDGE}" -o kezio-lease0 -j ACCEPT 2>/dev/null || \
-              sudo iptables -I FORWARD -i "${PROVISIONING_BRIDGE}" -o kezio-lease0 -j ACCEPT
-            sudo iptables -C FORWARD -i kezio-lease0 -o "${PROVISIONING_BRIDGE}" -j ACCEPT 2>/dev/null || \
-              sudo iptables -I FORWARD -i kezio-lease0 -o "${PROVISIONING_BRIDGE}" -j ACCEPT
-          fi
-          if command -v nft >/dev/null 2>&1 && sudo nft list table inet filter >/dev/null 2>&1; then
-            sudo nft list chain inet filter FORWARD 2>/dev/null | grep -q "iifname \"${PROVISIONING_BRIDGE}\" oifname \"kezio-lease0\" accept" || \
-              sudo nft insert rule inet filter FORWARD iifname "${PROVISIONING_BRIDGE}" oifname "kezio-lease0" accept
-            sudo nft list chain inet filter FORWARD 2>/dev/null | grep -q "iifname \"kezio-lease0\" oifname \"${PROVISIONING_BRIDGE}\" accept" || \
-              sudo nft insert rule inet filter FORWARD iifname "kezio-lease0" oifname "${PROVISIONING_BRIDGE}" accept
-          fi
-          # dhcp-option=3 with no value: suppress the router option
-          # entirely. Left unset, dnsmasq defaults a relayed request's
-          # router to giaddr - bootd's net1 (192.0.2.2), observed as
-          # "option: 3 router 192.0.2.2" in run 31067834491's
-          # host-dnsmasq.log - a black hole, since bootd's pod does not
-          # forward. But the VM needs no router at all: everything it
-          # ever talks to is on-link on this /24 - bootd's net1
-          # (TFTP/DHCP and, once its reverse proxy is configured, the
-          # boot config and agent servers too), the opentracker pod's
-          # net1 (the announce URL)
-          # and the ezio seeder pod's net1 (the BT peer address the
-          # tracker hands out), both Multus-attached to this same bridge
-          # (see "Deploy image-service+seeder..." below). Handing out no
-          # default route makes that a structural guarantee: the VM
-          # cannot route off the provisioning segment even by accident.
-          cat <<EOF | sudo tee /etc/kezio-host-dnsmasq.conf
-          port=0
-          bind-interfaces
-          listen-address=${LEASE_SERVER_IP}
-          dhcp-range=192.0.2.10,192.0.2.100,255.255.255.0,12h
-          dhcp-option=3
-          no-ping
-          log-dhcp
-          log-facility=${RUNNER_TEMP}/host-dnsmasq.log
-          dhcp-leasefile=${RUNNER_TEMP}/host-dnsmasq.leases
-          EOF
-          sudo ip netns exec kezio-lease dnsmasq --conf-file=/etc/kezio-host-dnsmasq.conf
-          echo "RELAY_DHCP_SERVER_IP=${LEASE_SERVER_IP}" >> "$GITHUB_ENV"
-
       - name: Start capturing the provisioning bridge (tcpdump)
         # Definitive instrumentation regardless of whether the checksum
         # fix above is the actual/only cause: capture every DHCP/TFTP
@@ -885,16 +807,22 @@ jobs:
           kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
 
       - name: Create the provisioning NetworkAttachmentDefinitions
-        # FOUR NADs on the SAME bridge, split on purpose:
+        # FOUR NADs on the SAME bridge, split on purpose (a fifth,
+        # kezio-existing-dhcp-network, is created separately by the
+        # "Deploy the existing-dhcp pod" step above, through
+        # .github/actions/deploy-existing-dhcp - see that action's own
+        # comment for why its own address, tuning chain, and dhcp-range
+        # travel together with the pod they belong to instead of living
+        # here):
         #
         # kezio-boot-network (static ipam) is for the bootd pod ONLY.
         # bootd's net1 must carry a fixed address
         # (PROVISIONING_BOOTD_NET1_IP) on the provisioning subnet -
         # dnsmasq binds its DHCP sockets to net1, uses this address as
         # the dhcp-relay giaddr, and BOOTD_SERVER_IP advertises it as
-        # the TFTP next-server. The runner host keeps
-        # PROVISIONING_HOST_IP on the same bridge, so the two never
-        # collide.
+        # the TFTP next-server. Every other address on this bridge
+        # (the existing-dhcp pod's, the tracker's, the seeder's) is its
+        # own static Multus attachment, so none of them ever collide.
         #
         # kezio-tracker-network / kezio-seeder-network (static ipam) are
         # for the opentracker and ezio-seeder pods, one each, so every
@@ -1179,6 +1107,17 @@ jobs:
             exit 1
           fi
 
+      - name: Deploy the existing-dhcp pod on the provisioning bridge
+        id: existing-dhcp
+        uses: ./.github/actions/deploy-existing-dhcp
+        with:
+          namespace: kezio-system
+          name: kezio-existing-dhcp
+          image: ${{ env.EXISTING_DHCP_IMG }}
+          bridge: ${{ env.PROVISIONING_BRIDGE }}
+          static-cidr: ${{ env.PROVISIONING_EXISTING_DHCP_NET1_IP }}
+          dhcp-range: ${{ env.PROVISIONING_DHCP_RANGE }}
+
       - name: Deploy kezio-bootd on the provisioning bridge
         env:
           BOOT_ARTIFACTS_VERSION: ${{ inputs.boot_artifacts_version }}
@@ -1195,9 +1134,11 @@ jobs:
           #     TFTPs straight to the pod, and the dhcp-relay giaddr.
           #   - BOOTD_PROVISIONING_CIDR: the segment's subnet, rendered
           #     as dnsmasq's proxyDHCP dhcp-range.
-          #   - BOOTD_DHCP_RELAY_SERVER: the host lease-only dnsmasq
-          #     (see "Start a lease-only DHCP server" above) - the
-          #     stand-in for the site's existing DHCP server.
+          #   - BOOTD_DHCP_RELAY_SERVER: the existing-dhcp pod's own
+          #     net1 address (see "Deploy the existing-dhcp pod" above) -
+          #     the stand-in for the site's existing DHCP server. On the
+          #     SAME /24 as bootd's own net1, so the relay is a plain
+          #     on-link unicast - no host-side routing is involved.
           #   - BOOTD_BOOT_CONFIG_URL: bootd's OWN address (the same
           #     value BOOT_SERVER_URL/BOOT_AGENT_SERVER_URL were set to
           #     above) - bootd's own reverse proxy is what actually
@@ -1224,7 +1165,7 @@ jobs:
           kubectl -n kezio-system set env deployment/kezio-bootd \
             BOOTD_SERVER_IP="${PROVISIONING_BOOTD_NET1_IP%%/*}" \
             BOOTD_PROVISIONING_CIDR="${PROVISIONING_CIDR}" \
-            BOOTD_DHCP_RELAY_SERVER="${RELAY_DHCP_SERVER_IP}" \
+            BOOTD_DHCP_RELAY_SERVER="${PROVISIONING_EXISTING_DHCP_NET1_IP%%/*}" \
             BOOTD_BOOT_CONFIG_URL="http://${PROVISIONING_BOOTD_NET1_IP%%/*}:80" \
             BOOTD_AGENT_UPSTREAM_URL="http://kezio-agent-server.kezio-system.svc.cluster.local:8091" \
             BOOTD_BOOT_UPSTREAM_URL="http://kezio-boot-server.kezio-system.svc.cluster.local:8090"
@@ -1285,26 +1226,15 @@ jobs:
             exit 1
           fi
           echo "BOOTD_POD_NAME=${bootd_pod}" >> "$GITHUB_ENV"
-
-          # Pin the relay leg to the provisioning bridge. dnsmasq
-          # sources its relayed unicasts from the dhcp-relay LOCAL
-          # address (bootd's net1 192.0.2.2), but the pod's default
-          # route goes out eth0 (the CNI pod network), where a
-          # 192.0.2.2-sourced packet to the lease server is dropped as
-          # unroutable - host-dnsmasq never saw a single relayed
-          # message. A /32 route via the host's bridge address sends
-          # the relayed packet over the provisioning bridge instead:
-          # the host owns the bridge gateway address and forwards to
-          # the lease server's veth (rp_filter on the host is
-          # satisfied because the host routes 192.0.2.0/24 on that
-          # bridge), and replies to giaddr 192.0.2.2 return over the
-          # same path. This models a site's existing DHCP server
-          # reachable via the segment's L3 gateway. `ip route replace`
-          # for idempotency; exec inherits the bootd container's
-          # NET_ADMIN, and the image ships iproute2 for exactly this.
-          kubectl -n kezio-system exec "${bootd_pod}" -c bootd -- \
-            ip route replace "${RELAY_DHCP_SERVER_IP}/32" \
-            via "${PROVISIONING_HOST_IP%%/*}" dev net1
+          # No host-side or in-pod route setup for the relay leg: the
+          # existing-dhcp pod's net1 (PROVISIONING_EXISTING_DHCP_NET1_IP)
+          # is on the SAME /24 as bootd's own net1, so the connected
+          # route bootd's static IPAM already installs delivers the
+          # relayed unicast directly - a plain on-link exchange, not a
+          # routed one (lab-verified against real dnsmasq processes on a
+          # shared bridge: bootd's own route to the relay target
+          # resolves to "dev net1 src <bootd's own address>" with no
+          # route entry ever added).
 
       - name: Start capturing bootd's pod network namespace (nsenter tcpdump on net1)
         # bridge.pcap (started above) only proves a frame crossed
@@ -2080,6 +2010,46 @@ jobs:
             exit 1
           fi
 
+      - name: "Verify the DHCP relay leg reached the existing-dhcp server"
+        # The target VM may legitimately receive two offers for a given
+        # DISCOVER - one direct from the existing-dhcp pod (same
+        # broadcast domain), one relayed via bootd - so this does NOT
+        # assert "a lease is obtainable only through the relay"; that
+        # would be asserting away the real Clonezilla-precedent shape
+        # this topology models. What it proves instead is that the relay
+        # leg itself fired at least once during provisioning (which just
+        # finished, by Layer 1 above, so the PXE handshake this checks
+        # already happened):
+        #
+        #   - bootd's own dnsmasq logs "DHCP relay at <giaddr> -> <target>"
+        #     at the moment it relays a request (lab-verified against
+        #     dnsmasq 2.91, the same version debian:stable-slim gives
+        #     bootd's own image) - giaddr is bootd's net1 address, target
+        #     is the existing-dhcp pod's net1 address, so this line only
+        #     ever appears when a real relayed unicast left bootd's pod.
+        #   - the existing-dhcp pod's own log then shows it actually
+        #     received and answered that request (DHCPDISCOVER/
+        #     DHCPOFFER), not just that bootd claims to have sent it.
+        run: |
+          set -euo pipefail
+          bootd_ip="${PROVISIONING_BOOTD_NET1_IP%%/*}"
+          existing_dhcp_ip="${PROVISIONING_EXISTING_DHCP_NET1_IP%%/*}"
+          relay_line="DHCP relay at ${bootd_ip} -> ${existing_dhcp_ip}"
+
+          bootd_log="$(kubectl -n kezio-system logs deployment/kezio-bootd --all-containers --tail=-1)"
+          if ! grep -qF "${relay_line}" <<<"${bootd_log}"; then
+            echo "::error::bootd's dnsmasq log never shows '${relay_line}' - the relay leg to the existing-dhcp server never fired." >&2
+            echo "${bootd_log}"
+            exit 1
+          fi
+
+          existing_dhcp_log="$(kubectl -n kezio-system logs deployment/kezio-existing-dhcp --all-containers --tail=-1)"
+          if ! grep -qF "DHCPDISCOVER" <<<"${existing_dhcp_log}" || ! grep -qF "DHCPOFFER" <<<"${existing_dhcp_log}"; then
+            echo "::error::existing-dhcp's own log shows no DHCPDISCOVER/DHCPOFFER exchange - it never actually answered the request bootd's log says it relayed." >&2
+            echo "${existing_dhcp_log}"
+            exit 1
+          fi
+
       - name: "BMC power cycle to consume KubeVirtBMC's one-shot PXE override (VMI recreation)"
         if: ${{ inputs.bmc_mode }}
         # KubeVirtBMC-only accommodation, not a kezio product concern.
@@ -2476,6 +2446,8 @@ jobs:
           kubectl -n kezio-system logs deployment/kezio-ezio-seeder --tail=1000
           echo "===== opentracker logs ====="
           kubectl -n kezio-system logs deployment/kezio-opentracker --tail=1000
+          echo "===== existing-dhcp logs (the site's stand-in existing DHCP server) ====="
+          kubectl -n kezio-system logs deployment/kezio-existing-dhcp --all-containers --tail=1000
           echo "===== image-service logs ====="
           kubectl -n kezio-system logs deployment/kezio-image-service --tail=1000
           echo "===== VirtualMachine / VMI ====="
@@ -2537,22 +2509,21 @@ jobs:
             tcpdump -vvv -r "${RUNNER_TEMP}/bootd-netns.pcap" > "${RUNNER_TEMP}/bootd-netns-pcap.txt" 2>&1
           fi
 
-      - name: Flush the bootd and host DHCP-server logs to the artifact
+      - name: Flush the bootd and existing-dhcp logs to the artifact
         if: always()
         # Unconditional, like the pcap flushes above: bootd's pod log
         # now carries dnsmasq's forwarded per-request log-dhcp decision
-        # lines (see internal/bootd's forwardLines), and the host
-        # lease server's own log-dhcp log shows whether relayed lease
-        # traffic ever arrived - both are the DHCP story a passing OR
-        # failing run needs on record. The failure-only diagnostics
-        # dump includes bootd's log too, but only on failure.
+        # lines (see internal/bootd's forwardLines), and the
+        # existing-dhcp pod's own log-dhcp log shows whether relayed
+        # lease traffic ever arrived - both are the DHCP story a passing
+        # OR failing run needs on record. The failure-only diagnostics
+        # dump includes both logs too, but only on failure.
         run: |
           set +e
           kubectl -n kezio-system logs deployment/kezio-bootd --all-containers --tail=-1 \
             > "${RUNNER_TEMP}/bootd.log" 2>&1 || true
-          if [ -f "${RUNNER_TEMP}/host-dnsmasq.log" ]; then
-            sudo chmod 0644 "${RUNNER_TEMP}/host-dnsmasq.log"
-          fi
+          kubectl -n kezio-system logs deployment/kezio-existing-dhcp --all-containers --tail=-1 \
+            > "${RUNNER_TEMP}/existing-dhcp.log" 2>&1 || true
           exit 0
 
       - name: Dump KubeVirtBMC diagnostics on failure
@@ -2597,7 +2568,6 @@ jobs:
             ${{ runner.temp }}/bootd-netns.pcap
             ${{ runner.temp }}/bootd-netns-pcap.txt
             ${{ runner.temp }}/bootd.log
-            ${{ runner.temp }}/host-dnsmasq.log
-            ${{ runner.temp }}/host-dnsmasq.leases
+            ${{ runner.temp }}/existing-dhcp.log
           if-no-files-found: ignore
           retention-days: 7
