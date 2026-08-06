@@ -352,6 +352,26 @@ jobs:
         run: |
           set -euo pipefail
           kubectl apply -f "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-operator.yaml"
+          # kubevirt-operator.yaml's own apply is what registers the
+          # KubeVirt CRD; kubectl returns as soon as that apply is
+          # accepted, before the apiserver has actually established it.
+          # kubevirt-cr.yaml's very next apply is a KubeVirt custom
+          # resource, so it loses that race intermittently ("no matches
+          # for kind \"KubeVirt\" in version \"kubevirt.io/v1\""). Same
+          # exists-then-Established shape as the Multus NAD CRD wait
+          # below: `kubectl wait` itself errors out immediately if the
+          # CRD object does not exist yet, so a plain wait right after
+          # the operator apply is not safe either - poll for existence
+          # first, then wait for it to actually establish.
+          deadline=$(( $(date +%s) + 120 ))
+          until kubectl get crd kubevirts.kubevirt.io >/dev/null 2>&1; do
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::kubevirts.kubevirt.io CRD did not appear within the timeout - kubevirt-operator.yaml may not have applied cleanly." >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          kubectl wait --for=condition=Established crd/kubevirts.kubevirt.io --timeout=120s
           kubectl apply -f "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-cr.yaml"
           kubectl patch kubevirt kubevirt -n kubevirt --type=merge -p '{
             "spec": {
@@ -379,6 +399,19 @@ jobs:
         run: |
           set -euo pipefail
           kubectl apply -f "https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_VERSION}/cdi-operator.yaml"
+          # Same operator-apply-registers-the-CRD race as the KubeVirt
+          # install above: cdi-cr.yaml applies a CDI custom resource right
+          # after, so it needs the same exists-then-Established wait
+          # before it can run safely.
+          deadline=$(( $(date +%s) + 120 ))
+          until kubectl get crd cdis.cdi.kubevirt.io >/dev/null 2>&1; do
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::cdis.cdi.kubevirt.io CRD did not appear within the timeout - cdi-operator.yaml may not have applied cleanly." >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          kubectl wait --for=condition=Established crd/cdis.cdi.kubevirt.io --timeout=120s
           kubectl apply -f "https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_VERSION}/cdi-cr.yaml"
           kubectl wait cdi cdi --for=condition=Available --timeout=300s
 
