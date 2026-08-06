@@ -332,11 +332,27 @@ jobs:
 
           echo "::group::virt-customize: injecting marker + qemu-guest-agent"
           start_ts="$(date +%s)"
+          # --install's apt-get runs chrooted into this GUEST image inside
+          # the appliance, so it resolves names through the guest's own
+          # /etc/resolv.conf - not the appliance's. Ubuntu cloud images
+          # ship that file as a symlink to
+          # ../run/systemd/resolve/stub-resolv.conf (the systemd-resolved
+          # stub at 127.0.0.53), which is a dangling target here since no
+          # resolved runs inside the appliance chroot, so apt-get failed
+          # to resolve archive.ubuntu.com/security.ubuntu.com even though
+          # the appliance's own network (passt) was working fine. passt's
+          # own startup output advertises its usable forwarding DNS at
+          # the link-local gateway 169.254.2.2, so point the guest's
+          # resolv.conf at that for the duration of --install, then
+          # restore the shipped symlink afterwards so the deployed OS
+          # keeps its normal systemd-resolved behavior.
           if ! timeout 300 virt-customize -a "${{ runner.temp }}/ubuntu-cloud-marked.img" \
             --network \
             --write "${MARKER_PATH}:${MARKER_TOKEN}" \
+            --run-command 'rm -f /etc/resolv.conf && echo "nameserver 169.254.2.2" > /etc/resolv.conf' \
             --install qemu-guest-agent \
             --run-command "systemctl enable qemu-guest-agent" \
+            --run-command 'rm -f /etc/resolv.conf && ln -s ../run/systemd/resolve/stub-resolv.conf /etc/resolv.conf' \
             --verbose >"${guestfs_log}" 2>&1; then
             end_ts="$(date +%s)"
             echo "::error::virt-customize failed or timed out after $((end_ts - start_ts))s; full --verbose output follows" >&2
