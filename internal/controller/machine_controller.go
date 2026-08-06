@@ -406,10 +406,14 @@ func (r *MachineReconciler) onDelete(ctx context.Context, _ ctrl.Request, machin
 // (Available or Provisioned), not a step in the deployment flow, so it
 // retries on its own short interval instead of consuming errorCount.
 func (r *MachineReconciler) reconcilePower(ctx context.Context, machine *keziov1alpha1.Machine, dep deployer.Deployer) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
 	desired := machine.Spec.EffectiveOnline()
 	if machine.Status.PoweredOn != nil && *machine.Status.PoweredOn == desired {
 		return ctrl.Result{}, nil
 	}
+
+	log.Info("power state mismatch, issuing BMC power command",
+		"machine", machine.Name, "desiredOnline", desired)
 
 	var result deployer.Result
 	var err error
@@ -431,6 +435,30 @@ func (r *MachineReconciler) reconcilePower(ctx context.Context, machine *keziov1
 	if err := r.Status().Update(ctx, machine); err != nil {
 		return ctrl.Result{}, err
 	}
+
+	// A BMC power command can succeed while the machine has not actually
+	// reached the desired state yet: PowerOff requests a graceful,
+	// orderly shutdown (see internal/bmc/redfish's PowerOff doc comment)
+	// that can take much longer than the read-back this same call just
+	// took, and PowerOn can equally race a BMC that has not yet reported
+	// the machine on. Recording that honest, still-mismatched observation
+	// (applyObservedPower above) is correct, but leaving it there without
+	// a retry is not: the next reconcile only runs on the next spec or
+	// status change, and status.poweredOn's mismatched value would then
+	// wrongly look like a *confirmed* state to compare a later spec.online
+	// flip against - exactly the trap that let a stale "still on" reading
+	// after a graceful PowerOff cause a subsequent PowerOn to be skipped
+	// as a no-op. Requeuing here instead keeps polling GetPowerState (via
+	// this same idempotent PowerOn/PowerOff call - see bmc.BMC's doc
+	// comment) until the observation actually agrees with desired.
+	if result.PoweredOn != nil && *result.PoweredOn != desired {
+		log.Info("BMC power command accepted but machine has not reached the desired state yet, retrying",
+			"machine", machine.Name, "desiredOnline", desired, "observedPoweredOn", *result.PoweredOn)
+		return ctrl.Result{RequeueAfter: backoffBaseDelay}, nil
+	}
+
+	log.Info("power state now matches spec.online",
+		"machine", machine.Name, "desiredOnline", desired)
 	return ctrl.Result{}, nil
 }
 

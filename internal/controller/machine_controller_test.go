@@ -100,6 +100,32 @@ func (d *powerOnMismatchDeployer) PowerOn(context.Context) (deployer.Result, err
 	return deployer.Result{Dirty: true, PoweredOn: &off}, nil
 }
 
+// laggingPowerOffDeployer wraps a fake deployer.Deployer, simulating a BMC
+// whose PowerOff is a graceful shutdown still in progress: the first call
+// observes the machine as still on, and every call after that observes it
+// correctly off - the same shape a real BMC's GetPowerState read-back
+// takes once an orderly shutdown actually completes. It also counts
+// PowerOn calls, so a test can assert PowerOn still fires once
+// spec.online flips back to true instead of being skipped by the first
+// call's stale observation.
+type laggingPowerOffDeployer struct {
+	deployer.Deployer
+	powerOffCalls *int
+	powerOnCalls  *int
+}
+
+func (d *laggingPowerOffDeployer) PowerOff(context.Context) (deployer.Result, error) {
+	*d.powerOffCalls++
+	still := *d.powerOffCalls == 1
+	return deployer.Result{Dirty: true, PoweredOn: &still}, nil
+}
+
+func (d *laggingPowerOffDeployer) PowerOn(context.Context) (deployer.Result, error) {
+	*d.powerOnCalls++
+	on := true
+	return deployer.Result{Dirty: true, PoweredOn: &on}, nil
+}
+
 // newTestMachineSpec builds a minimal, valid MachineSpec for a test
 // resource named name.
 func newTestMachineSpec(name string) keziov1alpha1.MachineSpec {
@@ -852,6 +878,85 @@ var _ = Describe("Machine Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.Status.PoweredOn).NotTo(BeNil())
 			Expect(*result.Status.PoweredOn).To(BeFalse(), "status.poweredOn must reflect what the driver observed, not the commanded/desired state")
+		})
+
+		It("requeues at backoffBaseDelay when PowerOff succeeds but the machine has not actually gone off yet, then still calls PowerOn once it does", func() {
+			// Regression test for a stale post-PowerOff observation
+			// (for example a graceful shutdown that is still in
+			// progress when GetPowerState is read back) getting cached
+			// into status.poweredOn as if it were confirmed, then
+			// wrongly matching a later spec.online=true and causing
+			// reconcilePower to skip PowerOn entirely.
+			const resourceName = "power-off-lagging-machine"
+			namespace := "default"
+			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+			nn := types.NamespacedName{Namespace: namespace, Name: resourceName}
+
+			machine := &keziov1alpha1.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec:       newPowerOnlyMachineSpec(resourceName, false),
+			}
+			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+			DeferCleanup(func() {
+				m := &keziov1alpha1.Machine{}
+				if err := k8sClient.Get(ctx, key, m); err == nil {
+					Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+				}
+			})
+
+			var powerOffCalls, powerOnCalls int
+			base := deployer.NewFactory()
+			r := &MachineReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+				DeployerFactory: func(m *keziov1alpha1.Machine) (deployer.Deployer, error) {
+					fake, err := base.New(m)
+					if err != nil {
+						return nil, err
+					}
+					if m.Name != nn.Name {
+						return fake, nil
+					}
+					return &laggingPowerOffDeployer{Deployer: fake, powerOffCalls: &powerOffCalls, powerOnCalls: &powerOnCalls}, nil
+				},
+			}
+
+			By("reconciling to Available, before reconcilePower has run at all")
+			_, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateAvailable
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(powerOffCalls).To(BeZero())
+
+			By("reconciling once, where the first PowerOff still observes the machine as on and requeues at backoffBaseDelay")
+			firstPowerResult, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(firstPowerResult.RequeueAfter).To(Equal(backoffBaseDelay))
+
+			mismatched := &keziov1alpha1.Machine{}
+			Expect(k8sClient.Get(ctx, key, mismatched)).To(Succeed())
+			Expect(*mismatched.Status.PoweredOn).To(BeTrue(), "the honest, still-mismatched observation must be recorded")
+			Expect(powerOffCalls).To(Equal(1))
+
+			By("reconciling once more, which retries PowerOff and this time actually observes off")
+			secondPowerResult, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(secondPowerResult.RequeueAfter).To(BeZero())
+
+			settled := &keziov1alpha1.Machine{}
+			Expect(k8sClient.Get(ctx, key, settled)).To(Succeed())
+			Expect(*settled.Status.PoweredOn).To(BeFalse(), "the retry must have observed the machine actually off by now")
+			Expect(powerOffCalls).To(Equal(2))
+
+			By("flipping spec.online back to true: PowerOn must still fire, not be skipped by the earlier mismatch")
+			Expect(k8sClient.Get(ctx, key, settled)).To(Succeed())
+			online := true
+			settled.Spec.Online = &online
+			Expect(k8sClient.Update(ctx, settled)).To(Succeed())
+
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(powerOnCalls).To(Equal(1), "PowerOn must be called once spec.online flips back to true")
 		})
 
 		It("calls PowerOff and records status.poweredOn=false when spec.online is false", func() {
