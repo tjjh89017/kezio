@@ -167,6 +167,26 @@ func (r *MachineReconciler) reconcileEnrolling(ctx context.Context, machine *kez
 		return ctrl.Result{RequeueAfter: result.RequeueAfter}, nil
 	}
 
+	// The BMC-backed Register (internal/deployer/agent.go) fetches and
+	// writes the Machine's status through its own, separate Get/Update -
+	// clearing stale registration state before arming the BMC's one-time
+	// PXE boot - so the copy this reconcile started with is stale by the
+	// time Register returns success: its resourceVersion no longer
+	// matches what Register itself just wrote. Advancing straight from
+	// that stale copy would make advance's Status().Update conflict, and
+	// a conflict here is not a benign, safe-to-retry failure: the
+	// automatic requeue it triggers re-enters reconcileEnrolling (the
+	// Machine never left Enrolling) and calls Register again, re-arming
+	// the BMC's one-time PXE override and re-issuing its power command
+	// against a machine that is already mid-boot from the first call -
+	// exactly what let a single Enrolling pass re-arm PXE and reset a
+	// VM already netbooting from it. Re-fetching before advancing picks
+	// up Register's own write instead of racing it, so a successful
+	// Register is only ever acted on once per Machine generation.
+	if err := r.Get(ctx, client.ObjectKeyFromObject(machine), machine); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	now := metav1.Now()
 	machine.Status.InspectingSince = &now
 	return r.advance(ctx, machine, keziov1alpha1.MachineStateInspecting, reasonInspecting,

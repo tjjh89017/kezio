@@ -126,6 +126,44 @@ func (d *laggingPowerOffDeployer) PowerOn(context.Context) (deployer.Result, err
 	return deployer.Result{Dirty: true, PoweredOn: &on}, nil
 }
 
+// racingRegisterDeployer wraps a fake deployer.Deployer, overriding
+// Register to mimic agentDeployer.Register's real shape (internal/
+// deployer/agent.go): it fetches and writes the Machine's status through
+// its own, separate Get/Update - clearing stale registration state -
+// before doing anything else, so the reconciler's own copy of the
+// Machine goes stale (a lower resourceVersion than what this write just
+// committed) the moment Register returns success. That is exactly the
+// race reconcileEnrolling's re-fetch-before-advance guards against (see
+// its doc comment); this deployer also counts calls, so a test can
+// assert Register never runs a second time despite the race.
+type racingRegisterDeployer struct {
+	deployer.Deployer
+	client        ctrlclient.Client
+	key           types.NamespacedName
+	registerCalls *int
+}
+
+func (d *racingRegisterDeployer) Register(ctx context.Context, data *deployer.RegisterData) (deployer.Result, error) {
+	*d.registerCalls++
+
+	machine := &keziov1alpha1.Machine{}
+	if err := d.client.Get(ctx, d.key, machine); err != nil {
+		return deployer.Result{}, err
+	}
+	apimeta.SetStatusCondition(&machine.Status.Conditions, metav1.Condition{
+		Type:               keziov1alpha1.MachineConditionAgentRegistered,
+		Status:             metav1.ConditionFalse,
+		Reason:             "AwaitingAgent",
+		Message:            "waiting for kezio-agent to boot and register",
+		ObservedGeneration: machine.Generation,
+	})
+	if err := d.client.Status().Update(ctx, machine); err != nil {
+		return deployer.Result{}, err
+	}
+
+	return d.Deployer.Register(ctx, data)
+}
+
 // newTestMachineSpec builds a minimal, valid MachineSpec for a test
 // resource named name.
 func newTestMachineSpec(name string) keziov1alpha1.MachineSpec {
@@ -1456,6 +1494,65 @@ var _ = Describe("Machine Controller", func() {
 			Expect(afterSecondError.Status.ErrorCount).To(Equal(int32(2)),
 				"errorCount grows by one per inspectingStuckThreshold window, not per reconcile")
 			Expect(powerCalls).To(Equal(powerCallsAfterRegister))
+		})
+	})
+
+	Context("Register racing the reconciler's own status write", func() {
+		It("re-fetches before advancing so the race does not call Register twice", func() {
+			const resourceName = "register-race-machine"
+			namespace := "default"
+			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+
+			machine := &keziov1alpha1.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec:       newTestMachineSpec(resourceName),
+			}
+			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+			DeferCleanup(func() {
+				m := &keziov1alpha1.Machine{}
+				if err := k8sClient.Get(ctx, key, m); err == nil {
+					Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+				}
+			})
+
+			registerCalls := 0
+			factory := deployer.NewFactory()
+			r := &MachineReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+				DeployerFactory: func(m *keziov1alpha1.Machine) (deployer.Deployer, error) {
+					inner, err := factory.New(m)
+					if err != nil {
+						return nil, err
+					}
+					return &racingRegisterDeployer{
+						Deployer:      inner,
+						client:        k8sClient,
+						key:           types.NamespacedName{Namespace: m.Namespace, Name: m.Name},
+						registerCalls: &registerCalls,
+					}, nil
+				},
+			}
+
+			By("attaching the finalizer, then reaching Enrolling")
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			enrolling := &keziov1alpha1.Machine{}
+			Expect(k8sClient.Get(ctx, key, enrolling)).To(Succeed())
+			Expect(enrolling.Status.State).To(Equal(keziov1alpha1.MachineStateEnrolling))
+
+			By("reconciling Enrolling once more, where Register's own status write races advance's")
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+
+			afterRegister := &keziov1alpha1.Machine{}
+			Expect(k8sClient.Get(ctx, key, afterRegister)).To(Succeed())
+			Expect(afterRegister.Status.State).To(Equal(keziov1alpha1.MachineStateInspecting),
+				"the race must not surface as a Reconcile error that leaves the Machine stuck in Enrolling")
+			Expect(registerCalls).To(Equal(1),
+				"Register must run exactly once even though its own status write raced advance's")
 		})
 	})
 })

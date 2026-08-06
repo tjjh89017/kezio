@@ -2054,10 +2054,37 @@ jobs:
         # headlessly - and, given a logfile argument, records everything
         # written to that pty there, byte for byte, without also needing
         # a real terminal itself.
+        #
+        # A single `virtctl console` attach only lasts as long as the VMI
+        # it attached to: bmc_mode's own later "power cycle to consume
+        # KubeVirtBMC's one-shot PXE override" step tears the VMI down
+        # and brings up a new one (a fresh virt-launcher pod, fresh
+        # console socket), which drops this attach for good - a prior
+        # run lost the entire new VMI's boot to an unobserved console
+        # this way. The loop below reattaches (through the same `script`
+        # capture, `-a` so it appends rather than truncates) every time
+        # the attach exits, printing a marker line either side of the
+        # gap so the uploaded console.log still reads as one continuous
+        # history across however many VMI generations this job goes
+        # through, instead of silently going dark after the first.
         run: |
           set -euo pipefail
-          nohup script -qec "virtctl console '${TARGET_VM_NAME}' -n kezio-system" \
-            "${RUNNER_TEMP}/console.log" >/tmp/console-capture-wrapper.log 2>&1 &
+          cat >"${RUNNER_TEMP}/console-capture-loop.sh" <<'CONSOLE_CAPTURE_LOOP'
+          #!/bin/bash
+          set -uo pipefail
+          vm_name="$1"
+          namespace="$2"
+          logfile="$3"
+          while true; do
+          echo "===== console-capture: (re)attaching to ${vm_name} at $(date -Is) =====" >>"${logfile}"
+          script -qec "virtctl console '${vm_name}' -n '${namespace}'" -a "${logfile}"
+          echo "===== console-capture: disconnected from ${vm_name} at $(date -Is); reattaching in 2s (a VMI recreation or a transient drop, not necessarily a failure) =====" >>"${logfile}"
+          sleep 2
+          done
+          CONSOLE_CAPTURE_LOOP
+          chmod +x "${RUNNER_TEMP}/console-capture-loop.sh"
+          nohup "${RUNNER_TEMP}/console-capture-loop.sh" "${TARGET_VM_NAME}" kezio-system "${RUNNER_TEMP}/console.log" \
+            >/tmp/console-capture-wrapper.log 2>&1 &
           disown
 
       - name: Wait for the Machine to reach Provisioned
