@@ -152,8 +152,22 @@ env:
   # comment's "Honest scope" section for what these genuinely simulate.
   SITE_A_BRIDGE: kezio-site-a0
   SITE_B_BRIDGE: kezio-site-b0
-  SITE_A_BOOTD_IP: 192.0.2.1/24
-  SITE_B_BOOTD_IP: 192.0.3.1/24
+  # Three distinct addresses per site segment, kept apart deliberately
+  # (see e2e-kubevirt-reusable.yml's env block for the full "why"):
+  #   - SITE_*_HOST_IP: the runner host's own address on that site's
+  #     bridge - not that site's bootd address.
+  #   - SITE_*_BOOTD_NET1_IP: the static address that site's
+  #     kezio-boot-network-<site> NetworkAttachmentDefinition assigns
+  #     to that site's bootd net1 - its dhcp-range subnet anchor and
+  #     the TFTP next-server it advertises.
+  #   - SITE_*_CIDR: that site's whole segment, handed to that site's
+  #     bootd as BOOTD_PROVISIONING_CIDR.
+  SITE_A_HOST_IP: 192.0.2.1/24
+  SITE_A_BOOTD_NET1_IP: 192.0.2.2/24
+  SITE_A_CIDR: 192.0.2.0/24
+  SITE_B_HOST_IP: 192.0.3.1/24
+  SITE_B_BOOTD_NET1_IP: 192.0.3.2/24
+  SITE_B_CIDR: 192.0.3.0/24
   SITE_A_VM_MAC: "52:54:00:be:ef:0a"
   SITE_B_VM_MAC: "52:54:00:be:ef:0b"
   SITE_A_VM_DISK_SERIAL: "KEZIOE2ESCALESITEADISK1"
@@ -250,11 +264,11 @@ jobs:
         run: |
           set -euo pipefail
           sudo ip link add "${SITE_A_BRIDGE}" type bridge
-          sudo ip addr add "${SITE_A_BOOTD_IP}" dev "${SITE_A_BRIDGE}"
+          sudo ip addr add "${SITE_A_HOST_IP}" dev "${SITE_A_BRIDGE}"
           sudo ip link set "${SITE_A_BRIDGE}" up
 
           sudo ip link add "${SITE_B_BRIDGE}" type bridge
-          sudo ip addr add "${SITE_B_BOOTD_IP}" dev "${SITE_B_BRIDGE}"
+          sudo ip addr add "${SITE_B_HOST_IP}" dev "${SITE_B_BRIDGE}"
           sudo ip link set "${SITE_B_BRIDGE}" up
 
       - name: Cache the Ubuntu cloud image
@@ -570,16 +584,23 @@ jobs:
           set -euo pipefail
           make install
           make deploy IMG="${MANAGER_IMG}"
-          kubectl label --overwrite ns kezio-system pod-security.kubernetes.io/enforce=restricted
+          # privileged, not restricted: bootd's dnsmasq child needs NET_ADMIN/NET_RAW, outside both the restricted and baseline PSA profiles - see config/bootd/deployment.yaml's capabilities comment. Every pod keeps its own strict securityContext regardless.
+          kubectl label --overwrite ns kezio-system pod-security.kubernetes.io/enforce=privileged
           kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
 
       - name: Create the two boot NetworkAttachmentDefinitions
+        # Static ipam, not "ipam": {}: each site's bootd net1 must carry
+        # a fixed address (that site's BOOTD_NET1_IP) on that site's
+        # subnet - dnsmasq binds its DHCP sockets to net1 and
+        # BOOTD_SERVER_IP advertises it as the TFTP next-server. Each
+        # site's runner-host bridge address (HOST_IP) stays on the same
+        # bridge without colliding.
         run: |
           set -euo pipefail
           for site in site-a site-b; do
             case "${site}" in
-              site-a) bridge="${SITE_A_BRIDGE}" ;;
-              site-b) bridge="${SITE_B_BRIDGE}" ;;
+              site-a) bridge="${SITE_A_BRIDGE}"; bootd_net1_ip="${SITE_A_BOOTD_NET1_IP}" ;;
+              site-b) bridge="${SITE_B_BRIDGE}"; bootd_net1_ip="${SITE_B_BOOTD_NET1_IP}" ;;
             esac
             cat <<EOF | kubectl apply -f -
           apiVersion: k8s.cni.cncf.io/v1
@@ -593,7 +614,12 @@ jobs:
                 "cniVersion": "0.3.1",
                 "type": "bridge",
                 "bridge": "${bridge}",
-                "ipam": {}
+                "ipam": {
+                  "type": "static",
+                  "addresses": [
+                    {"address": "${bootd_net1_ip}"}
+                  ]
+                }
               }
           EOF
           done
@@ -720,16 +746,22 @@ jobs:
 
           for site in site-a site-b; do
             case "${site}" in
-              site-a) bootd_ip="${SITE_A_BOOTD_IP%%/*}" ;;
-              site-b) bootd_ip="${SITE_B_BOOTD_IP%%/*}" ;;
+              site-a) bootd_ip="${SITE_A_BOOTD_NET1_IP%%/*}"; cidr="${SITE_A_CIDR}" ;;
+              site-b) bootd_ip="${SITE_B_BOOTD_NET1_IP%%/*}"; cidr="${SITE_B_CIDR}" ;;
             esac
+            # BOOTD_SERVER_IP: that site's bootd net1 static address
+            # (the NAD's static ipam above). BOOTD_PROVISIONING_CIDR:
+            # that site's segment subnet, rendered as dnsmasq's
+            # proxyDHCP dhcp-range - both required, both site-specific,
+            # so both get patched per clone the same way.
             echo "${deployment_base_json}" | jq \
-              --arg site "${site}" --arg ip "${bootd_ip}" --arg net "kezio-boot-network-${site}" '
+              --arg site "${site}" --arg ip "${bootd_ip}" --arg cidr "${cidr}" --arg net "kezio-boot-network-${site}" '
               .metadata.name = "kezio-bootd-\($site)"
               | .spec.selector.matchLabels["kezio.kojuro.date/network-site"] = $site
               | .spec.template.metadata.labels["kezio.kojuro.date/network-site"] = $site
               | .spec.template.metadata.annotations["k8s.v1.cni.cncf.io/networks"] = $net
               | (.spec.template.spec.containers[] | select(.name=="bootd") | .env[] | select(.name=="BOOTD_SERVER_IP") | .value) = $ip
+              | (.spec.template.spec.containers[] | select(.name=="bootd") | .env[] | select(.name=="BOOTD_PROVISIONING_CIDR") | .value) = $cidr
             ' | kubectl apply -f -
 
             if [ -n "${BOOT_ARTIFACTS_VERSION}" ]; then
@@ -1164,6 +1196,20 @@ jobs:
             fi
           done
 
+      - name: Flush each site's bootd log to the artifact
+        if: always()
+        # Unconditional, like the pcap flush above - each site's bootd
+        # pod log carries dnsmasq's forwarded per-request log-dhcp
+        # decision lines (see internal/bootd's forwardLines), useful on
+        # a passing run too, not only a failing one.
+        run: |
+          set +e
+          for site in site-a site-b; do
+            kubectl -n kezio-system logs deployment/kezio-bootd-"${site}" --all-containers --tail=-1 \
+              > "${RUNNER_TEMP}/bootd-${site}.log" 2>&1 || true
+          done
+          exit 0
+
       - name: Upload E2E diagnostics artifacts
         # Always, not just on failure - this lane had no artifact upload
         # at all before; the bridge captures are worth having on a
@@ -1179,5 +1225,7 @@ jobs:
             ${{ runner.temp }}/bridge-site-a-pcap.txt
             ${{ runner.temp }}/bridge-site-b.pcap
             ${{ runner.temp }}/bridge-site-b-pcap.txt
+            ${{ runner.temp }}/bootd-site-a.log
+            ${{ runner.temp }}/bootd-site-b.log
           if-no-files-found: ignore
           retention-days: 7

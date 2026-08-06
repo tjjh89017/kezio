@@ -68,7 +68,20 @@ env:
   # see config/bootd's networkattachmentdefinition.example.yaml for why
   # that is fine for proxyDHCP/TFTP traffic.
   PROVISIONING_BRIDGE: kezio-prov0
-  PROVISIONING_BOOTD_IP: 192.0.2.1/24
+  # Three distinct addresses on that segment, kept apart deliberately
+  # (see e2e-kubevirt-reusable.yml's env block for the full "why"):
+  #   - PROVISIONING_HOST_IP: the runner host's own address on the
+  #     bridge, anchoring only the socat TCP forwards for the boot/
+  #     agent servers below - not bootd's own address.
+  #   - PROVISIONING_BOOTD_NET1_IP: the static address the
+  #     kezio-boot-network NetworkAttachmentDefinition assigns to
+  #     bootd's net1 - the dhcp-range subnet anchor and the TFTP
+  #     next-server bootd advertises.
+  #   - PROVISIONING_CIDR: the whole segment, handed to bootd as
+  #     BOOTD_PROVISIONING_CIDR.
+  PROVISIONING_HOST_IP: 192.0.2.1/24
+  PROVISIONING_BOOTD_NET1_IP: 192.0.2.2/24
+  PROVISIONING_CIDR: 192.0.2.0/24
   TARGET_VM_MAC: "52:54:00:be:ef:01"
   TARGET_VM_DISK_SERIAL: "KEZIOE2EVMDISK01"
 
@@ -165,7 +178,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo ip link add "${PROVISIONING_BRIDGE}" type bridge
-          sudo ip addr add "${PROVISIONING_BOOTD_IP}" dev "${PROVISIONING_BRIDGE}"
+          sudo ip addr add "${PROVISIONING_HOST_IP}" dev "${PROVISIONING_BRIDGE}"
           sudo ip link set "${PROVISIONING_BRIDGE}" up
 
       - name: Write the RKE2 config (must exist before the service starts)
@@ -404,7 +417,8 @@ jobs:
           # config/default's own kustomization creates the kezio-system
           # namespace as part of `make deploy` above; only the security
           # label is this step's own responsibility.
-          kubectl label --overwrite ns kezio-system pod-security.kubernetes.io/enforce=restricted
+          # privileged, not restricted: bootd's dnsmasq child needs NET_ADMIN/NET_RAW, outside both the restricted and baseline PSA profiles - see config/bootd/deployment.yaml's capabilities comment. Every pod keeps its own strict securityContext regardless.
+          kubectl label --overwrite ns kezio-system pod-security.kubernetes.io/enforce=privileged
           kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
 
       - name: Create the provisioning NetworkAttachmentDefinition
@@ -419,6 +433,13 @@ jobs:
         # a stylistic reshuffle - the first dispatched run of this
         # workflow failed with exactly that 404
         # ("namespaces \"kezio-system\" not found").
+        #
+        # Static ipam, not "ipam": {}: bootd's net1 must carry a fixed
+        # address (PROVISIONING_BOOTD_NET1_IP) on the provisioning
+        # subnet - dnsmasq binds its DHCP sockets to net1 and
+        # BOOTD_SERVER_IP advertises it as the TFTP next-server. The
+        # runner host keeps PROVISIONING_HOST_IP on the same bridge, so
+        # the two never collide.
         run: |
           cat <<EOF | kubectl apply -f -
           apiVersion: k8s.cni.cncf.io/v1
@@ -432,7 +453,12 @@ jobs:
                 "cniVersion": "0.3.1",
                 "type": "bridge",
                 "bridge": "${PROVISIONING_BRIDGE}",
-                "ipam": {}
+                "ipam": {
+                  "type": "static",
+                  "addresses": [
+                    {"address": "${PROVISIONING_BOOTD_NET1_IP}"}
+                  ]
+                }
               }
           EOF
 
@@ -445,9 +471,9 @@ jobs:
           kubectl -n kezio-system set env deployment/kezio-controller-manager \
             BOOT_SERVER_ADDR=:8090 \
             BOOT_ARTIFACTS_DIR=/boot-artifacts \
-            BOOT_SERVER_URL="http://${PROVISIONING_BOOTD_IP%%/*}:8090" \
+            BOOT_SERVER_URL="http://${PROVISIONING_HOST_IP%%/*}:8090" \
             AGENT_SERVER_ADDR=:8091 \
-            BOOT_AGENT_SERVER_URL="http://${PROVISIONING_BOOTD_IP%%/*}:8091" \
+            BOOT_AGENT_SERVER_URL="http://${PROVISIONING_HOST_IP%%/*}:8091" \
             DEPLOYER=agent
           # config/e2e-boot-path deliberately does not wire the
           # fetch-boot-artifacts initContainer into its own
@@ -481,7 +507,7 @@ jobs:
           set -euo pipefail
           command -v socat >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq socat)
 
-          bridge_ip="${PROVISIONING_BOOTD_IP%%/*}"
+          bridge_ip="${PROVISIONING_HOST_IP%%/*}"
           boot_clusterip="$(kubectl -n kezio-system get svc kezio-boot-server -o jsonpath='{.spec.clusterIP}')"
           agent_clusterip="$(kubectl -n kezio-system get svc kezio-agent-server -o jsonpath='{.spec.clusterIP}')"
 
@@ -507,14 +533,20 @@ jobs:
           cd config/bootd && ../../bin/kustomize edit set image bootd=example.com/kezio-bootd:e2e-boot-path
           cd ../..
           kubectl apply -k config/bootd
-          # BOOTD_BOOT_CONFIG_URL: the boot config server as the VM
-          # reaches it - the socat forward on the bridge address (the
-          # same value BOOT_SERVER_URL was set to above); bootd renders
-          # it into the grub/grub.cfg it serves over TFTP for the
-          # netboot GRUB image.
+          # - BOOTD_SERVER_IP: bootd's OWN net1 static address (the
+          #   NAD's static ipam above) - the PXE next-server, so
+          #   firmware TFTPs straight to the pod.
+          # - BOOTD_PROVISIONING_CIDR: the segment's subnet, rendered
+          #   as dnsmasq's proxyDHCP dhcp-range.
+          # - BOOTD_BOOT_CONFIG_URL: the boot config server as the VM
+          #   reaches it - the socat forward on the host bridge address
+          #   (the same value BOOT_SERVER_URL was set to above); bootd
+          #   renders it into the grub/grub.cfg it serves over TFTP for
+          #   the netboot GRUB image.
           kubectl -n kezio-system set env deployment/kezio-bootd \
-            BOOTD_SERVER_IP="${PROVISIONING_BOOTD_IP%%/*}" \
-            BOOTD_BOOT_CONFIG_URL="http://${PROVISIONING_BOOTD_IP%%/*}:8090"
+            BOOTD_SERVER_IP="${PROVISIONING_BOOTD_NET1_IP%%/*}" \
+            BOOTD_PROVISIONING_CIDR="${PROVISIONING_CIDR}" \
+            BOOTD_BOOT_CONFIG_URL="http://${PROVISIONING_HOST_IP%%/*}:8090"
           # config/bootd already wires its own fetch-boot-artifacts
           # initContainer (see config/boot-artifacts) and a plain
           # emptyDir "tftp" volume it populates - no volume patch needed
@@ -685,6 +717,18 @@ jobs:
             tcpdump -vvv -r "${RUNNER_TEMP}/bridge.pcap" > "${RUNNER_TEMP}/bridge-pcap.txt" 2>&1
           fi
 
+      - name: Flush the bootd log to the artifact
+        if: always()
+        # Unconditional, like the pcap flush above - bootd's pod log
+        # carries dnsmasq's forwarded per-request log-dhcp decision
+        # lines (see internal/bootd's forwardLines), useful on a passing
+        # run too, not only a failing one.
+        run: |
+          set +e
+          kubectl -n kezio-system logs deployment/kezio-bootd --all-containers --tail=-1 \
+            > "${RUNNER_TEMP}/bootd.log" 2>&1 || true
+          exit 0
+
       - name: Upload E2E diagnostics artifacts
         # Always, not just on failure - this lane had no artifact upload
         # at all before; the bridge capture is worth having on a passing
@@ -698,5 +742,6 @@ jobs:
           path: |
             ${{ runner.temp }}/bridge.pcap
             ${{ runner.temp }}/bridge-pcap.txt
+            ${{ runner.temp }}/bootd.log
           if-no-files-found: ignore
           retention-days: 7
