@@ -483,19 +483,22 @@ jobs:
         #     the appliance boot on real KVM instead of TCG.
         #   - `--install`'s appliance-side apt-get needing the
         #     appliance's own outbound network once failed hard on this
-        #     runner ("libguestfs error: passt exited with status 1").
-        #     libguestfs's --network setup tries a "passt" user-mode
-        #     network backend first when the passt binary is present,
-        #     and a broken passt invocation errors out instead of
-        #     falling back - purging passt below (a no-op if it was
-        #     never installed) removes that binary so libguestfs falls
-        #     back to its other, long-stable user-mode network
-        #     implementation (qemu's own built-in SLIRP) instead.
+        #     runner ("libguestfs error: passt exited with status 1"),
+        #     which led an earlier revision of this step to purge passt
+        #     so libguestfs would fall back to qemu's built-in SLIRP.
+        #     That fallback theory was wrong: on noble, libguestfs's
+        #     --network path requires the passt binary and has no
+        #     working SLIRP fallback - a run with passt purged left the
+        #     appliance with no network at all ("passt: not found",
+        #     followed by the in-guest apt-get failing to resolve
+        #     archive.ubuntu.com). passt is therefore installed
+        #     (not purged) below; the historical passt failure is being
+        #     re-tested deliberately rather than assumed to still apply.
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libguestfs-tools
-          sudo apt-get purge -y passt 2>/dev/null || true
+          sudo apt-get install -y --no-install-recommends passt
 
           cp "${{ runner.temp }}/ubuntu-cloud.img" "${{ runner.temp }}/ubuntu-cloud-marked.img"
 

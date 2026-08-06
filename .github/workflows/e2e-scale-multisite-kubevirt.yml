@@ -284,14 +284,17 @@ jobs:
         # mount instead, believing the appliance's own boot time was the
         # bottleneck - now believed to have been the software "tcg"
         # fallback, not an inherent cost, since /dev/kvm is confirmed
-        # usable on this runner; and for why passt is purged before this
-        # runs, and why the appliance's network is unrelated to the
-        # target VM's own bridge-pure boot path below).
+        # usable on this runner; and for why passt is installed rather
+        # than purged before this runs - on noble, libguestfs's
+        # --network path requires the passt binary and has no working
+        # SLIRP fallback, so purging it left the appliance with no
+        # network at all - and why the appliance's network is unrelated
+        # to the target VM's own bridge-pure boot path below).
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libguestfs-tools
-          sudo apt-get purge -y passt 2>/dev/null || true
+          sudo apt-get install -y --no-install-recommends passt
 
           cp "${{ runner.temp }}/ubuntu-cloud.img" "${{ runner.temp }}/ubuntu-cloud-marked.img"
 
