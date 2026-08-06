@@ -469,22 +469,64 @@ jobs:
         #
         # qemu-guest-agent's own Depends: is not fully covered by what
         # the (minimal) cloud image already carries - noble's
-        # qemu-guest-agent 1:8.2.2+ds-0ubuntu1.16 depends on liburing2
-        # (>= 2.3) and libnuma1 (>= 2.0.11), neither of which is in
-        # ubuntu-24.04-minimal-cloudimg-amd64.manifest, unlike libc6/
-        # libglib2.0-0t64/libudev1/init-system-helpers, which are.
-        # Missing liburing2 means the daemon's dynamic linker fails
-        # instantly on start (no .so found), which systemd sees as a
-        # crash loop that burns through StartLimitBurst and gives up
-        # for good - no amount of restarting fixes a missing library.
-        # Both liburing2 and libnuma1 depend on nothing beyond libc6
-        # themselves (checked against packages.ubuntu.com), so
-        # unpacking all three payloads with `dpkg-deb -x` (no
-        # maintainer scripts run) is enough for a working daemon -
-        # only the postinst's systemd-enable step needs to be
-        # reproduced by hand, which this script does by reading the
-        # unit's own [Install] WantedBy= and creating the same
-        # wants-symlink(s) dpkg would have.
+        # qemu-guest-agent 1:8.2.2+ds-0ubuntu1.16 once depended on
+        # liburing2 (>= 2.3) and libnuma1 (>= 2.0.11), neither of which
+        # was in ubuntu-24.04-minimal-cloudimg-amd64.manifest, unlike
+        # libc6/libglib2.0-0t64/libudev1/init-system-helpers, which
+        # were. Missing liburing2 meant the daemon's dynamic linker
+        # failed instantly on start (no .so found), which systemd saw
+        # as a crash loop that burned through StartLimitBurst and gave
+        # up for good - no amount of restarting fixes a missing
+        # library.
+        #
+        # A first fix hardcoded that pair ("qemu-guest-agent liburing2
+        # libnuma1") as the download list. That was only a stopgap: a
+        # future qemu-guest-agent version bump can add, drop, or
+        # rename dependencies at any point, silently reintroducing the
+        # same crash loop with no signal until the boot-verify step
+        # times out. The dependency closure is resolved dynamically
+        # below instead, so this step self-heals across
+        # qemu-guest-agent updates.
+        #
+        # Resolution mechanism: `apt-get install --simulate` runs
+        # apt's real solver, so `Depends: a | b` alternatives and
+        # virtual packages come out already resolved to one concrete,
+        # installable package - unlike `apt-cache depends --recurse`,
+        # which prints the raw, unresolved dependency graph (every
+        # alternative, every virtual-package name, some of which name
+        # no real .deb at all). `-o Dir::State::status=/dev/null` makes
+        # apt simulate against an empty dpkg status database, so the
+        # closure always lists qemu-guest-agent's *complete* dependency
+        # tree regardless of what this runner happens to already have
+        # installed - the runner's own package set must never leak
+        # into what gets injected into the image. This runner tracks
+        # the same noble release the image is pinned to
+        # (UBUNTU_CLOUD_IMAGE_URL above), so the closure it resolves is
+        # the same one the image would need.
+        #
+        # What's still missing from the image is found by diffing that
+        # closure against the image's own sibling .manifest file (same
+        # URL, .img -> .manifest; "pkgname<TAB>version" per line,
+        # dpkg-query -W format) instead of assuming which packages are
+        # absent. Only packages the manifest doesn't already list get
+        # downloaded and unpacked; qemu-guest-agent itself is always
+        # downloaded regardless of manifest membership, since its own
+        # .deb is where the systemd unit below is read from. Downloaded
+        # payloads are unpacked with `dpkg-deb -x` (no maintainer
+        # scripts run) - fine for libraries, which need nothing beyond
+        # extraction; only qemu-guest-agent's own postinst
+        # systemd-enable step needs reproducing by hand, which this
+        # script does by reading the unit's own [Install] WantedBy=
+        # and creating the same wants-symlink(s) dpkg would have.
+        #
+        # Edge cases handled: package names apt reports as
+        # arch-qualified (e.g. "libc6:amd64") are stripped to their
+        # bare name before comparing against the manifest and before
+        # `apt-get download`, since the manifest never carries the
+        # qualifier either. A download failure for any package in the
+        # closure fails this step outright - a silently-skipped
+        # dependency is exactly the class of bug this whole mechanism
+        # exists to prevent.
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -495,10 +537,47 @@ jobs:
           MARKER_TOKEN="$(openssl rand -hex 16)"
           echo "MARKER_TOKEN=${MARKER_TOKEN}" >> "$GITHUB_ENV"
 
+          echo "::group::Resolving qemu-guest-agent's runtime dependency closure"
+          mapfile -t qga_closure < <(
+            apt-get install --simulate -o Dir::State::status=/dev/null \
+              --no-install-recommends qemu-guest-agent \
+              | awk '/^Inst /{n=$2; sub(/:.*$/, "", n); print n}' \
+              | sort -u
+          )
+          if [ "${#qga_closure[@]}" -eq 0 ]; then
+            echo "::error::apt could not resolve qemu-guest-agent's dependency closure" >&2
+            exit 1
+          fi
+          echo "full closure (${#qga_closure[@]} packages): ${qga_closure[*]}"
+
+          manifest_file="$(mktemp)"
+          curl -sfL -o "${manifest_file}" "${UBUNTU_CLOUD_IMAGE_URL%.img}.manifest"
+
+          mapfile -t qga_missing < <(
+            comm -23 \
+              <(printf '%s\n' "${qga_closure[@]}" | sort -u) \
+              <(awk -F'\t' '{n=$1; sub(/:.*$/, "", n); print n}' "${manifest_file}" | sort -u)
+          )
+          if ! printf '%s\n' "${qga_missing[@]:-}" | grep -qxF qemu-guest-agent; then
+            qga_missing+=("qemu-guest-agent")
+          fi
+          echo "missing from the image manifest, to be downloaded and injected (${#qga_missing[@]} packages): ${qga_missing[*]}"
+          echo "::endgroup::"
+
           qga_deb_dir="$(mktemp -d)"
-          (cd "${qga_deb_dir}" && apt-get download qemu-guest-agent liburing2 libnuma1)
+          echo "::group::Downloading resolved+injected packages"
+          (
+            cd "${qga_deb_dir}"
+            for pkg in "${qga_missing[@]}"; do
+              if ! apt-get download "${pkg}"; then
+                echo "::error::apt-get download failed for '${pkg}' (part of qemu-guest-agent's dependency closure, not already carried by the image)" >&2
+                exit 1
+              fi
+            done
+          )
+          echo "::endgroup::"
           qga_deb="$(ls "${qga_deb_dir}"/qemu-guest-agent_*.deb)"
-          qga_extra_debs=("${qga_deb_dir}"/liburing2_*.deb "${qga_deb_dir}"/libnuma1_*.deb)
+          mapfile -t qga_extra_debs < <(find "${qga_deb_dir}" -maxdepth 1 -name '*.deb' ! -name 'qemu-guest-agent_*')
 
           mount_dir="$(mktemp -d)"
 

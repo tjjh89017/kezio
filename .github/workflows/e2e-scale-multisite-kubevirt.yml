@@ -285,8 +285,12 @@ jobs:
         # qemu-guest-agent's own Depends: is not fully covered by what
         # the (minimal) cloud image already carries - see
         # e2e-kubevirt-reusable.yml's step of this name for the
-        # liburing2/libnuma1 dependency evidence and why both extra
-        # .debs get unpacked alongside qemu-guest-agent's here too.
+        # liburing2/libnuma1 evidence that first surfaced this, and for
+        # why the dependency closure below is resolved dynamically at
+        # run time (a fixed package list was only a stopgap - a future
+        # qemu-guest-agent update can add, drop, or rename dependencies
+        # and silently reintroduce the same crash loop) rather than
+        # hardcoded here too.
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -297,10 +301,47 @@ jobs:
           MARKER_TOKEN="$(openssl rand -hex 16)"
           echo "MARKER_TOKEN=${MARKER_TOKEN}" >> "$GITHUB_ENV"
 
+          echo "::group::Resolving qemu-guest-agent's runtime dependency closure"
+          mapfile -t qga_closure < <(
+            apt-get install --simulate -o Dir::State::status=/dev/null \
+              --no-install-recommends qemu-guest-agent \
+              | awk '/^Inst /{n=$2; sub(/:.*$/, "", n); print n}' \
+              | sort -u
+          )
+          if [ "${#qga_closure[@]}" -eq 0 ]; then
+            echo "::error::apt could not resolve qemu-guest-agent's dependency closure" >&2
+            exit 1
+          fi
+          echo "full closure (${#qga_closure[@]} packages): ${qga_closure[*]}"
+
+          manifest_file="$(mktemp)"
+          curl -sfL -o "${manifest_file}" "${UBUNTU_CLOUD_IMAGE_URL%.img}.manifest"
+
+          mapfile -t qga_missing < <(
+            comm -23 \
+              <(printf '%s\n' "${qga_closure[@]}" | sort -u) \
+              <(awk -F'\t' '{n=$1; sub(/:.*$/, "", n); print n}' "${manifest_file}" | sort -u)
+          )
+          if ! printf '%s\n' "${qga_missing[@]:-}" | grep -qxF qemu-guest-agent; then
+            qga_missing+=("qemu-guest-agent")
+          fi
+          echo "missing from the image manifest, to be downloaded and injected (${#qga_missing[@]} packages): ${qga_missing[*]}"
+          echo "::endgroup::"
+
           qga_deb_dir="$(mktemp -d)"
-          (cd "${qga_deb_dir}" && apt-get download qemu-guest-agent liburing2 libnuma1)
+          echo "::group::Downloading resolved+injected packages"
+          (
+            cd "${qga_deb_dir}"
+            for pkg in "${qga_missing[@]}"; do
+              if ! apt-get download "${pkg}"; then
+                echo "::error::apt-get download failed for '${pkg}' (part of qemu-guest-agent's dependency closure, not already carried by the image)" >&2
+                exit 1
+              fi
+            done
+          )
+          echo "::endgroup::"
           qga_deb="$(ls "${qga_deb_dir}"/qemu-guest-agent_*.deb)"
-          qga_extra_debs=("${qga_deb_dir}"/liburing2_*.deb "${qga_deb_dir}"/libnuma1_*.deb)
+          mapfile -t qga_extra_debs < <(find "${qga_deb_dir}" -maxdepth 1 -name '*.deb' ! -name 'qemu-guest-agent_*')
 
           mount_dir="$(mktemp -d)"
 
