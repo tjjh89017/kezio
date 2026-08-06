@@ -243,7 +243,7 @@ func TestExecute_CommandSequenceForMixedPartitionTypes(t *testing.T) {
 	wantInOrder := []string{
 		"blockdev --getsize64 " + disk, // safety check, before any write
 		"sfdisk " + disk,
-		"partprobe " + disk,
+		"blockdev --rereadpt " + disk,
 		"mkfs.vfat " + agentapi.DevicePartitionPath(disk, 1),
 		"mkswap --uuid 11111111-1111-1111-1111-111111111111 " + agentapi.DevicePartitionPath(disk, 3),
 	}

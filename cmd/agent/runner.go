@@ -25,7 +25,7 @@ import (
 )
 
 // execRunner implements deploy.Runner by shelling out to the live
-// environment's own tools (sfdisk, partprobe, mkfs.*, mkswap, blockdev -
+// environment's own tools (sfdisk, blockdev, mkfs.*, mkswap -
 // all present in the live boot image; see hack/live-image). It is the
 // only place in kezio-agent that actually runs a command against a real
 // device.

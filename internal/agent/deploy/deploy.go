@@ -51,7 +51,7 @@ limitations under the License.
 // the whole deployment having written nothing at all rather than leaving
 // some disks touched and others not.
 //
-// Every external command (sfdisk, partprobe, mkfs.*, mkswap, blockdev)
+// Every external command (sfdisk, blockdev, mkfs.*, mkswap)
 // and the ezio gRPC control plane are reached through the small Runner
 // and EzioClient/EzioLauncher interfaces this package defines, not
 // os/exec or seeder.Dial directly, so Execute's orchestration - which
@@ -121,7 +121,7 @@ type ProgressReporter interface {
 
 // Executor runs a DeployPlan against the machine it executes on.
 type Executor struct {
-	// Runner executes sfdisk, partprobe, mkfs.*, mkswap, and blockdev.
+	// Runner executes sfdisk, blockdev, mkfs.*, and mkswap.
 	Runner Runner
 	// Ezio launches the local ezio daemon used for every content
 	// partition across the whole plan. Only consulted when the plan
@@ -381,7 +381,7 @@ func (e *Executor) applyImagePlan(ctx context.Context, ip agentapi.ImageDeployPl
 	if _, err := e.Runner.Run(ctx, []byte(script), "sfdisk", ip.Disk); err != nil {
 		return fmt.Errorf("image %s: writing partition table to %s: %w", ip.ImageRef.Name, ip.Disk, err)
 	}
-	if _, err := e.Runner.Run(ctx, nil, "partprobe", ip.Disk); err != nil {
+	if _, err := e.Runner.Run(ctx, nil, "blockdev", "--rereadpt", ip.Disk); err != nil {
 		return fmt.Errorf("image %s: re-reading partition table on %s: %w", ip.ImageRef.Name, ip.Disk, err)
 	}
 

@@ -157,7 +157,7 @@ func TestPollLoop_ExecutesDeployPlanOnceAndReportsProgress(t *testing.T) {
 		t.Fatalf("pollLoop returned %v, want nil (it should run until ctx expires and then return cleanly)", err)
 	}
 
-	// blockdev --getsize64 + sfdisk + partprobe + mkfs.ext4 + (finalize:
+	// blockdev --getsize64 + sfdisk + blockdev --rereadpt + mkfs.ext4 + (finalize:
 	// no ESP partition here, so no efibootmgr calls) + systemctl reboot
 	// = 5 Runner calls for exactly one execution; if the plan were
 	// re-executed on a later poll (the controller keeps answering

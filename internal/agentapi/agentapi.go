@@ -307,7 +307,7 @@ type ProgressRequest struct {
 // means the deploy actually succeeded end to end.
 const (
 	// DeployStepPartitioning means every image plan's partition table is
-	// being written and re-read (sfdisk, partprobe) - before any
+	// being written and re-read (sfdisk, blockdev --rereadpt) - before any
 	// individual partition's content or file system is touched.
 	DeployStepPartitioning = "WritingPartitionTable"
 	// DeployStepWritingContent means every partition is being made or

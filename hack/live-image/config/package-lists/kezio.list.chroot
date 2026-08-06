@@ -22,6 +22,15 @@ dosfstools
 e2fsprogs
 efibootmgr
 
+# The finalize step's growLastPartition runs growpart
+# (internal/agent/deploy/finalize.go), which cloud-guest-utils ships;
+# xfsprogs and btrfs-progs cover the mkfs.xfs/mkfs.btrfs and
+# xfs_growfs/btrfs-resize commands the same deploy flow issues for plans
+# whose partitions declare those file systems.
+cloud-guest-utils
+xfsprogs
+btrfs-progs
+
 # qemu-guest-agent is deliberately NOT listed here. The KubeVirt e2e
 # lanes (.github/workflows/e2e-kubevirt-reusable.yml and its BMC/
 # multisite variants) inject qemu-guest-agent straight into the

@@ -20,7 +20,7 @@ import "context"
 
 // Runner executes one external command to completion and returns its
 // combined stdout+stderr output. Executor shells out to sfdisk,
-// partprobe, mkfs.*, mkswap, and blockdev through this single narrow
+// blockdev, mkfs.*, and mkswap through this single narrow
 // interface instead of calling os/exec directly, so the orchestration
 // logic in deploy.go - which partitions get which command, in what order,
 // on what condition - is unit-testable against a fake Runner that
