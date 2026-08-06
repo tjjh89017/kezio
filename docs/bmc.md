@@ -19,7 +19,19 @@ address you configure:
 
 Use `redfish://` when the BMC supports it. It has no extra binary
 dependency, so it works with the default manager image, and it is the
-protocol modern BMC hardware prefers over IPMI.
+protocol modern BMC hardware prefers over IPMI. `redfish://` connects
+over HTTPS; `redfishs://` is an accepted alias for the same behavior.
+
+### `redfish+http://` is a lab-only escape hatch, not for production BMCs
+
+`internal/bmc/redfish` also registers `redfish+http://`, which connects
+over plain HTTP instead of HTTPS. It exists for lab or test Redfish
+endpoints that have no TLS listener at all - for example, kezio's own
+KubeVirtBMC-driven end-to-end lane uses it, because KubeVirtBMC's
+generated Redfish Service does not terminate TLS. A real BMC's Redfish
+endpoint is reachable over HTTPS; use `redfish://` for it. Reach for
+`redfish+http://` only against a lab endpoint you know has no TLS
+listener.
 
 ## ipmi:// is the recommended path for IPMI-only BMCs
 
