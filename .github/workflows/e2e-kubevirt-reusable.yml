@@ -450,83 +450,143 @@ jobs:
         # so a re-run with a cache hit customizes a clean copy, not a
         # copy some previous attempt already stamped a marker into.
         #
-        # The qcow2 is edited with libguestfs (virt-customize), which
-        # boots a small "supermin" helper appliance to make the edits,
-        # with real outbound network from that appliance
-        # (--network below) so `--install qemu-guest-agent` can run
-        # apt-get inside the guest itself and resolve its own dependency
-        # closure - qemu-guest-agent's Depends: is not fully covered by
-        # what the (minimal) cloud image already carries (noble's
-        # qemu-guest-agent 1:8.2.2+ds-0ubuntu1.16 once depended on
-        # liburing2 and libnuma1, neither shipped in
-        # ubuntu-24.04-minimal-cloudimg-amd64.manifest, and a missing
-        # liburing2 crash-looped the daemon at boot with no signal until
-        # the downstream boot-verify step timed out), so apt's own
-        # solver - not a list hand-picked or resolved by this workflow -
-        # is what must stay authoritative across qemu-guest-agent
-        # version bumps. The appliance's network is host-side user-mode
-        # networking (SLIRP/passt) private to the appliance process, not
-        # the target VM's own deliberately bridge-pure boot path below,
-        # so it carries no test-realism concern.
+        # This step went through two networked virt-customize attempts
+        # before landing on the offline one below. First, `--network`
+        # with `--install qemu-guest-agent` (apt-get running inside the
+        # appliance's guest chroot) hit "libguestfs error: passt exited
+        # with status 1" - passt's shipped AppArmor profile denies the
+        # PID-file write into libguestfs's per-run
+        # /run/user/<uid>/libguestfs*/ directory. Patching that profile
+        # (see git history) got passt starting, but a second failure
+        # took its place: the appliance's own init runs `dhcpcd eth0`
+        # then polls /etc/resolv.conf for a nameserver line 11 times,
+        # 1s apart, and every poll came back empty - the appliance never
+        # got a DHCP lease or DNS from passt at all, so the guest-chroot
+        # resolv.conf rewrite this step used to carry (verified to have
+        # run, via the guestfsd log) was moot with no functional eth0
+        # underneath it. Appliance networking on this runner has now
+        # failed three different ways (passt AppArmor, then appliance
+        # DHCP never completing) for two different reasons, so this step
+        # switches mechanism entirely: `--no-network` skips booting the
+        # appliance's networking (and passt) altogether, and
+        # qemu-guest-agent plus its full runtime dependency closure are
+        # downloaded on the host below and installed with `dpkg -i`
+        # inside the guest instead of `--install`'s apt-get. `dpkg -i`
+        # still runs real maintainer scripts and registers the packages
+        # in the image's own dpkg database (unlike a bare `dpkg-deb -x`
+        # unpack), and fails loudly if any dependency is missing - which
+        # the closure resolved below guarantees is not the case.
         #
         # An earlier revision of this step dropped virt-customize
         # entirely for a qemu-nbd mount of the qcow2's root partition,
-        # for two reasons that no longer hold on this runner:
-        #   - the appliance's own boot time was believed to be the real
-        #     bottleneck, slow enough to time out this step outright.
-        #     That symptom is now believed to have been libguestfs
-        #     falling back to its "tcg" (software-emulated) backend, not
-        #     an inherent appliance-boot cost - the "Fail fast unless
-        #     /dev/kvm is usable" step above (and the udev MODE="0666"
-        #     rule it installs) confirms /dev/kvm is present and usable
-        #     on this runner, so LIBGUESTFS_BACKEND=direct below makes
-        #     the appliance boot on real KVM instead of TCG.
-        #   - `--install`'s appliance-side apt-get needing the
-        #     appliance's own outbound network once failed hard on this
-        #     runner ("libguestfs error: passt exited with status 1"),
-        #     which led an earlier revision of this step to purge passt
-        #     so libguestfs would fall back to qemu's built-in SLIRP.
-        #     That fallback theory was wrong: on noble, libguestfs's
-        #     --network path requires the passt binary and has no
-        #     working SLIRP fallback - a run with passt purged left the
-        #     appliance with no network at all ("passt: not found",
-        #     followed by the in-guest apt-get failing to resolve
-        #     archive.ubuntu.com). passt is therefore installed
-        #     (not purged) below; the historical passt failure is being
-        #     re-tested deliberately rather than assumed to still apply.
+        # believing the appliance's own boot time was the real
+        # bottleneck. That symptom is now believed to have been
+        # libguestfs falling back to its "tcg" (software-emulated)
+        # backend, not an inherent appliance-boot cost - the "Fail fast
+        # unless /dev/kvm is usable" step above (and the udev
+        # MODE="0666" rule it installs) confirms /dev/kvm is present and
+        # usable on this runner, so LIBGUESTFS_BACKEND=direct below
+        # makes the appliance boot on real KVM instead of TCG.
+        #
+        # qemu-guest-agent's own Depends: is not fully covered by what
+        # the (minimal) cloud image already carries - noble's
+        # qemu-guest-agent 1:8.2.2+ds-0ubuntu1.16 once depended on
+        # liburing2 (>= 2.3) and libnuma1 (>= 2.0.11), neither of which
+        # was in ubuntu-24.04-minimal-cloudimg-amd64.manifest, unlike
+        # libc6/libglib2.0-0t64/libudev1/init-system-helpers, which
+        # were. Missing liburing2 meant the daemon's dynamic linker
+        # failed instantly on start (no .so found), which systemd saw
+        # as a crash loop that burned through StartLimitBurst and gave
+        # up for good - no amount of restarting fixes a missing
+        # library. A fixed dependency list would only be a stopgap: a
+        # future qemu-guest-agent version bump can add, drop, or rename
+        # dependencies at any point, silently reintroducing the same
+        # crash loop with no signal until the boot-verify step times
+        # out. The dependency closure is therefore resolved dynamically
+        # below, so this step self-heals across qemu-guest-agent
+        # updates.
+        #
+        # Resolution mechanism: `apt-get install --simulate` runs apt's
+        # real solver, so `Depends: a | b` alternatives and virtual
+        # packages come out already resolved to one concrete,
+        # installable package - unlike `apt-cache depends --recurse`,
+        # which prints the raw, unresolved dependency graph (every
+        # alternative, every virtual-package name, some of which name
+        # no real .deb at all). `-o Dir::State::status=/dev/null` makes
+        # apt simulate against an empty dpkg status database, so the
+        # closure always lists qemu-guest-agent's *complete* dependency
+        # tree regardless of what this runner happens to already have
+        # installed - the runner's own package set must never leak into
+        # what gets injected into the image. This runner tracks the
+        # same noble release the image is pinned to
+        # (UBUNTU_CLOUD_IMAGE_URL above), so the closure it resolves is
+        # the same one the image would need.
+        #
+        # What's still missing from the image is found by diffing that
+        # closure against the image's own sibling .manifest file (same
+        # URL, .img -> .manifest; "pkgname<TAB>version" per line,
+        # dpkg-query -W format) instead of assuming which packages are
+        # absent. Only packages the manifest doesn't already list get
+        # downloaded; qemu-guest-agent itself is always downloaded
+        # regardless of manifest membership, since it is the package
+        # this step exists to install. Package names apt reports as
+        # arch-qualified (e.g. "libc6:amd64") are stripped to their bare
+        # name before comparing against the manifest and before
+        # `apt-get download`, since the manifest never carries the
+        # qualifier either. A download failure for any package in the
+        # closure fails this step outright - a silently-skipped
+        # dependency is exactly the class of bug this whole mechanism
+        # exists to prevent.
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libguestfs-tools
-          sudo apt-get install -y --no-install-recommends passt
-
-          # The re-test above confirmed passt itself now starts, but a new
-          # failure took its place: verbose libguestfs logs showed passt
-          # binding its UNIX socket fine, then dying with "PID file open:
-          # Permission denied" ("libguestfs error: passt exited with
-          # status 1") while writing --pid into libguestfs's per-run
-          # /run/user/<uid>/libguestfs*/ directory. Ubuntu's passt package
-          # ships an AppArmor profile confining the binary to a fixed set
-          # of paths that does not include libguestfs's per-run directory,
-          # so the kernel denies that write outright - a known
-          # passt/libguestfs AppArmor interaction, not a libguestfs or
-          # workflow bug. Unloading the profile looked like the fix, but
-          # noble's kernel.apparmor_restrict_unprivileged_userns=1 only
-          # allows unprivileged user namespaces for processes confined by
-          # an AppArmor profile that grants userns - unloading the
-          # profile removes that grant too, so passt then fails with
-          # "unshare: Operation not permitted" instead. The profile must
-          # stay loaded; only its path list needs the missing entry.
-          # passt's shipped profile (contrib/apparmor/usr.bin.passt) has
-          # no `include <local/...>` hook to drop an override into, so
-          # append the missing rule directly before its closing brace.
-          sudo sed -i '/^}$/i\  owner /run/user/*/libguestfs*/** rw,' /etc/apparmor.d/usr.bin.passt
-          sudo apparmor_parser -r /etc/apparmor.d/usr.bin.passt
 
           cp "${{ runner.temp }}/ubuntu-cloud.img" "${{ runner.temp }}/ubuntu-cloud-marked.img"
 
           MARKER_TOKEN="$(openssl rand -hex 16)"
           echo "MARKER_TOKEN=${MARKER_TOKEN}" >> "$GITHUB_ENV"
+
+          echo "::group::Resolving qemu-guest-agent's runtime dependency closure"
+          mapfile -t qga_closure < <(
+            apt-get install --simulate -o Dir::State::status=/dev/null \
+              --no-install-recommends qemu-guest-agent \
+              | awk '/^Inst /{n=$2; sub(/:.*$/, "", n); print n}' \
+              | sort -u
+          )
+          if [ "${#qga_closure[@]}" -eq 0 ]; then
+            echo "::error::apt could not resolve qemu-guest-agent's dependency closure" >&2
+            exit 1
+          fi
+          echo "full closure (${#qga_closure[@]} packages): ${qga_closure[*]}"
+
+          manifest_file="$(mktemp)"
+          curl -sfL -o "${manifest_file}" "${UBUNTU_CLOUD_IMAGE_URL%.img}.manifest"
+
+          mapfile -t qga_missing < <(
+            comm -23 \
+              <(printf '%s\n' "${qga_closure[@]}" | sort -u) \
+              <(awk -F'\t' '{n=$1; sub(/:.*$/, "", n); print n}' "${manifest_file}" | sort -u)
+          )
+          if ! printf '%s\n' "${qga_missing[@]:-}" | grep -qxF qemu-guest-agent; then
+            qga_missing+=("qemu-guest-agent")
+          fi
+          echo "missing from the image manifest, to be downloaded and injected (${#qga_missing[@]} packages): ${qga_missing[*]}"
+          echo "::endgroup::"
+
+          qga_deb_dir="${RUNNER_TEMP}/qga-debs"
+          mkdir -p "${qga_deb_dir}"
+          echo "::group::Downloading resolved+injected packages"
+          (
+            cd "${qga_deb_dir}"
+            for pkg in "${qga_missing[@]}"; do
+              if ! apt-get download "${pkg}"; then
+                echo "::error::apt-get download failed for '${pkg}' (part of qemu-guest-agent's dependency closure, not already carried by the image)" >&2
+                exit 1
+              fi
+            done
+          )
+          echo "::endgroup::"
 
           # LIBGUESTFS_BACKEND=direct skips libguestfs's own backend
           # probe (which can otherwise settle on the software "tcg"
@@ -547,32 +607,15 @@ jobs:
           echo "::group::virt-customize: injecting marker + qemu-guest-agent"
           start_ts="$(date +%s)"
           # 300s bound: a KVM-backed supermin appliance boot plus one
-          # apt-get install is normally well under a minute, so this
-          # guards against a silent regression to the TCG fallback (or a
-          # hung appliance-side apt-get) rather than a genuinely slow but
-          # successful run.
-          #
-          # --install's apt-get runs chrooted into this GUEST image inside
-          # the appliance, so it resolves names through the guest's own
-          # /etc/resolv.conf - not the appliance's. Ubuntu cloud images
-          # ship that file as a symlink to
-          # ../run/systemd/resolve/stub-resolv.conf (the systemd-resolved
-          # stub at 127.0.0.53), which is a dangling target here since no
-          # resolved runs inside the appliance chroot, so apt-get failed
-          # to resolve archive.ubuntu.com/security.ubuntu.com even though
-          # the appliance's own network (passt) was working fine. passt's
-          # own startup output advertises its usable forwarding DNS at
-          # the link-local gateway 169.254.2.2, so point the guest's
-          # resolv.conf at that for the duration of --install, then
-          # restore the shipped symlink afterwards so the deployed OS
-          # keeps its normal systemd-resolved behavior.
+          # dpkg -i is normally well under a minute, so this guards
+          # against a silent regression to the TCG fallback rather than
+          # a genuinely slow but successful run.
           if ! timeout 300 virt-customize -a "${{ runner.temp }}/ubuntu-cloud-marked.img" \
-            --network \
+            --no-network \
             --write "${MARKER_PATH}:${MARKER_TOKEN}" \
-            --run-command 'rm -f /etc/resolv.conf && echo "nameserver 169.254.2.2" > /etc/resolv.conf' \
-            --install qemu-guest-agent \
-            --run-command "systemctl enable qemu-guest-agent" \
-            --run-command 'rm -f /etc/resolv.conf && ln -s ../run/systemd/resolve/stub-resolv.conf /etc/resolv.conf' \
+            --copy-in "${qga_deb_dir}:/tmp" \
+            --run-command 'dpkg -i /tmp/qga-debs/*.deb' \
+            --run-command 'systemctl enable qemu-guest-agent' \
             --verbose >"${guestfs_log}" 2>&1; then
             end_ts="$(date +%s)"
             echo "::error::virt-customize failed or timed out after $((end_ts - start_ts))s; full --verbose output follows" >&2
@@ -580,7 +623,7 @@ jobs:
             exit 1
           fi
           end_ts="$(date +%s)"
-          echo "virt-customize (appliance boot + apt-get install + all edits) completed in $((end_ts - start_ts))s"
+          echo "virt-customize (appliance boot + dpkg -i + all edits) completed in $((end_ts - start_ts))s"
           echo "::endgroup::"
 
           echo "UBUNTU_CLOUD_IMAGE_PATH=${{ runner.temp }}/ubuntu-cloud-marked.img" >> "$GITHUB_ENV"
