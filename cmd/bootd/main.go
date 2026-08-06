@@ -122,6 +122,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	if cfg.Proxy.Enabled() {
+		proxy, err := bootd.NewProxyServer(cfg.Proxy)
+		if err != nil {
+			setupLog.Error(err, "invalid bootd proxy configuration")
+			os.Exit(1)
+		}
+		if err := mgr.Add(proxy); err != nil {
+			setupLog.Error(err, "unable to add proxy server")
+			os.Exit(1)
+		}
+	}
+
 	setupLog.Info("starting bootd",
 		"answerAll", cfg.Server.AnswerAll,
 		"tftpDir", cfg.TFTPDir,
@@ -147,6 +159,11 @@ type bootdConfig struct {
 	// hands the netboot GRUB image (see bootd.GrubConfigPath); empty
 	// when BOOTD_BOOT_CONFIG_URL is unset.
 	GrubConfig string
+	// Proxy configures bootd's optional reverse-proxy front for the
+	// in-cluster agent and boot config servers (see bootd.ProxyServer).
+	// Proxy.Enabled() is false - the zero value - unless
+	// BOOTD_AGENT_UPSTREAM_URL or BOOTD_BOOT_UPSTREAM_URL is set.
+	Proxy bootd.ProxyConfig
 }
 
 // bootdConfigFromEnv builds bootdConfig from the process environment.
@@ -206,6 +223,30 @@ type bootdConfig struct {
 //     internal/bootd's package doc comment and MACCache) and answer
 //     every PXE client regardless of Machine enrollment. Defaults to
 //     "false" - the fail-secure, known-MACs-only mode.
+//   - BOOTD_AGENT_UPSTREAM_URL: internal/agentserver's in-cluster base
+//     URL, for example
+//     "http://kezio-agent-server.kezio-system.svc.cluster.local:8091".
+//     Set, bootd reverse-proxies every /agent/... request it receives on
+//     BOOTD_PROXY_ADDR to this upstream (see bootd.ProxyServer), so a
+//     live-booted kezio-agent can reach the in-cluster agent server
+//     through bootd's own provisioning-network address instead of
+//     needing that server separately reachable there. Unset (the
+//     default): bootd proxies nothing under /agent/, unchanged from
+//     before this variable existed.
+//   - BOOTD_BOOT_UPSTREAM_URL: internal/bootserver's in-cluster base
+//     URL, for example
+//     "http://kezio-boot-server.kezio-system.svc.cluster.local:8090".
+//     Set, bootd reverse-proxies every /boot/... request (GRUB's
+//     per-MAC config fetch and the live kernel/initrd/squashfs
+//     download) to this upstream, the same way
+//     BOOTD_AGENT_UPSTREAM_URL does for /agent/.... Unset (the
+//     default): bootd proxies nothing under /boot/.
+//   - BOOTD_PROXY_ADDR: optional, the address the reverse proxy above
+//     listens on when at least one of the two upstream URLs is set.
+//     Defaults to BOOTD_SERVER_IP with port 80 - the provisioning
+//     interface's own address, not every interface the pod happens to
+//     have (see bootd.DefaultProxyAddr). Ignored, along with both
+//     upstream URLs, when neither upstream URL is set.
 //
 // BOOTD_HTTP_BOOT_URL, BOOTD_DHCP_ADDR, and BOOTD_PXE_ADDR are no
 // longer supported (dnsmasq's proxyDHCP engine does not answer UEFI
@@ -268,6 +309,15 @@ func bootdConfigFromEnv() (bootdConfig, error) {
 		}
 	}
 
+	proxyCfg := bootd.ProxyConfig{
+		Addr:             os.Getenv("BOOTD_PROXY_ADDR"),
+		AgentUpstreamURL: os.Getenv("BOOTD_AGENT_UPSTREAM_URL"),
+		BootUpstreamURL:  os.Getenv("BOOTD_BOOT_UPSTREAM_URL"),
+	}
+	if proxyCfg.Enabled() && proxyCfg.Addr == "" {
+		proxyCfg.Addr = fmt.Sprintf("%s:80", serverIP.String())
+	}
+
 	return bootdConfig{
 		Server: bootd.Config{
 			Interface:       os.Getenv("BOOTD_DHCP_INTERFACE"),
@@ -284,5 +334,6 @@ func bootdConfigFromEnv() (bootdConfig, error) {
 		RunDir:      os.Getenv("BOOTD_RUN_DIR"),
 		DnsmasqPath: os.Getenv("BOOTD_DNSMASQ_PATH"),
 		GrubConfig:  grubConfig,
+		Proxy:       proxyCfg,
 	}, nil
 }
