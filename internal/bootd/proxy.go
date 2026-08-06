@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -93,14 +92,6 @@ type ProxyConfig struct {
 	// request under bootRoutePrefix is forwarded here unchanged. Empty
 	// disables boot-server proxying.
 	BootUpstreamURL string
-	// VRFDevice, when set, binds the listening socket to this device
-	// (SO_BINDTODEVICE, see bindToDeviceControl) before it binds to
-	// Addr, so the listener's routing follows that device's VRF table
-	// instead of the pod's default one. Set this to
-	// ProvisioningVRFName exactly when Config.ProvisioningGateway is
-	// configured (see cmd/bootd). Empty (the default) binds the
-	// socket exactly as before this field existed.
-	VRFDevice string
 }
 
 // Enabled reports whether ProxyServer has anything to serve: at least one
@@ -133,9 +124,8 @@ func (c ProxyConfig) addr() string {
 // that deliberately fronts the agent/boot servers some other way, is
 // unaffected by adding it.
 type ProxyServer struct {
-	handler   http.Handler
-	addr      string
-	vrfDevice string
+	handler http.Handler
+	addr    string
 }
 
 var _ manager.Runnable = (*ProxyServer)(nil)
@@ -172,7 +162,7 @@ func NewProxyServer(cfg ProxyConfig) (*ProxyServer, error) {
 		mux.Handle(bootRoutePrefix, proxy)
 	}
 
-	return &ProxyServer{handler: mux, addr: cfg.addr(), vrfDevice: cfg.VRFDevice}, nil
+	return &ProxyServer{handler: mux, addr: cfg.addr()}, nil
 }
 
 // newReverseProxy builds a *httputil.ReverseProxy forwarding to rawURL
@@ -212,28 +202,15 @@ func newReverseProxy(rawURL string) (*httputil.ReverseProxy, error) {
 // is cancelled, then shuts the server down gracefully - the same
 // listen/shutdown shape internal/bootserver.Server.Start and
 // internal/agentserver.Server.Start use.
-//
-// The listener is built explicitly (rather than via
-// http.Server.ListenAndServe) so vrfDevice can be applied to it: empty,
-// net.ListenConfig.Control is nil and the resulting listener is
-// identical to what ListenAndServe would have produced.
 func (p *ProxyServer) Start(ctx context.Context) error {
-	lc := net.ListenConfig{}
-	if p.vrfDevice != "" {
-		lc.Control = bindToDeviceControl(p.vrfDevice)
-	}
-	ln, err := lc.Listen(ctx, "tcp", p.addr)
-	if err != nil {
-		return fmt.Errorf("listening on %s: %w", p.addr, err)
-	}
-
 	httpServer := &http.Server{
+		Addr:              p.addr,
 		Handler:           p.handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- httpServer.Serve(ln) }()
+	go func() { errCh <- httpServer.ListenAndServe() }()
 
 	select {
 	case <-ctx.Done():

@@ -89,29 +89,10 @@ func main() {
 
 	ctx := ctrl.SetupSignalHandler()
 
-	// The VRF, when configured, must exist and carry its route before
-	// any provisioning-side socket is opened - dnsmasq's child and
-	// bootd's own listeners both need it in place at the moment they
-	// bind (see internal/bootd's SetupProvisioningVRF and
-	// bindToDeviceControl). So this runs synchronously here, ahead of
-	// building any of those, rather than as a concurrent
-	// manager.Runnable racing their own Start calls.
-	var vrfDevice string
-	if cfg.Server.ProvisioningGateway != nil {
-		err := bootd.SetupProvisioningVRF(
-			ctx, setupLog, cfg.Server.Interface, cfg.Server.ProvisioningGateway)
-		if err != nil {
-			setupLog.Error(err, "unable to set up provisioning VRF")
-			os.Exit(1)
-		}
-		vrfDevice = bootd.ProvisioningVRFName
-	}
-
 	dnsmasq := &bootd.Dnsmasq{
 		Config:     cfg.Server,
 		RunDir:     cfg.RunDir,
 		BinaryPath: cfg.DnsmasqPath,
-		VRFName:    vrfDevice,
 	}
 
 	macCache, err := bootd.NewMACCache(ctx, mgr.GetCache(), dnsmasq)
@@ -140,7 +121,6 @@ func main() {
 		Dir:        cfg.TFTPDir,
 		Addr:       cfg.TFTPAddr,
 		GrubConfig: cfg.GrubConfig,
-		VRFDevice:  vrfDevice,
 	}
 	if err := mgr.Add(tftpServer); err != nil {
 		setupLog.Error(err, "unable to add TFTP server")
@@ -148,7 +128,6 @@ func main() {
 	}
 
 	if cfg.Proxy.Enabled() {
-		cfg.Proxy.VRFDevice = vrfDevice
 		proxy, err := bootd.NewProxyServer(cfg.Proxy)
 		if err != nil {
 			setupLog.Error(err, "invalid bootd proxy configuration")
@@ -164,8 +143,7 @@ func main() {
 		"answerAll", cfg.Server.AnswerAll,
 		"tftpDir", cfg.TFTPDir,
 		"provisioningNet", cfg.Server.ProvisioningNet.String(),
-		"relay", cfg.Server.RelayServerIP,
-		"provisioningVRF", vrfDevice)
+		"relay", cfg.Server.RelayServerIP)
 	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running bootd")
 		os.Exit(1)
@@ -274,21 +252,6 @@ type bootdConfig struct {
 //     interface's own address, not every interface the pod happens to
 //     have (see bootd.DefaultProxyAddr). Ignored, along with both
 //     upstream URLs, when neither upstream URL is set.
-//   - BOOTD_PROVISIONING_GATEWAY: optional IPv4 address of the
-//     provisioning segment's gateway. Set, bootd puts
-//     BOOTD_DHCP_INTERFACE into its own VRF at startup, installs a
-//     default route to this address in that VRF's routing table, and
-//     runs dnsmasq and its own provisioning-side listeners (the
-//     reverse proxy, the TFTP server) inside that VRF - so any address
-//     reachable through the segment's gateway (a relay target, an
-//     in-cluster service reverse-proxied onto the segment) routes
-//     correctly without touching the pod's own default route
-//     (eth0/CNI cluster traffic is untouched). Requires
-//     BOOTD_DHCP_INTERFACE to also be set - there would otherwise be
-//     nothing to enslave into the VRF - and setting it without that is
-//     an error. Unset (the default): no VRF is created and every
-//     provisioning-side socket behaves exactly as it did before this
-//     variable existed.
 //
 // BOOTD_HTTP_BOOT_URL, BOOTD_DHCP_ADDR, and BOOTD_PXE_ADDR are no
 // longer supported (dnsmasq's proxyDHCP engine does not answer UEFI
@@ -360,32 +323,16 @@ func bootdConfigFromEnv() (bootdConfig, error) {
 		proxyCfg.Addr = fmt.Sprintf("%s:80", serverIP.String())
 	}
 
-	dhcpInterface := os.Getenv("BOOTD_DHCP_INTERFACE")
-
-	var provisioningGateway net.IP
-	if s := os.Getenv("BOOTD_PROVISIONING_GATEWAY"); s != "" {
-		provisioningGateway = net.ParseIP(s)
-		if provisioningGateway == nil || provisioningGateway.To4() == nil {
-			return bootdConfig{}, fmt.Errorf("BOOTD_PROVISIONING_GATEWAY %q is not a valid IPv4 address", s)
-		}
-		if dhcpInterface == "" {
-			return bootdConfig{}, fmt.Errorf(
-				"BOOTD_PROVISIONING_GATEWAY requires BOOTD_DHCP_INTERFACE to be set " +
-					"(there would be nothing to enslave into the VRF)")
-		}
-	}
-
 	return bootdConfig{
 		Server: bootd.Config{
-			Interface:           dhcpInterface,
-			ServerIP:            serverIP,
-			NextServerIP:        nextServerIP,
-			ProvisioningNet:     provisioningNet,
-			BootFilename:        os.Getenv("BOOTD_BOOT_FILENAME"),
-			RelayServerIP:       relayServerIP,
-			TFTPDir:             tftpDir,
-			AnswerAll:           os.Getenv("BOOTD_ANSWER_ALL") == "true",
-			ProvisioningGateway: provisioningGateway,
+			Interface:       os.Getenv("BOOTD_DHCP_INTERFACE"),
+			ServerIP:        serverIP,
+			NextServerIP:    nextServerIP,
+			ProvisioningNet: provisioningNet,
+			BootFilename:    os.Getenv("BOOTD_BOOT_FILENAME"),
+			RelayServerIP:   relayServerIP,
+			TFTPDir:         tftpDir,
+			AnswerAll:       os.Getenv("BOOTD_ANSWER_ALL") == "true",
 		},
 		TFTPDir:     tftpDir,
 		TFTPAddr:    os.Getenv("BOOTD_TFTP_ADDR"),

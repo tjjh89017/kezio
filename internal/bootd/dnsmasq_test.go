@@ -167,47 +167,6 @@ while :; do sleep 0.05; done
 	<-done
 }
 
-// TestDnsmasq_VRFNameWrapsChildInIPVRFExec proves VRFName routes the
-// child through "ip vrf exec <VRFName> <binary> ...", not the binary
-// directly - the mechanism VRFName's doc comment names as required
-// when the interface is enslaved into a VRF (see vrf.go). A fake "ip"
-// stands in for the real binary (which needs CAP_NET_ADMIN and an
-// actual VRF device - see internal/bootd/vrf_test.go for that
-// scenario) and simply asserts its own argv shape before execing
-// through to the fake dnsmasq, so the rest of the supervisor contract
-// (start, log forwarding, shutdown) is exercised unchanged.
-func TestDnsmasq_VRFNameWrapsChildInIPVRFExec(t *testing.T) {
-	d, runDir := newTestDnsmasq(t, longRunningScript)
-	fakeIP := filepath.Join(runDir, "fake-ip")
-	script := `#!/bin/sh
-if [ "$1" != "vrf" ] || [ "$2" != "exec" ] || [ "$3" != "test-vrf" ]; then
-  echo "unexpected ip argv: $@" >&2
-  exit 1
-fi
-shift 3
-exec "$@"
-`
-	if err := os.WriteFile(fakeIP, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	d.VRFName = "test-vrf"
-	d.ipPath = fakeIP
-
-	ctx, cancel := context.WithCancel(logf.IntoContext(context.Background(), logf.Log))
-	done := make(chan error, 1)
-	go func() { done <- d.Start(ctx) }()
-
-	waitFor(t, "config file", func() bool {
-		_, err := os.Stat(filepath.Join(runDir, "dnsmasq.conf"))
-		return err == nil
-	})
-
-	cancel()
-	if err := <-done; err != nil {
-		t.Errorf("Start returned %v after ctx cancellation, want nil (fake ip rejected the wrapped argv - see its stderr)", err)
-	}
-}
-
 func TestDnsmasq_RestartsCrashedChild(t *testing.T) {
 	// First two runs crash immediately; the third stays up. The
 	// supervisor must keep restarting (staying under maxFastExits)

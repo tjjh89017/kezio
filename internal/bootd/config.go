@@ -82,23 +82,6 @@ type Config struct {
 	// deliberately wants bootd to net-boot every unknown machine on
 	// the segment (for example, an inventory-only lab).
 	AnswerAll bool
-
-	// ProvisioningGateway optionally puts Interface into its own VRF
-	// (see SetupProvisioningVRF) with a default route to this address
-	// installed in the VRF's own routing table, and moves every
-	// provisioning-side socket - dnsmasq's child process and bootd's
-	// own listeners (the reverse proxy, the TFTP server) - into that
-	// VRF. Any address reachable through the segment's gateway (a
-	// relay target, an in-cluster service this pod reverse-proxies
-	// to) then routes correctly through the provisioning interface,
-	// without touching the pod's own default route (eth0/CNI cluster
-	// traffic stays exactly as it is). Empty (the default) means no
-	// VRF is created and every provisioning-side socket behaves
-	// exactly as it did before this field existed - the pod network
-	// namespace's ordinary routing table. Setting it requires
-	// Interface to also be set, since there would otherwise be
-	// nothing to enslave into the VRF.
-	ProvisioningGateway net.IP
 }
 
 // withDefaults returns a copy of c with every zero-valued optional

@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,14 +87,6 @@ type TFTPServer struct {
 	// this config existed - and bootd logs the gap at startup (see
 	// cmd/bootd).
 	GrubConfig string
-	// VRFDevice, when set, binds the listening UDP socket to this
-	// device (SO_BINDTODEVICE, see bindToDeviceControl) before it
-	// binds to Addr, so the socket's routing follows that device's
-	// VRF table instead of the pod's default one. Set this to
-	// ProvisioningVRFName exactly when Config.ProvisioningGateway is
-	// configured (see cmd/bootd). Empty (the default) binds the
-	// socket exactly as before this field existed.
-	VRFDevice string
 }
 
 var _ manager.Runnable = (*TFTPServer)(nil)
@@ -104,14 +95,6 @@ var _ manager.Runnable = (*TFTPServer)(nil)
 const DefaultTFTPAddr = ":69"
 
 // Start implements manager.Runnable: it serves until ctx is cancelled.
-//
-// The UDP socket is built explicitly (rather than via
-// tftp.Server.ListenAndServe) so VRFDevice can be applied to it: empty,
-// net.ListenConfig.Control is nil and the resulting socket is
-// identical to what ListenAndServe would have produced. pin/tftp's
-// Serve type-asserts the conn to *net.UDPConn for per-packet source
-// address handling; net.ListenConfig.ListenPacket("udp", ...) returns
-// exactly that concrete type, so the assertion still succeeds.
 func (t *TFTPServer) Start(ctx context.Context) error {
 	log := logf.FromContext(ctx).WithName("bootd-tftp")
 	addr := t.Addr
@@ -119,19 +102,10 @@ func (t *TFTPServer) Start(ctx context.Context) error {
 		addr = DefaultTFTPAddr
 	}
 
-	lc := net.ListenConfig{}
-	if t.VRFDevice != "" {
-		lc.Control = bindToDeviceControl(t.VRFDevice)
-	}
-	conn, err := lc.ListenPacket(ctx, "udp", addr)
-	if err != nil {
-		return fmt.Errorf("listening on %s: %w", addr, err)
-	}
-
 	srv := tftp.NewServer(t.readHandler(log), nil) // nil writeHandler: every write request is rejected.
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Serve(conn) }()
+	go func() { errCh <- srv.ListenAndServe(addr) }()
 
 	select {
 	case <-ctx.Done():

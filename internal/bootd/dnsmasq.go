@@ -73,16 +73,6 @@ type Dnsmasq struct {
 	// BinaryPath is the dnsmasq executable to run. Empty means
 	// DefaultDnsmasqPath.
 	BinaryPath string
-	// VRFName, when set, runs the dnsmasq child inside this VRF ("ip
-	// vrf exec <VRFName> <binary> ...") instead of executing it
-	// directly. Required when Config.ProvisioningGateway is set (see
-	// that field): dnsmasq's own bind-interfaces binds addresses, not
-	// devices, so a plain child process left in the pod's default VRF
-	// misses l3mdev-slave unicasts and broadcasts on an interface
-	// enslaved elsewhere (lab-verified - see internal/bootd's package
-	// tests). Empty (the default) runs dnsmasq exactly as before this
-	// field existed.
-	VRFName string
 
 	mu    sync.Mutex
 	macs  []string
@@ -98,12 +88,6 @@ type Dnsmasq struct {
 	hupDebounce    time.Duration
 	initialBackoff time.Duration
 	fastExitWindow time.Duration
-
-	// ipPath overrides the "ip" binary runChild wraps VRFName's exec
-	// through. Test-only: lets tests exercise the "ip vrf exec"
-	// wrapping shape without needing real CAP_NET_ADMIN or a VRF
-	// device present. Empty means "ip" (looked up on PATH).
-	ipPath string
 }
 
 var _ manager.Runnable = (*Dnsmasq)(nil)
@@ -249,20 +233,7 @@ func (d *Dnsmasq) runChild(ctx context.Context, log logr.Logger, binary, confPat
 	// posture; the same flag kube-dns ran its dnsmasq with, for the
 	// same reason. Started as non-root (the lab's setpriv path),
 	// dnsmasq never attempts a drop and the flag is inert.
-	dnsmasqArgs := []string{"--conf-file=" + confPath, "--no-daemon", "--user=root"}
-	var cmd *exec.Cmd
-	if d.VRFName != "" {
-		// "ip vrf exec" runs the child inside the named VRF's network
-		// context (see Config.ProvisioningGateway and VRFName's doc
-		// comment for why a plain child process is not enough).
-		ipBinary := d.ipPath
-		if ipBinary == "" {
-			ipBinary = "ip"
-		}
-		cmd = exec.Command(ipBinary, append([]string{"vrf", "exec", d.VRFName, binary}, dnsmasqArgs...)...)
-	} else {
-		cmd = exec.Command(binary, dnsmasqArgs...)
-	}
+	cmd := exec.Command(binary, "--conf-file="+confPath, "--no-daemon", "--user=root")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("opening dnsmasq stdout pipe: %w", err)
@@ -374,7 +345,7 @@ func forwardLines(log logr.Logger, r io.Reader) {
 // countLines counts non-empty lines, for the "entries" log field only.
 func countLines(s string) int {
 	n := 0
-	for _, line := range strings.Split(s, "\n") {
+	for line := range strings.SplitSeq(s, "\n") {
 		if line != "" {
 			n++
 		}
