@@ -210,14 +210,23 @@ env:
   KUBEVIRTBMC_VERSION: ${{ inputs.kubevirtbmc_version }}
 
   # The provisioning L2 segment, same shape as e2e-boot-path-kubevirt.yml.
-  # A flat L2 with no gateway and no host address at all - the host's
-  # only presence on this bridge is the bridge device itself, exactly
-  # the "target VM's real deployment segment" shape (see the "Create the
+  # A flat L2 with no gateway. The host DOES carry one address on it
+  # (PROVISIONING_HOST_IP below) - see that variable's own comment for
+  # why a non-gateway host peer does not compromise the "target VM's
+  # real deployment segment" shape (see also the "Create the
   # provisioning bridge" step below).
   PROVISIONING_BRIDGE: kezio-prov0
   # Distinct addresses on that segment, kept apart deliberately (and all
   # outside the existing-dhcp pod's dhcp-range 192.0.2.10-100 below, so a
   # leased address can never collide with any of them):
+  #   - PROVISIONING_HOST_IP: the runner host's own address on the
+  #     bridge. Nothing on the boot path (bootd, the target VM, its
+  #     live-booted kezio-agent) ever addresses this IP; it exists
+  #     solely so the runner itself - not anything Multus-attached - can
+  #     act as an ordinary on-segment client for the "Deploy kezio-bootd"
+  #     step's post-deploy curl probe below. Without it the host has no
+  #     route to this /24 at all and that probe fails regardless of
+  #     whether bootd is healthy (see that step's own comment).
   #   - PROVISIONING_BOOTD_NET1_IP: the static address the
   #     kezio-boot-network NetworkAttachmentDefinition assigns to
   #     bootd's net1. It is dnsmasq's dhcp-range subnet anchor, the
@@ -248,6 +257,7 @@ env:
   #     NAT/DNAT ever touches the announce path (the no-NAT rule).
   #   - PROVISIONING_CIDR: the whole segment, handed to bootd as
   #     BOOTD_PROVISIONING_CIDR (its proxyDHCP dhcp-range).
+  PROVISIONING_HOST_IP: 192.0.2.1/24
   PROVISIONING_BOOTD_NET1_IP: 192.0.2.2/24
   PROVISIONING_EXISTING_DHCP_NET1_IP: 192.0.2.3/24
   PROVISIONING_TRACKER_NET1_IP: 192.0.2.4/24
@@ -432,15 +442,18 @@ jobs:
           fi
 
       - name: Create the provisioning bridge
-        # No address on the bridge itself: the flat L2 segment this
-        # models has no gateway, and the host has no reason to be a peer
-        # on it - every participant (bootd, the existing-dhcp pod, the
-        # target VM) gets its own Multus-attached address instead.
-        # tcpdump (below) captures on the bridge device with no address
-        # of its own needed to do so.
+        # PROVISIONING_HOST_IP is the runner's own address, not a
+        # gateway: every participant in the boot path itself (bootd, the
+        # existing-dhcp pod, the target VM) still gets its own
+        # Multus-attached address, and none of them ever addresses this
+        # one - see that variable's own comment for why it exists
+        # anyway (the "Deploy kezio-bootd" step's post-deploy curl
+        # probe). tcpdump (below) captures on the bridge device
+        # regardless of whether it carries an address.
         run: |
           set -euo pipefail
           sudo ip link add "${PROVISIONING_BRIDGE}" type bridge
+          sudo ip addr add "${PROVISIONING_HOST_IP}" dev "${PROVISIONING_BRIDGE}"
           sudo ip link set "${PROVISIONING_BRIDGE}" up
 
       - name: Cache the Ubuntu cloud image
@@ -1227,9 +1240,26 @@ jobs:
           # bootd's own provisioning-network address, reached from the
           # host's own port on the same bridge - the same L2 path the VM
           # will use.
+          #
+          # Split into a connect step and a status check instead of a
+          # bare `curl -sf`: `-f` treats "could not open a TCP
+          # connection to bootd" and "connected fine but the upstream
+          # boot config server answered >= 400" as the exact same
+          # failure, which previously cost a full debugging cycle
+          # working out which of the two had actually happened (the
+          # runner host having no address on this segment at all, a
+          # routing problem with nothing to do with bootd's proxy). The
+          # http_code capture below fails on the former (curl itself
+          # errors, no code to report) and reports the code on the
+          # latter, so the two are distinguishable from the error text
+          # alone.
           bootd_ip="${PROVISIONING_BOOTD_NET1_IP%%/*}"
-          if ! curl -sf -o /dev/null "http://${bootd_ip}:80/boot/artifacts/manifest.json"; then
-            echo "::error::boot config server not reachable at ${bootd_ip}:80 through bootd's reverse proxy" >&2
+          http_code="$(curl -s -o /dev/null -w '%{http_code}' "http://${bootd_ip}:80/boot/artifacts/manifest.json")" || {
+            echo "::error::could not connect to bootd's reverse proxy at ${bootd_ip}:80 at all (no TCP connection - a network/routing failure, not an HTTP error from the boot config server)" >&2
+            exit 1
+          }
+          if [ "${http_code}" -lt 200 ] || [ "${http_code}" -ge 400 ]; then
+            echo "::error::bootd's reverse proxy at ${bootd_ip}:80 is reachable but answered HTTP ${http_code} for /boot/artifacts/manifest.json - the proxy itself is up, the boot config server behind it is not serving the artifact" >&2
             exit 1
           fi
 
