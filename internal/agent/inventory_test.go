@@ -150,6 +150,55 @@ func TestCollect_MissingOptionalAttributesLeaveZeroValues(t *testing.T) {
 	}
 }
 
+func TestCollect_SerialNumberSources(t *testing.T) {
+	// SCSI and NVMe expose the serial at device/serial; virtio-blk has no
+	// device/serial and instead exposes it at the block device's top
+	// level (/sys/block/vdX/serial). collectOneDisk must read
+	// device/serial first and fall back to the top-level file, so a
+	// virtio disk's serial still reaches the controller's disk-hint
+	// matching.
+	cases := []struct {
+		name           string
+		deviceSerial   string // device/serial content; "" means the file is absent
+		topLevelSerial string // <dev>/serial content; "" means the file is absent
+		want           string
+	}{
+		{"virtio: top-level serial only", "", "KEZIOE2EBMCDISK1", "KEZIOE2EBMCDISK1"},
+		{"scsi: device/serial only", "SCSISER1", "", "SCSISER1"},
+		{"both present: device/serial wins", "DEVSER1", "TOPSER1", "DEVSER1"},
+		{"neither present: empty", "", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			devDir := filepath.Join(root, "sys", "block", "vda")
+			mkdirAll(t, filepath.Join(devDir, "device"))
+			if tc.deviceSerial != "" {
+				writeFile(t, filepath.Join(devDir, "device", "serial"), tc.deviceSerial+"\n")
+			}
+			if tc.topLevelSerial != "" {
+				writeFile(t, filepath.Join(devDir, "serial"), tc.topLevelSerial+"\n")
+			}
+			mkdirAll(t, filepath.Join(root, "sys", "class", "net"))
+			mkdirAll(t, filepath.Join(root, "proc"))
+			writeFile(t, filepath.Join(root, "proc", "meminfo"), "MemTotal:       1024 kB\n")
+			writeFile(t, filepath.Join(root, "proc", "cpuinfo"), "processor\t: 0\n")
+
+			hw, err := Collect(root)
+			if err != nil {
+				t.Fatalf("Collect: %v", err)
+			}
+			vda := diskByName(hw.Disks, "/dev/vda")
+			if vda == nil {
+				t.Fatalf("no /dev/vda in %+v", hw.Disks)
+			}
+			if vda.SerialNumber != tc.want {
+				t.Errorf("SerialNumber = %q, want %q", vda.SerialNumber, tc.want)
+			}
+		})
+	}
+}
+
 func mkdirAll(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0o755); err != nil {

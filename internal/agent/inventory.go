@@ -117,6 +117,13 @@ func collectOneDisk(blockDir, name string) keziov1alpha1.MachineHardwareDisk {
 		Vendor:       readTrimmed(filepath.Join(devDir, "device", "vendor")),
 	}
 
+	if disk.SerialNumber == "" {
+		// virtio-blk has no device/serial; it exposes the serial at the
+		// block device's top level (/sys/block/vdX/serial). SCSI and
+		// NVMe keep their device/serial precedence above.
+		disk.SerialNumber = readTrimmed(filepath.Join(devDir, "serial"))
+	}
+
 	if sectors, ok := readUint(filepath.Join(devDir, "size")); ok {
 		// /sys/block/<dev>/size is always in 512-byte sectors,
 		// regardless of the device's actual logical block size - a
