@@ -274,150 +274,49 @@ jobs:
         # One Image, ingested once, deployed to both sites concurrently -
         # see the header comment's "pre-warm" section for why the
         # central seeder needs no separate warm-up. Same technique
-        # e2e-kubevirt-reusable.yml uses - connect the qcow2 as an NBD
-        # block device (qemu-nbd) and write into its mounted root
-        # partition directly, no guest boot at all; see that workflow's
-        # own step of this name for the full reasoning (an earlier
-        # libguestfs-based revision booted a helper appliance to make the
-        # same edits, and that appliance's own boot time timed out this
-        # step on GitHub-hosted runners).
-        #
-        # qemu-guest-agent's own Depends: is not fully covered by what
-        # the (minimal) cloud image already carries - see
-        # e2e-kubevirt-reusable.yml's step of this name for the
-        # liburing2/libnuma1 evidence that first surfaced this, and for
-        # why the dependency closure below is resolved dynamically at
-        # run time (a fixed package list was only a stopgap - a future
-        # qemu-guest-agent update can add, drop, or rename dependencies
-        # and silently reintroduce the same crash loop) rather than
-        # hardcoded here too.
+        # e2e-kubevirt-reusable.yml uses - libguestfs (virt-customize),
+        # forced onto /dev/kvm via LIBGUESTFS_BACKEND=direct, with real
+        # appliance-side network (--network) so `--install
+        # qemu-guest-agent` resolves and fetches its own dependency
+        # closure via apt-get running inside the guest; see that
+        # workflow's own step of this name for the full reasoning
+        # (an earlier revision dropped virt-customize for a qemu-nbd
+        # mount instead, believing the appliance's own boot time was the
+        # bottleneck - now believed to have been the software "tcg"
+        # fallback, not an inherent cost, since /dev/kvm is confirmed
+        # usable on this runner; and for why passt is purged before this
+        # runs, and why the appliance's network is unrelated to the
+        # target VM's own bridge-pure boot path below).
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-utils
+          sudo apt-get install -y --no-install-recommends libguestfs-tools
+          sudo apt-get purge -y passt 2>/dev/null || true
 
           cp "${{ runner.temp }}/ubuntu-cloud.img" "${{ runner.temp }}/ubuntu-cloud-marked.img"
 
           MARKER_TOKEN="$(openssl rand -hex 16)"
           echo "MARKER_TOKEN=${MARKER_TOKEN}" >> "$GITHUB_ENV"
 
-          echo "::group::Resolving qemu-guest-agent's runtime dependency closure"
-          mapfile -t qga_closure < <(
-            apt-get install --simulate -o Dir::State::status=/dev/null \
-              --no-install-recommends qemu-guest-agent \
-              | awk '/^Inst /{n=$2; sub(/:.*$/, "", n); print n}' \
-              | sort -u
-          )
-          if [ "${#qga_closure[@]}" -eq 0 ]; then
-            echo "::error::apt could not resolve qemu-guest-agent's dependency closure" >&2
+          export LIBGUESTFS_BACKEND=direct
+          guestfs_log="$(mktemp)"
+
+          echo "::group::virt-customize: injecting marker + qemu-guest-agent"
+          start_ts="$(date +%s)"
+          if ! timeout 300 virt-customize -a "${{ runner.temp }}/ubuntu-cloud-marked.img" \
+            --network \
+            --write "${MARKER_PATH}:${MARKER_TOKEN}" \
+            --install qemu-guest-agent \
+            --run-command "systemctl enable qemu-guest-agent" \
+            --verbose >"${guestfs_log}" 2>&1; then
+            end_ts="$(date +%s)"
+            echo "::error::virt-customize failed or timed out after $((end_ts - start_ts))s; full --verbose output follows" >&2
+            cat "${guestfs_log}" >&2
             exit 1
           fi
-          echo "full closure (${#qga_closure[@]} packages): ${qga_closure[*]}"
-
-          manifest_file="$(mktemp)"
-          curl -sfL -o "${manifest_file}" "${UBUNTU_CLOUD_IMAGE_URL%.img}.manifest"
-
-          mapfile -t qga_missing < <(
-            comm -23 \
-              <(printf '%s\n' "${qga_closure[@]}" | sort -u) \
-              <(awk -F'\t' '{n=$1; sub(/:.*$/, "", n); print n}' "${manifest_file}" | sort -u)
-          )
-          if ! printf '%s\n' "${qga_missing[@]:-}" | grep -qxF qemu-guest-agent; then
-            qga_missing+=("qemu-guest-agent")
-          fi
-          echo "missing from the image manifest, to be downloaded and injected (${#qga_missing[@]} packages): ${qga_missing[*]}"
+          end_ts="$(date +%s)"
+          echo "virt-customize (appliance boot + apt-get install + all edits) completed in $((end_ts - start_ts))s"
           echo "::endgroup::"
-
-          qga_deb_dir="$(mktemp -d)"
-          echo "::group::Downloading resolved+injected packages"
-          (
-            cd "${qga_deb_dir}"
-            for pkg in "${qga_missing[@]}"; do
-              if ! apt-get download "${pkg}"; then
-                echo "::error::apt-get download failed for '${pkg}' (part of qemu-guest-agent's dependency closure, not already carried by the image)" >&2
-                exit 1
-              fi
-            done
-          )
-          echo "::endgroup::"
-          qga_deb="$(ls "${qga_deb_dir}"/qemu-guest-agent_*.deb)"
-          mapfile -t qga_extra_debs < <(find "${qga_deb_dir}" -maxdepth 1 -name '*.deb' ! -name 'qemu-guest-agent_*')
-
-          mount_dir="$(mktemp -d)"
-
-          cleanup() {
-            sudo umount "${mount_dir}" 2>/dev/null || true
-            sudo qemu-nbd --disconnect /dev/nbd0 2>/dev/null || true
-          }
-          trap cleanup EXIT
-
-          sudo modprobe nbd max_part=16
-          sudo qemu-nbd --connect=/dev/nbd0 "${{ runner.temp }}/ubuntu-cloud-marked.img"
-          sudo partprobe /dev/nbd0
-          sudo udevadm settle
-
-          # Largest ext4 partition on the disk - see
-          # e2e-kubevirt-reusable.yml's step of this name for why size/fs
-          # detection is used instead of a hardcoded partition number.
-          root_part=""
-          root_size=0
-          # Retry: partprobe/udevadm settle can still race the kernel's
-          # nbd partition-node creation, so give it a few bounded
-          # attempts before treating "no ext4 partition" as real.
-          # Re-validated at this version bump: this is a GitHub Actions
-          # runner kernel/udev race, independent of the KubeVirt/CDI/
-          # RKE2 pins above, so it is still needed.
-          for attempt in $(seq 1 10); do
-            root_part=""
-            root_size=0
-            while read -r part_name part_fstype part_size; do
-              [ "${part_fstype}" = "ext4" ] || continue
-              if [ "${part_size}" -gt "${root_size}" ]; then
-                root_size="${part_size}"
-                root_part="/dev/${part_name}"
-              fi
-            done < <(lsblk -rno NAME,FSTYPE,SIZE --bytes /dev/nbd0)
-
-            [ -n "${root_part}" ] && break
-            [ "${attempt}" -eq 10 ] && break
-            sleep 2
-            sudo partprobe /dev/nbd0
-            sudo udevadm settle
-          done
-
-          if [ -z "${root_part}" ]; then
-            echo "::error::no ext4 partition found on /dev/nbd0" >&2
-            lsblk /dev/nbd0
-            blkid /dev/nbd0* || true
-            exit 1
-          fi
-          echo "root partition: ${root_part}"
-
-          sudo mount "${root_part}" "${mount_dir}"
-
-          echo "${MARKER_TOKEN}" | sudo tee "${mount_dir}${MARKER_PATH}" >/dev/null
-
-          sudo dpkg-deb -x "${qga_deb}" "${mount_dir}"
-          for extra_deb in "${qga_extra_debs[@]}"; do
-            sudo dpkg-deb -x "${extra_deb}" "${mount_dir}"
-          done
-
-          unit_path="$(find "${mount_dir}/lib/systemd/system" "${mount_dir}/usr/lib/systemd/system" \
-            -maxdepth 1 -name qemu-guest-agent.service 2>/dev/null | head -n1)"
-          if [ -z "${unit_path}" ]; then
-            echo "::error::qemu-guest-agent.service unit not found in the extracted package" >&2
-            exit 1
-          fi
-          unit_rel="${unit_path#"${mount_dir}"}"
-          echo "qemu-guest-agent unit: ${unit_rel}"
-
-          wanted_by="$(grep -oP '^WantedBy=\K.*' "${unit_path}" || true)"
-          wanted_by="${wanted_by:-multi-user.target}"
-
-          for target in ${wanted_by}; do
-            sudo mkdir -p "${mount_dir}/etc/systemd/system/${target}.wants"
-            sudo ln -sf "${unit_rel}" "${mount_dir}/etc/systemd/system/${target}.wants/qemu-guest-agent.service"
-          done
 
           echo "UBUNTU_CLOUD_IMAGE_PATH=${{ runner.temp }}/ubuntu-cloud-marked.img" >> "$GITHUB_ENV"
 
