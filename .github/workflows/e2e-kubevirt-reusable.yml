@@ -2113,6 +2113,103 @@ jobs:
             exit 1
           fi
 
+      - name: "BMC power cycle to consume KubeVirtBMC's one-shot PXE override (VMI recreation)"
+        if: ${{ inputs.bmc_mode }}
+        # KubeVirtBMC-only accommodation, not a kezio product concern.
+        # agentDeployer.Register (internal/deployer/agent.go) arms a
+        # one-shot PXE override on the BMC (SetOneTimePXEBoot) so the
+        # live environment net-boots once during Inspecting; on real
+        # hardware, firmware consumes a one-shot override after a
+        # single boot, so kezio-agent's own in-guest reboot at the end
+        # of finalize already lands on the NVRAM boot order with the
+        # deployed disk first. KubeVirtBMC emulates the override by
+        # injecting interface/disk bootOrder into the VMI spec and only
+        # clears it (its bootorderrestore controller) once the VMI is
+        # recreated - an in-guest reboot keeps the same VMI and the
+        # same QEMU process, so OVMF's SetBootOrderFromQemu keeps
+        # rewriting NVRAM BootOrder from the still-present fw_cfg
+        # override on every boot, discarding kezio's own NVRAM entry
+        # and falling through to PXE every time. Driving a real
+        # BMC-level stop/start here (through spec.online, the same
+        # mechanism the steady-state power-cycle steps below use)
+        # recreates the VMI so bootorderrestore restores the original
+        # boot order before the in-guest reboot chain is allowed to run.
+        #
+        # Confirmed not to disturb kezio's own state machine: a
+        # Provisioned Machine's reconcileProvisioned
+        # (internal/controller/machine_controller.go) only calls
+        # reconcilePower for a spec.online mismatch, which calls
+        # agentDeployer.PowerOn/PowerOff - neither issues
+        # SetOneTimePXEBoot (only Register does, and Register only runs
+        # from the Enrolling state or a RegisterFailed retry via
+        # reconcileError). So this power cycle cannot re-arm the
+        # one-time PXE override or restart provisioning.
+        run: |
+          set -euo pipefail
+
+          old_uid="$(kubectl get vmi "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.metadata.uid}')"
+          echo "current VMI UID: ${old_uid}"
+
+          kubectl patch machine "${TARGET_VM_NAME}" -n kezio-system --type=merge -p '{"spec":{"online":false}}'
+
+          deadline=$(( $(date +%s) + 300 ))
+          while true; do
+            status="$(kubectl get vm "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.status.printableStatus}' || true)"
+            vmi_now="$(kubectl get vmi "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+            echo "$(date -Is) VM printableStatus=${status:-<none>} VMI UID=${vmi_now:-<gone>}"
+            if [ "${status}" = "Stopped" ] && [ -z "${vmi_now}" ]; then
+              break
+            fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::VM ${TARGET_VM_NAME} did not stop and its VMI did not disappear within the timeout after spec.online=false - the old VMI must be gone before bootorderrestore can consume the one-shot on the next start." >&2
+              kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o yaml
+              exit 1
+            fi
+            sleep 5
+          done
+
+          kubectl patch machine "${TARGET_VM_NAME}" -n kezio-system --type=merge -p '{"spec":{"online":true}}'
+
+          deadline=$(( $(date +%s) + 300 ))
+          new_uid=""
+          while true; do
+            status="$(kubectl get vm "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.status.printableStatus}' || true)"
+            new_uid="$(kubectl get vmi "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+            echo "$(date -Is) VM printableStatus=${status:-<none>} VMI UID=${new_uid:-<none>}"
+            if [ "${status}" = "Running" ] && [ -n "${new_uid}" ] && [ "${new_uid}" != "${old_uid}" ]; then
+              break
+            fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::VM ${TARGET_VM_NAME} did not come back up with a new VMI within the timeout after spec.online=true." >&2
+              kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o yaml
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "new VMI UID: ${new_uid}"
+
+          # Wait for KubeVirtBMC's bootorderrestore controller to actually
+          # consume the one-shot against this new VMI - the VMI existing
+          # is not enough, restoring the boot order happens
+          # asynchronously once the controller observes the new
+          # generation.
+          deadline=$(( $(date +%s) + 120 ))
+          while true; do
+            if kubectl -n kubevirtbmc-system logs deployment/kubevirtbmc-controller-manager --since=5m 2>/dev/null \
+                | grep -F "oneshot boot order restored successfully" | grep -qF "${TARGET_VM_NAME}"; then
+              echo "KubeVirtBMC restored the original boot order (one-shot consumed)."
+              break
+            fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::KubeVirtBMC's bootorderrestore controller never logged consuming the one-shot boot override for ${TARGET_VM_NAME} within the timeout - it may still be in effect." >&2
+              kubectl -n kubevirtbmc-system logs deployment/kubevirtbmc-controller-manager --tail=200
+              exit 1
+            fi
+            sleep 5
+          done
+
+          kubectl wait vmi/"${TARGET_VM_NAME}" -n kezio-system --for=condition=Ready --timeout=180s
+
       - name: "Wait for layer 2 (boot): the deployed disk boots and qemu-guest-agent connects"
         # The live environment never runs qemu-guest-agent (see this
         # workflow's header comment on why only the *deployed* test
