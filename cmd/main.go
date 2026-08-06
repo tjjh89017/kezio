@@ -225,7 +225,16 @@ func main() {
 		setupLog.Error(err, "invalid ingest configuration")
 		os.Exit(1)
 	}
-	seederDeploymentConfig, err := seederDeploymentConfigFromEnv()
+	// Computed before seederDeploymentConfigFromEnv, which reuses its
+	// tracker/store/tuning fields the same way agentServerConfigFromEnv
+	// does below - one tracker URL and one store mount serve every
+	// consumer that builds a .torrent, not a separate set per consumer.
+	seederCfg, err := seederConfigFromEnv()
+	if err != nil {
+		setupLog.Error(err, "invalid seeder configuration")
+		os.Exit(1)
+	}
+	seederDeploymentConfig, err := seederDeploymentConfigFromEnv(seederCfg)
 	if err != nil {
 		setupLog.Error(err, "invalid seeder deployment configuration")
 		os.Exit(1)
@@ -252,11 +261,6 @@ func main() {
 		DeployerFactory: deployerFactoryFromEnv(mgr.GetClient()),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Machine")
-		os.Exit(1)
-	}
-	seederCfg, err := seederConfigFromEnv()
-	if err != nil {
-		setupLog.Error(err, "invalid seeder configuration")
 		os.Exit(1)
 	}
 	if err := (&controller.SeederReconciler{
@@ -457,7 +461,18 @@ func seederConfigFromEnv() (controller.SeederConfig, error) {
 // SEEDER_DEPLOYMENT_GRACE_PERIOD is optional (a Go duration string, for
 // example "5m"); left unset, the reconciler's own default applies (see
 // SeederDeploymentConfig.gracePeriod).
-func seederDeploymentConfigFromEnv() (controller.SeederDeploymentConfig, error) {
+//
+// seeder carries the tracker URL and store root a per-Image Deployment's
+// pod is actually seeded through (SeederDeploymentConfig.TrackerURL/
+// StoreRoot), reused verbatim rather than introducing a second,
+// parallel set of SEEDER_DEPLOYMENT_TRACKER_URL/SEEDER_DEPLOYMENT_STORE_ROOT
+// variables naming the same tracker and the same store - the identical
+// reasoning agentServerConfigFromEnv gives for reusing SeederConfig
+// itself. Leaving SEEDER_TRACKER_URL unset still lets per-Image
+// Deployments be created and torn down by their reference count; it
+// just means nothing ever adds content to them (see
+// SeederDeploymentConfig.contentEnabled).
+func seederDeploymentConfigFromEnv(seeder controller.SeederConfig) (controller.SeederDeploymentConfig, error) {
 	image := os.Getenv("SEEDER_DEPLOYMENT_IMAGE")
 	if image == "" {
 		return controller.SeederDeploymentConfig{}, nil
@@ -474,6 +489,9 @@ func seederDeploymentConfigFromEnv() (controller.SeederDeploymentConfig, error) 
 		StoreVolume: corev1.VolumeSource{
 			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: storePVC},
 		},
+		TrackerURL: seeder.TrackerURL,
+		StoreRoot:  seeder.StoreRoot,
+		EzioTuning: seeder.EzioTuning,
 	}
 	if raw := os.Getenv("SEEDER_DEPLOYMENT_GRACE_PERIOD"); raw != "" {
 		gracePeriod, err := time.ParseDuration(raw)

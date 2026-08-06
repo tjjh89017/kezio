@@ -381,3 +381,122 @@ func mustFixtureHash() store.InfoHash {
 	_, h := writeFixtureContent()
 	return h
 }
+
+// createSeederDeploymentPod creates a ReplicaSet owned by dep and a Pod
+// owned by that ReplicaSet, with status.podIP already set to podIP -
+// standing in for what a real Deployment controller and kubelet would
+// otherwise produce (envtest runs neither), so podsForDeployment's
+// ownership-chain lookup has something to find.
+func createSeederDeploymentPod(ctx context.Context, dep *appsv1.Deployment, podIP string) {
+	trueVal := true
+	rs := &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("%s-%s", dep.Name, rand.String(5)),
+			Namespace: dep.Namespace,
+			Labels:    dep.Spec.Selector.MatchLabels,
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "apps/v1",
+				Kind:       "Deployment",
+				Name:       dep.Name,
+				UID:        dep.UID,
+				Controller: &trueVal,
+			}},
+		},
+		Spec: appsv1.ReplicaSetSpec{
+			Selector: dep.Spec.Selector,
+			Template: dep.Spec.Template,
+		},
+	}
+	ExpectWithOffset(1, k8sClient.Create(ctx, rs)).To(Succeed())
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("%s-%s", rs.Name, rand.String(5)),
+			Namespace: dep.Namespace,
+			Labels:    dep.Spec.Selector.MatchLabels,
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "apps/v1",
+				Kind:       "ReplicaSet",
+				Name:       rs.Name,
+				UID:        rs.UID,
+				Controller: &trueVal,
+			}},
+		},
+		Spec: dep.Spec.Template.Spec,
+	}
+	ExpectWithOffset(1, k8sClient.Create(ctx, pod)).To(Succeed())
+	pod.Status.PodIP = podIP
+	ExpectWithOffset(1, k8sClient.Status().Update(ctx, pod)).To(Succeed())
+}
+
+var _ = Describe("Seeder Deployment content", func() {
+	ctx := context.Background()
+
+	// seederDeploymentContentTarget is the dial target
+	// createSeederDeploymentPod's fixed pod IP resolves to, on the fixed
+	// gRPC port every per-Image seeder container listens on.
+	const seederDeploymentContentPodIP = "10.9.9.9"
+
+	It("adds every Ready-Image content partition to the pod behind a newly created per-Image Deployment", func() {
+		fixtureRoot, hash := writeFixtureContent()
+		image := createReadyImage(ctx, hash)
+		registry := newFakeSeederRegistry()
+
+		r := &ImageReconciler{
+			Client: k8sClient,
+			Scheme: k8sClient.Scheme(),
+			SeederDeployment: SeederDeploymentConfig{
+				Image:       "ezio-seeder:test",
+				StoreVolume: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+				TrackerURL:  "http://tracker.kezio-system.svc:6969/announce",
+				StoreRoot:   fixtureRoot,
+				Dial:        registry.dial,
+			},
+		}
+		key := types.NamespacedName{Name: image.Name, Namespace: image.Namespace}
+
+		machine := createSeederTestMachine(ctx, image.Namespace, image.Name, "site-a", keziov1alpha1.MachineStateProvisioning)
+		DeferCleanup(func() { cleanupSeederTest(ctx, r, image, machine) })
+
+		_, err := reconcileImage(ctx, r, key)
+		Expect(err).NotTo(HaveOccurred())
+		dep := seederDeploymentsForImage(ctx, image)["site-a"]
+
+		createSeederDeploymentPod(ctx, &dep, seederDeploymentContentPodIP)
+
+		// The pod did not exist during the reconcile above (its
+		// Deployment had just been created), so a second pass is what
+		// actually finds it and syncs content - the same "requeue and
+		// pick it up next time" shape the rest of this reconciler uses.
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		target := fmt.Sprintf("%s:%d", seederDeploymentContentPodIP, seederDeploymentGRPCPort)
+		daemon := registry.daemons[target]
+		Expect(daemon).NotTo(BeNil(), "expected a dial to the per-Image seeder pod's own address")
+		Expect(daemon.torrents).To(HaveKey(hash.String()))
+	})
+
+	It("does not dial any pod when SeederDeployment carries no tracker/store configuration", func() {
+		image := createReadyImage(ctx, mustFixtureHash())
+		r, _ := newSeederDeploymentReconciler()
+		dialed := false
+		r.SeederDeployment.Dial = func(string) (SeederEZIOClient, error) {
+			dialed = true
+			return nil, fmt.Errorf("dial should not have been called")
+		}
+		key := types.NamespacedName{Name: image.Name, Namespace: image.Namespace}
+
+		machine := createSeederTestMachine(ctx, image.Namespace, image.Name, "site-a", keziov1alpha1.MachineStateProvisioning)
+		DeferCleanup(func() { cleanupSeederTest(ctx, r, image, machine) })
+
+		_, err := reconcileImage(ctx, r, key)
+		Expect(err).NotTo(HaveOccurred())
+		dep := seederDeploymentsForImage(ctx, image)["site-a"]
+		createSeederDeploymentPod(ctx, &dep, seederDeploymentContentPodIP)
+
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(dialed).To(BeFalse(), "contentEnabled() is false (no TrackerURL/StoreRoot) - nothing should have dialed the pod")
+	})
+})

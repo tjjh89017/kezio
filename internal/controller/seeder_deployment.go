@@ -20,7 +20,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"net"
 	"sort"
 	"strconv"
 	"time"
@@ -30,11 +32,23 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
+	"github.com/tjjh89017/kezio/internal/seeder"
+	"github.com/tjjh89017/kezio/internal/store"
 )
+
+// seederDeploymentGRPCPort is the fixed gRPC control port every
+// per-Image seeder container listens on (see buildSeederDeployment's
+// EZIO_GRPC_LISTEN). syncSeederDeploymentContent dials a pod's own
+// address on this port directly, rather than through a Service: a
+// per-Image, per-site Deployment always has exactly one intended
+// backend (replicas stays 1 - see buildSeederDeployment), and nothing
+// outside this reconciler ever needs to reach it.
+const seederDeploymentGRPCPort = 50051
 
 // seederBTPort is the fixed BitTorrent listen port every per-Image
 // seeder container uses. Fixed (not ephemeral) for the same reason
@@ -106,11 +120,51 @@ type SeederDeploymentConfig struct {
 	// Now returns the current time. Defaults to time.Now; tests override
 	// it to drive the grace-period countdown without sleeping.
 	Now func() time.Time
+
+	// TrackerURL and StoreRoot are the same tracker/store settings
+	// SeederConfig itself carries (see cmd/main.go's
+	// seederDeploymentConfigFromEnv, which reuses them verbatim rather
+	// than a second, parallel set of variables naming the same tracker
+	// and the same store). Needed by syncSeederDeploymentContent to
+	// build the .torrent bytes it adds to a per-Image Deployment's pod.
+	// Left empty, Deployments are still created and torn down by their
+	// reference count (see contentEnabled) - only the content-adding
+	// half is skipped.
+	TrackerURL string
+	StoreRoot  string
+	// EzioTuning carries the cluster-wide default AddTorrent tuning
+	// (MaxUploads/MaxConnections) applied to every content torrent
+	// syncSeederDeploymentContent adds. Nil falls back to
+	// seeder.DefaultMaxUploads/DefaultMaxConnections, the same as
+	// SeederConfig.EzioTuning.
+	EzioTuning *keziov1alpha1.MachineEzioTuning
+	// Dial opens a client to one per-Image seeder pod's gRPC target
+	// (host:port). Defaults to wrapping seeder.Dial when nil; tests
+	// override it to hand back a fake, the same shape SeederConfig.Dial
+	// uses.
+	Dial func(target string) (SeederEZIOClient, error)
 }
 
 // enabled reports whether per-Image seeder Deployments are configured.
 func (c SeederDeploymentConfig) enabled() bool {
 	return c.Image != ""
+}
+
+// contentEnabled reports whether syncSeederDeploymentContent has enough
+// configuration (a tracker URL and a store to read torrent.info from)
+// to actually add content to a per-Image seeder Deployment's pod. See
+// TrackerURL/StoreRoot's own doc comment for what runs with this false.
+func (c SeederDeploymentConfig) contentEnabled() bool {
+	return c.TrackerURL != "" && c.StoreRoot != ""
+}
+
+// dial opens a client to target, defaulting to seeder.Dial - the same
+// fallback SeederConfig.dial uses.
+func (c SeederDeploymentConfig) dial(target string) (SeederEZIOClient, error) {
+	if c.Dial != nil {
+		return c.Dial(target)
+	}
+	return seeder.Dial(target)
 }
 
 // gracePeriod returns c.GracePeriod, falling back to
@@ -237,12 +291,18 @@ func (r *ImageReconciler) reconcileSeederDeployments(ctx context.Context, image 
 			if err != nil {
 				return ctrl.Result{}, err
 			}
-			if err := r.Create(ctx, newDep); err != nil && !apierrors.IsAlreadyExists(err) {
-				return ctrl.Result{}, fmt.Errorf("create seeder deployment: %w", err)
+			if err := r.Create(ctx, newDep); err != nil {
+				if !apierrors.IsAlreadyExists(err) {
+					return ctrl.Result{}, fmt.Errorf("create seeder deployment: %w", err)
+				}
+				// Someone else created it concurrently since the List
+				// above; pick up its content on the next reconcile
+				// instead of syncing against a Deployment this call
+				// never actually created (newDep never got a real UID).
+				continue
 			}
-			continue
-		}
-		if _, draining := dep.Annotations[seederDeploymentEmptySinceAnnotation]; draining {
+			dep = newDep
+		} else if _, draining := dep.Annotations[seederDeploymentEmptySinceAnnotation]; draining {
 			// Demand came back before the grace period elapsed: this is
 			// exactly the thrash the grace period exists to absorb, so
 			// clear the countdown instead of letting it run out under a
@@ -250,6 +310,10 @@ func (r *ImageReconciler) reconcileSeederDeployments(ctx context.Context, image 
 			if err := r.clearSeederEmptySince(ctx, dep); err != nil {
 				return ctrl.Result{}, err
 			}
+		}
+
+		if err := r.syncSeederDeploymentContent(ctx, image, dep); err != nil {
+			return ctrl.Result{}, fmt.Errorf("sync seeder deployment content: %w", err)
 		}
 	}
 
@@ -371,6 +435,151 @@ func seederStatusEqual(a, b []keziov1alpha1.ImageSeederSiteStatus) bool {
 		}
 	}
 	return true
+}
+
+// syncSeederDeploymentContent adds every content partition of image to
+// dep's own pod(s) over gRPC, so the Deployment reconcileSeederDeployments
+// just created (or kept) actually serves the content its site's Machines
+// are leeching, instead of running an idle ezio with nothing added. A
+// no-op when SeederDeploymentConfig carries no tracker/store
+// configuration (see SeederDeploymentConfig.contentEnabled) - the
+// lifecycle-only shape the envtest suite in
+// seeder_deployment_envtest_test.go exercises.
+//
+// Unlike SeederReconciler.syncTarget (which reconciles a shared fleet
+// against every Ready Image and pauses whatever a target no longer
+// needs), this Deployment serves exactly one Image for as long as it
+// exists at all, so there is nothing to pause here: content is only
+// ever added, never removed - the "ezio has no RemoveTorrent RPC"
+// constraint the shared fleet works around by pausing does not even
+// arise, since deleting the whole Deployment is how this Image's
+// content stops being served.
+func (r *ImageReconciler) syncSeederDeploymentContent(ctx context.Context, image *keziov1alpha1.Image, dep *appsv1.Deployment) error {
+	if !r.SeederDeployment.contentEnabled() {
+		return nil
+	}
+
+	var hashes []string
+	for _, p := range image.Status.Partitions {
+		if p.InfoHash != "" {
+			hashes = append(hashes, p.InfoHash)
+		}
+	}
+	if len(hashes) == 0 {
+		return nil
+	}
+
+	pods, err := r.podsForDeployment(ctx, dep)
+	if err != nil {
+		return fmt.Errorf("list seeder deployment pods: %w", err)
+	}
+
+	var errs []error
+	for i := range pods {
+		pod := &pods[i]
+		if pod.Status.PodIP == "" || pod.DeletionTimestamp != nil {
+			// Not yet scheduled, or on its way out - retried on the
+			// next reconcile once a live replacement's IP is known.
+			continue
+		}
+		target := net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(seederDeploymentGRPCPort))
+		if err := r.addSeederDeploymentContent(ctx, target, hashes); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", target, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// addSeederDeploymentContent adds whichever of hashes target does not
+// already know about (per GetTorrentStatus), each read from the store
+// and bencoded the same way SeederReconciler.addContent does for the
+// shared fleet.
+func (r *ImageReconciler) addSeederDeploymentContent(ctx context.Context, target string, hashes []string) error {
+	c, err := r.SeederDeployment.dial(target)
+	if err != nil {
+		return fmt.Errorf("dial: %w", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	existing, err := c.GetTorrentStatus(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("get torrent status: %w", err)
+	}
+
+	for _, hash := range hashes {
+		if _, ok := existing[hash]; ok {
+			continue
+		}
+		infoHash, err := store.ParseInfoHash(hash)
+		if err != nil {
+			return fmt.Errorf("parse content hash %s: %w", hash, err)
+		}
+		contentDir := store.ContentDir(r.SeederDeployment.StoreRoot, infoHash)
+		info, err := store.LoadContentDirTorrentInfo(contentDir)
+		if err != nil {
+			return fmt.Errorf("load torrent.info for %s: %w", hash, err)
+		}
+		torrentBytes, err := store.BuildTorrentFile(info, r.SeederDeployment.TrackerURL)
+		if err != nil {
+			return fmt.Errorf("build torrent file for %s: %w", hash, err)
+		}
+		if err := c.AddTorrent(ctx, torrentBytes, contentDir, true,
+			seeder.ResolveMaxUploads(r.SeederDeployment.EzioTuning),
+			seeder.ResolveMaxConnections(r.SeederDeployment.EzioTuning)); err != nil {
+			return fmt.Errorf("add content %s: %w", hash, err)
+		}
+	}
+	return nil
+}
+
+// podsForDeployment returns the Pods currently owned by dep, resolved
+// through the ReplicaSet(s) it owns rather than a bare label-selector
+// list: two per-Image seeder Deployments for the same Image (different
+// sites) share an identical pod template selector (see
+// buildSeederDeployment - the site lives only in an annotation, not a
+// label), so a plain label-selector list cannot tell their pods apart.
+// Going through the ReplicaSet ownership chain keeps this scoped to dep
+// specifically, the same way a Deployment's own status.replicas is
+// computed internally.
+func (r *ImageReconciler) podsForDeployment(ctx context.Context, dep *appsv1.Deployment) ([]corev1.Pod, error) {
+	var replicaSets appsv1.ReplicaSetList
+	if err := r.List(ctx, &replicaSets,
+		client.InNamespace(dep.Namespace),
+		client.MatchingLabels(dep.Spec.Selector.MatchLabels),
+	); err != nil {
+		return nil, err
+	}
+
+	owned := make(map[types.UID]struct{})
+	for i := range replicaSets.Items {
+		for _, ref := range replicaSets.Items[i].OwnerReferences {
+			if ref.UID == dep.UID {
+				owned[replicaSets.Items[i].UID] = struct{}{}
+			}
+		}
+	}
+	if len(owned) == 0 {
+		return nil, nil
+	}
+
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods,
+		client.InNamespace(dep.Namespace),
+		client.MatchingLabels(dep.Spec.Selector.MatchLabels),
+	); err != nil {
+		return nil, err
+	}
+
+	var result []corev1.Pod
+	for _, pod := range pods.Items {
+		for _, ref := range pod.OwnerReferences {
+			if _, ok := owned[ref.UID]; ok {
+				result = append(result, pod)
+				break
+			}
+		}
+	}
+	return result, nil
 }
 
 // buildSeederDeployment constructs the (not yet created) per-Image,
