@@ -45,12 +45,20 @@ const (
 	// BuiltinStepGrowLastPartition grows the last partition and its file
 	// system when the target disk is larger than the source.
 	BuiltinStepGrowLastPartition = "growLastPartition"
+	// BuiltinStepInstallRemovableFallback copies a shim/grub bootloader
+	// onto the ESP's UEFI removable-media fallback path for an image that
+	// does not already carry one there. kezio's own boot-entry contract
+	// requires every bootable Image to ship this file already (see
+	// internal/agent/deploy's efiRemovableLoaderPath doc comment); this
+	// builtin is the opt-in escape hatch for a golden image that predates
+	// or does not meet that contract, not something every deploy needs.
+	BuiltinStepInstallRemovableFallback = "install-removable-fallback"
 )
 
 // PostHookBuiltinStep runs one of the named steps KEZIO ships.
 type PostHookBuiltinStep struct {
 	// Name selects which shipped builtin runs.
-	// +kubebuilder:validation:Enum=mkswap;efibootmgr;growLastPartition
+	// +kubebuilder:validation:Enum=mkswap;efibootmgr;growLastPartition;install-removable-fallback
 	Name string `json:"name"`
 	// TimeoutSeconds bounds how long the builtin may run before the agent
 	// treats it as failed. Defaults to PostHookDefaultTimeoutSeconds.

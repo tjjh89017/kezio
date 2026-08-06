@@ -30,12 +30,16 @@ limitations under the License.
 // carries (root file system, swap - see mkswap --uuid) already matches
 // whatever the image's own fstab and bootloader configuration expects;
 // there is nothing to regenerate. efibootmgr itself only ever touches
-// firmware NVRAM. The one exception is the ESP: finalize mounts it
-// read-write to make sure the UEFI spec's removable-media fallback
-// bootloader path is present (ensureRemovableFallback, in finalize.go),
-// since that is the path firmware falls back to entirely on its own,
-// with no NVRAM boot entry involved, whenever the entry efibootmgr
-// created does not survive to the next boot.
+// firmware NVRAM, and finalize never opens the ESP's file system either:
+// it relies entirely on kezio's own image contract (see
+// internal/agent/deploy's efiRemovableLoaderPath doc comment) that a
+// bootable Image already carries its fallback bootloader at the path
+// firmware falls back to on its own, with no NVRAM boot entry involved,
+// whenever the entry efibootmgr created does not survive to the next
+// boot. Deliberately no validation checks this contract anywhere in
+// kezio - the documented contract is the whole of it. An image that does
+// not meet it can opt into the "install-removable-fallback" builtin post
+// hook step (hooks.go) instead.
 //
 // Between content writing and finalize, Execute runs plan.Hooks
 // (runHooks, in hooks.go): every PostHook internal/agentserver resolved

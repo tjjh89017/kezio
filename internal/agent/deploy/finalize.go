@@ -19,9 +19,7 @@ package deploy
 import (
 	"context"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -29,39 +27,49 @@ import (
 	"github.com/tjjh89017/kezio/internal/agentapi"
 )
 
-// bootloaderFallbackPath is the UEFI spec's own fallback removable-media
-// bootloader path, independent of whatever distro-specific
-// \EFI\<distro>\... path a bootloader installer would normally register
-// for itself. finalize points every boot entry it creates at this path
-// rather than trying to guess a distro-specific one: it never opens or
+// efiRemovableLoaderPath is the UEFI spec's own fallback removable-media
+// bootloader path for one CPU architecture - the exact file firmware
+// falls back to on its own, no NVRAM boot entry involved at all,
+// whenever nothing in BootOrder succeeds. ensureEFIBootEntry always
+// registers its NVRAM entry against this same path rather than a
+// distro-specific \EFI\<distro>\... one: finalize never opens or
 // inspects the deployed file system (see the package doc comment), so it
 // has no way to know which path an arbitrary image's own installer used.
-// Images kezio deploys must carry a bootloader at this path for the
-// created entry to actually boot; image builders should ship or symlink
-// one.
-const bootloaderFallbackPath = `\EFI\BOOT\BOOTX64.EFI`
+//
+// This is kezio's documented image contract: a bootable Image must
+// already carry its fallback bootloader at this path on its ESP.
+// finalize does not check for it (see the package doc comment on why
+// finalize adds no validation of its own) - an image missing it will get
+// an NVRAM entry that still fails to boot the moment that entry is lost.
+// The "install-removable-fallback" builtin post hook step (hooks.go)
+// copies a shim/grub file into place for a golden image that does not
+// already carry one.
+//
+// kezio supports exactly two architectures, x86_64 and aarch64; this is
+// a fixed two-entry table, not an extensible registry, and aarch64 is
+// intentionally unimplemented (see efiRemovableLoaderPathForArch).
+var efiRemovableLoaderPath = map[string]string{
+	"amd64": `\EFI\BOOT\BOOTX64.EFI`, // x86_64
+	// "arm64" (aarch64) is deliberately absent: BOOTAA64.EFI support is
+	// not implemented yet. efiRemovableLoaderPathForArch fails explicitly
+	// for it rather than falling through to the x86_64 path.
+}
 
-// removableFallbackDir and removableFallbackName are bootloaderFallbackPath
-// spelled as a POSIX-style relative path under an ESP mount, the form
-// ensureRemovableFallback needs to check for and, if absent, create the
-// file at. Firmware falls back to this exact path on its own - no NVRAM
-// boot entry involved at all - whenever nothing in BootOrder succeeds,
-// which is why ensureRemovableFallback exists alongside
-// ensureEFIBootEntry rather than instead of it: it is the boot path that
-// survives an NVRAM boot entry not surviving.
-const (
-	removableFallbackDir  = "EFI/BOOT"
-	removableFallbackName = "BOOTX64.EFI"
-)
-
-// espBootloaderCandidates are the file names ensureRemovableFallback
-// looks for under any other EFI/<name>/ directory on the ESP when
-// removableFallbackName is missing - shim first (so a secure-boot image
-// keeps chaining through it to grub), grub itself as the fallback for a
-// non-shim image. These are the same two names kezio-bootd's own netboot
-// chain fetches (cmd/bootd/main.go), so an image built for kezio's PXE
-// flow already carries one of them somewhere under EFI/.
-var espBootloaderCandidates = []string{"shimx64.efi", "grubx64.efi"}
+// efiRemovableLoaderPathForArch looks goarch (a Go GOARCH value - the
+// deploying machine's own, since kezio-agent runs on the machine it is
+// deploying) up in efiRemovableLoaderPath, failing explicitly for
+// aarch64 ("arm64") and any architecture outside kezio's two-architecture
+// scope rather than silently defaulting to the x86_64 path.
+func efiRemovableLoaderPathForArch(goarch string) (string, error) {
+	path, ok := efiRemovableLoaderPath[goarch]
+	if !ok {
+		if goarch == "arm64" {
+			return "", fmt.Errorf("UEFI boot entries for aarch64 are not implemented yet")
+		}
+		return "", fmt.Errorf("unsupported architecture %q for UEFI boot entries; kezio supports x86_64 and aarch64 only", goarch)
+	}
+	return path, nil
+}
 
 // efibootLabelPrefix, plus the deploying machine's name, is the stable
 // label finalize gives every boot entry it creates: stable across
@@ -78,21 +86,21 @@ func efibootLabel(machineName string) string {
 // partition across the whole DeployPlan is written or made: an optional
 // grow of each image's last partition (and its file system), and for
 // whichever image plan carries an ESP-role partition (ordinarily the OS
-// image only) a UEFI boot entry plus the removable-media fallback
-// bootloader that entry does not depend on surviving. See the package
-// doc comment for why this never chroots or runs update-initramfs.
+// image only) a UEFI boot entry pointing at the image contract's fallback
+// bootloader path (efiRemovableLoaderPath). finalize itself never opens
+// the ESP's file system - see the package doc comment for why this never
+// chroots, runs update-initramfs, or otherwise inspects deployed content,
+// and efiRemovableLoaderPath's doc comment for the fallback-bootloader
+// contract this relies on the image to already satisfy.
 //
-// It returns a human-readable summary of what the ESP-role pass actually
-// did and found - which file the removable fallback was installed from
-// (or that it was already present), plus a full "efibootmgr" listing
-// taken right after both boot-entry actions complete. Deploy's console
-// carries none of the agent's own log output (the live environment's
-// stdout does not reach the guest's serial console - see this package's
-// doc comment), and the guest is gone the moment it reboots into the
-// deployed disk, so this summary, threaded back to Execute's terminal
-// progress report, is the only record of whether the boot entry and the
-// removable fallback actually landed that survives past the reboot this
-// same call is about to trigger.
+// It returns a full "efibootmgr" listing taken right after the boot
+// entry is created. Deploy's console carries none of the agent's own log
+// output (the live environment's stdout does not reach the guest's
+// serial console - see this package's doc comment), and the guest is
+// gone the moment it reboots into the deployed disk, so this listing,
+// threaded back to Execute's terminal progress report, is the only
+// record of whether the boot entry actually landed that survives past
+// the reboot this same call is about to trigger.
 func (e *Executor) finalize(ctx context.Context, plan *agentapi.DeployPlan, plans []agentapi.ImageDeployPlan) (string, error) {
 	var summary strings.Builder
 	sawESP := false
@@ -108,15 +116,6 @@ func (e *Executor) finalize(ctx context.Context, plan *agentapi.DeployPlan, plan
 			sawESP = true
 			if err := e.ensureEFIBootEntry(ctx, plan.MachineName, ip, p); err != nil {
 				return summary.String(), err
-			}
-			installed, source, err := e.ensureRemovableFallback(ctx, ip, p)
-			if err != nil {
-				return summary.String(), err
-			}
-			if installed {
-				fmt.Fprintf(&summary, "removable fallback installed on %s from %s; ", p.Device, source)
-			} else {
-				fmt.Fprintf(&summary, "removable fallback already present on %s; ", p.Device)
 			}
 		}
 	}
@@ -142,14 +141,21 @@ func (e *Executor) efibootmgrSnapshot(ctx context.Context) string {
 }
 
 // ensureEFIBootEntry creates a UEFI NVRAM boot entry pointing at esp (an
-// ESP-role partition of ip.Disk) and bootloaderFallbackPath, first
-// removing any prior entry this same machine created - matched by label,
-// not boot number, since efibootmgr assigns those itself and they are
-// not stable across firmware or across which entries currently exist.
-// This only ever touches firmware NVRAM through efibootmgr, never the
-// ESP's own file system content - ensureRemovableFallback is the one
-// finalize step that does open it.
+// ESP-role partition of ip.Disk) and the deploying machine's own
+// architecture's fallback loader path (efiRemovableLoaderPathForArch of
+// runtime.GOARCH - kezio-agent runs on the machine it is deploying, so
+// its own build architecture is the target's), first removing any prior
+// entry this same machine created - matched by label, not boot number,
+// since efibootmgr assigns those itself and they are not stable across
+// firmware or across which entries currently exist. This only ever
+// touches firmware NVRAM through efibootmgr, never the ESP's own file
+// system content.
 func (e *Executor) ensureEFIBootEntry(ctx context.Context, machineName string, ip agentapi.ImageDeployPlan, esp agentapi.PlanPartition) error {
+	loaderPath, err := efiRemovableLoaderPathForArch(runtime.GOARCH)
+	if err != nil {
+		return fmt.Errorf("image %s: %w", ip.ImageRef.Name, err)
+	}
+
 	label := efibootLabel(machineName)
 
 	out, err := e.Runner.Run(ctx, nil, "efibootmgr")
@@ -163,12 +169,12 @@ func (e *Executor) ensureEFIBootEntry(ctx context.Context, machineName string, i
 		}
 	}
 
-	e.log("creating UEFI boot entry %q on %s partition %d, loader %s", label, ip.Disk, esp.Number, bootloaderFallbackPath)
+	e.log("creating UEFI boot entry %q on %s partition %d, loader %s", label, ip.Disk, esp.Number, loaderPath)
 	if _, err := e.Runner.Run(ctx, nil, "efibootmgr",
 		"--create",
 		"--disk", ip.Disk,
 		"--part", strconv.Itoa(int(esp.Number)),
-		"--loader", bootloaderFallbackPath,
+		"--loader", loaderPath,
 		"--label", label,
 	); err != nil {
 		return fmt.Errorf("image %s: creating UEFI boot entry: %w", ip.ImageRef.Name, err)
@@ -201,137 +207,6 @@ func parseEFIBootEntries(listing, label string) []string {
 		}
 	}
 	return nums
-}
-
-// ensureRemovableFallback mounts esp (an ESP-role partition of ip.Disk)
-// and makes sure it carries a bootloader at the UEFI spec's fixed
-// removable-media path, EFI/BOOT/BOOTX64.EFI, installing one from
-// whichever EFI/<name>/ directory holds an espBootloaderCandidates match
-// when it does not already. Real hardware and virtualized firmware alike
-// can lose an NVRAM boot entry a prior deploy created - a factory reset,
-// a battery-backed CMOS finally dying, a hypervisor's EFI variable store
-// not surviving a reboot the way its persistent-disk-backed one is
-// supposed to - and the removable path is the one BdsDxe still finds on
-// its own once BootOrder has nothing left to try, with no boot entry
-// involved at all. Running this in addition to ensureEFIBootEntry, never
-// instead of it, keeps the labelled NVRAM entry as the normal path (it
-// survives other machines' own entries coming and going, unlike the
-// single shared removable path) while this covers the case that entry
-// does not survive.
-//
-// It returns whether it actually installed a fallback (false means
-// EFI/BOOT/BOOTX64.EFI was already present) and, when it did, the source
-// path it copied from - both threaded back through finalize into the
-// terminal progress report (see finalize's doc comment for why that
-// report is this deploy's only durable record of the decision).
-func (e *Executor) ensureRemovableFallback(ctx context.Context, ip agentapi.ImageDeployPlan, esp agentapi.PlanPartition) (installed bool, source string, err error) {
-	mountpoint, err := os.MkdirTemp("", "kezio-esp-")
-	if err != nil {
-		return false, "", fmt.Errorf("image %s: creating ESP mountpoint: %w", ip.ImageRef.Name, err)
-	}
-	defer func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), hookCleanupTimeout)
-		e.unmountAll(cleanupCtx, []string{mountpoint})
-		cancel()
-		if err := os.Remove(mountpoint); err != nil && !os.IsNotExist(err) {
-			e.log("removing ESP mountpoint %s: %v", mountpoint, err)
-		}
-	}()
-
-	// -t vfat is explicit rather than left to mount's own autoprobe: the
-	// UEFI spec requires the ESP to carry a FAT file system, but a bare
-	// "mount esp.Device mountpoint" lets the kernel/mount guess a type
-	// from whatever superblocks it tries first, which can pick something
-	// else entirely (observed picking squashfs and failing outright) when
-	// the device's content happens to look ambiguous to autoprobe.
-	if _, err := e.Runner.Run(ctx, nil, "mount", "-t", "vfat", esp.Device, mountpoint); err != nil {
-		return false, "", fmt.Errorf("image %s: mounting ESP %s at %s: %w", ip.ImageRef.Name, esp.Device, mountpoint, err)
-	}
-
-	installed, source, err = ensureRemovableFallbackFile(mountpoint)
-	if err != nil {
-		return false, "", fmt.Errorf("image %s: ensuring removable fallback bootloader: %w", ip.ImageRef.Name, err)
-	}
-	if installed {
-		e.log("installed removable fallback bootloader on %s from %s", esp.Device, source)
-	}
-	return installed, source, nil
-}
-
-// ensureRemovableFallbackFile is ensureRemovableFallback's pure part:
-// given root (an already-mounted ESP), it reports whether
-// EFI/BOOT/BOOTX64.EFI is already present, installing a copy from the
-// first espBootloaderCandidates match under any other EFI/<name>/
-// directory when it is not. source names whichever file it copied from
-// ("" when nothing needed copying). Kept separate from
-// ensureRemovableFallback so this decision is unit-testable against a
-// plain temp directory, with no mount or Runner involved.
-func ensureRemovableFallbackFile(root string) (installed bool, source string, err error) {
-	fallback := filepath.Join(root, filepath.FromSlash(removableFallbackDir), removableFallbackName)
-	if _, statErr := os.Stat(fallback); statErr == nil {
-		return false, "", nil
-	} else if !os.IsNotExist(statErr) {
-		return false, "", fmt.Errorf("checking %s: %w", fallback, statErr)
-	}
-
-	src, err := findESPBootloader(root)
-	if err != nil {
-		return false, "", err
-	}
-	if err := os.MkdirAll(filepath.Dir(fallback), 0o755); err != nil {
-		return false, "", fmt.Errorf("creating %s: %w", filepath.Dir(fallback), err)
-	}
-	if err := copyFile(src, fallback); err != nil {
-		return false, "", fmt.Errorf("copying %s to %s: %w", src, fallback, err)
-	}
-	return true, src, nil
-}
-
-// findESPBootloader looks for espBootloaderCandidates under every
-// EFI/<name>/ directory of root other than EFI/BOOT itself (that is the
-// fallback's destination, never a source), returning the first match in
-// directory-then-candidate order. A deployed image ordinarily carries
-// exactly one EFI/<distro>/ directory, so "first match" is not an
-// arbitrary choice in practice.
-func findESPBootloader(root string) (string, error) {
-	efiDir := filepath.Join(root, "EFI")
-	entries, err := os.ReadDir(efiDir)
-	if err != nil {
-		return "", fmt.Errorf("reading %s: %w", efiDir, err)
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() || strings.EqualFold(entry.Name(), "BOOT") {
-			continue
-		}
-		for _, candidate := range espBootloaderCandidates {
-			path := filepath.Join(efiDir, entry.Name(), candidate)
-			if _, err := os.Stat(path); err == nil {
-				return path, nil
-			}
-		}
-	}
-	return "", fmt.Errorf("no bootloader (%s) found under any EFI/<name>/ directory in %s", strings.Join(espBootloaderCandidates, ", "), efiDir)
-}
-
-// copyFile copies src to dst, creating dst world-readable - firmware
-// does not check the execute bit, and everything already on an ESP is
-// similarly non-executable from the host OS's point of view.
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = in.Close() }()
-
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		return err
-	}
-	return out.Close()
 }
 
 // growLastPartition grows ip's last partition and, when it has a file

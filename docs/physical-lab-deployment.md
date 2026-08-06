@@ -47,7 +47,7 @@ This no-relay shape is exercised by the in-repo packet lab
 runs the real dnsmasq supervisor against a real netns topology with
 `BOOTD_LAB_RELAY` left unset. kezio's KubeVirt-based GitHub Actions
 lanes do not separately exercise this no-relay shape end to end - see
-section 7 for what those lanes cover instead.
+section 8 for what those lanes cover instead.
 
 ### Scenario 2: existing DHCP reachable but not on the segment (relay mode)
 
@@ -292,7 +292,52 @@ and the explicit statement that no kezio CI lane exercises Secure Boot
 end to end - this guide's own network scenarios are unaffected by
 whether Secure Boot is on or off at a site.
 
-## 5. Full port table
+## 5. Image boot-entry contract
+
+kezio-agent creates a firmware NVRAM boot entry for a deployed machine
+(`efibootmgr --create`) once a deploy finishes, labelled
+`kezio:<machine name>`. It never opens or edits a deployed image's file
+system to do this - it only points the new entry at a fixed loader path
+on the machine's own EFI System Partition (ESP).
+
+**Contract: every bootable Image must already carry its own fallback
+bootloader at the fixed path firmware falls back to on its own.** This
+matches the shape of Clonezilla's `update-efi-nvram-boot-entry` and
+Ironic IPA's `efi_utils`: both write an NVRAM entry only, and both leave
+the fallback file to the image. kezio does the same.
+
+The fixed path is per architecture. kezio supports exactly two
+architectures today:
+
+| Architecture | Fallback bootloader path on the ESP |
+|---|---|
+| x86_64 | `\EFI\BOOT\BOOTX64.EFI` |
+| aarch64 | `\EFI\BOOT\BOOTAA64.EFI` (declared, not implemented yet) |
+
+arm32 and RISC-V are out of scope; kezio-agent fails an aarch64 deploy
+explicitly rather than writing an x86_64 path onto it.
+
+A machine's NVRAM can lose a boot entry on its own - a factory reset, a
+dead CMOS battery, a hypervisor's EFI variable store not surviving a
+reboot. When that happens, firmware falls back to the fixed path above
+with no NVRAM entry involved at all. The contract exists so that
+fallback still finds a working bootloader.
+
+kezio adds no check for this contract anywhere: no ingest-time check on
+an uploaded Image, no Image status warning, no deploy-time gate. The
+operator who builds or picks a golden image carries the responsibility
+to make sure it already ships the fallback bootloader for its
+architecture; this guide and the contract table above are the whole of
+the documentation for it.
+
+A golden image that does not already carry the fallback file can use
+the `install-removable-fallback` builtin PostHook step instead of
+carrying one by hand. That step copies a shim or GRUB binary it finds
+under another `EFI/<name>/` directory on the ESP into the fallback path.
+It is opt-in - a `PostHook` must name it explicitly - and it is scoped
+to the same two architectures as the table above.
+
+## 6. Full port table
 
 Every port below is checked against the manifests and code that
 declare it.
@@ -325,7 +370,7 @@ to IPMI's standard port 623 (`internal/bmc/ipmi/ipmi.go`'s
 `defaultPort`). Confirm each BMC's actual listening port against its
 own documentation.
 
-## 6. Bring-up order
+## 7. Bring-up order
 
 1. Deploy `config/default` (CRDs and controller-manager).
 2. Deploy `config/bootserver` and `config/agentserver`; set
@@ -350,7 +395,7 @@ own documentation.
 7. Power on the machine (through its BMC, or manually) and confirm it
    PXE boots, registers with the agent server, and reaches Ready.
 
-## 7. e2e lanes measured against this matrix
+## 8. e2e lanes measured against this matrix
 
 kezio's KubeVirt-based GitHub Actions lanes
 (`e2e-kubevirt-reusable.yml`, `e2e-boot-path-kubevirt.yml`,
@@ -418,7 +463,7 @@ correctness bug, and restructuring an existing KubeVirt lane to add it
 was out of scope for this change while GitHub Actions cannot be used to
 verify the result.
 
-## 8. Fact-check table
+## 9. Fact-check table
 
 | Claim | File verified against |
 |---|---|

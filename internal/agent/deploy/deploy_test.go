@@ -20,8 +20,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -93,21 +91,6 @@ func (f *fakeRunner) Run(_ context.Context, stdin []byte, name string, args ...s
 			size = 100 << 30 // 100 GiB, comfortably large by default
 		}
 		return []byte(fmt.Sprintf("%d\n", size)), nil
-	}
-	// A plain "mount [-t <fstype>] <device> <target>" (never "--bind",
-	// which always carries 3 args) stands in for a real mount of whatever
-	// file system ensureRemovableFallback or runChrootScriptStep just
-	// mounted. This fake never touches a real block device, so it seeds
-	// target with a stub EFI/BOOT/BOOTX64.EFI - the layout
-	// ensureRemovableFallback finds already satisfied and leaves alone -
-	// unless a test overrides this by calling target-specific setup
-	// before Execute runs.
-	if name == "mount" && args[0] != "--bind" {
-		target := args[len(args)-1]
-		dir := filepath.Join(target, "EFI", "BOOT")
-		if err := os.MkdirAll(dir, 0o755); err == nil {
-			_ = os.WriteFile(filepath.Join(dir, "BOOTX64.EFI"), []byte("stub"), 0o644)
-		}
 	}
 	return nil, nil
 }
@@ -691,9 +674,8 @@ func TestExecute_ReportsFinalizeAndTerminalSteps(t *testing.T) {
 // attempt 38's post-mortem found: the agent's own log output never
 // reaches the deployed machine's serial console, and the machine is gone
 // the moment it reboots into the deployed disk, so the terminal progress
-// report is the only place finalize's boot-entry and removable-fallback
-// outcome (and the resulting efibootmgr listing) survives to be read
-// after the fact.
+// report is the only place finalize's boot-entry outcome (the resulting
+// efibootmgr listing) survives to be read after the fact.
 func TestExecute_TerminalReportCarriesFinalizeBootSummary(t *testing.T) {
 	runner := newFakeRunner()
 	runner.outputs["efibootmgr "] = []byte(
@@ -711,9 +693,6 @@ func TestExecute_TerminalReportCarriesFinalizeBootSummary(t *testing.T) {
 	last := progress.events[len(progress.events)-1]
 	if last.Step != agentapi.DeployStepRebootingToDisk {
 		t.Fatalf("last step = %q, want %q", last.Step, agentapi.DeployStepRebootingToDisk)
-	}
-	if !strings.Contains(last.StepMessage, "removable fallback already present") {
-		t.Fatalf("StepMessage = %q, want it to mention the removable fallback outcome", last.StepMessage)
 	}
 	if !strings.Contains(last.StepMessage, "BootOrder: 0002,0001,0000") {
 		t.Fatalf("StepMessage = %q, want it to carry the post-finalize efibootmgr listing", last.StepMessage)
@@ -741,9 +720,6 @@ func TestExecute_TerminalReportAlsoEchoesBootSummaryToConsole(t *testing.T) {
 		t.Fatalf("Execute: %v", err)
 	}
 
-	if !strings.Contains(console.String(), "removable fallback already present") {
-		t.Fatalf("console output = %q, want it to mention the removable fallback outcome", console.String())
-	}
 	if !strings.Contains(console.String(), "BootOrder: 0002,0001,0000") {
 		t.Fatalf("console output = %q, want it to carry the post-finalize efibootmgr listing", console.String())
 	}
