@@ -35,17 +35,29 @@ name: E2E Boot Path (KubeVirt VM)
 on:
   workflow_dispatch:
     inputs:
-      boot_artifacts_version:
+      boot_artifacts_image:
         description: >-
-          Boot-artifacts release tag to boot (see
-          .github/workflows/build-live-image.yml). Empty uses the
-          repository's latest published release - the same default
-          config/bootserver and config/bootd ship. Publishing a release
-          is a maintainer action (a "v*" tag push, or a manual
-          build-live-image.yml dispatch with publish=true); this input
-          only selects among what is already published.
+          kezio-boot-artifacts OCI image to boot (see .github/workflows/
+          build-live-image.yml, which builds and pushes it). Ignored
+          when build_boot_artifacts is true. Defaults to the published
+          "latest" tag - the same default config/bootserver and
+          config/bootd ship.
         required: false
         type: string
+        default: "ghcr.io/tjjh89017/kezio-boot-artifacts:latest"
+      build_boot_artifacts:
+        description: >-
+          Build the live boot image (hack/live-image/build.sh, which
+          cross-compiles cmd/agent from this checkout) and the
+          kezio-boot-artifacts image from it, instead of pulling
+          boot_artifacts_image - the way this lane boots a kezio-agent
+          built from the commit under test rather than whatever
+          build-live-image.yml last published. Adds roughly the same
+          many-minutes cost build-live-image.yml itself budgets for the
+          identical script (see this job's own timeout-minutes).
+        required: false
+        type: boolean
+        default: false
       existing_dhcp_image:
         description: >-
           dnsmasq image standing in for the site's existing DHCP server
@@ -112,6 +124,10 @@ env:
   TARGET_VM_MAC: "52:54:00:be:ef:01"
   TARGET_VM_DISK_SERIAL: "KEZIOE2EVMDISK01"
   EXISTING_DHCP_IMG: ${{ inputs.existing_dhcp_image }}
+  # See "Build the live boot image and kezio-boot-artifacts image" below
+  # for the build_boot_artifacts branch; the default pulls the published
+  # image directly, no local build or import at all.
+  BOOT_ARTIFACTS_IMG: ${{ inputs.build_boot_artifacts && 'example.com/kezio-boot-artifacts:e2e-boot-path' || inputs.boot_artifacts_image }}
 
 jobs:
   boot-path-kubevirt:
@@ -121,10 +137,12 @@ jobs:
     # squashfs live-boot are each on the order of tens of seconds to a
     # few minutes; budget generously for a first PXE cycle that may need
     # firmware retries, plus the fetch-boot-artifacts initContainers'
-    # own release-asset download (kernel/initrd/squashfs/shim/grub,
-    # up to a few hundred MiB - see build-live-image.yml) before either
-    # Deployment's main container even starts.
-    timeout-minutes: 60
+    # own image pull (kernel/initrd/squashfs/shim/grub, up to a few
+    # hundred MiB - see build-live-image.yml) before either Deployment's
+    # main container even starts. build_boot_artifacts adds roughly the
+    # same many-minutes cost build-live-image.yml itself budgets for the
+    # identical hack/live-image/build.sh run.
+    timeout-minutes: ${{ inputs.build_boot_artifacts && 150 || 60 }}
     steps:
       - name: Clone the code
         uses: actions/checkout@v7
@@ -186,21 +204,34 @@ jobs:
 
       # ---------------------------------------------------------------
       # Boot artifacts: kernel/initrd/squashfs and shimx64.efi/
-      # grubx64.efi are never built in this job - a from-source
-      # `lb build` run (build-live-image.yml) takes up to 90 minutes on
-      # its own, which this job's already-generous 60 minute budget
-      # cannot also absorb. Nothing in this job downloads them either
-      # anymore: config/bootserver's and config/bootd's own
-      # fetch-boot-artifacts initContainer (see config/boot-artifacts)
-      # does that fetch, from build-live-image.yml's published GitHub
-      # Release, once each Deployment's pod actually starts - the same
-      # mechanism a real deployment uses, dogfooding it here instead of
-      # this job's own now-removed `gh run download` + `apt-get
-      # download` sourcing. That does mean this job needs a published
-      # release to exist first (a "v*" tag push, or a build-live-
-      # image.yml dispatch with publish=true) - see
-      # boot_artifacts_version's own description above.
+      # grubx64.efi are, by default, never built in this job - a
+      # from-source `lb build` run (hack/live-image/build.sh) takes up to
+      # 90 minutes on its own, which this job's default 60 minute budget
+      # cannot also absorb. Instead, config/bootserver's and
+      # config/bootd's own fetch-boot-artifacts initContainer `cp`s them
+      # straight out of the kezio-boot-artifacts OCI image
+      # (boot_artifacts_image, published by build-live-image.yml) once
+      # each Deployment's pod actually starts - the same mechanism a
+      # real deployment uses, dogfooding it here. Set build_boot_artifacts
+      # to build that image from this checkout instead (see this job's
+      # own input description and the "Build the live boot image and
+      # kezio-boot-artifacts image" step below) - the only way this lane
+      # proves a kezio-agent change, since a live-booted kezio-agent is
+      # otherwise whatever build-live-image.yml last published.
       # ---------------------------------------------------------------
+
+      - name: Fail fast unless the boot-artifacts image exists
+        # Mirrors e2e-kubevirt-reusable.yml's own step of the same name -
+        # see that file's comment for the full reasoning. Skipped when
+        # build_boot_artifacts is set: that mode builds and locally
+        # imports its own tag, which exists in no registry to check.
+        if: ${{ !inputs.build_boot_artifacts }}
+        run: |
+          set -euo pipefail
+          if ! docker manifest inspect "${BOOT_ARTIFACTS_IMG}" >/dev/null; then
+            echo "::error::No boot-artifacts image at ${BOOT_ARTIFACTS_IMG}. Publish one first: push a \"v*\" tag, or dispatch build-live-image.yml with publish=true - a plain workflow_dispatch of build-live-image.yml without publish=true only validates the build and skips both publishing steps." >&2
+            exit 1
+          fi
 
       - name: Create the provisioning bridge
         # PROVISIONING_HOST_IP is the runner's own address, not a
@@ -475,6 +506,18 @@ jobs:
           make docker-build-bootd BOOTD_IMG=example.com/kezio-bootd:e2e-boot-path
           docker save example.com/kezio-bootd:e2e-boot-path | sudo ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images import -
 
+      - name: Build the live boot image and kezio-boot-artifacts image
+        # See build_boot_artifacts's own input description. Runs the same
+        # script build-live-image.yml budgets 90 minutes for on its own.
+        if: ${{ inputs.build_boot_artifacts }}
+        env:
+          AGENT_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          hack/live-image/build.sh
+          make docker-build-boot-artifacts BOOT_ARTIFACTS_IMG="${BOOT_ARTIFACTS_IMG}"
+          docker save "${BOOT_ARTIFACTS_IMG}" | sudo ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images import -
+
       - name: Deploy CRDs and the controller-manager
         run: |
           set -euo pipefail
@@ -569,8 +612,6 @@ jobs:
           EOF
 
       - name: Deploy the boot config and agent registration Services, wire real artifacts
-        env:
-          BOOT_ARTIFACTS_VERSION: ${{ inputs.boot_artifacts_version }}
         run: |
           set -euo pipefail
           kubectl apply -k config/e2e-boot-path
@@ -586,20 +627,14 @@ jobs:
           # kustomization.yaml (see boot-artifacts-init-patch.yaml's own
           # comment: doing so would make test-e2e.yml's lighter,
           # always-on boot-path lane - which shares this same overlay
-          # and never touches real artifact bytes - depend on network
-          # egress and a published release existing). This job does need
-          # real bytes, so it materializes the fetch script's ConfigMap
-          # and applies that initContainer patch itself, on top of the
-          # overlay just applied above.
-          kubectl -n kezio-system create configmap boot-artifacts-fetch-script \
-            --from-file=fetch.sh=config/boot-artifacts/fetch.sh \
-            --dry-run=client -o yaml | kubectl apply -f -
+          # and never touches real artifact bytes - depend on an image
+          # pull existing). This job does need real bytes, so it applies
+          # that initContainer patch itself, on top of the overlay just
+          # applied above, then points it at BOOT_ARTIFACTS_IMG.
           kubectl -n kezio-system patch deployment/kezio-controller-manager --type=json \
             --patch-file=config/e2e-boot-path/boot-artifacts-init-patch.yaml
-          if [ -n "${BOOT_ARTIFACTS_VERSION}" ]; then
-            kubectl -n kezio-system set env deployment/kezio-controller-manager \
-              -c fetch-boot-artifacts "BOOT_ARTIFACTS_VERSION=${BOOT_ARTIFACTS_VERSION}"
-          fi
+          kubectl -n kezio-system set image deployment/kezio-controller-manager \
+            fetch-boot-artifacts="${BOOT_ARTIFACTS_IMG}"
           kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
 
       - name: Deploy the existing-dhcp pod on the provisioning bridge
@@ -614,11 +649,11 @@ jobs:
           dhcp-range: ${{ env.PROVISIONING_DHCP_RANGE }}
 
       - name: Deploy kezio-bootd on the provisioning bridge
-        env:
-          BOOT_ARTIFACTS_VERSION: ${{ inputs.boot_artifacts_version }}
         run: |
           set -euo pipefail
-          cd config/bootd && ../../bin/kustomize edit set image bootd=example.com/kezio-bootd:e2e-boot-path
+          cd config/bootd
+          ../../bin/kustomize edit set image bootd=example.com/kezio-bootd:e2e-boot-path
+          ../../bin/kustomize edit set image kezio-boot-artifacts="${BOOT_ARTIFACTS_IMG}"
           cd ../..
           kubectl apply -k config/bootd
           # - BOOTD_SERVER_IP: bootd's OWN net1 static address (the
@@ -657,8 +692,8 @@ jobs:
             BOOTD_AGENT_UPSTREAM_URL="http://kezio-agent-server.kezio-system.svc.cluster.local:8091" \
             BOOTD_BOOT_UPSTREAM_URL="http://kezio-boot-server.kezio-system.svc.cluster.local:8090"
           # config/bootd already wires its own fetch-boot-artifacts
-          # initContainer (see config/boot-artifacts) and a plain
-          # emptyDir "tftp" volume it populates - no volume patch needed
+          # initContainer (docker/boot-artifacts/Dockerfile via `cp`) and
+          # a plain emptyDir "tftp" volume it populates - no volume patch needed
           # here anymore. Only the Multus network annotation, which is
           # site/job-specific, still needs patching in. This also fixes
           # a real bug the previous hostPath-based patch carried: a
@@ -672,10 +707,6 @@ jobs:
           kubectl -n kezio-system patch deployment/kezio-bootd --type=json -p='[
             {"op":"add","path":"/spec/template/metadata/annotations","value":{"k8s.v1.cni.cncf.io/networks":"kezio-boot-network"}}
           ]'
-          if [ -n "${BOOT_ARTIFACTS_VERSION}" ]; then
-            kubectl -n kezio-system set env deployment/kezio-bootd \
-              -c fetch-boot-artifacts "BOOT_ARTIFACTS_VERSION=${BOOT_ARTIFACTS_VERSION}"
-          fi
           kubectl rollout status deployment/kezio-bootd -n kezio-system --timeout=180s
 
           # Same early-failure shape the old socat forward's curl check
@@ -706,6 +737,37 @@ jobs:
             exit 1
           fi
 
+      - name: Assert the boot artifacts agent commit
+        # Mirrors e2e-kubevirt-reusable.yml's own step of the same name -
+        # see that file's comment for the full reasoning: this is what
+        # makes a stale kezio-agent fail loudly (build_boot_artifacts
+        # set) or at least say so out loud (the pinned default), instead
+        # of a lane going green while silently booting last month's
+        # agent.
+        run: |
+          set -euo pipefail
+          bootd_ip="${PROVISIONING_BOOTD_NET1_IP%%/*}"
+          agent_commit="$(curl -sf "http://${bootd_ip}:80/boot/artifacts/manifest.json" | jq -r '.agentCommit // "unknown"')"
+          if [ "${agent_commit}" = "${GITHUB_SHA}" ]; then
+            result="FRESH - this run exercised the commit under test's own kezio-agent."
+            echo "Boot artifacts agent commit ${agent_commit} matches the commit under test."
+          elif [ "${{ inputs.build_boot_artifacts }}" = "true" ]; then
+            result="MISMATCH (unexpected - build_boot_artifacts was set)"
+          else
+            result="STALE / PINNED - this run booted build-live-image.yml's last published kezio-agent, NOT the commit under test. Set build_boot_artifacts: true to exercise agent-side changes."
+            echo "::notice::Boot artifacts agent commit ${agent_commit} does not match the commit under test (${GITHUB_SHA}) - this is the pinned default (boot_artifacts_image), not a failure. Set build_boot_artifacts: true to boot this commit's own kezio-agent."
+          fi
+          {
+            echo "## Boot artifacts agent commit"
+            echo "- commit under test: \`${GITHUB_SHA}\`"
+            echo "- booted kezio-agent built from: \`${agent_commit}\`"
+            echo "- result: ${result}"
+          } >>"${GITHUB_STEP_SUMMARY}"
+          if [ "${agent_commit}" != "${GITHUB_SHA}" ] && [ "${{ inputs.build_boot_artifacts }}" = "true" ]; then
+            echo "::error::build_boot_artifacts was set to build a fresh kezio-boot-artifacts image from ${GITHUB_SHA}, but the deployed image reports agentCommit=${agent_commit}. The freshness build did not actually take effect." >&2
+            exit 1
+          fi
+
       - name: Create the Machine CR for the target VM
         run: |
           cat <<EOF | kubectl apply -f -
@@ -723,10 +785,10 @@ jobs:
 
       - name: Create and start the target KubeVirt VirtualMachine
         # OVMF UEFI firmware, no Secure Boot (secureBoot: false - the
-        # shim kezio-bootd serves is still a real signed binary, fetched
-        # by config/bootd's fetch-boot-artifacts initContainer from the
-        # published live-image release, but nothing here enrolls the
-        # firmware's Secure Boot keys). Network boot
+        # shim kezio-bootd serves is still a real signed binary, copied
+        # by config/bootd's fetch-boot-artifacts initContainer out of the
+        # published kezio-boot-artifacts image, but nothing here enrolls
+        # the firmware's Secure Boot keys). Network boot
         # first (interface bootOrder 1), then the blank data disk
         # (bootOrder 2) as the local-disk fallback GRUB's "exit" hands
         # control back to. The disk's serial is set explicitly so it

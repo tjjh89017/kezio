@@ -45,9 +45,10 @@ UEFI firmware (db: Microsoft UEFI CA)
    by a certificate in that chain - see the next section.
 
 `hack/live-image/build.sh`'s `stage_signed_boot_binaries` step is what
-pulls `shimx64.efi`/`grubx64.efi` into the published live-image release
-that `config/bootd`'s `fetch-boot-artifacts` initContainer downloads
-(see `config/boot-artifacts/README.md`). It extracts the `.signed`
+pulls `shimx64.efi`/`grubx64.efi` into the published `kezio-boot-
+artifacts` image that `config/bootd`'s `fetch-boot-artifacts`
+initContainer `cp`s them out of (see `docker/boot-artifacts/Dockerfile`
+and `config/bootd/README.md`). It extracts the `.signed`
 member of each package (`shimx64.efi.signed`, and
 `grubnetx64.efi.signed` - the netboot GRUB build, whose embedded
 `/grub` prefix resolves against the TFTP device it was loaded from,

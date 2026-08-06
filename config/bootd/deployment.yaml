@@ -51,65 +51,51 @@ spec:
         # for the capability mechanics that force this).
         seccompProfile:
           type: RuntimeDefault
-        # Matches curl_user's gid (101, see the fetch-boot-artifacts
-        # initContainer's own securityContext comment below): the "tftp"
-        # emptyDir this initContainer writes into is otherwise created
-        # root:root mode 0755, and a fresh emptyDir grants no group
-        # access for a non-root gid unless the pod's fsGroup says so -
-        # the same reasoning config/image-service's
-        # securityContext.fsGroup comment documents for its Secret
-        # volume. Without this, fetch-boot-artifacts's `mkdir -p
-        # "${DEST_DIR}"` (config/boot-artifacts/fetch.sh) fails with
-        # EACCES and the initContainer CrashLoopBackOffs before bootd's
-        # own container ever starts. (The "run" emptyDir below needs no
-        # such help: bootd's container runs as root and writes it
-        # directly.)
-        fsGroup: 101
-      # Fetches shimx64.efi/grubx64.efi (see .github/workflows/
-      # build-live-image.yml, which now publishes them alongside the
-      # live kernel/initrd/squashfs) into the "tftp" emptyDir below
-      # before bootd starts - the concrete answer to what this
-      # Deployment's own comment on the "tftp" volume used to call a
-      # gap this kustomization does not fill. Uses fetch.sh from the
-      # "boot-artifacts-fetch-script" ConfigMap (../boot-artifacts, a
-      # Component this kustomization's own kustomization.yaml adds
-      # under `components:`).
+        # Matches docker/boot-artifacts/Dockerfile's own numeric USER gid
+        # (65532, see the fetch-boot-artifacts initContainer's own
+        # securityContext comment below): the "tftp" emptyDir this
+        # initContainer writes into is otherwise created root:root mode
+        # 0755, and a fresh emptyDir grants no group access for a
+        # non-root gid unless the pod's fsGroup says so - the same
+        # reasoning config/image-service's securityContext.fsGroup
+        # comment documents for its Secret volume. Without this, the
+        # `cp` below fails with EACCES writing into /dest and the
+        # initContainer CrashLoopBackOffs before bootd's own container
+        # ever starts. (The "run" emptyDir below needs no such help:
+        # bootd's container runs as root and writes it directly.)
+        fsGroup: 65532
+      # Copies shimx64.efi/grubx64.efi out of the kezio-boot-artifacts
+      # image (docker/boot-artifacts/Dockerfile, built and pushed by
+      # .github/workflows/build-live-image.yml alongside the live
+      # kernel/initrd/squashfs) into the "tftp" emptyDir below before
+      # bootd starts - the concrete answer to what this Deployment's own
+      # comment on the "tftp" volume used to call a gap this
+      # kustomization does not fill. This replaces what used to be a
+      # curlimages/curl initContainer running config/boot-artifacts/
+      # fetch.sh against a GitHub Release on every pod (re)start: the
+      # initContainer's image now IS the fetch, so populating the volume
+      # is a plain `cp` with no network access of its own.
       #
-      # BOOT_ARTIFACTS_VERSION defaults to "latest" - override with
-      # `kubectl set env deployment/kezio-bootd -c fetch-boot-artifacts
-      # BOOT_ARTIFACTS_VERSION=v0.1.0` (or a further kustomize patch) to
-      # pin a specific release instead.
+      # kustomization.yaml's `images:` entry for "kezio-boot-artifacts"
+      # defaults to "latest" - override with `kustomize edit set image
+      # kezio-boot-artifacts=...` (or a further overlay) to pin a
+      # specific published version instead.
       initContainers:
         - name: fetch-boot-artifacts
-          image: curlimages/curl:8.21.0
-          command: ["/bin/sh", "/scripts/fetch.sh"]
-          env:
-            - name: BOOT_ARTIFACTS_REPO
-              value: tjjh89017/kezio
-            - name: BOOT_ARTIFACTS_VERSION
-              value: latest
-            - name: BOOT_ARTIFACTS_FILES
-              value: "shimx64.efi grubx64.efi"
-            - name: DEST_DIR
-              value: /tftp
+          image: kezio-boot-artifacts:latest
+          command: ["cp", "-a", "/boot-artifacts/shimx64.efi", "/boot-artifacts/grubx64.efi", "/dest"]
           volumeMounts:
             - name: tftp
-              mountPath: /tftp
-            - name: fetch-script
-              mountPath: /scripts
-              readOnly: true
+              mountPath: /dest
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
+            # A numeric image USER (docker/boot-artifacts/Dockerfile's
+            # USER 65532:65532) is exactly what restricted Pod Security
+            # Admission needs to verify runAsNonRoot on its own - unlike
+            # curlimages/curl's non-numeric "curl_user", which used to
+            # force an explicit runAsUser/runAsGroup override here.
             runAsNonRoot: true
-            # curlimages/curl's image USER is the non-numeric "curl_user"
-            # (uid 100, gid 101 per its own /etc/passwd); restricted Pod
-            # Security Admission cannot resolve a non-numeric image USER
-            # to verify runAsNonRoot, so it rejects the pod outright
-            # ("cannot verify user is non-root") unless a numeric
-            # runAsUser/runAsGroup is set explicitly here.
-            runAsUser: 100
-            runAsGroup: 101
             capabilities:
               drop:
                 - "ALL"
@@ -315,7 +301,3 @@ spec:
           emptyDir: {}
         - name: run
           emptyDir: {}
-        - name: fetch-script
-          configMap:
-            name: kezio-boot-artifacts-fetch-script
-            defaultMode: 0o444

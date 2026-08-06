@@ -11,26 +11,34 @@ name: E2E Full Deploy (KubeVirt VM)
 # own e2e-boot-path-kubevirt.yml sibling gives (PXE over a Multus bridge
 # in a nested KubeVirt VM is a real risk surface a
 # flaky-gate-trains-reviewers-to-ignore-red-checks argument applies to),
-# plus one more: this job needs a published boot-artifacts release to
+# plus one more: this job needs a published kezio-boot-artifacts image to
 # exist (same dependency as e2e-boot-path-kubevirt.yml - see
-# boot_artifacts_version's description below) before it can even reach a
+# boot_artifacts_image's description below) before it can even reach a
 # live boot, so it cannot be relied on to pass until a maintainer has cut
-# one. Trigger it by hand before a release, after touching
+# one - or dispatch with build_boot_artifacts=true to build it here
+# instead. Trigger it by hand before a release, after touching
 # internal/deployer, internal/agent/deploy, or the live-image build, or
 # when deliberately validating the full deploy flow end to end.
 on:
   workflow_dispatch:
     inputs:
-      boot_artifacts_version:
+      boot_artifacts_image:
         description: >-
-          Boot-artifacts release tag to boot (see
-          .github/workflows/build-live-image.yml). Empty uses the
-          repository's latest published release. Publishing a release is
-          a maintainer action (a "v*" tag push, or a manual
-          build-live-image.yml dispatch with publish=true); this input
-          only selects among what is already published.
+          kezio-boot-artifacts OCI image to boot (see .github/workflows/
+          build-live-image.yml). Ignored when build_boot_artifacts is
+          true. Defaults to the published "latest" tag.
         required: false
         type: string
+        default: "ghcr.io/tjjh89017/kezio-boot-artifacts:latest"
+      build_boot_artifacts:
+        description: >-
+          Build the live boot image (including kezio-agent) from this
+          checkout instead of pulling boot_artifacts_image - the way to
+          exercise an internal/agent or cmd/agent change under test.
+          Slower; see e2e-kubevirt-reusable.yml's own input description.
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   deploy-kubevirt:
@@ -39,7 +47,8 @@ jobs:
     permissions:
       contents: read
     with:
-      boot_artifacts_version: ${{ inputs.boot_artifacts_version }}
+      boot_artifacts_image: ${{ inputs.boot_artifacts_image }}
+      build_boot_artifacts: ${{ inputs.build_boot_artifacts }}
       # ezio_ref and the image-tag inputs are left at the reusable
       # workflow's own defaults, which are kezio's current values -
       # kezio's own dispatch trigger needs no overrides.

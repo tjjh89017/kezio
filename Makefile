@@ -263,6 +263,24 @@ docker-build-bootd: ## Build docker image for kezio-bootd.
 docker-push-bootd: ## Push docker image for kezio-bootd.
 	$(CONTAINER_TOOL) push ${BOOTD_IMG}
 
+# BOOT_ARTIFACTS_IMG is the image tag for kezio-boot-artifacts. Unlike
+# every other docker-build-* target above, its build context must
+# already hold dist/live/ (hack/live-image/build.sh's output: vmlinuz,
+# initrd.img, filesystem.squashfs, shimx64.efi, grubx64.efi,
+# manifest.json) - there is no Go binary here to compile, only those
+# files to package; see docker/boot-artifacts/Dockerfile and
+# config/bootserver's/config/bootd's fetch-boot-artifacts
+# initContainers, the consumers this image feeds.
+BOOT_ARTIFACTS_IMG ?= $(IMAGE_TAG_BASE)-boot-artifacts:latest
+
+.PHONY: docker-build-boot-artifacts
+docker-build-boot-artifacts: ## Build docker image for kezio-boot-artifacts (dist/live/ must already exist - run hack/live-image/build.sh first).
+	$(CONTAINER_TOOL) build -t ${BOOT_ARTIFACTS_IMG} -f docker/boot-artifacts/Dockerfile .
+
+.PHONY: docker-push-boot-artifacts
+docker-push-boot-artifacts: ## Push docker image for kezio-boot-artifacts.
+	$(CONTAINER_TOOL) push ${BOOT_ARTIFACTS_IMG}
+
 .PHONY: build-kezioctl
 build-kezioctl: fmt vet ## Build the kezioctl binary (the operator-side CLI client; no container image, it runs on an operator's workstation).
 	go build -o bin/kezioctl ./cmd/kezioctl

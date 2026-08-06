@@ -84,16 +84,16 @@ on a different bootd instance instead.
    template.
 3. **TFTP artifacts volume is already populated for you.**
    `deployment.yaml` mounts an `emptyDir` at `/tftp`, filled in by a
-   `fetch-boot-artifacts` initContainer that downloads `shimx64.efi` and
+   `fetch-boot-artifacts` initContainer that `cp`s `shimx64.efi` and
    `grubx64.efi` (see `internal/bootd.ShimFilename` /
-   `internal/bootd.GrubFilename`) from the repository's published
-   live-image release (see `.github/workflows/build-live-image.yml`,
-   which now bundles the signed shim/grub alongside the kernel/initrd/
-   squashfs) before `bootd` itself starts - no PVC, ConfigMap, or custom
-   initContainer to write yourself. By default it fetches the
-   repository's *latest* release; pin a specific one with `kubectl set
-   env deployment/kezio-bootd -c fetch-boot-artifacts
-   BOOT_ARTIFACTS_VERSION=v0.1.0` (or a further kustomize patch)
+   `internal/bootd.GrubFilename`) straight out of the `kezio-boot-
+   artifacts` OCI image (see `.github/workflows/build-live-image.yml`,
+   which builds and pushes it with the signed shim/grub bundled
+   alongside the kernel/initrd/squashfs) before `bootd` itself starts -
+   no PVC, ConfigMap, or custom initContainer to write yourself. By
+   default it pulls the image's *latest* tag; pin a specific published
+   version with `kustomize edit set image kezio-boot-artifacts=ghcr.io/
+   tjjh89017/kezio-boot-artifacts:v0.1.0` (or a further kustomize patch)
    instead. An unpopulated volume (for example, the initContainer
    failing before the main container ever starts) leaves the TFTP
    server unable to serve either file - a clean per-request error, not

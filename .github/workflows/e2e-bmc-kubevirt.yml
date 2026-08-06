@@ -8,10 +8,10 @@ name: E2E BMC-Driven Deploy (KubeVirtBMC + KubeVirt VM)
 # were before the scenario was folded into the reusable workflow - only
 # the job body moved, not this file's behavior.
 #
-# workflow_dispatch only, release-gated exactly like
-# e2e-deploy-kubevirt.yml (see that workflow's header for why: it cannot
-# reach a live boot without a published boot-artifacts release), plus
-# this workflow adds a second, independent gate: it needs a published
+# workflow_dispatch only, gated exactly like e2e-deploy-kubevirt.yml (see
+# that workflow's header for why: it cannot reach a live boot without a
+# published kezio-boot-artifacts image, unless build_boot_artifacts is
+# set), plus this workflow adds a second, independent gate: it needs a published
 # KubeVirtBMC release whose install manifest and image tags match
 # kubevirtbmc_version below. Both gates are pinned, not auto-discovered,
 # so a version bump on either side is a deliberate edit to this file.
@@ -26,16 +26,23 @@ name: E2E BMC-Driven Deploy (KubeVirtBMC + KubeVirt VM)
 on:
   workflow_dispatch:
     inputs:
-      boot_artifacts_version:
+      boot_artifacts_image:
         description: >-
-          Boot-artifacts release tag to boot (see
-          .github/workflows/build-live-image.yml). Empty uses the
-          repository's latest published release. Publishing a release is
-          a maintainer action (a "v*" tag push, or a manual
-          build-live-image.yml dispatch with publish=true); this input
-          only selects among what is already published.
+          kezio-boot-artifacts OCI image to boot (see .github/workflows/
+          build-live-image.yml). Ignored when build_boot_artifacts is
+          true. Defaults to the published "latest" tag.
         required: false
         type: string
+        default: "ghcr.io/tjjh89017/kezio-boot-artifacts:latest"
+      build_boot_artifacts:
+        description: >-
+          Build the live boot image (including kezio-agent) from this
+          checkout instead of pulling boot_artifacts_image - the way to
+          exercise an internal/agent or cmd/agent change under test.
+          Slower; see e2e-kubevirt-reusable.yml's own input description.
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   bmc-kubevirt:
@@ -44,7 +51,8 @@ jobs:
     permissions:
       contents: read
     with:
-      boot_artifacts_version: ${{ inputs.boot_artifacts_version }}
+      boot_artifacts_image: ${{ inputs.boot_artifacts_image }}
+      build_boot_artifacts: ${{ inputs.build_boot_artifacts }}
       bmc_mode: true
       manager_image: "example.com/kezio:e2e-bmc"
       bootd_image: "example.com/kezio-bootd:e2e-bmc"

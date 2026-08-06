@@ -16,11 +16,16 @@ resources:
   - ../default
   - service.yaml
 
-# Supplies fetch.sh (as the "boot-artifacts-fetch-script" ConfigMap) for
-# boot-artifacts-init-patch.yaml's initContainer - see that file and
-# ../boot-artifacts/kustomization.yaml.
-components:
-  - ../boot-artifacts
+# The fetch-boot-artifacts initContainer boot-artifacts-init-patch.yaml
+# adds names this image; override with `kustomize edit set image
+# kezio-boot-artifacts=...` (or a further overlay) to pin a specific
+# published version instead of always pulling "latest" - see that
+# patch's own comment for what the image contains and why an OCI image
+# replaced what a fetch.sh + ConfigMap Component used to do here.
+images:
+  - name: kezio-boot-artifacts
+    newName: ghcr.io/tjjh89017/kezio-boot-artifacts
+    newTag: latest
 
 patches:
   - path: manager-port-patch.yaml

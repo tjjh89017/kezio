@@ -10,24 +10,27 @@ name: Build Live Boot Image
 # for an on-demand build, and "v*" tags so a release carries a matching
 # image without anyone having to remember to trigger one by hand.
 #
-# Publishing target: GitHub Release assets, not a ghcr OCI artifact.
-# This repository is public, so a release asset is a plain HTTPS URL any
-# consumer (config/boot-artifacts' initContainer, a human, `curl`) can
-# fetch with no registry auth at all - unlike ghcr, which even for a
-# public *image* still expects a client that speaks OCI (docker/oras/
-# crane), an extra tool this project would otherwise have no reason to
-# ship into kezio-bootd's or the controller-manager's init path. These
-# artifacts are also not container images or OCI-shaped content in any
-# useful sense - a bare kernel, initrd, squashfs, and two EFI binaries -
-# so an OCI artifact push (oras) would need a custom media type with no
-# ecosystem benefit over a release asset, only ecosystem cost (installing
-# and pinning `oras` here and in every consumer). Release assets also
-# come with GitHub's own size/bandwidth handling for exactly this shape
-# of content and integrate with `gh release` end to end (create, upload,
-# download), which this repository already depends on elsewhere (see
-# e2e-boot-path-kubevirt.yml). If this repository ever goes private, or
-# ghcr becomes the project's one blessed distribution channel, revisit -
-# neither is true today.
+# Publishing targets: BOTH a GitHub Release (human download - a plain
+# HTTPS URL, `gh release`'s own end-to-end tooling, GitHub's size/
+# bandwidth handling for this shape of content) AND a
+# ghcr.io/tjjh89017/kezio-boot-artifacts OCI image (runtime consumption -
+# config/bootserver's and config/bootd's fetch-boot-artifacts
+# initContainers `cp` these same files out of that image instead of
+# curling a release asset at every pod start/restart). The two used to be
+# one and the same: a release asset was also this project's only runtime
+# fetch source, which meant every fetch-boot-artifacts initContainer
+# depended on GitHub's release-asset HTTPS path staying reachable and
+# correctly redirect-followed from inside a cluster, on every pod
+# (re)start - the actual cause of four separate e2e-gate failures (a
+# non-numeric image USER restricted PSA could not verify, an emptyDir
+# permission gap, a 404 against a release that did not exist yet, and an
+# unfollowed 302 redirect). An OCI image fixes all four at once: the
+# kubelet's own image cache serves every restart with no repeated
+# download, a numeric-uid image satisfies restricted PSA outright (see
+# docker/boot-artifacts/Dockerfile), and a missing/failed pull surfaces
+# as an ordinary ImagePullBackOff instead of a curl exit code five layers
+# removed from the actual cause. The GitHub Release stays for human
+# download - this only replaces the runtime path.
 on:
   workflow_dispatch:
     inputs:
@@ -67,11 +70,13 @@ jobs:
     # Debian sid chroot into a squashfs - budget generously.
     timeout-minutes: 90
     # contents: write is only exercised by the "Publish GitHub Release"
-    # step below, and only when that step's own `if:` actually runs
-    # (a "v*" tag push, or an explicit workflow_dispatch publish=true) -
-    # every other step in this job only ever reads.
+    # step below, and packages: write only by "Push kezio-boot-artifacts
+    # to ghcr" - both gated on the same `if:` (a "v*" tag push, or an
+    # explicit workflow_dispatch publish=true) - every other step in this
+    # job only ever reads.
     permissions:
       contents: write
+      packages: write
     steps:
       - name: Clone the code
         uses: actions/checkout@v7
@@ -102,10 +107,12 @@ jobs:
       - name: Upload workflow artifacts
         # Ephemeral, retention-limited GitHub Actions artifact - kept as
         # a quick way to inspect a workflow_dispatch build's output
-        # in-place without publishing a release. The durable, easy-to-
-        # consume copy is the GitHub Release asset set uploaded below;
-        # config/boot-artifacts' fetch.sh and everything else that
-        # consumes these artifacts fetches from there, never from here.
+        # in-place without publishing anything. The durable, easy-to-
+        # consume copies are the GitHub Release asset set and the
+        # kezio-boot-artifacts ghcr image, both published below; every
+        # runtime consumer (config/bootserver's and config/bootd's
+        # fetch-boot-artifacts initContainers) pulls the image, never
+        # this ephemeral copy.
         uses: actions/upload-artifact@v7
         with:
           name: kezio-live-image
@@ -160,3 +167,47 @@ jobs:
             dist/live/grubx64.efi \
             dist/live/manifest.json \
             dist/live/sha256sums
+          # Shared with "Push kezio-boot-artifacts to ghcr" below - same
+          # tag names both the release and the image, so a caller can
+          # correlate the two (and a boot_artifacts_image input
+          # downstream that names this tag explicitly, instead of
+          # "latest", still points at the matching release).
+          echo "RELEASE_TAG=${tag}" >>"${GITHUB_ENV}"
+
+      - name: Set up Docker Buildx
+        if: |
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
+          (github.event_name == 'workflow_dispatch' && inputs.publish)
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to ghcr.io
+        if: |
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
+          (github.event_name == 'workflow_dispatch' && inputs.publish)
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push kezio-boot-artifacts to ghcr
+        # Same gate as "Publish GitHub Release" above, for the same
+        # reason: an on-demand build-only dispatch (publish=false)
+        # validates the build and packaging without publishing anything,
+        # on either channel. Tagged both with the release tag itself
+        # (so a caller can pin an exact boot-artifacts version the same
+        # way it could pin a release tag before) and "latest" (the
+        # default every fetch-boot-artifacts initContainer pulls,
+        # replacing GitHub's own "releases/latest/download" alias).
+        if: |
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
+          (github.event_name == 'workflow_dispatch' && inputs.publish)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/boot-artifacts/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/tjjh89017/kezio-boot-artifacts:${{ env.RELEASE_TAG }}
+            ghcr.io/tjjh89017/kezio-boot-artifacts:latest

@@ -271,10 +271,24 @@ collect_artifacts() {
 	# grubx64.efi (staged by stage_signed_boot_binaries) are listed here
 	# too, now that they are published alongside the live image instead
 	# of being sourced separately by each consumer.
+	#
+	# agentCommit: the full git SHA build_agent's checkout was at when it
+	# cross-compiled cmd/agent into this image (AGENT_COMMIT overrides it
+	# for a caller that already knows the SHA, e.g. a CI workflow that
+	# checked out a detached ref; otherwise `git rev-parse HEAD` reads it
+	# straight from the checkout build_agent itself just built from).
+	# This is what lets a consumer - a human, or an e2e lane's own
+	# version-assertion step - tell which kezio-agent commit a given
+	# kezio-boot-artifacts image actually carries, instead of trusting an
+	# image tag alone: a lane pinned to a published release can otherwise
+	# go green while silently booting a stale agent (see
+	# .github/workflows/e2e-kubevirt-reusable.yml's "Assert the boot
+	# artifacts agent commit" step).
+	local agent_commit="${AGENT_COMMIT:-$(cd "${repo_root}" && git rev-parse HEAD)}"
 	(
 		cd "${dist_dir}"
 		{
-			printf '{\n  "artifacts": [\n'
+			printf '{\n  "agentCommit": "%s",\n  "artifacts": [\n' "${agent_commit}"
 			first=1
 			for f in vmlinuz initrd.img filesystem.squashfs shimx64.efi grubx64.efi; do
 				[ "${first}" -eq 1 ] || printf ',\n'
@@ -286,13 +300,16 @@ collect_artifacts() {
 			printf '\n  ]\n}\n'
 		} >manifest.json
 	)
-	log "manifest written to ${dist_dir}/manifest.json"
+	log "manifest written to ${dist_dir}/manifest.json (agentCommit ${agent_commit})"
 
 	# sha256sums: a plain GNU-coreutils-format checksum file (one
-	# "<sha256>  <name>" line per artifact, manifest.json included) so a
-	# consumer - a release-asset download, or config/boot-artifacts'
-	# fetch.sh initContainer - can `sha256sum -c` instead of parsing
-	# manifest.json's JSON just to verify integrity.
+	# "<sha256>  <name>" line per artifact, manifest.json included) for
+	# the GitHub Release asset set this script's artifacts still publish
+	# to (human download; see .github/workflows/build-live-image.yml) so
+	# a downloader can `sha256sum -c` instead of parsing manifest.json's
+	# JSON just to verify integrity. Runtime consumers no longer need
+	# this: docker/boot-artifacts/Dockerfile bakes these same files into
+	# an OCI image, whose digest is what the pull path verifies instead.
 	(
 		cd "${dist_dir}"
 		sha256sum vmlinuz initrd.img filesystem.squashfs shimx64.efi grubx64.efi manifest.json >sha256sums

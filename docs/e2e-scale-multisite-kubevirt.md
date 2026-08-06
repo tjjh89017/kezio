@@ -72,14 +72,15 @@ per-site data network would need either multiple runners or a real
 multi-cluster/multi-network setup, neither of which a single GitHub
 Actions job can provide - see the "does NOT claim" section above.
 
-## Dependency on a maintainer release
+## Dependency on a published image (or an in-lane build)
 
 Like `e2e-deploy-kubevirt.yml` and `e2e-boot-path-kubevirt.yml`, this
-lane needs a published `build-live-image.yml` boot-artifacts release to
-exist before either VM can even reach a live boot (`boot_artifacts_version`
-selects among what is already published; publishing itself is a
-maintainer action). It will not pass on a repository with no release cut
-yet.
+lane needs a published `kezio-boot-artifacts` image to exist before
+either VM can even reach a live boot (`boot_artifacts_image` selects
+among what is already published; publishing itself is a maintainer
+action) - or set `build_boot_artifacts: true` to build it from this
+checkout instead. It will not pass on a repository with no image
+published yet, unless `build_boot_artifacts` is set.
 
 ## Runner requirements
 
@@ -100,7 +101,8 @@ run it manually (`workflow_dispatch`). Inputs:
 
 | Input | Type | Default | Purpose |
 |---|---|---|---|
-| `boot_artifacts_version` | string | `""` (latest published release) | Boot-artifacts release tag both site VMs net-boot. |
+| `boot_artifacts_image` | string | `ghcr.io/tjjh89017/kezio-boot-artifacts:latest` | `kezio-boot-artifacts` OCI image both site VMs net-boot. Ignored when `build_boot_artifacts` is true. |
+| `build_boot_artifacts` | boolean | `false` | Build the live boot image (including `kezio-agent`) from this checkout instead of pulling `boot_artifacts_image`. |
 | `runs_on` | string | `ubuntu-latest` | Runner label to run the job on - point this at a larger or self-hosted KubeVirt-capable runner if the default hosted runner proves too resource-constrained. |
 
 It does **not** run on push or pull request - see the workflow file's own
