@@ -1700,11 +1700,24 @@ jobs:
       - name: Create the target KubeVirt VirtualMachine, powered off
         if: ${{ inputs.bmc_mode }}
         # `running: false`: unlike the non-bmc_mode path, this VM is
-        # never started here. Same device shape (network boot first,
-        # blank data disk second) as the non-bmc_mode VM above, so the
-        # post-deploy in-guest reboot (kezio-agent's own systemctl
-        # reboot, unrelated to the BMC) falls through to disk the same
-        # way.
+        # never started here. Unlike the non-bmc_mode VM above, neither
+        # device carries a permanent bootOrder: KubeVirtBMC's Register
+        # call (SetOneTimePXEBoot) patches its own interface-first order
+        # onto the VM spec for that one boot and backs up whatever was
+        # there before (nothing, here) so its bootorderrestore controller
+        # can put it back once the VMI that consumed the override is
+        # gone. A permanent bootOrder here would keep QEMU's "bootorder"
+        # fw_cfg file non-empty on every subsequent boot too, and OVMF's
+        # QemuBootOrderLib rewrites/filters the NVRAM BootOrder from that
+        # file whenever it is present and non-empty - discarding the
+        # persistent efibootmgr entry kezio-agent writes at finalize
+        # (which carries no bootindex) before the post-deploy reboot ever
+        # reaches it, and falling back to the PXE entry, then UiApp. With
+        # no static bootOrder, fw_cfg's "bootorder" file goes back to
+        # absent/empty after the one-shot is consumed and restored, so
+        # OVMF leaves NVRAM BootOrder untouched on the reboot into disk -
+        # the same behavior real firmware has with no BMC-issued boot
+        # override in effect.
         run: |
           cat <<EOF | kubectl apply -f -
           apiVersion: kubevirt.io/v1
@@ -1740,11 +1753,9 @@ jobs:
                       - name: provisioning
                         macAddress: "${TARGET_VM_MAC}"
                         bridge: {}
-                        bootOrder: 1
                     disks:
                       - name: data
                         serial: "${TARGET_VM_DISK_SERIAL}"
-                        bootOrder: 2
                         disk:
                           bus: virtio
                 networks:
