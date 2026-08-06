@@ -510,12 +510,18 @@ jobs:
           # of paths that does not include libguestfs's per-run directory,
           # so the kernel denies that write outright - a known
           # passt/libguestfs AppArmor interaction, not a libguestfs or
-          # workflow bug. Unloading the profile (rather than patching it)
-          # is sufficient here because this appliance-side passt only
-          # serves virt-customize's own transient network, never the
-          # target VM's; `|| true` keeps this a no-op when AppArmor is
-          # already inactive.
-          sudo apparmor_parser -R /etc/apparmor.d/usr.bin.passt 2>/dev/null || true
+          # workflow bug. Unloading the profile looked like the fix, but
+          # noble's kernel.apparmor_restrict_unprivileged_userns=1 only
+          # allows unprivileged user namespaces for processes confined by
+          # an AppArmor profile that grants userns - unloading the
+          # profile removes that grant too, so passt then fails with
+          # "unshare: Operation not permitted" instead. The profile must
+          # stay loaded; only its path list needs the missing entry.
+          # passt's shipped profile (contrib/apparmor/usr.bin.passt) has
+          # no `include <local/...>` hook to drop an override into, so
+          # append the missing rule directly before its closing brace.
+          sudo sed -i '/^}$/i\  owner /run/user/*/libguestfs*/** rw,' /etc/apparmor.d/usr.bin.passt
+          sudo apparmor_parser -r /etc/apparmor.d/usr.bin.passt
 
           cp "${{ runner.temp }}/ubuntu-cloud.img" "${{ runner.temp }}/ubuntu-cloud-marked.img"
 

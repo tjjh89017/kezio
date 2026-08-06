@@ -305,11 +305,18 @@ jobs:
           # confining the binary to a fixed set of paths that does not
           # include that per-run directory, so the kernel denies the
           # write outright - a known passt/libguestfs AppArmor
-          # interaction. Unloading the profile is sufficient since this
-          # appliance-side passt only serves virt-customize's own
-          # transient network; `|| true` keeps this a no-op when AppArmor
-          # is already inactive.
-          sudo apparmor_parser -R /etc/apparmor.d/usr.bin.passt 2>/dev/null || true
+          # interaction. Unloading the profile looked like the fix, but
+          # noble's kernel.apparmor_restrict_unprivileged_userns=1 only
+          # allows unprivileged user namespaces for processes confined by
+          # an AppArmor profile that grants userns - unloading the
+          # profile removes that grant too, so passt then fails with
+          # "unshare: Operation not permitted" instead. The profile must
+          # stay loaded; only its path list needs the missing entry.
+          # passt's shipped profile (contrib/apparmor/usr.bin.passt) has
+          # no `include <local/...>` hook to drop an override into, so
+          # append the missing rule directly before its closing brace.
+          sudo sed -i '/^}$/i\  owner /run/user/*/libguestfs*/** rw,' /etc/apparmor.d/usr.bin.passt
+          sudo apparmor_parser -r /etc/apparmor.d/usr.bin.passt
 
           cp "${{ runner.temp }}/ubuntu-cloud.img" "${{ runner.temp }}/ubuntu-cloud-marked.img"
 
