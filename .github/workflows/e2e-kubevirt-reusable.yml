@@ -1686,6 +1686,9 @@ jobs:
                         bootOrder: 2
                         disk:
                           bus: virtio
+                      - name: cloudinitdisk
+                        disk:
+                          bus: virtio
                 networks:
                   - name: provisioning
                     multus:
@@ -1694,6 +1697,41 @@ jobs:
                   - name: data
                     emptyDisk:
                       capacity: 4Gi
+                  - name: cloudinitdisk
+                    cloudInitNoCloud:
+                      # run46 (commit f397696) proved the deployed disk
+                      # itself boots fine, but qemu-guest-agent.service
+                      # crash-looped inside the guest and hit systemd's
+                      # restart-burst limit before ever staying up long
+                      # enough to connect (console.log: five "Started
+                      # qemu-guest-agent.service" lines followed by
+                      # "Failed to start qemu-guest-agent.service", no
+                      # intervening "Starting" line - the classic
+                      # StartLimitBurst-exhausted signature). This
+                      # NoCloud seed is attached to the VM for its whole
+                      # lifetime, so it is still present across the
+                      # post-deploy in-guest reboot and is picked up the
+                      # first time the deployed Ubuntu image itself boots
+                      # (the live PXE environment has no cloud-init, so it
+                      # ignores this device). It removes the restart
+                      # burst limit and forces the unit enabled+running,
+                      # without needing to know why any single start
+                      # attempt failed - qemu-guest-agent is already
+                      # installed and systemd-started by the image, so
+                      # this is not a reinstall.
+                      userData: |
+                        #cloud-config
+                        write_files:
+                          - path: /etc/systemd/system/qemu-guest-agent.service.d/override.conf
+                            content: |
+                              [Unit]
+                              StartLimitIntervalSec=0
+                              [Service]
+                              Restart=always
+                              RestartSec=1
+                        runcmd:
+                          - systemctl daemon-reload
+                          - systemctl enable --now qemu-guest-agent.service
           EOF
           kubectl wait vmi/"${TARGET_VM_NAME}" -n kezio-system --for=condition=Ready --timeout=180s
 
@@ -1795,6 +1833,9 @@ jobs:
                         serial: "${TARGET_VM_DISK_SERIAL}"
                         disk:
                           bus: virtio
+                      - name: cloudinitdisk
+                        disk:
+                          bus: virtio
                 networks:
                   - name: provisioning
                     multus:
@@ -1803,6 +1844,32 @@ jobs:
                   - name: data
                     persistentVolumeClaim:
                       claimName: ${TARGET_VM_NAME}-data
+                  - name: cloudinitdisk
+                    cloudInitNoCloud:
+                      # See the non-bmc_mode VM's cloudinitdisk comment
+                      # above: run46 (commit f397696) proved
+                      # qemu-guest-agent.service crash-loops in the
+                      # guest and permanently fails (systemd
+                      # StartLimitBurst exhausted) before ever staying up
+                      # long enough to connect, which is why AgentConnected
+                      # never appeared even though the deployed disk
+                      # itself booted. This VM persists across the BMC
+                      # power-cycle's VMI recreation, so the seed stays
+                      # attached and is picked up on every boot of the
+                      # deployed image, including after PowerOn.
+                      userData: |
+                        #cloud-config
+                        write_files:
+                          - path: /etc/systemd/system/qemu-guest-agent.service.d/override.conf
+                            content: |
+                              [Unit]
+                              StartLimitIntervalSec=0
+                              [Service]
+                              Restart=always
+                              RestartSec=1
+                        runcmd:
+                          - systemctl daemon-reload
+                          - systemctl enable --now qemu-guest-agent.service
           EOF
 
       - name: "Assert the VM is off before any Machine is created (the harness did not start it)"
@@ -2295,6 +2362,8 @@ jobs:
             [ "${connected}" = "True" ] && break
             if [ "$(date +%s)" -ge "${deadline}" ]; then
               echo "::error::qemu-guest-agent never connected within the timeout after Provisioned - the VM did not boot from the deployed disk." >&2
+              echo "===== VMI ${TARGET_VM_NAME} conditions at timeout ====="
+              kubectl get vmi "${TARGET_VM_NAME}" -n kezio-system -o yaml || true
               exit 1
             fi
             sleep 5
@@ -2406,6 +2475,8 @@ jobs:
             [ "${connected}" = "True" ] && break
             if [ "$(date +%s)" -ge "${deadline}" ]; then
               echo "::error::qemu-guest-agent never reconnected after the BMC-driven PowerOn - the VM did not boot back from the deployed disk." >&2
+              echo "===== VMI ${TARGET_VM_NAME} conditions at timeout ====="
+              kubectl get vmi "${TARGET_VM_NAME}" -n kezio-system -o yaml || true
               exit 1
             fi
             sleep 5

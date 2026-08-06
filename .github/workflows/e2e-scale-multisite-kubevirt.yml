@@ -946,6 +946,9 @@ jobs:
                         bootOrder: 2
                         disk:
                           bus: virtio
+                      - name: cloudinitdisk
+                        disk:
+                          bus: virtio
                 networks:
                   - name: provisioning
                     multus:
@@ -954,6 +957,31 @@ jobs:
                   - name: data
                     emptyDisk:
                       capacity: 4Gi
+                  - name: cloudinitdisk
+                    cloudInitNoCloud:
+                      # See e2e-kubevirt-reusable.yml's cloudinitdisk
+                      # comment: qemu-guest-agent.service can crash-loop
+                      # in the guest and permanently fail (systemd
+                      # StartLimitBurst exhausted) before ever staying up
+                      # long enough for AgentConnected to appear, even
+                      # though the deployed disk itself booted fine. This
+                      # seed removes the restart burst limit and forces
+                      # the unit enabled+running; qemu-guest-agent is
+                      # already installed and systemd-started by the
+                      # image, so this is not a reinstall.
+                      userData: |
+                        #cloud-config
+                        write_files:
+                          - path: /etc/systemd/system/qemu-guest-agent.service.d/override.conf
+                            content: |
+                              [Unit]
+                              StartLimitIntervalSec=0
+                              [Service]
+                              Restart=always
+                              RestartSec=1
+                        runcmd:
+                          - systemctl daemon-reload
+                          - systemctl enable --now qemu-guest-agent.service
           EOF
           done
           kubectl wait vmi/e2e-scale-site-a -n kezio-system --for=condition=Ready --timeout=180s
@@ -1086,6 +1114,8 @@ jobs:
               [ "${connected}" = "True" ] && break
               if [ "$(date +%s)" -ge "${deadline}" ]; then
                 echo "::error::[${site}] qemu-guest-agent never connected within the timeout after Provisioned - the VM did not boot from the deployed disk." >&2
+                echo "===== [${site}] VMI e2e-scale-${site} conditions at timeout ====="
+                kubectl get vmi e2e-scale-"${site}" -n kezio-system -o yaml || true
                 exit 1
               fi
               sleep 5
