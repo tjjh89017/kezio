@@ -30,11 +30,13 @@ UEFI firmware (db: Microsoft UEFI CA)
 2. **Shim -> GRUB.** Debian's shim build embeds a second, Debian-owned
    certificate ("Debian Secure Boot CA") as its vendor cert - a trust
    root shim itself checks in addition to the firmware's `db`. Debian's
-   GRUB build (`grubx64.efi`, shipped by the `grub-efi-amd64-signed`
-   package) is signed by a certificate chaining up to that same Debian
-   CA ("Debian Secure Boot Signer 2022 - grub2"), so shim chainloads it
-   without needing that key enrolled in firmware `db` or a MOK
-   (Machine Owner Key) separately.
+   GRUB build (published as `grubx64.efi`; the netboot variant
+   `grubnetx64.efi.signed` shipped by the `grub-efi-amd64-signed`
+   package, renamed to the name shim requests - see
+   `hack/live-image/build.sh`) is signed by a certificate chaining up
+   to that same Debian CA ("Debian Secure Boot Signer 2022 - grub2"),
+   so shim chainloads it without needing that key enrolled in firmware
+   `db` or a MOK (Machine Owner Key) separately.
 
 3. **GRUB -> kernel.** GRUB's shim-lock verifier checks the signature on
    whatever PE/COFF binary it loads next (the kernel), against the same
@@ -46,11 +48,14 @@ UEFI firmware (db: Microsoft UEFI CA)
 pulls `shimx64.efi`/`grubx64.efi` into the published live-image release
 that `config/bootd`'s `fetch-boot-artifacts` initContainer downloads
 (see `config/boot-artifacts/README.md`). It extracts the `.signed`
-member of each package (`shimx64.efi.signed`,
-`grubx64.efi.signed` - the only files those packages ship under those
-names; the extraction only accepts a path ending in `.signed`, so it
-fails closed instead of silently taking an unsigned copy if a future
-package revision were to add one) and, before publishing either file,
+member of each package (`shimx64.efi.signed`, and
+`grubnetx64.efi.signed` - the netboot GRUB build, whose embedded
+`/grub` prefix resolves against the TFTP device it was loaded from,
+unlike the disk-boot `grubx64.efi.signed` whose `/EFI/debian` prefix
+can never resolve on a netboot; the extraction only accepts a path
+ending in `.signed`, so it fails closed instead of silently taking an
+unsigned copy if a future package revision were to add one) and,
+before publishing either file,
 runs `sbverify --list` against it and rejects the build if that
 verification fails or the file is empty. That check confirms the
 binaries actually carry an Authenticode signature; it does not (and
