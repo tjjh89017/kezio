@@ -34,16 +34,9 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o bo
 # TFTP/DNS daemon alone, without the init scripts and resolvconf
 # integration of the full dnsmasq package. The binary lands at
 # /usr/sbin/dnsmasq (internal/bootd.DefaultDnsmasqPath).
-# iproute2 alongside dnsmasq-base: sites whose existing DHCP server
-# sits behind the segment's L3 gateway need a host route added inside
-# the pod (ip route replace <server>/32 via <gateway> dev net1) so the
-# relayed unicasts dnsmasq sources from the giaddr leave over the
-# provisioning interface instead of the pod network. The container has
-# NET_ADMIN, so a kubectl exec suffices - but only if the ip binary is
-# present, and debian:stable-slim does not ship it.
 FROM debian:stable-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends dnsmasq-base iproute2 \
+    && apt-get install -y --no-install-recommends dnsmasq-base \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /workspace/bootd /bootd
 # Root, unlike every other kezio image: Kubernetes grants a container's
