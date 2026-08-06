@@ -467,13 +467,24 @@ jobs:
         # issue) sidestepped that second problem, but not the appliance
         # boot time; dropping libguestfs entirely sidesteps both.
         #
-        # qemu-guest-agent has no hard package dependencies beyond
-        # libc/libglib that the Ubuntu cloud image already carries, so
-        # unpacking its payload with `dpkg-deb -x` (no maintainer scripts
-        # run) is enough for a working daemon - only the postinst's
-        # systemd-enable step needs to be reproduced by hand, which this
-        # script does by reading the unit's own [Install] WantedBy= and
-        # creating the same wants-symlink(s) dpkg would have.
+        # qemu-guest-agent's own Depends: is not fully covered by what
+        # the (minimal) cloud image already carries - noble's
+        # qemu-guest-agent 1:8.2.2+ds-0ubuntu1.16 depends on liburing2
+        # (>= 2.3) and libnuma1 (>= 2.0.11), neither of which is in
+        # ubuntu-24.04-minimal-cloudimg-amd64.manifest, unlike libc6/
+        # libglib2.0-0t64/libudev1/init-system-helpers, which are.
+        # Missing liburing2 means the daemon's dynamic linker fails
+        # instantly on start (no .so found), which systemd sees as a
+        # crash loop that burns through StartLimitBurst and gives up
+        # for good - no amount of restarting fixes a missing library.
+        # Both liburing2 and libnuma1 depend on nothing beyond libc6
+        # themselves (checked against packages.ubuntu.com), so
+        # unpacking all three payloads with `dpkg-deb -x` (no
+        # maintainer scripts run) is enough for a working daemon -
+        # only the postinst's systemd-enable step needs to be
+        # reproduced by hand, which this script does by reading the
+        # unit's own [Install] WantedBy= and creating the same
+        # wants-symlink(s) dpkg would have.
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -485,8 +496,9 @@ jobs:
           echo "MARKER_TOKEN=${MARKER_TOKEN}" >> "$GITHUB_ENV"
 
           qga_deb_dir="$(mktemp -d)"
-          (cd "${qga_deb_dir}" && apt-get download qemu-guest-agent)
+          (cd "${qga_deb_dir}" && apt-get download qemu-guest-agent liburing2 libnuma1)
           qga_deb="$(ls "${qga_deb_dir}"/qemu-guest-agent_*.deb)"
+          qga_extra_debs=("${qga_deb_dir}"/liburing2_*.deb "${qga_deb_dir}"/libnuma1_*.deb)
 
           mount_dir="$(mktemp -d)"
 
@@ -553,6 +565,9 @@ jobs:
           echo "${MARKER_TOKEN}" | sudo tee "${mount_dir}${MARKER_PATH}" >/dev/null
 
           sudo dpkg-deb -x "${qga_deb}" "${mount_dir}"
+          for extra_deb in "${qga_extra_debs[@]}"; do
+            sudo dpkg-deb -x "${extra_deb}" "${mount_dir}"
+          done
 
           unit_path="$(find "${mount_dir}/lib/systemd/system" "${mount_dir}/usr/lib/systemd/system" \
             -maxdepth 1 -name qemu-guest-agent.service 2>/dev/null | head -n1)"

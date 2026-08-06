@@ -281,6 +281,12 @@ jobs:
         # libguestfs-based revision booted a helper appliance to make the
         # same edits, and that appliance's own boot time timed out this
         # step on GitHub-hosted runners).
+        #
+        # qemu-guest-agent's own Depends: is not fully covered by what
+        # the (minimal) cloud image already carries - see
+        # e2e-kubevirt-reusable.yml's step of this name for the
+        # liburing2/libnuma1 dependency evidence and why both extra
+        # .debs get unpacked alongside qemu-guest-agent's here too.
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -292,8 +298,9 @@ jobs:
           echo "MARKER_TOKEN=${MARKER_TOKEN}" >> "$GITHUB_ENV"
 
           qga_deb_dir="$(mktemp -d)"
-          (cd "${qga_deb_dir}" && apt-get download qemu-guest-agent)
+          (cd "${qga_deb_dir}" && apt-get download qemu-guest-agent liburing2 libnuma1)
           qga_deb="$(ls "${qga_deb_dir}"/qemu-guest-agent_*.deb)"
+          qga_extra_debs=("${qga_deb_dir}"/liburing2_*.deb "${qga_deb_dir}"/libnuma1_*.deb)
 
           mount_dir="$(mktemp -d)"
 
@@ -350,6 +357,9 @@ jobs:
           echo "${MARKER_TOKEN}" | sudo tee "${mount_dir}${MARKER_PATH}" >/dev/null
 
           sudo dpkg-deb -x "${qga_deb}" "${mount_dir}"
+          for extra_deb in "${qga_extra_debs[@]}"; do
+            sudo dpkg-deb -x "${extra_deb}" "${mount_dir}"
+          done
 
           unit_path="$(find "${mount_dir}/lib/systemd/system" "${mount_dir}/usr/lib/systemd/system" \
             -maxdepth 1 -name qemu-guest-agent.service 2>/dev/null | head -n1)"
