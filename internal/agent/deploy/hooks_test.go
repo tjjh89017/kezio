@@ -203,6 +203,14 @@ func TestRunHooks_ChrootScriptMountsChrootsRunsUnmountsInOrder(t *testing.T) {
 	if calls[8] != "umount "+rootMountpoint {
 		t.Fatalf("last unmount = %q, want %q (the same mountpoint the root mount used)", calls[8], "umount "+rootMountpoint)
 	}
+
+	// The root mount must name its file system type explicitly (from
+	// PlanPartition.FSType) rather than leaving it to mount's own
+	// autoprobe - the same defect class that made the ESP mount in
+	// finalize.go pick the wrong driver.
+	if calls[0] != fmt.Sprintf("mount -t ext4 /dev/nvme0n1p1 %s", rootMountpoint) {
+		t.Fatalf("root mount = %q, want an explicit -t ext4", calls[0])
+	}
 }
 
 func TestRunHooks_ChrootScriptStepTimeoutAbortsDeploy(t *testing.T) {

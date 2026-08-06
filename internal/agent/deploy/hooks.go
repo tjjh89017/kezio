@@ -200,7 +200,19 @@ func (e *Executor) runChrootScriptStep(ctx context.Context, plan *agentapi.Deplo
 		}
 	}()
 
-	if _, err := e.Runner.Run(ctx, nil, "mount", root.Device, mountpoint); err != nil {
+	// -t root.FSType is explicit rather than left to mount's own
+	// autoprobe, for the same reason ensureRemovableFallback's ESP mount
+	// in finalize.go is explicit: FSType is already known from the plan
+	// (see PlanPartition.FSType's doc comment - populated for every
+	// content partition, which a root partition always is), so there is
+	// no reason to let autoprobe guess and risk picking the wrong file
+	// system driver.
+	var mountArgs []string
+	if root.FSType != "" {
+		mountArgs = append(mountArgs, "-t", root.FSType)
+	}
+	mountArgs = append(mountArgs, root.Device, mountpoint)
+	if _, err := e.Runner.Run(ctx, nil, "mount", mountArgs...); err != nil {
 		return fmt.Errorf("mounting root partition %s at %s: %w", root.Device, mountpoint, err)
 	}
 	mounted = append(mounted, mountpoint)

@@ -143,16 +143,18 @@ func TestFindESPBootloader_NeverReadsUnderEFIBootItself(t *testing.T) {
 // --- ensureRemovableFallback: Executor-level wiring via the fake Runner ---
 
 // finalizeFakeRunner is a minimal Runner for ensureRemovableFallback tests:
-// it records every call and, on a plain two-arg "mount", invokes onMount
-// (if set) with the real temp directory ensureRemovableFallback just
-// asked it to mount at, letting a test seed that directory's content
-// before the function under test reads it back - standing in for
-// whatever a real "mount /dev/... /tmp/..." would have made visible.
+// it records every call and, on a "mount" call, invokes onMount (if set)
+// with the real temp directory ensureRemovableFallback just asked it to
+// mount at (the call's last argument), letting a test seed that
+// directory's content before the function under test reads it back -
+// standing in for whatever a real "mount -t vfat /dev/... /tmp/..." would
+// have made visible.
 type finalizeFakeRunner struct {
 	calls   []string
 	onMount func(target string)
-	// failOn, when non-nil, is consulted for every call ("name arg0"
-	// - never the mountpoint arg, which is a fresh temp dir each run)
+	// failOn, when non-nil, is consulted for every call against the call's
+	// full rendered line ("name arg0 arg1 ...") as a prefix match - the
+	// mountpoint arg, a fresh temp dir each run, is never part of a key -
 	// and its error returned instead of the call succeeding.
 	failOn map[string]error
 }
@@ -160,15 +162,13 @@ type finalizeFakeRunner struct {
 func (f *finalizeFakeRunner) Run(_ context.Context, _ []byte, name string, args ...string) ([]byte, error) {
 	call := fmt.Sprintf("%s %s", name, strings.Join(args, " "))
 	f.calls = append(f.calls, call)
-	key := name
-	if len(args) > 0 {
-		key = name + " " + args[0]
+	for key, err := range f.failOn {
+		if strings.HasPrefix(call, key) {
+			return nil, err
+		}
 	}
-	if err, ok := f.failOn[key]; ok {
-		return nil, err
-	}
-	if name == "mount" && len(args) == 2 && f.onMount != nil {
-		f.onMount(args[1])
+	if name == "mount" && len(args) >= 2 && f.onMount != nil {
+		f.onMount(args[len(args)-1])
 	}
 	return nil, nil
 }
@@ -226,8 +226,8 @@ func TestEnsureRemovableFallback_MountsESPInstallsAndUnmounts(t *testing.T) {
 	if mountCalls != 1 || umountCalls != 1 {
 		t.Fatalf("mount calls = %d, umount calls = %d, want exactly 1 each", mountCalls, umountCalls)
 	}
-	if runner.calls[0] != "mount /dev/nvme0n1p1 "+mountedTarget {
-		t.Fatalf("first call = %q, want a mount of the ESP device", runner.calls[0])
+	if runner.calls[0] != "mount -t vfat /dev/nvme0n1p1 "+mountedTarget {
+		t.Fatalf("first call = %q, want an explicit-fstype mount of the ESP device", runner.calls[0])
 	}
 }
 
@@ -294,7 +294,7 @@ func TestEnsureRemovableFallback_NoBootloaderAnywhereFailsAndStillUnmounts(t *te
 
 func TestEnsureRemovableFallback_MountFailurePropagatesAndSkipsUnmount(t *testing.T) {
 	runner := &finalizeFakeRunner{
-		failOn: map[string]error{"mount /dev/nvme0n1p1": fmt.Errorf("no such device")},
+		failOn: map[string]error{"mount -t vfat /dev/nvme0n1p1": fmt.Errorf("no such device")},
 	}
 	e := &Executor{Runner: runner}
 

@@ -238,7 +238,13 @@ func (e *Executor) ensureRemovableFallback(ctx context.Context, ip agentapi.Imag
 		}
 	}()
 
-	if _, err := e.Runner.Run(ctx, nil, "mount", esp.Device, mountpoint); err != nil {
+	// -t vfat is explicit rather than left to mount's own autoprobe: the
+	// UEFI spec requires the ESP to carry a FAT file system, but a bare
+	// "mount esp.Device mountpoint" lets the kernel/mount guess a type
+	// from whatever superblocks it tries first, which can pick something
+	// else entirely (observed picking squashfs and failing outright) when
+	// the device's content happens to look ambiguous to autoprobe.
+	if _, err := e.Runner.Run(ctx, nil, "mount", "-t", "vfat", esp.Device, mountpoint); err != nil {
 		return false, "", fmt.Errorf("image %s: mounting ESP %s at %s: %w", ip.ImageRef.Name, esp.Device, mountpoint, err)
 	}
 

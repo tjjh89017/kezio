@@ -94,15 +94,16 @@ func (f *fakeRunner) Run(_ context.Context, stdin []byte, name string, args ...s
 		}
 		return []byte(fmt.Sprintf("%d\n", size)), nil
 	}
-	// A plain "mount <device> <target>" (never "--bind", which always
-	// carries 3 args) stands in for a real mount of whatever file system
-	// ensureRemovableFallback or runChrootScriptStep just mounted. This
-	// fake never touches a real block device, so it seeds target with a
-	// stub EFI/BOOT/BOOTX64.EFI - the layout ensureRemovableFallback
-	// finds already satisfied and leaves alone - unless a test overrides
-	// this by calling target-specific setup before Execute runs.
-	if name == "mount" && len(args) == 2 {
-		target := args[1]
+	// A plain "mount [-t <fstype>] <device> <target>" (never "--bind",
+	// which always carries 3 args) stands in for a real mount of whatever
+	// file system ensureRemovableFallback or runChrootScriptStep just
+	// mounted. This fake never touches a real block device, so it seeds
+	// target with a stub EFI/BOOT/BOOTX64.EFI - the layout
+	// ensureRemovableFallback finds already satisfied and leaves alone -
+	// unless a test overrides this by calling target-specific setup
+	// before Execute runs.
+	if name == "mount" && args[0] != "--bind" {
+		target := args[len(args)-1]
 		dir := filepath.Join(target, "EFI", "BOOT")
 		if err := os.MkdirAll(dir, 0o755); err == nil {
 			_ = os.WriteFile(filepath.Join(dir, "BOOTX64.EFI"), []byte("stub"), 0o644)
