@@ -51,6 +51,11 @@ type progressTracker struct {
 	// first called, matching the wire type's "no overall step to report"
 	// zero value.
 	step string
+	// stepMessage augments step with a short human-readable detail (see
+	// agentapi.ProgressRequest.StepMessage). Empty until setStepMessage
+	// is called; snapshot then falls back to the controller's own
+	// per-partition summary, unchanged from before StepMessage existed.
+	stepMessage string
 }
 
 // newProgressTracker builds a tracker with one zero-value entry
@@ -134,9 +139,18 @@ func (t *progressTracker) setStep(step string) {
 	t.step = step
 }
 
+// setStepMessage sets the detail message reported alongside the current
+// step (see agentapi.ProgressRequest.StepMessage), until the next call
+// changes it - callers that only want the controller's default
+// per-partition summary for a step simply never call this.
+func (t *progressTracker) setStepMessage(message string) {
+	t.stepMessage = message
+}
+
 // snapshot returns a ProgressRequest carrying every tracked partition's
-// current progress (in plan order) and the whole-plan step most recently
-// set by setStep, ready to send as-is.
+// current progress (in plan order), the whole-plan step most recently
+// set by setStep, and the detail message most recently set by
+// setStepMessage, ready to send as-is.
 func (t *progressTracker) snapshot() agentapi.ProgressRequest {
 	partitions := make([]agentapi.PartitionProgress, 0, len(t.order))
 	for _, k := range t.order {
@@ -148,5 +162,5 @@ func (t *progressTracker) snapshot() agentapi.ProgressRequest {
 			PercentDone: tp.percent,
 		})
 	}
-	return agentapi.ProgressRequest{Partitions: partitions, Step: t.step}
+	return agentapi.ProgressRequest{Partitions: partitions, Step: t.step, StepMessage: t.stepMessage}
 }

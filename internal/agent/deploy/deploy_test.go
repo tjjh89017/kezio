@@ -685,6 +685,39 @@ func TestExecute_ReportsFinalizeAndTerminalSteps(t *testing.T) {
 	}
 }
 
+// TestExecute_TerminalReportCarriesFinalizeBootSummary exercises the gap
+// attempt 38's post-mortem found: the agent's own log output never
+// reaches the deployed machine's serial console, and the machine is gone
+// the moment it reboots into the deployed disk, so the terminal progress
+// report is the only place finalize's boot-entry and removable-fallback
+// outcome (and the resulting efibootmgr listing) survives to be read
+// after the fact.
+func TestExecute_TerminalReportCarriesFinalizeBootSummary(t *testing.T) {
+	runner := newFakeRunner()
+	runner.outputs["efibootmgr "] = []byte(
+		"BootCurrent: 0001\n" +
+			"BootOrder: 0002,0001,0000\n" +
+			"Boot0001* kezio:node-01\n",
+	)
+	progress := &fakeProgressReporter{}
+
+	e := &Executor{Runner: runner, Ezio: &fakeLauncher{}, Progress: progress}
+	if err := e.Execute(context.Background(), espOnlyPlan(keziov1alpha1.AfterDeployReboot, false)); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	last := progress.events[len(progress.events)-1]
+	if last.Step != agentapi.DeployStepRebootingToDisk {
+		t.Fatalf("last step = %q, want %q", last.Step, agentapi.DeployStepRebootingToDisk)
+	}
+	if !strings.Contains(last.StepMessage, "removable fallback already present") {
+		t.Fatalf("StepMessage = %q, want it to mention the removable fallback outcome", last.StepMessage)
+	}
+	if !strings.Contains(last.StepMessage, "BootOrder: 0002,0001,0000") {
+		t.Fatalf("StepMessage = %q, want it to carry the post-finalize efibootmgr listing", last.StepMessage)
+	}
+}
+
 // TestExecute_ReportsFailedStepOnError exercises Execute failing partway
 // through (a Runner command returning an error), the case that matters to
 // the controller: without a terminal step report, the controller's

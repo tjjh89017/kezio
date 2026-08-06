@@ -193,8 +193,15 @@ func TestEnsureRemovableFallback_MountsESPInstallsAndUnmounts(t *testing.T) {
 	ip := agentapi.ImageDeployPlan{ImageRef: keziov1alpha1.NameRef{Name: "os-image"}, Disk: "/dev/nvme0n1"}
 	esp := agentapi.PlanPartition{Number: 1, Device: "/dev/nvme0n1p1", Role: keziov1alpha1.PartitionRoleESP}
 
-	if err := e.ensureRemovableFallback(context.Background(), ip, esp); err != nil {
+	installed, source, err := e.ensureRemovableFallback(context.Background(), ip, esp)
+	if err != nil {
 		t.Fatalf("ensureRemovableFallback: %v", err)
+	}
+	if !installed {
+		t.Fatal("installed = false, want true - the fallback was missing and a candidate was found")
+	}
+	if !strings.HasSuffix(source, filepath.Join("EFI", "ubuntu", "shimx64.efi")) {
+		t.Fatalf("source = %q, want it to name the shim it copied from", source)
 	}
 
 	if mountedTarget == "" {
@@ -242,8 +249,15 @@ func TestEnsureRemovableFallback_AlreadyPresentInstallsNothing(t *testing.T) {
 	ip := agentapi.ImageDeployPlan{ImageRef: keziov1alpha1.NameRef{Name: "os-image"}, Disk: "/dev/nvme0n1"}
 	esp := agentapi.PlanPartition{Number: 1, Device: "/dev/nvme0n1p1", Role: keziov1alpha1.PartitionRoleESP}
 
-	if err := e.ensureRemovableFallback(context.Background(), ip, esp); err != nil {
+	installed, source, err := e.ensureRemovableFallback(context.Background(), ip, esp)
+	if err != nil {
 		t.Fatalf("ensureRemovableFallback: %v", err)
+	}
+	if installed {
+		t.Fatal("installed = true, want false - the fallback was already present")
+	}
+	if source != "" {
+		t.Fatalf("source = %q, want empty - nothing was copied", source)
 	}
 	if strings.Contains(logged.String(), "installed removable fallback bootloader") {
 		t.Fatalf("log output = %q, want no install log line - the fallback was already present", logged.String())
@@ -263,7 +277,7 @@ func TestEnsureRemovableFallback_NoBootloaderAnywhereFailsAndStillUnmounts(t *te
 	ip := agentapi.ImageDeployPlan{ImageRef: keziov1alpha1.NameRef{Name: "os-image"}, Disk: "/dev/nvme0n1"}
 	esp := agentapi.PlanPartition{Number: 1, Device: "/dev/nvme0n1p1", Role: keziov1alpha1.PartitionRoleESP}
 
-	if err := e.ensureRemovableFallback(context.Background(), ip, esp); err == nil {
+	if _, _, err := e.ensureRemovableFallback(context.Background(), ip, esp); err == nil {
 		t.Fatal("ensureRemovableFallback: want an error when the ESP carries no candidate bootloader")
 	}
 
@@ -287,7 +301,7 @@ func TestEnsureRemovableFallback_MountFailurePropagatesAndSkipsUnmount(t *testin
 	ip := agentapi.ImageDeployPlan{ImageRef: keziov1alpha1.NameRef{Name: "os-image"}, Disk: "/dev/nvme0n1"}
 	esp := agentapi.PlanPartition{Number: 1, Device: "/dev/nvme0n1p1", Role: keziov1alpha1.PartitionRoleESP}
 
-	err := e.ensureRemovableFallback(context.Background(), ip, esp)
+	_, _, err := e.ensureRemovableFallback(context.Background(), ip, esp)
 	if err == nil || !strings.Contains(err.Error(), "mounting ESP") {
 		t.Fatalf("ensureRemovableFallback error = %v, want it to name the mount failure", err)
 	}

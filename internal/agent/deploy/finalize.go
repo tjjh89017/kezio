@@ -81,25 +81,64 @@ func efibootLabel(machineName string) string {
 // image only) a UEFI boot entry plus the removable-media fallback
 // bootloader that entry does not depend on surviving. See the package
 // doc comment for why this never chroots or runs update-initramfs.
-func (e *Executor) finalize(ctx context.Context, plan *agentapi.DeployPlan, plans []agentapi.ImageDeployPlan) error {
+//
+// It returns a human-readable summary of what the ESP-role pass actually
+// did and found - which file the removable fallback was installed from
+// (or that it was already present), plus a full "efibootmgr" listing
+// taken right after both boot-entry actions complete. Deploy's console
+// carries none of the agent's own log output (the live environment's
+// stdout does not reach the guest's serial console - see this package's
+// doc comment), and the guest is gone the moment it reboots into the
+// deployed disk, so this summary, threaded back to Execute's terminal
+// progress report, is the only record of whether the boot entry and the
+// removable fallback actually landed that survives past the reboot this
+// same call is about to trigger.
+func (e *Executor) finalize(ctx context.Context, plan *agentapi.DeployPlan, plans []agentapi.ImageDeployPlan) (string, error) {
+	var summary strings.Builder
+	sawESP := false
 	for _, ip := range plans {
 		if err := e.growLastPartition(ctx, ip, false); err != nil {
-			return err
+			return summary.String(), err
 		}
 
 		for _, p := range ip.Partitions {
 			if p.Role != keziov1alpha1.PartitionRoleESP {
 				continue
 			}
+			sawESP = true
 			if err := e.ensureEFIBootEntry(ctx, plan.MachineName, ip, p); err != nil {
-				return err
+				return summary.String(), err
 			}
-			if err := e.ensureRemovableFallback(ctx, ip, p); err != nil {
-				return err
+			installed, source, err := e.ensureRemovableFallback(ctx, ip, p)
+			if err != nil {
+				return summary.String(), err
+			}
+			if installed {
+				fmt.Fprintf(&summary, "removable fallback installed on %s from %s; ", p.Device, source)
+			} else {
+				fmt.Fprintf(&summary, "removable fallback already present on %s; ", p.Device)
 			}
 		}
 	}
-	return nil
+	if sawESP {
+		summary.WriteString(e.efibootmgrSnapshot(ctx))
+	}
+	return summary.String(), nil
+}
+
+// efibootmgrSnapshot runs a plain "efibootmgr" listing and returns its
+// output flattened to one line (newlines replaced with " | "), or a
+// short placeholder naming the error - never fails finalize itself,
+// since this call exists purely to make the resulting NVRAM state (which
+// entries exist, what BootOrder and BootCurrent are) visible in the
+// terminal progress report; a listing failure here must not turn into a
+// deploy failure over an already-successful boot entry creation.
+func (e *Executor) efibootmgrSnapshot(ctx context.Context) string {
+	out, err := e.Runner.Run(ctx, nil, "efibootmgr")
+	if err != nil {
+		return fmt.Sprintf("efibootmgr listing after finalize failed: %v", err)
+	}
+	return strings.ReplaceAll(strings.TrimSpace(string(out)), "\n", " | ")
 }
 
 // ensureEFIBootEntry creates a UEFI NVRAM boot entry pointing at esp (an
@@ -179,10 +218,16 @@ func parseEFIBootEntries(listing, label string) []string {
 // survives other machines' own entries coming and going, unlike the
 // single shared removable path) while this covers the case that entry
 // does not survive.
-func (e *Executor) ensureRemovableFallback(ctx context.Context, ip agentapi.ImageDeployPlan, esp agentapi.PlanPartition) error {
+//
+// It returns whether it actually installed a fallback (false means
+// EFI/BOOT/BOOTX64.EFI was already present) and, when it did, the source
+// path it copied from - both threaded back through finalize into the
+// terminal progress report (see finalize's doc comment for why that
+// report is this deploy's only durable record of the decision).
+func (e *Executor) ensureRemovableFallback(ctx context.Context, ip agentapi.ImageDeployPlan, esp agentapi.PlanPartition) (installed bool, source string, err error) {
 	mountpoint, err := os.MkdirTemp("", "kezio-esp-")
 	if err != nil {
-		return fmt.Errorf("image %s: creating ESP mountpoint: %w", ip.ImageRef.Name, err)
+		return false, "", fmt.Errorf("image %s: creating ESP mountpoint: %w", ip.ImageRef.Name, err)
 	}
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), hookCleanupTimeout)
@@ -194,17 +239,17 @@ func (e *Executor) ensureRemovableFallback(ctx context.Context, ip agentapi.Imag
 	}()
 
 	if _, err := e.Runner.Run(ctx, nil, "mount", esp.Device, mountpoint); err != nil {
-		return fmt.Errorf("image %s: mounting ESP %s at %s: %w", ip.ImageRef.Name, esp.Device, mountpoint, err)
+		return false, "", fmt.Errorf("image %s: mounting ESP %s at %s: %w", ip.ImageRef.Name, esp.Device, mountpoint, err)
 	}
 
-	installed, source, err := ensureRemovableFallbackFile(mountpoint)
+	installed, source, err = ensureRemovableFallbackFile(mountpoint)
 	if err != nil {
-		return fmt.Errorf("image %s: ensuring removable fallback bootloader: %w", ip.ImageRef.Name, err)
+		return false, "", fmt.Errorf("image %s: ensuring removable fallback bootloader: %w", ip.ImageRef.Name, err)
 	}
 	if installed {
 		e.log("installed removable fallback bootloader on %s from %s", esp.Device, source)
 	}
-	return nil
+	return installed, source, nil
 }
 
 // ensureRemovableFallbackFile is ensureRemovableFallback's pure part:

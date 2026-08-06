@@ -277,15 +277,21 @@ func (e *Executor) Execute(ctx context.Context, plan *agentapi.DeployPlan) (err 
 
 	progress.setStep(agentapi.DeployStepFinalizing)
 	e.report(ctx, progress)
-	if err := e.finalize(ctx, plan, plans); err != nil {
+	bootSummary, err := e.finalize(ctx, plan, plans)
+	if err != nil {
 		return fmt.Errorf("finalizing: %w", err)
 	}
 
 	// The terminal report: everything above completed, so this is the
 	// deploy's success signal (see agentapi.DeployStepRebootingToDisk's
 	// doc comment). It is sent before invoking systemctl below, since
-	// nothing sent after that call is guaranteed to land.
+	// nothing sent after that call is guaranteed to land. bootSummary
+	// carries finalize's own boot-entry/removable-fallback outcome and a
+	// post-finalize efibootmgr listing - see finalize's doc comment for
+	// why this report is the only place that survives to say what
+	// finalize actually did to the firmware's boot configuration.
 	progress.setStep(agentapi.DeployStepRebootingToDisk)
+	progress.setStepMessage(bootSummary)
 	e.report(ctx, progress)
 
 	if err := e.rebootOrPowerOff(ctx, plan.AfterDeploy); err != nil {

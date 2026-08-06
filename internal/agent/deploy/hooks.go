@@ -310,7 +310,7 @@ func runBuiltinEfibootmgr(ctx context.Context, e *Executor, plan *agentapi.Deplo
 			if err := e.ensureEFIBootEntry(ctx, plan.MachineName, ip, p); err != nil {
 				return err
 			}
-			if err := e.ensureRemovableFallback(ctx, ip, p); err != nil {
+			if _, _, err := e.ensureRemovableFallback(ctx, ip, p); err != nil {
 				return err
 			}
 		}
