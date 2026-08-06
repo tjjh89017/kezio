@@ -27,9 +27,11 @@ limitations under the License.
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -38,6 +40,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
@@ -127,6 +130,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		setupLog.Error(err, "unable to set up health check")
+		os.Exit(1)
+	}
+
 	if cfg.Proxy.Enabled() {
 		proxy, err := bootd.NewProxyServer(cfg.Proxy)
 		if err != nil {
@@ -135,6 +143,35 @@ func main() {
 		}
 		if err := mgr.Add(proxy); err != nil {
 			setupLog.Error(err, "unable to add proxy server")
+			os.Exit(1)
+		}
+		// Readiness now means something a caller can act on: with the
+		// proxy enabled, "ready" is true only once it has actually
+		// bound and can answer a request (ProxyServer.Ready), not just
+		// "the process started". Before this check existed, bootd's
+		// pod reported Ready the instant the container ran regardless
+		// of whether this proxy ever came up - which is what let
+		// config/bootd's Deployment (no readinessProbe at all) and a
+		// caller's `kubectl rollout status` race ahead of the proxy's
+		// own bind, then hit a connection that was never coming.
+		if err := mgr.AddReadyzCheck("boot-config-proxy", func(_ *http.Request) error {
+			if !proxy.Ready() {
+				return errors.New("boot config proxy has not bound its listener yet")
+			}
+			return nil
+		}); err != nil {
+			setupLog.Error(err, "unable to set up proxy readiness check")
+			os.Exit(1)
+		}
+	} else {
+		// No proxy configured at all: readiness has nothing proxy-side
+		// to reflect, so fall back to the same trivial check healthz
+		// uses - a deployment that never sets BOOTD_AGENT_UPSTREAM_URL/
+		// BOOTD_BOOT_UPSTREAM_URL still gets a working /readyz endpoint
+		// (config/bootd's readinessProbe targets it unconditionally)
+		// rather than one that 404s for lack of any registered check.
+		if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+			setupLog.Error(err, "unable to set up readiness check")
 			os.Exit(1)
 		}
 	}

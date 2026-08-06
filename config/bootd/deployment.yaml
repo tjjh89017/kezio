@@ -275,14 +275,32 @@ spec:
             requests:
               cpu: 100m
               memory: 64Mi
-          # No probes wired: bootd's protocols (proxyDHCP, PXE, TFTP)
-          # are all UDP with no lightweight synchronous health check to
-          # piggyback a probe on, and health here is best judged by
-          # whether firmware on the segment is actually booting - an
-          # operational signal, not one this container can self-report
-          # cheaply. Revisit if a future readiness signal (for example,
-          # "Machine MAC cache synced" from internal/bootd.MACCache)
-          # turns out to be worth exposing.
+          # No livenessProbe: bootd's protocols (proxyDHCP, PXE, TFTP)
+          # are all UDP with no lightweight synchronous check to
+          # piggyback one on, and the dnsmasq child bootd supervises
+          # already restarts itself with backoff on crash
+          # (internal/bootd.Dnsmasq.Start) - a liveness probe killing
+          # the whole pod over the same transient failure would fight
+          # that supervisor rather than help it.
+          #
+          # readinessProbe DOES exist, and is load-bearing once
+          # BOOTD_AGENT_UPSTREAM_URL/BOOTD_BOOT_UPSTREAM_URL turn on
+          # bootd's reverse proxy (internal/bootd.ProxyServer): before
+          # this probe existed, the pod reported Ready the instant its
+          # process started, regardless of whether that proxy had
+          # bound its listener - so a caller's `kubectl rollout status`
+          # (config/e2e's deploy step is exactly that caller) could
+          # return success and immediately hit a port nothing was
+          # listening on yet, or ever, with no probe failure to say so.
+          # cmd/bootd wires /readyz to ProxyServer.Ready when the proxy
+          # is enabled, and to a trivial always-ok check otherwise, so
+          # this probe is safe to leave unconditional here.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 1
+            periodSeconds: 5
       volumes:
         # Populated by the fetch-boot-artifacts initContainer above
         # before bootd's own container starts; an emptyDir is enough

@@ -20,10 +20,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -126,6 +128,13 @@ func (c ProxyConfig) addr() string {
 type ProxyServer struct {
 	handler http.Handler
 	addr    string
+
+	// ready flips true once Start's net.Listen succeeds and back to
+	// false once serving stops, for anything (cmd/bootd's readyz check)
+	// that needs to know whether this front is actually able to answer
+	// a request right now rather than assuming it is because the
+	// process is up - see Ready.
+	ready atomic.Bool
 }
 
 var _ manager.Runnable = (*ProxyServer)(nil)
@@ -202,15 +211,37 @@ func newReverseProxy(rawURL string) (*httputil.ReverseProxy, error) {
 // is cancelled, then shuts the server down gracefully - the same
 // listen/shutdown shape internal/bootserver.Server.Start and
 // internal/agentserver.Server.Start use.
+//
+// Unlike a bare http.Server.ListenAndServe (this type's previous shape),
+// the listener is bound explicitly, before anything is served, with a
+// log line on both sides of that call - mirroring the "starting server"
+// line controller-runtime's own health-probe Runnable logs before its
+// bind. That line's absence used to be the only symptom of this proxy
+// never actually accepting connections (a bind failure surfaced only as
+// whatever tried to reach the address timing out minutes later, with
+// nothing in bootd's own log to say why): every deployment that enables
+// this proxy now gets an explicit success-or-reason-why line at startup
+// instead of silence either way.
 func (p *ProxyServer) Start(ctx context.Context) error {
+	log := logf.FromContext(ctx).WithName("bootd-proxy")
+
+	log.Info("starting server", "name", "boot config proxy", "addr", p.addr)
+	listener, err := net.Listen("tcp", p.addr)
+	if err != nil {
+		log.Error(err, "boot config proxy failed to bind; every /agent/... and /boot/... "+
+			"request on this address will go unanswered until this is fixed", "addr", p.addr)
+		return fmt.Errorf("binding boot config proxy to %s: %w", p.addr, err)
+	}
+	p.ready.Store(true)
+	defer p.ready.Store(false)
+
 	httpServer := &http.Server{
-		Addr:              p.addr,
 		Handler:           p.handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- httpServer.ListenAndServe() }()
+	go func() { errCh <- httpServer.Serve(listener) }()
 
 	select {
 	case <-ctx.Done():
@@ -221,8 +252,20 @@ func (p *ProxyServer) Start(ctx context.Context) error {
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
+		log.Error(err, "boot config proxy stopped serving unexpectedly", "addr", p.addr)
 		return err
 	}
+}
+
+// Ready reports whether Start has bound its listener and is actively
+// serving. False before Start's net.Listen succeeds, after it fails, and
+// again once serving stops - so a readiness check built on this (see
+// cmd/bootd's wiring) never reports healthy while this proxy cannot
+// actually answer a request, closing the exact gap that let bootd's pod
+// report Ready before its reverse proxy had bound, or after it silently
+// failed to.
+func (p *ProxyServer) Ready() bool {
+	return p.ready.Load()
 }
 
 // Handler returns the routed http.Handler, exported for tests.

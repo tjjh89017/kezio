@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -362,9 +363,9 @@ func TestProxyServer_StartServesAndShutsDown(t *testing.T) {
 	// the real listening address before this test can reach it; since
 	// Start does not report back which port the kernel chose, exercise
 	// Handler() directly here for the request/response assertion and
-	// keep Start's own contract (starts, serves via ListenAndServe,
-	// shuts down cleanly on cancel) covered by the ctx-cancel behavior
-	// below.
+	// keep Start's own contract (starts, serves through its own bound
+	// listener, shuts down cleanly on cancel) covered by the ctx-cancel
+	// behavior below.
 	front := httptest.NewServer(srv.Handler())
 	defer front.Close()
 	resp, err := http.Get(front.URL + "/agent/register")
@@ -392,5 +393,81 @@ func TestProxyServer_StartServesAndShutsDown(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Start did not return within 5s of context cancellation")
+	}
+}
+
+// TestProxyServer_ReadyReflectsListenState pins the exact contract
+// cmd/bootd's readyz check relies on: Ready is false before Start ever
+// runs, flips true only once Start's listener is actually bound, and
+// flips back false once serving stops - so a caller polling Ready never
+// sees "healthy" for a front that cannot yet, or can no longer, answer a
+// request.
+func TestProxyServer_ReadyReflectsListenState(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer upstream.Close()
+
+	srv, err := NewProxyServer(ProxyConfig{Addr: "127.0.0.1:0", AgentUpstreamURL: upstream.URL})
+	if err != nil {
+		t.Fatalf("NewProxyServer: %v", err)
+	}
+
+	if srv.Ready() {
+		t.Fatal("Ready() = true before Start was ever called")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Start(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !srv.Ready() {
+		if time.Now().After(deadline) {
+			t.Fatal("Ready() never became true within 2s of Start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Errorf("Start returned %v after context cancellation, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start did not return within 5s of context cancellation")
+	}
+
+	if srv.Ready() {
+		t.Error("Ready() = true after Start returned, want false")
+	}
+}
+
+// TestProxyServer_StartReturnsErrorOnBindFailure proves a listener that
+// cannot bind (the address is already taken here) is reported back to
+// the caller as an error - the same failure manager.Start propagates
+// into cmd/bootd's own "problem running bootd" fatal log line - instead
+// of Start silently doing nothing forever. Ready must also stay false:
+// nothing about a failed bind should ever look healthy.
+func TestProxyServer_StartReturnsErrorOnBindFailure(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer upstream.Close()
+
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserving a port to collide with: %v", err)
+	}
+	defer func() { _ = occupied.Close() }()
+
+	srv, err := NewProxyServer(ProxyConfig{Addr: occupied.Addr().String(), AgentUpstreamURL: upstream.URL})
+	if err != nil {
+		t.Fatalf("NewProxyServer: %v", err)
+	}
+
+	err = srv.Start(context.Background())
+	if err == nil {
+		t.Fatal("Start returned nil binding to an address already in use, want an error")
+	}
+	if srv.Ready() {
+		t.Error("Ready() = true after a failed bind, want false")
 	}
 }
