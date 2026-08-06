@@ -18,6 +18,7 @@ package bootd
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -166,6 +167,47 @@ while :; do sleep 0.05; done
 	<-done
 }
 
+// TestDnsmasq_VRFNameWrapsChildInIPVRFExec proves VRFName routes the
+// child through "ip vrf exec <VRFName> <binary> ...", not the binary
+// directly - the mechanism VRFName's doc comment names as required
+// when the interface is enslaved into a VRF (see vrf.go). A fake "ip"
+// stands in for the real binary (which needs CAP_NET_ADMIN and an
+// actual VRF device - see internal/bootd/vrf_test.go for that
+// scenario) and simply asserts its own argv shape before execing
+// through to the fake dnsmasq, so the rest of the supervisor contract
+// (start, log forwarding, shutdown) is exercised unchanged.
+func TestDnsmasq_VRFNameWrapsChildInIPVRFExec(t *testing.T) {
+	d, runDir := newTestDnsmasq(t, longRunningScript)
+	fakeIP := filepath.Join(runDir, "fake-ip")
+	script := `#!/bin/sh
+if [ "$1" != "vrf" ] || [ "$2" != "exec" ] || [ "$3" != "test-vrf" ]; then
+  echo "unexpected ip argv: $@" >&2
+  exit 1
+fi
+shift 3
+exec "$@"
+`
+	if err := os.WriteFile(fakeIP, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	d.VRFName = "test-vrf"
+	d.ipPath = fakeIP
+
+	ctx, cancel := context.WithCancel(logf.IntoContext(context.Background(), logf.Log))
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+
+	waitFor(t, "config file", func() bool {
+		_, err := os.Stat(filepath.Join(runDir, "dnsmasq.conf"))
+		return err == nil
+	})
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Errorf("Start returned %v after ctx cancellation, want nil (fake ip rejected the wrapped argv - see its stderr)", err)
+	}
+}
+
 func TestDnsmasq_RestartsCrashedChild(t *testing.T) {
 	// First two runs crash immediately; the third stays up. The
 	// supervisor must keep restarting (staying under maxFastExits)
@@ -232,6 +274,40 @@ func TestDnsmasq_StartFailsOnInvalidConfig(t *testing.T) {
 
 	if err := d.Start(logf.IntoContext(context.Background(), logf.Log)); err == nil {
 		t.Fatal("Start returned nil with an unrenderable config")
+	}
+}
+
+// erroringReader yields lines then a non-EOF error, standing in for a
+// dnsmasq stdout/stderr pipe that fails mid-read (the child dying
+// abruptly, for example) rather than closing cleanly.
+type erroringReader struct {
+	lines []string
+	err   error
+	i     int
+}
+
+func (r *erroringReader) Read(p []byte) (int, error) {
+	if r.i < len(r.lines) {
+		n := copy(p, r.lines[r.i])
+		r.i++
+		return n, nil
+	}
+	return 0, r.err
+}
+
+func TestForwardLines_LogsScannerErrorAfterReadFailure(t *testing.T) {
+	sink := &recordingSink{}
+	log := newRecordingLogger(sink)
+	boom := errors.New("boom")
+
+	forwardLines(log, &erroringReader{lines: []string{"hello\n"}, err: boom})
+
+	msgs := sink.messages()
+	if !containsSubstring(msgs, "hello") {
+		t.Errorf("forwardLines dropped the line read before the failure: %v", msgs)
+	}
+	if !containsSubstring(msgs, "reading dnsmasq output failed") {
+		t.Errorf("forwardLines did not log the scanner error: %v", msgs)
 	}
 }
 

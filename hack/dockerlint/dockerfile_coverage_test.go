@@ -109,7 +109,7 @@ func transitiveKezioDeps(t *testing.T, repoRoot, target string) []string {
 	}
 
 	var deps []string
-	for _, line := range strings.Split(string(out), "\n") {
+	for line := range strings.SplitSeq(string(out), "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, modulePath+"/") {
 			deps = append(deps, line)

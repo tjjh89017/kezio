@@ -31,6 +31,7 @@ func clearBootdEnv(t *testing.T) {
 		"BOOTD_RUN_DIR", "BOOTD_DNSMASQ_PATH", "BOOTD_ANSWER_ALL",
 		"BOOTD_AGENT_UPSTREAM_URL", "BOOTD_BOOT_UPSTREAM_URL", "BOOTD_PROXY_ADDR",
 		"BOOTD_HTTP_BOOT_URL", "BOOTD_DHCP_ADDR", "BOOTD_PXE_ADDR",
+		"BOOTD_PROVISIONING_GATEWAY",
 	} {
 		t.Setenv(key, "")
 	}
@@ -127,5 +128,69 @@ func TestBootdConfigFromEnv_ProxyBothUpstreams(t *testing.T) {
 	}
 	if cfg.Proxy.BootUpstreamURL != "http://boot.example:8090" {
 		t.Errorf("Proxy.BootUpstreamURL = %q", cfg.Proxy.BootUpstreamURL)
+	}
+}
+
+// TestBootdConfigFromEnv_ProvisioningGatewayUnsetIsNoOp pins the
+// opt-in contract for the provisioning VRF: leaving
+// BOOTD_PROVISIONING_GATEWAY unset must produce exactly the same
+// Config a deployment predating that variable would get - nil, not a
+// zero-value non-nil net.IP or any other value that would make
+// cmd/bootd's ProvisioningGateway != nil check fire.
+func TestBootdConfigFromEnv_ProvisioningGatewayUnsetIsNoOp(t *testing.T) {
+	clearBootdEnv(t)
+	requiredBootdEnv(t)
+
+	cfg, err := bootdConfigFromEnv()
+	if err != nil {
+		t.Fatalf("bootdConfigFromEnv: %v", err)
+	}
+	if cfg.Server.ProvisioningGateway != nil {
+		t.Errorf("ProvisioningGateway = %v, want nil when unset",
+			cfg.Server.ProvisioningGateway)
+	}
+}
+
+// TestBootdConfigFromEnv_ProvisioningGatewayRequiresInterface proves a
+// configured gateway without BOOTD_DHCP_INTERFACE is a startup error,
+// not a silently inert VRF (there would be nothing to enslave).
+func TestBootdConfigFromEnv_ProvisioningGatewayRequiresInterface(t *testing.T) {
+	clearBootdEnv(t)
+	requiredBootdEnv(t)
+	t.Setenv("BOOTD_PROVISIONING_GATEWAY", "192.0.2.1")
+
+	if _, err := bootdConfigFromEnv(); err == nil {
+		t.Fatal("bootdConfigFromEnv returned nil error with BOOTD_PROVISIONING_GATEWAY set but BOOTD_DHCP_INTERFACE unset")
+	}
+}
+
+// TestBootdConfigFromEnv_ProvisioningGatewayValid proves a valid
+// gateway alongside BOOTD_DHCP_INTERFACE is carried through.
+func TestBootdConfigFromEnv_ProvisioningGatewayValid(t *testing.T) {
+	clearBootdEnv(t)
+	requiredBootdEnv(t)
+	t.Setenv("BOOTD_DHCP_INTERFACE", "net1")
+	t.Setenv("BOOTD_PROVISIONING_GATEWAY", "192.0.2.1")
+
+	cfg, err := bootdConfigFromEnv()
+	if err != nil {
+		t.Fatalf("bootdConfigFromEnv: %v", err)
+	}
+	if cfg.Server.ProvisioningGateway == nil || cfg.Server.ProvisioningGateway.String() != "192.0.2.1" {
+		t.Errorf("ProvisioningGateway = %v, want 192.0.2.1", cfg.Server.ProvisioningGateway)
+	}
+}
+
+// TestBootdConfigFromEnv_ProvisioningGatewayInvalidAddress proves a
+// malformed address is rejected at startup rather than silently
+// ignored.
+func TestBootdConfigFromEnv_ProvisioningGatewayInvalidAddress(t *testing.T) {
+	clearBootdEnv(t)
+	requiredBootdEnv(t)
+	t.Setenv("BOOTD_DHCP_INTERFACE", "net1")
+	t.Setenv("BOOTD_PROVISIONING_GATEWAY", "not-an-ip")
+
+	if _, err := bootdConfigFromEnv(); err == nil {
+		t.Fatal("bootdConfigFromEnv returned nil error with an invalid BOOTD_PROVISIONING_GATEWAY")
 	}
 }
