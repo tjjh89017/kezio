@@ -24,13 +24,18 @@ limitations under the License.
 // and hands the machine off to the deployed OS (systemctl reboot or
 // poweroff, per DeployPlan.AfterDeploy).
 //
-// Finalize deliberately never opens or modifies the file systems inside
-// the deployed disks: no chroot, no update-initramfs. The content ezio
-// restored is byte-identical to the source image, so every UUID it
+// Finalize deliberately never opens or modifies the root file systems
+// inside the deployed disks: no chroot, no update-initramfs. The content
+// ezio restored is byte-identical to the source image, so every UUID it
 // carries (root file system, swap - see mkswap --uuid) already matches
 // whatever the image's own fstab and bootloader configuration expects;
-// there is nothing to regenerate. efibootmgr only ever touches firmware
-// NVRAM, never the ESP's own file system content.
+// there is nothing to regenerate. efibootmgr itself only ever touches
+// firmware NVRAM. The one exception is the ESP: finalize mounts it
+// read-write to make sure the UEFI spec's removable-media fallback
+// bootloader path is present (ensureRemovableFallback, in finalize.go),
+// since that is the path firmware falls back to entirely on its own,
+// with no NVRAM boot entry involved, whenever the entry efibootmgr
+// created does not survive to the next boot.
 //
 // Between content writing and finalize, Execute runs plan.Hooks
 // (runHooks, in hooks.go): every PostHook internal/agentserver resolved

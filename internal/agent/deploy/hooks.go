@@ -164,9 +164,11 @@ func rootPartition(ip agentapi.ImageDeployPlan) (agentapi.PlanPartition, error) 
 // never leave the target mounted (see the package's security posture:
 // cleanup must be robust even on failure).
 //
-// This is the only place in kezio-agent that opens the deployed OS image's
-// own file system - see internal/agent/deploy's package doc comment for
-// why finalize itself never does.
+// This is the only place in kezio-agent that opens the deployed OS
+// image's root file system - see internal/agent/deploy's package doc
+// comment for why finalize itself never does (ensureRemovableFallback,
+// in finalize.go, opens the ESP, a distinct file system, for a
+// different reason).
 func (e *Executor) runChrootScriptStep(ctx context.Context, plan *agentapi.DeployPlan, step agentapi.ResolvedHookStep) error {
 	if plan.OS == nil {
 		return fmt.Errorf("chrootScript post hook step requires a plan with an OS image")
@@ -294,10 +296,11 @@ func runBuiltinMkswap(ctx context.Context, e *Executor, plan *agentapi.DeployPla
 	return nil
 }
 
-// runBuiltinEfibootmgr creates (or replaces) the UEFI boot entry for
-// every ESP-role partition across every image plan, the same action
-// finalize's own unconditional pass takes for every PartitionRoleESP
-// partition it finds.
+// runBuiltinEfibootmgr creates (or replaces) the UEFI boot entry and
+// removable-media fallback bootloader for every ESP-role partition
+// across every image plan, the same actions finalize's own
+// unconditional pass takes for every PartitionRoleESP partition it
+// finds.
 func runBuiltinEfibootmgr(ctx context.Context, e *Executor, plan *agentapi.DeployPlan) error {
 	for _, ip := range imagePlans(plan) {
 		for _, p := range ip.Partitions {
@@ -305,6 +308,9 @@ func runBuiltinEfibootmgr(ctx context.Context, e *Executor, plan *agentapi.Deplo
 				continue
 			}
 			if err := e.ensureEFIBootEntry(ctx, plan.MachineName, ip, p); err != nil {
+				return err
+			}
+			if err := e.ensureRemovableFallback(ctx, ip, p); err != nil {
 				return err
 			}
 		}
