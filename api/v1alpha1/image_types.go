@@ -242,6 +242,25 @@ type ImagePartitionStatus struct {
 	TorrentInfoRef *NameRef `json:"torrentInfoRef,omitempty"`
 }
 
+// ImageSeederSiteStatus records how many Machines at Site currently hold
+// this Image's per-Image seeder Deployment demanded there. See
+// internal/controller's machineHoldsSeederReference for which Machine
+// states count, and its reconcileSeederDeployments for how this is
+// computed and kept in sync with the Deployment(s) it describes.
+// MachineCount can be zero: a site whose demand just dropped keeps its
+// entry (and its Deployment) through the teardown grace period, so
+// "still up with zero demand, about to drain" stays visible here rather
+// than disappearing the instant the count changes.
+type ImageSeederSiteStatus struct {
+	// Site is the Machine's spec.networkSite value this count applies to
+	// (the empty string is itself a valid, distinct site: every Machine
+	// that never sets networkSite).
+	Site string `json:"site"`
+	// MachineCount is how many Machines at Site currently hold a seeder
+	// reference to this Image.
+	MachineCount int32 `json:"machineCount"`
+}
+
 // ImageStatus defines the observed state of Image.
 type ImageStatus struct {
 	// Conditions report the current state of the image, including
@@ -258,6 +277,13 @@ type ImageStatus struct {
 	// Partitions records each partition captured during ingest.
 	// +optional
 	Partitions []ImagePartitionStatus `json:"partitions,omitempty"`
+	// Seeders records, per site, how many Machines currently hold this
+	// Image's seeder Deployment demanded there - the derived reference
+	// count that decides whether that Deployment exists (see
+	// ImageSeederSiteStatus's doc comment). Absent or empty means no
+	// site currently demands a seeder Deployment for this Image.
+	// +optional
+	Seeders []ImageSeederSiteStatus `json:"seeders,omitempty"`
 }
 
 // +kubebuilder:object:root=true

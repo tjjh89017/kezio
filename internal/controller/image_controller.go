@@ -20,6 +20,7 @@ import (
 	"context"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -57,6 +58,10 @@ type ImageReconciler struct {
 	// and the e2e suite are unaffected until it is explicitly wired up
 	// (see IngestConfig's doc comment).
 	Ingest IngestConfig
+	// SeederDeployment configures the per-Image, per-site seeder
+	// Deployments this reconciler creates on demand. Its zero value
+	// disables them entirely (see SeederDeploymentConfig's doc comment).
+	SeederDeployment SeederDeploymentConfig
 }
 
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=images,verbs=get;list;watch;create;update;patch;delete
@@ -64,6 +69,7 @@ type ImageReconciler struct {
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=images/finalizers,verbs=update
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines,verbs=get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 
@@ -136,9 +142,15 @@ func (r *ImageReconciler) onChange(ctx context.Context, _ ctrl.Request, image *k
 				"Image ingest complete")
 		}
 		return r.reconcileIngesting(ctx, image)
+	case keziov1alpha1.ImageStateReady:
+		// Ready is a steady state for the ingest state machine itself
+		// (nothing to do there until re-ingest on a spec change becomes a
+		// feature), but it is the only state a seeder Deployment can
+		// serve content for, so this is where per-site seeder demand is
+		// reconciled.
+		return r.reconcileSeederDeployments(ctx, image)
 	default:
-		// Ready and Failed are steady states at this stage: nothing to do
-		// until re-ingest on a spec change becomes a feature.
+		// Failed is a steady state: nothing to do.
 		return ctrl.Result{}, nil
 	}
 }
@@ -270,6 +282,7 @@ func (r *ImageReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&keziov1alpha1.Image{}).
 		Owns(&batchv1.Job{}).
+		Owns(&appsv1.Deployment{}).
 		Watches(&keziov1alpha1.Machine{}, handler.EnqueueRequestsFromMapFunc(mapMachineToImages)).
 		Named("image").
 		Complete(r)

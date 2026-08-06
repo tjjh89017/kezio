@@ -225,10 +225,16 @@ func main() {
 		setupLog.Error(err, "invalid ingest configuration")
 		os.Exit(1)
 	}
+	seederDeploymentConfig, err := seederDeploymentConfigFromEnv()
+	if err != nil {
+		setupLog.Error(err, "invalid seeder deployment configuration")
+		os.Exit(1)
+	}
 	if err := (&controller.ImageReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Ingest: ingestConfig,
+		Client:           mgr.GetClient(),
+		Scheme:           mgr.GetScheme(),
+		Ingest:           ingestConfig,
+		SeederDeployment: seederDeploymentConfig,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Image")
 		os.Exit(1)
@@ -436,6 +442,47 @@ func seederConfigFromEnv() (controller.SeederConfig, error) {
 		GRPCPortName:     os.Getenv("SEEDER_GRPC_PORT_NAME"),
 		EzioTuning:       ezioTuning,
 	}, nil
+}
+
+// seederDeploymentConfigFromEnv builds the Image reconciler's
+// SeederDeploymentConfig from the environment. Leaving
+// SEEDER_DEPLOYMENT_IMAGE unset (the default for every existing
+// deployment and the e2e suite) yields the zero SeederDeploymentConfig,
+// which disables per-Image seeder Deployments entirely - no Deployment
+// is ever created and no store volume is required. Setting
+// SEEDER_DEPLOYMENT_IMAGE opts in; SEEDER_DEPLOYMENT_STORE_PVC must then
+// also be set, naming the same store PersistentVolumeClaim the seeder
+// containers mount read-only (see config/seeder/README.md's "store PVC"
+// prerequisite - this is the identical volume, not a separate one).
+// SEEDER_DEPLOYMENT_GRACE_PERIOD is optional (a Go duration string, for
+// example "5m"); left unset, the reconciler's own default applies (see
+// SeederDeploymentConfig.gracePeriod).
+func seederDeploymentConfigFromEnv() (controller.SeederDeploymentConfig, error) {
+	image := os.Getenv("SEEDER_DEPLOYMENT_IMAGE")
+	if image == "" {
+		return controller.SeederDeploymentConfig{}, nil
+	}
+
+	storePVC := os.Getenv("SEEDER_DEPLOYMENT_STORE_PVC")
+	if storePVC == "" {
+		return controller.SeederDeploymentConfig{}, fmt.Errorf(
+			"SEEDER_DEPLOYMENT_IMAGE is set but SEEDER_DEPLOYMENT_STORE_PVC is not")
+	}
+
+	cfg := controller.SeederDeploymentConfig{
+		Image: image,
+		StoreVolume: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: storePVC},
+		},
+	}
+	if raw := os.Getenv("SEEDER_DEPLOYMENT_GRACE_PERIOD"); raw != "" {
+		gracePeriod, err := time.ParseDuration(raw)
+		if err != nil {
+			return controller.SeederDeploymentConfig{}, fmt.Errorf("invalid SEEDER_DEPLOYMENT_GRACE_PERIOD: %w", err)
+		}
+		cfg.GracePeriod = gracePeriod
+	}
+	return cfg, nil
 }
 
 // ezioTuningFromEnv reads a cluster-wide default MaxUploads/MaxConnections

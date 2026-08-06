@@ -335,6 +335,42 @@ spec:
                   - role
                   type: object
                 type: array
+              seeders:
+                description: |-
+                  Seeders records, per site, how many Machines currently hold this
+                  Image's seeder Deployment demanded there - the derived reference
+                  count that decides whether that Deployment exists (see
+                  ImageSeederSiteStatus's doc comment). Absent or empty means no
+                  site currently demands a seeder Deployment for this Image.
+                items:
+                  description: |-
+                    ImageSeederSiteStatus records how many Machines at Site currently hold
+                    this Image's per-Image seeder Deployment demanded there. See
+                    internal/controller's machineHoldsSeederReference for which Machine
+                    states count, and its reconcileSeederDeployments for how this is
+                    computed and kept in sync with the Deployment(s) it describes.
+                    MachineCount can be zero: a site whose demand just dropped keeps its
+                    entry (and its Deployment) through the teardown grace period, so
+                    "still up with zero demand, about to drain" stays visible here rather
+                    than disappearing the instant the count changes.
+                  properties:
+                    machineCount:
+                      description: |-
+                        MachineCount is how many Machines at Site currently hold a seeder
+                        reference to this Image.
+                      format: int32
+                      type: integer
+                    site:
+                      description: |-
+                        Site is the Machine's spec.networkSite value this count applies to
+                        (the empty string is itself a valid, distinct site: every Machine
+                        that never sets networkSite).
+                      type: string
+                  required:
+                  - machineCount
+                  - site
+                  type: object
+                type: array
               state:
                 description: State is the ingest state machine position.
                 enum:

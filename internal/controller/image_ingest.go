@@ -57,6 +57,12 @@ const (
 	workMountPath    = ingest.DefaultWorkDir
 )
 
+// storeVolumeName is the Volume/VolumeMount name for the store, shared
+// by the ingest Job (buildIngestJob) and every per-Image seeder
+// Deployment (buildSeederDeployment) - both mount the same underlying
+// volume, just at different paths and access modes.
+const storeVolumeName = "store"
+
 // ingestJobLabel marks every resource (Job, its Pods) created for one
 // Image's ingest run, and doubles as the Job's controller-runtime watch
 // key.
@@ -144,7 +150,7 @@ func (r *ImageReconciler) buildIngestJob(image *keziov1alpha1.Image, jobName str
 		{Name: "WORK_DIR", Value: workMountPath},
 	}
 	volumes := []corev1.Volume{
-		{Name: "store", VolumeSource: r.Ingest.StoreVolume},
+		{Name: storeVolumeName, VolumeSource: r.Ingest.StoreVolume},
 		// work is scratch space for the fetched/staged source image,
 		// the qemu-img-converted raw disk, and per-partition slices
 		// and content before they are moved into the store - never the
@@ -156,7 +162,7 @@ func (r *ImageReconciler) buildIngestJob(image *keziov1alpha1.Image, jobName str
 		{Name: "work", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 	}
 	mounts := []corev1.VolumeMount{
-		{Name: "store", MountPath: storeMountPath},
+		{Name: storeVolumeName, MountPath: storeMountPath},
 		{Name: "work", MountPath: workMountPath},
 	}
 
