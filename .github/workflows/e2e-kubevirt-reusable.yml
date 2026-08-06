@@ -205,15 +205,21 @@ env:
   # outside the lease server's dhcp-range 192.0.2.10-100 below, so a
   # leased address can never collide with any of them):
   #   - PROVISIONING_HOST_IP: the runner host's own address on the
-  #     bridge. It anchors only the socat TCP forwards for the
-  #     boot/agent servers below - it is NOT bootd's address (bootd
-  #     stopped borrowing it when it grew its own net1 address).
+  #     bridge. It anchors the host's routed veth to the lease-only DHCP
+  #     server below (BOOTD_DHCP_RELAY_SERVER's return path) - it is NOT
+  #     bootd's address and nothing on the target VM's boot path ever
+  #     reaches it directly.
   #   - PROVISIONING_BOOTD_NET1_IP: the static address the
   #     kezio-boot-network NetworkAttachmentDefinition assigns to
   #     bootd's net1. It is dnsmasq's dhcp-range subnet anchor, the
-  #     relay giaddr, and the TFTP next-server bootd advertises - so
+  #     relay giaddr, the TFTP next-server bootd advertises - so
   #     firmware TFTPs straight into bootd's pod with no host-side
-  #     UDP/69 forward in the path.
+  #     UDP/69 forward in the path - and, once bootd's reverse proxy is
+  #     configured below, the one address a net-booting machine (and the
+  #     kezio-agent it boots into) ever needs to reach for the whole
+  #     boot-to-registration flow (BOOT_SERVER_URL, BOOT_AGENT_SERVER_URL,
+  #     BOOTD_BOOT_CONFIG_URL all resolve to it) - no socat forward and no
+  #     bare ClusterIP URL anywhere in this lane.
   #   - PROVISIONING_TRACKER_NET1_IP / PROVISIONING_SEEDER_NET1_IP: the
   #     static addresses the kezio-tracker-network / kezio-seeder-network
   #     NetworkAttachmentDefinitions assign to the opentracker and ezio
@@ -574,11 +580,12 @@ jobs:
 
           # No bridge<->pod-network accepts, on purpose: the target VM's
           # whole world lives on this bridge. Every peer it talks to -
-          # bootd's net1, the opentracker and ezio-seeder pods' net1
-          # (Multus-attached below with static bridge addresses), and the
-          # host's own socat forwards - is a port on this same bridge, so
-          # the port-to-port ACCEPT above covers all of it and the VM
-          # needs no route into the cluster's pod network at all.
+          # bootd's net1 (DHCP/TFTP and, through its reverse proxy, the
+          # boot config and agent APIs too) and the opentracker and
+          # ezio-seeder pods' net1 (Multus-attached below with static
+          # bridge addresses) - is a port on this same bridge, so the
+          # port-to-port ACCEPT above covers all of it and the VM needs
+          # no route into the cluster's pod network at all.
 
       - name: Fill UDP checksums for PXE DHCP crossing the provisioning bridge
         # The target VM's virtio-net leaves UDP checksums to be filled in
@@ -691,8 +698,9 @@ jobs:
           # host-dnsmasq.log - a black hole, since bootd's pod does not
           # forward. But the VM needs no router at all: everything it
           # ever talks to is on-link on this /24 - bootd's net1
-          # (TFTP/DHCP), the host's socat forwards on 192.0.2.1
-          # (8090/8091), the opentracker pod's net1 (the announce URL)
+          # (TFTP/DHCP and, once its reverse proxy is configured, the
+          # boot config and agent servers too), the opentracker pod's
+          # net1 (the announce URL)
           # and the ezio seeder pod's net1 (the BT peer address the
           # tracker hands out), both Multus-attached to this same bridge
           # (see "Deploy image-service+seeder..." below). Handing out no
@@ -1114,9 +1122,9 @@ jobs:
             SEEDER_SERVICE_NAME=kezio-ezio-seeder \
             BOOT_SERVER_ADDR=:8090 \
             BOOT_ARTIFACTS_DIR=/boot-artifacts \
-            BOOT_SERVER_URL="http://${PROVISIONING_HOST_IP%%/*}:8090" \
+            BOOT_SERVER_URL="http://${PROVISIONING_BOOTD_NET1_IP%%/*}:80" \
             AGENT_SERVER_ADDR=:8091 \
-            BOOT_AGENT_SERVER_URL="http://${PROVISIONING_HOST_IP%%/*}:8091" \
+            BOOT_AGENT_SERVER_URL="http://${PROVISIONING_BOOTD_NET1_IP%%/*}:80" \
             DEPLOYER=agent
 
           kubectl -n kezio-system create configmap boot-artifacts-fetch-script \
@@ -1158,9 +1166,9 @@ jobs:
             fi
           done
 
-          # Same early-failure shape as the socat forwards' curl check
-          # below: prove the tracker actually answers HTTP on its bridge
-          # address - the one baked into the announce URL above -
+          # Same early-failure shape as the bootd-proxy reachability curl
+          # check below: prove the tracker actually answers HTTP on its
+          # bridge address - the one baked into the announce URL above -
           # reached from the host's own port on the same bridge, the
           # same L2 path the VM will use. No -f: an HTTP error body
           # (opentracker answers a parameterless /announce with a
@@ -1168,83 +1176,6 @@ jobs:
           # connect failure should fail the job here.
           if ! curl -s -o /dev/null --max-time 10 "http://${PROVISIONING_TRACKER_NET1_IP%%/*}:6969/announce"; then
             echo "::error::opentracker not reachable at ${PROVISIONING_TRACKER_NET1_IP%%/*}:6969 on the provisioning bridge (the announce URL every .torrent carries)" >&2
-            exit 1
-          fi
-
-      - name: Forward the boot/agent servers onto the provisioning bridge
-        # kezio-boot-server and kezio-agent-server (both just created
-        # above, BOOT_SERVER_URL/BOOT_AGENT_SERVER_URL already pointing at
-        # this bridge address) are plain ClusterIP Services - reachable
-        # only from inside the cluster network. config/bootserver/
-        # README.md's and config/agentserver/README.md's own "Make the
-        # Service reachable from the boot network" steps call this out as
-        # something every real deployment still has to patch in (NodePort,
-        # LoadBalancer, hostNetwork, or a reverse proxy); this e2e lane
-        # was shipping neither, so the target VM - which lives on the raw
-        # kezio-prov0 bridge with no cluster DNS and no route to a
-        # ClusterIP - could reach neither the boot config server (so GRUB
-        # never actually fetched a kernel to boot) nor the agent
-        # registration server (so a live-booted kezio-agent would 404
-        # forever - see 439f7a7's commit message for that half of the
-        # bug). kezio-bootd solves the equivalent problem for its own
-        # proxyDHCP/TFTP traffic by running as a Multus-attached pod
-        # directly on this bridge (see config/bootd/
-        # networkattachmentdefinition.example.yaml's "Why Multus, not
-        # hostNetwork" section) - not reused here because attaching the whole
-        # controller-manager Pod (leader election, the mutating/
-        # validating webhooks, every other controller) onto an isolated
-        # test L2 segment is a much bigger blast radius than this narrow
-        # reachability gap needs.
-        #
-        # Plain host-level TCP forwarding instead: the runner *is* the
-        # bridge's host network namespace (the "Create the provisioning
-        # bridge" step above ran `ip addr add` directly on the runner,
-        # not inside any container), so it already sits on the same
-        # broadcast domain as the target VM's provisioning NIC and can
-        # reach each Service's ClusterIP over the cluster's own pod
-        # network. socat listens on the host's own bridge address
-        # (${PROVISIONING_HOST_IP%%/*} - only these two TCP forwards;
-        # TFTP needs no host forward, since bootd advertises its own
-        # net1 address as next-server) and relays to
-        # each Service's ClusterIP rather than a specific Pod IP, so a
-        # Pod restart does not stop the forward from working - the same
-        # property kube-proxy's own iptables rules would give a Pod
-        # reaching the Service normally.
-        #
-        # The opentracker announce port (6969) is deliberately NOT
-        # forwarded this way: a socat hop would re-originate the
-        # seeder's announce from the host and register the seeder at
-        # the wrong address (see the SEEDER_TRACKER_URL comment in the
-        # deploy step above) - which is why the tracker and seeder pods
-        # sit on the bridge themselves, via their own Multus
-        # attachments, instead. HTTP is announce-source-agnostic, so
-        # 8090/8091 have no such constraint and socat is fine for them.
-        run: |
-          set -euo pipefail
-          command -v socat >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq socat)
-
-          bridge_ip="${PROVISIONING_HOST_IP%%/*}"
-          boot_clusterip="$(kubectl -n kezio-system get svc kezio-boot-server -o jsonpath='{.spec.clusterIP}')"
-          agent_clusterip="$(kubectl -n kezio-system get svc kezio-agent-server -o jsonpath='{.spec.clusterIP}')"
-
-          # nohup + disown: these must keep running for the rest of the
-          # job (through however long the VM takes to net-boot and
-          # register), well past this step's own shell exiting - the same
-          # backgrounding this workflow already relies on for the
-          # image-service port-forward below, except that one is torn
-          # down right after its one use and these are not, since every
-          # later step depends on them staying up.
-          nohup socat TCP-LISTEN:8090,bind="${bridge_ip}",fork,reuseaddr "TCP:${boot_clusterip}:8090" \
-            >/tmp/socat-boot-server.log 2>&1 &
-          disown
-          nohup socat TCP-LISTEN:8091,bind="${bridge_ip}",fork,reuseaddr "TCP:${agent_clusterip}:8091" \
-            >/tmp/socat-agent-server.log 2>&1 &
-          disown
-
-          sleep 1
-          if ! curl -sf -o /dev/null "http://${bridge_ip}:8090/boot/artifacts/manifest.json"; then
-            echo "::error::boot config server not reachable at ${bridge_ip}:8090 through the socat forward" >&2
-            cat /tmp/socat-boot-server.log >&2 || true
             exit 1
           fi
 
@@ -1256,9 +1187,9 @@ jobs:
           cd config/bootd && ../../bin/kustomize edit set image bootd="${BOOTD_IMG}"
           cd ../..
           kubectl apply -k config/bootd
-          # The three site-specific values config/bootd/deployment.yaml
-          # leaves as placeholders/comments (BOOTD_DHCP_INTERFACE=net1
-          # is already set there):
+          # The site-specific values config/bootd/deployment.yaml leaves
+          # as placeholders/comments (BOOTD_DHCP_INTERFACE=net1 is
+          # already set there):
           #   - BOOTD_SERVER_IP: bootd's OWN net1 static address (the
           #     NAD's ipam above) - the PXE next-server, so firmware
           #     TFTPs straight to the pod, and the dhcp-relay giaddr.
@@ -1267,17 +1198,36 @@ jobs:
           #   - BOOTD_DHCP_RELAY_SERVER: the host lease-only dnsmasq
           #     (see "Start a lease-only DHCP server" above) - the
           #     stand-in for the site's existing DHCP server.
-          #   - BOOTD_BOOT_CONFIG_URL: the boot config server as the VM
-          #     reaches it - the socat forward on the bridge address
-          #     (the same value BOOT_SERVER_URL was set to above). bootd
-          #     renders it into the grub/grub.cfg it serves over TFTP,
-          #     which is how the netboot GRUB image finds its per-MAC
-          #     config.
+          #   - BOOTD_BOOT_CONFIG_URL: bootd's OWN address (the same
+          #     value BOOT_SERVER_URL/BOOT_AGENT_SERVER_URL were set to
+          #     above) - bootd's own reverse proxy is what actually
+          #     answers /boot/grub.cfg-<mac> once BOOTD_BOOT_UPSTREAM_URL
+          #     below is set, forwarding it to kezio-boot-server. bootd
+          #     renders this URL into the grub/grub.cfg it serves over
+          #     TFTP, which is how the netboot GRUB image finds its
+          #     per-MAC config.
+          #   - BOOTD_AGENT_UPSTREAM_URL / BOOTD_BOOT_UPSTREAM_URL: the
+          #     in-cluster (ClusterIP) Services BOOT_AGENT_SERVER_URL and
+          #     BOOT_SERVER_URL used to name directly, before bootd grew
+          #     its own reverse proxy (see internal/bootd's ProxyServer
+          #     and config/bootd/README.md's "Reverse-proxying the agent
+          #     and boot config servers" section) - the target VM, which
+          #     lives on the raw kezio-prov0 bridge with no cluster DNS
+          #     and no route to a ClusterIP, can reach neither directly;
+          #     bootd, an ordinary cluster pod on its other (eth0)
+          #     interface, can. Setting these turns bootd's proxy on:
+          #     every /agent/... and /boot/... request the VM's firmware
+          #     or kezio-agent sends to bootd's own address above now
+          #     forwards to the real service - no socat, no
+          #     separately-exposed Service, and exactly one address
+          #     (bootd's) the VM ever needs to reach.
           kubectl -n kezio-system set env deployment/kezio-bootd \
             BOOTD_SERVER_IP="${PROVISIONING_BOOTD_NET1_IP%%/*}" \
             BOOTD_PROVISIONING_CIDR="${PROVISIONING_CIDR}" \
             BOOTD_DHCP_RELAY_SERVER="${RELAY_DHCP_SERVER_IP}" \
-            BOOTD_BOOT_CONFIG_URL="http://${PROVISIONING_HOST_IP%%/*}:8090"
+            BOOTD_BOOT_CONFIG_URL="http://${PROVISIONING_BOOTD_NET1_IP%%/*}:80" \
+            BOOTD_AGENT_UPSTREAM_URL="http://kezio-agent-server.kezio-system.svc.cluster.local:8091" \
+            BOOTD_BOOT_UPSTREAM_URL="http://kezio-boot-server.kezio-system.svc.cluster.local:8090"
           # Strategic-merge (kubectl patch's default type for a built-in
           # object like Deployment), not --type=json: a JSON Patch "add"
           # on .../metadata/annotations replaces the whole annotations
@@ -1295,6 +1245,19 @@ jobs:
               -c fetch-boot-artifacts "BOOT_ARTIFACTS_VERSION=${BOOT_ARTIFACTS_VERSION}"
           fi
           kubectl rollout status deployment/kezio-bootd -n kezio-system --timeout=180s
+
+          # Same early-failure shape the old socat forward's curl check
+          # used to give, moved here (bootd itself, not a host-level
+          # forward, is what has to answer now): prove bootd's reverse
+          # proxy actually reaches through to the boot config server on
+          # bootd's own provisioning-network address, reached from the
+          # host's own port on the same bridge - the same L2 path the VM
+          # will use.
+          bootd_ip="${PROVISIONING_BOOTD_NET1_IP%%/*}"
+          if ! curl -sf -o /dev/null "http://${bootd_ip}:80/boot/artifacts/manifest.json"; then
+            echo "::error::boot config server not reachable at ${bootd_ip}:80 through bootd's reverse proxy" >&2
+            exit 1
+          fi
 
           # Fail fast here, not 20 minutes later at a PXE-E18 timeout on
           # the VM console: confirm the live bootd pod actually has the
@@ -2015,7 +1978,7 @@ jobs:
         # exactly once regardless of which power path this job used.
         #
         # Runs for the rest of the job (nohup + disown, the same
-        # backgrounding pattern the socat forwards above use) so the
+        # backgrounding pattern used elsewhere in this job) so the
         # eventual "Dump diagnostics on failure" step's 20-second live
         # `virtctl console` attach - which only ever sees whatever the
         # guest happens to print in that narrow window, nothing from

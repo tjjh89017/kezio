@@ -653,6 +653,26 @@ jobs:
           cd ../..
           bin/kustomize build config/e2e-deploy-path | kubectl apply -f -
 
+          # BOOT_SERVER_URL / BOOT_AGENT_SERVER_URL: internal/bootserver
+          # is one instance, embedded in this one controller-manager
+          # process, shared across every site - there is no per-site
+          # copy of it to point at a genuinely per-site address (see
+          # config/bootd/README.md's "Per-site addressing" section: a
+          # real multi-site deployment gets this for free because every
+          # site's bootd reverse-proxies to the SAME cluster-wide
+          # Services, and each site's machines only ever talk to their
+          # own bootd). This lane's own header comment already documents
+          # that only PXE/DHCP is genuinely per-site-isolated here (the
+          # swarm data plane is not either); consistent with that, both
+          # sites are pointed at site-a's bootd address for the boot
+          # config/agent registration HTTP surface - not a bare
+          # ClusterIP, and not a socat forward, but an honestly-labeled
+          # simplification of the "one bootd per segment" production
+          # model this single runner cannot fully reproduce with two
+          # disjoint L2s and one shared boot server (see the "Deploy the
+          # two site-local kezio-bootd instances" step below for the
+          # pre-existing DHCP-lease gap this simplification does not
+          # attempt to close either).
           kubectl -n kezio-system set env deployment/kezio-controller-manager \
             INGEST_IMAGE="${INGEST_IMG}" \
             INGEST_STORE_PVC=kezio-store \
@@ -663,9 +683,9 @@ jobs:
             SEEDER_SERVICE_NAME=kezio-ezio-seeder \
             BOOT_SERVER_ADDR=:8090 \
             BOOT_ARTIFACTS_DIR=/boot-artifacts \
-            BOOT_SERVER_URL="http://kezio-boot-server.kezio-system.svc.cluster.local:8090" \
+            BOOT_SERVER_URL="http://${SITE_A_BOOTD_NET1_IP%%/*}:80" \
             AGENT_SERVER_ADDR=:8091 \
-            BOOT_AGENT_SERVER_URL="http://kezio-agent-server.kezio-system.svc.cluster.local:8091" \
+            BOOT_AGENT_SERVER_URL="http://${SITE_A_BOOTD_NET1_IP%%/*}:80" \
             DEPLOYER=agent
 
           kubectl -n kezio-system create configmap boot-artifacts-fetch-script \
@@ -754,6 +774,19 @@ jobs:
             # that site's segment subnet, rendered as dnsmasq's
             # proxyDHCP dhcp-range - both required, both site-specific,
             # so both get patched per clone the same way.
+            #
+            # BOOTD_BOOT_CONFIG_URL is also per-site, deliberately: it is
+            # each bootd's OWN address (self-referencing), since each
+            # site's bootd serves grub/grub.cfg to its OWN segment only -
+            # the "per-site bootd, per-site URL" half of this lane's
+            # coverage. BOOTD_AGENT_UPSTREAM_URL / BOOTD_BOOT_UPSTREAM_URL
+            # are the same cluster-wide Services for every site (there is
+            # only one internal/agentserver and one internal/bootserver
+            # for the whole cluster - see config/bootd/README.md's
+            # "Per-site addressing" section), appended rather than
+            # patched onto an existing entry since the base
+            # config/bootd/deployment.yaml leaves them commented out by
+            # default.
             echo "${deployment_base_json}" | jq \
               --arg site "${site}" --arg ip "${bootd_ip}" --arg cidr "${cidr}" --arg net "kezio-boot-network-${site}" '
               .metadata.name = "kezio-bootd-\($site)"
@@ -762,6 +795,11 @@ jobs:
               | .spec.template.metadata.annotations["k8s.v1.cni.cncf.io/networks"] = $net
               | (.spec.template.spec.containers[] | select(.name=="bootd") | .env[] | select(.name=="BOOTD_SERVER_IP") | .value) = $ip
               | (.spec.template.spec.containers[] | select(.name=="bootd") | .env[] | select(.name=="BOOTD_PROVISIONING_CIDR") | .value) = $cidr
+              | (.spec.template.spec.containers[] | select(.name=="bootd") | .env) += [
+                  {"name":"BOOTD_BOOT_CONFIG_URL","value":("http://" + $ip + ":80")},
+                  {"name":"BOOTD_AGENT_UPSTREAM_URL","value":"http://kezio-agent-server.kezio-system.svc.cluster.local:8091"},
+                  {"name":"BOOTD_BOOT_UPSTREAM_URL","value":"http://kezio-boot-server.kezio-system.svc.cluster.local:8090"}
+                ]
             ' | kubectl apply -f -
 
             if [ -n "${BOOT_ARTIFACTS_VERSION}" ]; then
@@ -770,6 +808,21 @@ jobs:
             fi
             kubectl rollout status deployment/kezio-bootd-"${site}" -n kezio-system --timeout=180s
           done
+          # Known pre-existing gap, unrelated to the bootd-proxy work
+          # above and unchanged by it: this lane runs bootd with no
+          # BOOTD_DHCP_RELAY_SERVER (no per-site "existing site DHCP
+          # server" stand-in, unlike e2e-kubevirt-reusable.yml's lease
+          # netns), and proxyDHCP alone never assigns an address (see
+          # internal/bootd's RenderDnsmasqConf doc comment) - and, with
+          # no router option ever handed to either segment, no route
+          # exists off the target VM's own subnet regardless. Both
+          # gaps predate this work item and were already true when
+          # BOOT_SERVER_URL/BOOT_AGENT_SERVER_URL named a bare ClusterIP
+          # DNS name the VM could resolve or reach: replacing that name
+          # with site-a's bootd address (above) removes the ClusterIP
+          # dependency this work item targets without claiming to have
+          # closed the DHCP-lease gap, which is a separate, pre-existing
+          # piece of unfinished lane infrastructure.
 
       - name: Ingest the marker-customized Ubuntu image through kezioctl
         # One Image, ingested once - both sites' Machines reference it

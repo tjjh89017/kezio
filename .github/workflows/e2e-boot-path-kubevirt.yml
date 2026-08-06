@@ -71,12 +71,15 @@ env:
   # Three distinct addresses on that segment, kept apart deliberately
   # (see e2e-kubevirt-reusable.yml's env block for the full "why"):
   #   - PROVISIONING_HOST_IP: the runner host's own address on the
-  #     bridge, anchoring only the socat TCP forwards for the boot/
-  #     agent servers below - not bootd's own address.
+  #     bridge - not bootd's own address, and not reached directly by
+  #     anything on the target VM's boot path.
   #   - PROVISIONING_BOOTD_NET1_IP: the static address the
   #     kezio-boot-network NetworkAttachmentDefinition assigns to
-  #     bootd's net1 - the dhcp-range subnet anchor and the TFTP
-  #     next-server bootd advertises.
+  #     bootd's net1 - the dhcp-range subnet anchor, the TFTP
+  #     next-server bootd advertises, and, once bootd's reverse proxy is
+  #     configured below, the one address the VM (and its live-booted
+  #     kezio-agent) ever needs to reach for the whole boot-to-
+  #     registration flow.
   #   - PROVISIONING_CIDR: the whole segment, handed to bootd as
   #     BOOTD_PROVISIONING_CIDR.
   PROVISIONING_HOST_IP: 192.0.2.1/24
@@ -471,9 +474,9 @@ jobs:
           kubectl -n kezio-system set env deployment/kezio-controller-manager \
             BOOT_SERVER_ADDR=:8090 \
             BOOT_ARTIFACTS_DIR=/boot-artifacts \
-            BOOT_SERVER_URL="http://${PROVISIONING_HOST_IP%%/*}:8090" \
+            BOOT_SERVER_URL="http://${PROVISIONING_BOOTD_NET1_IP%%/*}:80" \
             AGENT_SERVER_ADDR=:8091 \
-            BOOT_AGENT_SERVER_URL="http://${PROVISIONING_HOST_IP%%/*}:8091" \
+            BOOT_AGENT_SERVER_URL="http://${PROVISIONING_BOOTD_NET1_IP%%/*}:80" \
             DEPLOYER=agent
           # config/e2e-boot-path deliberately does not wire the
           # fetch-boot-artifacts initContainer into its own
@@ -496,35 +499,6 @@ jobs:
           fi
           kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
 
-      - name: Forward the boot/agent servers onto the provisioning bridge
-        # Same gap, same fix as .github/workflows/e2e-kubevirt-
-        # reusable.yml's step of the same name - see that step's own
-        # comment for the full reasoning (ClusterIP-only Services, no
-        # cluster DNS on the raw kezio-prov0 bridge, restricted Pod
-        # Security ruling out hostPort, and why this reuses plain
-        # host-level socat forwarding rather than a Multus attachment).
-        run: |
-          set -euo pipefail
-          command -v socat >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq socat)
-
-          bridge_ip="${PROVISIONING_HOST_IP%%/*}"
-          boot_clusterip="$(kubectl -n kezio-system get svc kezio-boot-server -o jsonpath='{.spec.clusterIP}')"
-          agent_clusterip="$(kubectl -n kezio-system get svc kezio-agent-server -o jsonpath='{.spec.clusterIP}')"
-
-          nohup socat TCP-LISTEN:8090,bind="${bridge_ip}",fork,reuseaddr "TCP:${boot_clusterip}:8090" \
-            >/tmp/socat-boot-server.log 2>&1 &
-          disown
-          nohup socat TCP-LISTEN:8091,bind="${bridge_ip}",fork,reuseaddr "TCP:${agent_clusterip}:8091" \
-            >/tmp/socat-agent-server.log 2>&1 &
-          disown
-
-          sleep 1
-          if ! curl -sf -o /dev/null "http://${bridge_ip}:8090/boot/artifacts/manifest.json"; then
-            echo "::error::boot config server not reachable at ${bridge_ip}:8090 through the socat forward" >&2
-            cat /tmp/socat-boot-server.log >&2 || true
-            exit 1
-          fi
-
       - name: Deploy kezio-bootd on the provisioning bridge
         env:
           BOOT_ARTIFACTS_VERSION: ${{ inputs.boot_artifacts_version }}
@@ -538,15 +512,31 @@ jobs:
           #   firmware TFTPs straight to the pod.
           # - BOOTD_PROVISIONING_CIDR: the segment's subnet, rendered
           #   as dnsmasq's proxyDHCP dhcp-range.
-          # - BOOTD_BOOT_CONFIG_URL: the boot config server as the VM
-          #   reaches it - the socat forward on the host bridge address
-          #   (the same value BOOT_SERVER_URL was set to above); bootd
-          #   renders it into the grub/grub.cfg it serves over TFTP for
-          #   the netboot GRUB image.
+          # - BOOTD_BOOT_CONFIG_URL: bootd's OWN address (the same value
+          #   BOOT_SERVER_URL/BOOT_AGENT_SERVER_URL were set to above) -
+          #   bootd's own reverse proxy answers /boot/grub.cfg-<mac>
+          #   once BOOTD_BOOT_UPSTREAM_URL below is set, forwarding it to
+          #   kezio-boot-server; bootd renders this URL into the
+          #   grub/grub.cfg it serves over TFTP for the netboot GRUB
+          #   image.
+          # - BOOTD_AGENT_UPSTREAM_URL / BOOTD_BOOT_UPSTREAM_URL: the
+          #   in-cluster (ClusterIP) Services the target VM - which lives
+          #   on the raw kezio-prov0 bridge with no cluster DNS and no
+          #   route to a ClusterIP - cannot reach directly; bootd, an
+          #   ordinary cluster pod on its other (eth0) interface, can.
+          #   Setting these turns bootd's reverse proxy on (see
+          #   internal/bootd's ProxyServer and config/bootd/README.md's
+          #   "Reverse-proxying the agent and boot config servers"
+          #   section): every /agent/... and /boot/... request the VM's
+          #   firmware or kezio-agent sends to bootd's own address above
+          #   now forwards to the real service - no socat, no
+          #   separately-exposed Service.
           kubectl -n kezio-system set env deployment/kezio-bootd \
             BOOTD_SERVER_IP="${PROVISIONING_BOOTD_NET1_IP%%/*}" \
             BOOTD_PROVISIONING_CIDR="${PROVISIONING_CIDR}" \
-            BOOTD_BOOT_CONFIG_URL="http://${PROVISIONING_HOST_IP%%/*}:8090"
+            BOOTD_BOOT_CONFIG_URL="http://${PROVISIONING_BOOTD_NET1_IP%%/*}:80" \
+            BOOTD_AGENT_UPSTREAM_URL="http://kezio-agent-server.kezio-system.svc.cluster.local:8091" \
+            BOOTD_BOOT_UPSTREAM_URL="http://kezio-boot-server.kezio-system.svc.cluster.local:8090"
           # config/bootd already wires its own fetch-boot-artifacts
           # initContainer (see config/boot-artifacts) and a plain
           # emptyDir "tftp" volume it populates - no volume patch needed
@@ -568,6 +558,17 @@ jobs:
               -c fetch-boot-artifacts "BOOT_ARTIFACTS_VERSION=${BOOT_ARTIFACTS_VERSION}"
           fi
           kubectl rollout status deployment/kezio-bootd -n kezio-system --timeout=180s
+
+          # Same early-failure shape the old socat forward's curl check
+          # used to give, moved here (bootd itself, not a host-level
+          # forward, is what has to answer now): prove bootd's reverse
+          # proxy actually reaches through to the boot config server on
+          # bootd's own provisioning-network address.
+          bootd_ip="${PROVISIONING_BOOTD_NET1_IP%%/*}"
+          if ! curl -sf -o /dev/null "http://${bootd_ip}:80/boot/artifacts/manifest.json"; then
+            echo "::error::boot config server not reachable at ${bootd_ip}:80 through bootd's reverse proxy" >&2
+            exit 1
+          fi
 
       - name: Create the Machine CR for the target VM
         run: |
