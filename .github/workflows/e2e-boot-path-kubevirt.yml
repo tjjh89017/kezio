@@ -46,6 +46,16 @@ on:
           only selects among what is already published.
         required: false
         type: string
+      existing_dhcp_image:
+        description: >-
+          dnsmasq image standing in for the site's existing DHCP server
+          (see .github/actions/deploy-existing-dhcp). Deliberately a
+          different, pinned third-party image from kezio-bootd's own -
+          the two dnsmasq instances must stay distinguishable in logs
+          and pcap.
+        required: false
+        type: string
+        default: "jpillora/dnsmasq:1.1@sha256:78a9c6711031a557d9c6a79a0b6e060c4ac09de3a8755c78d690acb55b4ccd15"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -63,16 +73,13 @@ env:
   CDI_VERSION: "v1.65.0"
 
   # The provisioning L2 segment: a Linux bridge on the runner's host
-  # network namespace, attached to both kezio-bootd's Pod and the target
-  # VM's NIC through Multus. It carries no route to any other network -
-  # see config/bootd's networkattachmentdefinition.example.yaml for why
-  # that is fine for proxyDHCP/TFTP traffic.
+  # network namespace, attached to kezio-bootd's Pod, the existing-dhcp
+  # pod, and the target VM's NIC through Multus. A flat L2 with no
+  # gateway and no host address at all - see e2e-kubevirt-reusable.yml's
+  # env block for the full reasoning behind that shape.
   PROVISIONING_BRIDGE: kezio-prov0
-  # Three distinct addresses on that segment, kept apart deliberately
-  # (see e2e-kubevirt-reusable.yml's env block for the full "why"):
-  #   - PROVISIONING_HOST_IP: the runner host's own address on the
-  #     bridge - not bootd's own address, and not reached directly by
-  #     anything on the target VM's boot path.
+  # Distinct addresses on that segment, kept apart deliberately (see
+  # e2e-kubevirt-reusable.yml's env block for the full "why"):
   #   - PROVISIONING_BOOTD_NET1_IP: the static address the
   #     kezio-boot-network NetworkAttachmentDefinition assigns to
   #     bootd's net1 - the dhcp-range subnet anchor, the TFTP
@@ -80,13 +87,20 @@ env:
   #     configured below, the one address the VM (and its live-booted
   #     kezio-agent) ever needs to reach for the whole boot-to-
   #     registration flow.
+  #   - PROVISIONING_EXISTING_DHCP_NET1_IP: the static address the
+  #     existing-dhcp pod's own NAD assigns to its net1 (see
+  #     .github/actions/deploy-existing-dhcp) - on the SAME /24 as
+  #     bootd's net1, so bootd's relay to it (BOOTD_DHCP_RELAY_SERVER)
+  #     is a plain on-link unicast with no host-side routing at all.
   #   - PROVISIONING_CIDR: the whole segment, handed to bootd as
   #     BOOTD_PROVISIONING_CIDR.
-  PROVISIONING_HOST_IP: 192.0.2.1/24
   PROVISIONING_BOOTD_NET1_IP: 192.0.2.2/24
+  PROVISIONING_EXISTING_DHCP_NET1_IP: 192.0.2.3/24
   PROVISIONING_CIDR: 192.0.2.0/24
+  PROVISIONING_DHCP_RANGE: "192.0.2.10,192.0.2.100,255.255.255.0,12h"
   TARGET_VM_MAC: "52:54:00:be:ef:01"
   TARGET_VM_DISK_SERIAL: "KEZIOE2EVMDISK01"
+  EXISTING_DHCP_IMG: ${{ inputs.existing_dhcp_image }}
 
 jobs:
   boot-path-kubevirt:
@@ -178,10 +192,13 @@ jobs:
       # ---------------------------------------------------------------
 
       - name: Create the provisioning bridge
+        # No address on the bridge itself: the flat L2 segment this
+        # models has no gateway, and the host has no reason to be a peer
+        # on it - see e2e-kubevirt-reusable.yml's own step of the same
+        # name for the full reasoning.
         run: |
           set -euo pipefail
           sudo ip link add "${PROVISIONING_BRIDGE}" type bridge
-          sudo ip addr add "${PROVISIONING_HOST_IP}" dev "${PROVISIONING_BRIDGE}"
           sudo ip link set "${PROVISIONING_BRIDGE}" up
 
       - name: Write the RKE2 config (must exist before the service starts)
@@ -441,8 +458,8 @@ jobs:
         # address (PROVISIONING_BOOTD_NET1_IP) on the provisioning
         # subnet - dnsmasq binds its DHCP sockets to net1 and
         # BOOTD_SERVER_IP advertises it as the TFTP next-server. The
-        # runner host keeps PROVISIONING_HOST_IP on the same bridge, so
-        # the two never collide.
+        # existing-dhcp pod (deployed separately below) keeps its own
+        # static address on the same bridge, so the two never collide.
         run: |
           cat <<EOF | kubectl apply -f -
           apiVersion: k8s.cni.cncf.io/v1
@@ -499,6 +516,17 @@ jobs:
           fi
           kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
 
+      - name: Deploy the existing-dhcp pod on the provisioning bridge
+        id: existing-dhcp
+        uses: ./.github/actions/deploy-existing-dhcp
+        with:
+          namespace: kezio-system
+          name: kezio-existing-dhcp
+          image: ${{ env.EXISTING_DHCP_IMG }}
+          bridge: ${{ env.PROVISIONING_BRIDGE }}
+          static-cidr: ${{ env.PROVISIONING_EXISTING_DHCP_NET1_IP }}
+          dhcp-range: ${{ env.PROVISIONING_DHCP_RANGE }}
+
       - name: Deploy kezio-bootd on the provisioning bridge
         env:
           BOOT_ARTIFACTS_VERSION: ${{ inputs.boot_artifacts_version }}
@@ -519,6 +547,10 @@ jobs:
           #   kezio-boot-server; bootd renders this URL into the
           #   grub/grub.cfg it serves over TFTP for the netboot GRUB
           #   image.
+          # - BOOTD_DHCP_RELAY_SERVER: the existing-dhcp pod's own net1
+          #   address (deployed just above), on the SAME /24 as bootd's
+          #   own net1 - the relay is a plain on-link unicast, no
+          #   host-side routing involved.
           # - BOOTD_AGENT_UPSTREAM_URL / BOOTD_BOOT_UPSTREAM_URL: the
           #   in-cluster (ClusterIP) Services the target VM - which lives
           #   on the raw kezio-prov0 bridge with no cluster DNS and no
@@ -534,6 +566,7 @@ jobs:
           kubectl -n kezio-system set env deployment/kezio-bootd \
             BOOTD_SERVER_IP="${PROVISIONING_BOOTD_NET1_IP%%/*}" \
             BOOTD_PROVISIONING_CIDR="${PROVISIONING_CIDR}" \
+            BOOTD_DHCP_RELAY_SERVER="${PROVISIONING_EXISTING_DHCP_NET1_IP%%/*}" \
             BOOTD_BOOT_CONFIG_URL="http://${PROVISIONING_BOOTD_NET1_IP%%/*}:80" \
             BOOTD_AGENT_UPSTREAM_URL="http://kezio-agent-server.kezio-system.svc.cluster.local:8091" \
             BOOTD_BOOT_UPSTREAM_URL="http://kezio-boot-server.kezio-system.svc.cluster.local:8090"
@@ -675,6 +708,34 @@ jobs:
               ;;
           esac
 
+      - name: "Verify the DHCP relay leg reached the existing-dhcp server"
+        # See e2e-kubevirt-reusable.yml's step of the same name for the
+        # full reasoning: this does NOT assert "a lease is obtainable
+        # only through the relay" (the VM may legitimately take either
+        # the existing-dhcp pod's own direct offer or bootd's relayed
+        # copy - both are real, both are on-segment). It instead proves
+        # the relay leg itself fired - the Machine reaching Available
+        # above already means the PXE handshake this checks happened.
+        run: |
+          set -euo pipefail
+          bootd_ip="${PROVISIONING_BOOTD_NET1_IP%%/*}"
+          existing_dhcp_ip="${PROVISIONING_EXISTING_DHCP_NET1_IP%%/*}"
+          relay_line="DHCP relay at ${bootd_ip} -> ${existing_dhcp_ip}"
+
+          bootd_log="$(kubectl -n kezio-system logs deployment/kezio-bootd --all-containers --tail=-1)"
+          if ! grep -qF "${relay_line}" <<<"${bootd_log}"; then
+            echo "::error::bootd's dnsmasq log never shows '${relay_line}' - the relay leg to the existing-dhcp server never fired." >&2
+            echo "${bootd_log}"
+            exit 1
+          fi
+
+          existing_dhcp_log="$(kubectl -n kezio-system logs deployment/kezio-existing-dhcp --all-containers --tail=-1)"
+          if ! grep -qF "DHCPDISCOVER" <<<"${existing_dhcp_log}" || ! grep -qF "DHCPOFFER" <<<"${existing_dhcp_log}"; then
+            echo "::error::existing-dhcp's own log shows no DHCPDISCOVER/DHCPOFFER exchange - it never actually answered the request bootd's log says it relayed." >&2
+            echo "${existing_dhcp_log}"
+            exit 1
+          fi
+
       - name: Dump diagnostics on failure
         if: failure()
         run: |
@@ -687,6 +748,8 @@ jobs:
           kubectl -n kezio-system logs deployment/kezio-controller-manager --all-containers --tail=1000
           echo "===== bootd logs ====="
           kubectl -n kezio-system logs deployment/kezio-bootd --all-containers --tail=1000
+          echo "===== existing-dhcp logs (the site's stand-in existing DHCP server) ====="
+          kubectl -n kezio-system logs deployment/kezio-existing-dhcp --all-containers --tail=1000
           echo "===== VirtualMachine / VMI ====="
           kubectl get vm,vmi -n kezio-system -o yaml
           echo "===== virt-launcher pod describe ====="
@@ -718,16 +781,18 @@ jobs:
             tcpdump -vvv -r "${RUNNER_TEMP}/bridge.pcap" > "${RUNNER_TEMP}/bridge-pcap.txt" 2>&1
           fi
 
-      - name: Flush the bootd log to the artifact
+      - name: Flush the bootd and existing-dhcp logs to the artifact
         if: always()
-        # Unconditional, like the pcap flush above - bootd's pod log
-        # carries dnsmasq's forwarded per-request log-dhcp decision
-        # lines (see internal/bootd's forwardLines), useful on a passing
-        # run too, not only a failing one.
+        # Unconditional, like the pcap flush above - both pods' logs
+        # carry log-dhcp decision lines (see internal/bootd's
+        # forwardLines for bootd's own), useful on a passing run too,
+        # not only a failing one.
         run: |
           set +e
           kubectl -n kezio-system logs deployment/kezio-bootd --all-containers --tail=-1 \
             > "${RUNNER_TEMP}/bootd.log" 2>&1 || true
+          kubectl -n kezio-system logs deployment/kezio-existing-dhcp --all-containers --tail=-1 \
+            > "${RUNNER_TEMP}/existing-dhcp.log" 2>&1 || true
           exit 0
 
       - name: Upload E2E diagnostics artifacts
@@ -744,5 +809,6 @@ jobs:
             ${{ runner.temp }}/bridge.pcap
             ${{ runner.temp }}/bridge-pcap.txt
             ${{ runner.temp }}/bootd.log
+            ${{ runner.temp }}/existing-dhcp.log
           if-no-files-found: ignore
           retention-days: 7

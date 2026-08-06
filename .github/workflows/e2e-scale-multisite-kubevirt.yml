@@ -127,6 +127,16 @@ on:
         required: false
         type: string
         default: "ubuntu-latest"
+      existing_dhcp_image:
+        description: >-
+          dnsmasq image standing in for each site's existing DHCP server
+          (see .github/actions/deploy-existing-dhcp), one pod per site.
+          Deliberately a different, pinned third-party image from
+          kezio-bootd's own - the dnsmasq instances must stay
+          distinguishable in logs and pcap.
+        required: false
+        type: string
+        default: "jpillora/dnsmasq:1.1@sha256:78a9c6711031a557d9c6a79a0b6e060c4ac09de3a8755c78d690acb55b4ccd15"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -150,28 +160,38 @@ env:
 
   # Two boot L2 segments, one per simulated site - see the header
   # comment's "Honest scope" section for what these genuinely simulate.
+  # Each is a flat L2 with no gateway and no host address at all - see
+  # e2e-kubevirt-reusable.yml's env block for the full reasoning behind
+  # that shape.
   SITE_A_BRIDGE: kezio-site-a0
   SITE_B_BRIDGE: kezio-site-b0
-  # Three distinct addresses per site segment, kept apart deliberately
-  # (see e2e-kubevirt-reusable.yml's env block for the full "why"):
-  #   - SITE_*_HOST_IP: the runner host's own address on that site's
-  #     bridge - not that site's bootd address.
+  # Distinct addresses per site segment, kept apart deliberately (see
+  # e2e-kubevirt-reusable.yml's env block for the full "why"):
   #   - SITE_*_BOOTD_NET1_IP: the static address that site's
   #     kezio-boot-network-<site> NetworkAttachmentDefinition assigns
   #     to that site's bootd net1 - its dhcp-range subnet anchor and
   #     the TFTP next-server it advertises.
+  #   - SITE_*_EXISTING_DHCP_NET1_IP: the static address that site's
+  #     own existing-dhcp pod's NAD assigns to its net1 (see
+  #     .github/actions/deploy-existing-dhcp, one deployed per site) -
+  #     on the SAME /24 as that site's bootd net1, so that site's relay
+  #     (BOOTD_DHCP_RELAY_SERVER) is a plain on-link unicast with no
+  #     host-side routing at all.
   #   - SITE_*_CIDR: that site's whole segment, handed to that site's
   #     bootd as BOOTD_PROVISIONING_CIDR.
-  SITE_A_HOST_IP: 192.0.2.1/24
   SITE_A_BOOTD_NET1_IP: 192.0.2.2/24
+  SITE_A_EXISTING_DHCP_NET1_IP: 192.0.2.3/24
   SITE_A_CIDR: 192.0.2.0/24
-  SITE_B_HOST_IP: 192.0.3.1/24
+  SITE_A_DHCP_RANGE: "192.0.2.10,192.0.2.100,255.255.255.0,12h"
   SITE_B_BOOTD_NET1_IP: 192.0.3.2/24
+  SITE_B_EXISTING_DHCP_NET1_IP: 192.0.3.3/24
   SITE_B_CIDR: 192.0.3.0/24
+  SITE_B_DHCP_RANGE: "192.0.3.10,192.0.3.100,255.255.255.0,12h"
   SITE_A_VM_MAC: "52:54:00:be:ef:0a"
   SITE_B_VM_MAC: "52:54:00:be:ef:0b"
   SITE_A_VM_DISK_SERIAL: "KEZIOE2ESCALESITEADISK1"
   SITE_B_VM_DISK_SERIAL: "KEZIOE2ESCALESITEBDISK1"
+  EXISTING_DHCP_IMG: ${{ inputs.existing_dhcp_image }}
 
   # Same source test-e2e.yml's image-path job and e2e-kubevirt-reusable.yml
   # use - see either's own comment for why "minimal".
@@ -261,14 +281,15 @@ jobs:
           fi
 
       - name: Create the two simulated sites' boot bridges
+        # No address on either bridge: each is a flat L2 with no gateway
+        # and no host presence - see e2e-kubevirt-reusable.yml's own
+        # "Create the provisioning bridge" step for the full reasoning.
         run: |
           set -euo pipefail
           sudo ip link add "${SITE_A_BRIDGE}" type bridge
-          sudo ip addr add "${SITE_A_HOST_IP}" dev "${SITE_A_BRIDGE}"
           sudo ip link set "${SITE_A_BRIDGE}" up
 
           sudo ip link add "${SITE_B_BRIDGE}" type bridge
-          sudo ip addr add "${SITE_B_HOST_IP}" dev "${SITE_B_BRIDGE}"
           sudo ip link set "${SITE_B_BRIDGE}" up
 
       - name: Cache the Ubuntu cloud image
@@ -593,8 +614,9 @@ jobs:
         # a fixed address (that site's BOOTD_NET1_IP) on that site's
         # subnet - dnsmasq binds its DHCP sockets to net1 and
         # BOOTD_SERVER_IP advertises it as the TFTP next-server. Each
-        # site's runner-host bridge address (HOST_IP) stays on the same
-        # bridge without colliding.
+        # site's existing-dhcp pod (deployed separately below) keeps its
+        # own static address on the same bridge, so the two never
+        # collide.
         run: |
           set -euo pipefail
           for site in site-a site-b; do
@@ -738,6 +760,30 @@ jobs:
             kubectl rollout status deployment/kezio-ezio-seeder-"${site}" -n kezio-system --timeout=180s
           done
 
+      - name: Deploy site-a's existing-dhcp pod
+        id: existing-dhcp-site-a
+        uses: ./.github/actions/deploy-existing-dhcp
+        with:
+          namespace: kezio-system
+          name: kezio-existing-dhcp-site-a
+          image: ${{ env.EXISTING_DHCP_IMG }}
+          bridge: ${{ env.SITE_A_BRIDGE }}
+          static-cidr: ${{ env.SITE_A_EXISTING_DHCP_NET1_IP }}
+          dhcp-range: ${{ env.SITE_A_DHCP_RANGE }}
+          network-site-label: site-a
+
+      - name: Deploy site-b's existing-dhcp pod
+        id: existing-dhcp-site-b
+        uses: ./.github/actions/deploy-existing-dhcp
+        with:
+          namespace: kezio-system
+          name: kezio-existing-dhcp-site-b
+          image: ${{ env.EXISTING_DHCP_IMG }}
+          bridge: ${{ env.SITE_B_BRIDGE }}
+          static-cidr: ${{ env.SITE_B_EXISTING_DHCP_NET1_IP }}
+          dhcp-range: ${{ env.SITE_B_DHCP_RANGE }}
+          network-site-label: site-b
+
       - name: Deploy the two site-local kezio-bootd instances
         # Same cloning technique as the seeder step above, applied to
         # config/bootd's Deployment - one instance per boot L2 segment
@@ -766,14 +812,18 @@ jobs:
 
           for site in site-a site-b; do
             case "${site}" in
-              site-a) bootd_ip="${SITE_A_BOOTD_NET1_IP%%/*}"; cidr="${SITE_A_CIDR}" ;;
-              site-b) bootd_ip="${SITE_B_BOOTD_NET1_IP%%/*}"; cidr="${SITE_B_CIDR}" ;;
+              site-a) bootd_ip="${SITE_A_BOOTD_NET1_IP%%/*}"; cidr="${SITE_A_CIDR}"; relay_ip="${SITE_A_EXISTING_DHCP_NET1_IP%%/*}" ;;
+              site-b) bootd_ip="${SITE_B_BOOTD_NET1_IP%%/*}"; cidr="${SITE_B_CIDR}"; relay_ip="${SITE_B_EXISTING_DHCP_NET1_IP%%/*}" ;;
             esac
             # BOOTD_SERVER_IP: that site's bootd net1 static address
             # (the NAD's static ipam above). BOOTD_PROVISIONING_CIDR:
             # that site's segment subnet, rendered as dnsmasq's
-            # proxyDHCP dhcp-range - both required, both site-specific,
-            # so both get patched per clone the same way.
+            # proxyDHCP dhcp-range. BOOTD_DHCP_RELAY_SERVER: that site's
+            # OWN existing-dhcp pod (deployed just above), on the same
+            # /24 as that site's bootd net1 - a plain on-link relay, no
+            # cross-site sharing and no host-side routing. All three are
+            # site-specific, so all three get patched per clone the same
+            # way.
             #
             # BOOTD_BOOT_CONFIG_URL is also per-site, deliberately: it is
             # each bootd's OWN address (self-referencing), since each
@@ -788,7 +838,7 @@ jobs:
             # config/bootd/deployment.yaml leaves them commented out by
             # default.
             echo "${deployment_base_json}" | jq \
-              --arg site "${site}" --arg ip "${bootd_ip}" --arg cidr "${cidr}" --arg net "kezio-boot-network-${site}" '
+              --arg site "${site}" --arg ip "${bootd_ip}" --arg cidr "${cidr}" --arg relay "${relay_ip}" --arg net "kezio-boot-network-${site}" '
               .metadata.name = "kezio-bootd-\($site)"
               | .spec.selector.matchLabels["kezio.kojuro.date/network-site"] = $site
               | .spec.template.metadata.labels["kezio.kojuro.date/network-site"] = $site
@@ -796,6 +846,7 @@ jobs:
               | (.spec.template.spec.containers[] | select(.name=="bootd") | .env[] | select(.name=="BOOTD_SERVER_IP") | .value) = $ip
               | (.spec.template.spec.containers[] | select(.name=="bootd") | .env[] | select(.name=="BOOTD_PROVISIONING_CIDR") | .value) = $cidr
               | (.spec.template.spec.containers[] | select(.name=="bootd") | .env) += [
+                  {"name":"BOOTD_DHCP_RELAY_SERVER","value":$relay},
                   {"name":"BOOTD_BOOT_CONFIG_URL","value":("http://" + $ip + ":80")},
                   {"name":"BOOTD_AGENT_UPSTREAM_URL","value":"http://kezio-agent-server.kezio-system.svc.cluster.local:8091"},
                   {"name":"BOOTD_BOOT_UPSTREAM_URL","value":"http://kezio-boot-server.kezio-system.svc.cluster.local:8090"}
@@ -808,21 +859,6 @@ jobs:
             fi
             kubectl rollout status deployment/kezio-bootd-"${site}" -n kezio-system --timeout=180s
           done
-          # Known pre-existing gap, unrelated to the bootd-proxy work
-          # above and unchanged by it: this lane runs bootd with no
-          # BOOTD_DHCP_RELAY_SERVER (no per-site "existing site DHCP
-          # server" stand-in, unlike e2e-kubevirt-reusable.yml's lease
-          # netns), and proxyDHCP alone never assigns an address (see
-          # internal/bootd's RenderDnsmasqConf doc comment) - and, with
-          # no router option ever handed to either segment, no route
-          # exists off the target VM's own subnet regardless. Both
-          # gaps predate this work item and were already true when
-          # BOOT_SERVER_URL/BOOT_AGENT_SERVER_URL named a bare ClusterIP
-          # DNS name the VM could resolve or reach: replacing that name
-          # with site-a's bootd address (above) removes the ClusterIP
-          # dependency this work item targets without claiming to have
-          # closed the DHCP-lease gap, which is a separate, pre-existing
-          # piece of unfinished lane infrastructure.
 
       - name: Ingest the marker-customized Ubuntu image through kezioctl
         # One Image, ingested once - both sites' Machines reference it
@@ -1103,6 +1139,39 @@ jobs:
             fi
           done
 
+      - name: "Verify each site's DHCP relay leg reached its own existing-dhcp server"
+        # See e2e-kubevirt-reusable.yml's step of the same name for the
+        # full reasoning - this does NOT assert "a lease is obtainable
+        # only through the relay" (either site's VM may legitimately take
+        # its own existing-dhcp pod's direct offer or its own bootd's
+        # relayed copy). It proves each site's relay leg fired
+        # independently, using that site's own bootd/existing-dhcp pair -
+        # never the other site's, confirming the two segments stayed
+        # disjoint.
+        run: |
+          set -euo pipefail
+          for site in site-a site-b; do
+            case "${site}" in
+              site-a) bootd_ip="${SITE_A_BOOTD_NET1_IP%%/*}"; existing_dhcp_ip="${SITE_A_EXISTING_DHCP_NET1_IP%%/*}" ;;
+              site-b) bootd_ip="${SITE_B_BOOTD_NET1_IP%%/*}"; existing_dhcp_ip="${SITE_B_EXISTING_DHCP_NET1_IP%%/*}" ;;
+            esac
+            relay_line="DHCP relay at ${bootd_ip} -> ${existing_dhcp_ip}"
+
+            bootd_log="$(kubectl -n kezio-system logs deployment/kezio-bootd-"${site}" --all-containers --tail=-1)"
+            if ! grep -qF "${relay_line}" <<<"${bootd_log}"; then
+              echo "::error::[${site}] bootd's dnsmasq log never shows '${relay_line}' - the relay leg to that site's existing-dhcp server never fired." >&2
+              echo "${bootd_log}"
+              exit 1
+            fi
+
+            existing_dhcp_log="$(kubectl -n kezio-system logs deployment/kezio-existing-dhcp-"${site}" --all-containers --tail=-1)"
+            if ! grep -qF "DHCPDISCOVER" <<<"${existing_dhcp_log}" || ! grep -qF "DHCPOFFER" <<<"${existing_dhcp_log}"; then
+              echo "::error::[${site}] existing-dhcp's own log shows no DHCPDISCOVER/DHCPOFFER exchange - it never actually answered the request that site's bootd log says it relayed." >&2
+              echo "${existing_dhcp_log}"
+              exit 1
+            fi
+          done
+
       - name: "Wait for layer 2 (boot): both deployed disks boot and qemu-guest-agent connects"
         run: |
           set -euo pipefail
@@ -1199,6 +1268,8 @@ jobs:
           for site in site-a site-b; do
             echo "===== bootd logs (${site}) ====="
             kubectl -n kezio-system logs deployment/kezio-bootd-"${site}" --all-containers --tail=1000
+            echo "===== existing-dhcp logs (${site}, that site's stand-in existing DHCP server) ====="
+            kubectl -n kezio-system logs deployment/kezio-existing-dhcp-"${site}" --all-containers --tail=1000
             echo "===== seeder logs (${site}) ====="
             kubectl -n kezio-system logs deployment/kezio-ezio-seeder-"${site}" --tail=1000
           done
@@ -1249,17 +1320,19 @@ jobs:
             fi
           done
 
-      - name: Flush each site's bootd log to the artifact
+      - name: Flush each site's bootd and existing-dhcp logs to the artifact
         if: always()
         # Unconditional, like the pcap flush above - each site's bootd
-        # pod log carries dnsmasq's forwarded per-request log-dhcp
-        # decision lines (see internal/bootd's forwardLines), useful on
-        # a passing run too, not only a failing one.
+        # and existing-dhcp pod logs carry log-dhcp decision lines (see
+        # internal/bootd's forwardLines for bootd's own), useful on a
+        # passing run too, not only a failing one.
         run: |
           set +e
           for site in site-a site-b; do
             kubectl -n kezio-system logs deployment/kezio-bootd-"${site}" --all-containers --tail=-1 \
               > "${RUNNER_TEMP}/bootd-${site}.log" 2>&1 || true
+            kubectl -n kezio-system logs deployment/kezio-existing-dhcp-"${site}" --all-containers --tail=-1 \
+              > "${RUNNER_TEMP}/existing-dhcp-${site}.log" 2>&1 || true
           done
           exit 0
 
@@ -1280,5 +1353,7 @@ jobs:
             ${{ runner.temp }}/bridge-site-b-pcap.txt
             ${{ runner.temp }}/bootd-site-a.log
             ${{ runner.temp }}/bootd-site-b.log
+            ${{ runner.temp }}/existing-dhcp-site-a.log
+            ${{ runner.temp }}/existing-dhcp-site-b.log
           if-no-files-found: ignore
           retention-days: 7
