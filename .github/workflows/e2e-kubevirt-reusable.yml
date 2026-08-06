@@ -500,6 +500,23 @@ jobs:
           sudo apt-get install -y --no-install-recommends libguestfs-tools
           sudo apt-get install -y --no-install-recommends passt
 
+          # The re-test above confirmed passt itself now starts, but a new
+          # failure took its place: verbose libguestfs logs showed passt
+          # binding its UNIX socket fine, then dying with "PID file open:
+          # Permission denied" ("libguestfs error: passt exited with
+          # status 1") while writing --pid into libguestfs's per-run
+          # /run/user/<uid>/libguestfs*/ directory. Ubuntu's passt package
+          # ships an AppArmor profile confining the binary to a fixed set
+          # of paths that does not include libguestfs's per-run directory,
+          # so the kernel denies that write outright - a known
+          # passt/libguestfs AppArmor interaction, not a libguestfs or
+          # workflow bug. Unloading the profile (rather than patching it)
+          # is sufficient here because this appliance-side passt only
+          # serves virt-customize's own transient network, never the
+          # target VM's; `|| true` keeps this a no-op when AppArmor is
+          # already inactive.
+          sudo apparmor_parser -R /etc/apparmor.d/usr.bin.passt 2>/dev/null || true
+
           cp "${{ runner.temp }}/ubuntu-cloud.img" "${{ runner.temp }}/ubuntu-cloud-marked.img"
 
           MARKER_TOKEN="$(openssl rand -hex 16)"

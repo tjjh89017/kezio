@@ -296,6 +296,21 @@ jobs:
           sudo apt-get install -y --no-install-recommends libguestfs-tools
           sudo apt-get install -y --no-install-recommends passt
 
+          # Same technique e2e-kubevirt-reusable.yml uses: verbose
+          # libguestfs logs showed passt binding its UNIX socket fine,
+          # then dying with "PID file open: Permission denied"
+          # ("libguestfs error: passt exited with status 1") while writing
+          # --pid into libguestfs's per-run /run/user/<uid>/libguestfs*/
+          # directory. Ubuntu's passt package ships an AppArmor profile
+          # confining the binary to a fixed set of paths that does not
+          # include that per-run directory, so the kernel denies the
+          # write outright - a known passt/libguestfs AppArmor
+          # interaction. Unloading the profile is sufficient since this
+          # appliance-side passt only serves virt-customize's own
+          # transient network; `|| true` keeps this a no-op when AppArmor
+          # is already inactive.
+          sudo apparmor_parser -R /etc/apparmor.d/usr.bin.passt 2>/dev/null || true
+
           cp "${{ runner.temp }}/ubuntu-cloud.img" "${{ runner.temp }}/ubuntu-cloud-marked.img"
 
           MARKER_TOKEN="$(openssl rand -hex 16)"
