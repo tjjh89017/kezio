@@ -2322,6 +2322,14 @@ jobs:
 
       - name: "BMC power cycle: PowerOn through the BMC (spec.online=true) and reconnect"
         if: ${{ inputs.bmc_mode }}
+        # This step's own tail already re-runs the layer 2 assertion (the
+        # same AgentConnected poll loop as "Wait for layer 2 (boot)..."
+        # above, 600s bound - proving the deployed disk survived the
+        # BMC-driven off/on cycle and booted again, not just that the VM
+        # went "Running"), so "Verify layer 3 again after the BMC power
+        # cycle" below only needs to add the marker-content re-read - re-
+        # waiting for AgentConnected a second time here would just
+        # duplicate this step's own wait.
         run: |
           set -euo pipefail
           kubectl patch machine "${TARGET_VM_NAME}" -n kezio-system --type=merge -p '{"spec":{"online":true}}'
@@ -2354,6 +2362,52 @@ jobs:
             fi
             sleep 5
           done
+
+      - name: "Verify layer 3 again after the BMC power cycle: read the marker file back through QGA and compare"
+        if: ${{ inputs.bmc_mode }}
+        # Same QGA guest-file-open/read/close mechanism as "Verify layer 3
+        # (content)..." above, re-run after the BMC-driven PowerOff/PowerOn
+        # cycle: the previous check only proved the marker survived the
+        # initial deploy (partclone capture -> BitTorrent -> partclone
+        # restore); this proves the deployed disk's content is still intact
+        # after a full BMC off/on cycle, not merely that the VM came back
+        # "Running" and the agent reconnected. The virt-launcher pod is
+        # looked up fresh rather than reusing the earlier launcher_pod
+        # variable - KubeVirt/virt-launcher lifecycle ties one pod per VMI
+        # run, so the PowerOff/PowerOn above has already replaced it with a
+        # new pod.
+        run: |
+          set -euo pipefail
+          launcher_pod="$(kubectl get pods -n kezio-system -l "kubevirt.io/vm=${TARGET_VM_NAME}" -o json \
+            | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)][0].metadata.name')"
+          if [ -z "${launcher_pod}" ] || [ "${launcher_pod}" = "null" ]; then
+            echo "::error::no non-terminating virt-launcher pod found for VM ${TARGET_VM_NAME}" >&2
+            exit 1
+          fi
+          domain="kezio-system_${TARGET_VM_NAME}"
+
+          qga_exec() {
+            kubectl exec -n kezio-system "${launcher_pod}" -c compute -- \
+              virsh qemu-agent-command "${domain}" "$1"
+          }
+
+          open_reply="$(qga_exec "{\"execute\":\"guest-file-open\",\"arguments\":{\"path\":\"${MARKER_PATH}\",\"mode\":\"r\"}}")"
+          handle="$(jq -r '.return' <<<"${open_reply}")"
+          if [ "${handle}" = "null" ] || [ -z "${handle}" ]; then
+            echo "::error::guest-file-open on ${MARKER_PATH} failed (post-BMC-power-cycle): ${open_reply}" >&2
+            exit 1
+          fi
+
+          read_reply="$(qga_exec "{\"execute\":\"guest-file-read\",\"arguments\":{\"handle\":${handle},\"count\":4096}}")"
+          qga_exec "{\"execute\":\"guest-file-close\",\"arguments\":{\"handle\":${handle}}}" >/dev/null
+
+          marker_content="$(jq -r '.return["buf-b64"]' <<<"${read_reply}" | base64 -d | tr -d '\n')"
+          echo "marker content (post-BMC-power-cycle): ${marker_content}"
+
+          if [ "${marker_content}" != "${MARKER_TOKEN}" ]; then
+            echo "::error::marker file content mismatch after the BMC power cycle: guest has ${marker_content@Q}, expected ${MARKER_TOKEN@Q}" >&2
+            exit 1
+          fi
 
       - name: Dump diagnostics on failure
         if: failure()
