@@ -106,7 +106,7 @@ jobs:
         # consume copy is the GitHub Release asset set uploaded below;
         # config/boot-artifacts' fetch.sh and everything else that
         # consumes these artifacts fetches from there, never from here.
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: kezio-live-image
           path: |

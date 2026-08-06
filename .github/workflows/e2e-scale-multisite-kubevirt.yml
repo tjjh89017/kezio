@@ -1171,7 +1171,7 @@ jobs:
         # activity instead of only ever validating this path when it is
         # hardest to also diagnose).
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-diagnostics-${{ github.job }}
           path: |

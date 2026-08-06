@@ -2622,7 +2622,7 @@ jobs:
         # if-no-files-found: ignore, since the two diagnostics-*-dump.log
         # files above only exist on a failed run at all.
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-diagnostics-${{ github.job }}-${{ inputs.target_vm_name }}
           path: |
