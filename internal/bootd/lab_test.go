@@ -32,8 +32,9 @@ import (
 // TestDnsmasqLab runs the real Dnsmasq supervisor against a real
 // dnsmasq binary, driven by an external harness over a control FIFO.
 // It is not a CI test: it is the in-repo entry point the containerized
-// packet lab (a netns topology with a PXE-shaped test client) uses to
-// exercise the exact code paths production runs - config rendering,
+// packet lab (a netns topology with a PXE-shaped test client - see
+// TestDnsmasqLabClient and hack/bootd-packet-lab.sh) uses to exercise
+// the exact code paths production runs - config rendering,
 // supervision, hostsfile rewrite + SIGHUP - with real packets on real
 // sockets, holding only the capabilities the pod grants (uid 0 with
 // the three-capability bounding set, per config/bootd's deployment).

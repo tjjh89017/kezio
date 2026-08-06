@@ -45,7 +45,12 @@ the default.
 This no-relay shape is exercised by the in-repo packet lab
 (`internal/bootd/lab_test.go`'s `TestDnsmasqLab`, `BOOTD_LAB=1`), which
 runs the real dnsmasq supervisor against a real netns topology with
-`BOOTD_LAB_RELAY` left unset. kezio's KubeVirt-based GitHub Actions
+`BOOTD_LAB_RELAY` left unset - driven end to end by
+`hack/bootd-packet-lab.sh`, which also sends a real PXE-shaped
+DHCPDISCOVER from the far end of the veth pair
+(`internal/bootd/lab_client_test.go`'s `TestDnsmasqLabClient`) and
+asserts an enrolled MAC receives a proxyDHCP DHCPOFFER while a denied
+one receives nothing at all. kezio's KubeVirt-based GitHub Actions
 lanes do not separately exercise this no-relay shape end to end - see
 section 8 for what those lanes cover instead.
 
@@ -116,8 +121,11 @@ Setup:
 
 This mode is exercised by the same in-repo packet lab as scenario 1
 (`internal/bootd/lab_test.go`'s `TestDnsmasqLab`, with
-`BOOTD_LAB_LEASE_MODE=1`), and is not covered by a KubeVirt e2e lane -
-see section 8 for what those lanes cover instead.
+`BOOTD_LAB_LEASE_MODE=1`, also driven by `hack/bootd-packet-lab.sh`):
+an enrolled MAC's DHCPDISCOVER gets back a DHCPOFFER carrying a real,
+non-zero leased address and the boot filename; a denied MAC gets
+nothing, the same MAC-gate outcome as scenario 1. It is not covered by
+a KubeVirt e2e lane - see section 8 for what those lanes cover instead.
 
 ## 2. Network prerequisites the operator owns
 
@@ -477,18 +485,24 @@ file needed a labeling change for this review; `docs/bmc.md` gained the
 `redfish+http://` note above since that gap was in the documentation,
 not in the workflow's own comments.
 
-### Recommendation for later (not done this cycle)
+### Coverage note: no-relay and lease mode are packet-lab-proven, not KubeVirt-lane-proven
 
-Add a dedicated assertion (in the packet lab, or a future lightweight
-CI lane) that scenario 1 - proxyDHCP alongside an on-segment DHCP
-server, with `BOOTD_DHCP_RELAY_SERVER` unset - completes a full PXE
-boot the same way the existing relay-mode lanes do. Today that shape is
-only covered at the dnsmasq-config-rendering unit-test level
-(`internal/bootd/render_test.go`) and the local packet lab, not by a
-full boot-to-registration KubeVirt run. This is a coverage gap, not a
-correctness bug, and restructuring an existing KubeVirt lane to add it
-was out of scope for this change while GitHub Actions cannot be used to
-verify the result.
+`hack/bootd-packet-lab.sh` gives scenario 1 (no relay) and scenario 3
+(lease mode) a repeatable, real-packet assertion: a fresh netns/veth
+topology, the real dnsmasq supervisor, and a PXE-shaped client sending
+an actual DHCPDISCOVER, asserting the DHCPOFFER (or its absence for a
+denied MAC) each scenario should produce. That closes the gap this
+section used to describe as unassessed beyond a manual check.
+
+What it does **not** claim: this is a DHCP/PXE packet-level assertion,
+not a full boot-to-registration KubeVirt run - it stops once the
+DHCPOFFER is verified, before TFTP, GRUB, the boot config server, or
+agent registration. No KubeVirt e2e lane exercises either scenario
+end to end for that reason; both remain relay-mode-only in CI (see
+"The lanes always exercise relay mode, on-link" above). Extending an
+existing KubeVirt lane (or adding a new one) with a no-relay or
+lease-mode variant of `BOOTD_DHCP_RELAY_SERVER`/`BOOTD_LEASE_MODE`
+remains open work.
 
 ## 9. Fact-check table
 
@@ -514,7 +528,7 @@ verify the result.
 | BMC driver selection by URL scheme; IPMI default port 623 | `docs/bmc.md`, `internal/bmc/ipmi/ipmi.go` |
 | Secure Boot chain and CI gap | `docs/secure-boot.md` |
 | CI's existing-dhcp fixture always sets `BOOTD_DHCP_RELAY_SERVER`, even on-link | `.github/actions/deploy-existing-dhcp/action.yml`, `.github/workflows/e2e-kubevirt-reusable.yml` |
-| No-relay shape is covered by the local packet lab, not a KubeVirt e2e lane | `internal/bootd/lab_test.go` |
+| No-relay and lease-mode shapes are covered by the local packet lab's real-packet assertions, not a KubeVirt e2e lane | `internal/bootd/lab_test.go`, `internal/bootd/lab_client_test.go`, `hack/bootd-packet-lab.sh` |
 | `redfish+http://` exists and is documented as a lab/test-only scheme | `internal/bmc/redfish/redfish.go` |
 | KubeVirtBMC's Redfish Service is plain HTTP, reached via `redfish+http://` | `.github/workflows/e2e-kubevirt-reusable.yml` (`BMC_REDFISH_ADDRESS`) |
 | Multi-site lane's data plane is one flat pod network, not isolated per site | `docs/e2e-scale-multisite-kubevirt.md` |
