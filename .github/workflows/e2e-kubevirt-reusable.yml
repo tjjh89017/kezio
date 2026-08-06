@@ -1697,6 +1697,43 @@ jobs:
           EOF
           kubectl wait vmi/"${TARGET_VM_NAME}" -n kezio-system --for=condition=Ready --timeout=180s
 
+      - name: Create the target VM's data disk PVC
+        if: ${{ inputs.bmc_mode }}
+        # bmc_mode's power-cycle step (below) recreates the VMI to
+        # consume KubeVirtBMC's one-shot PXE override, which is the BMC
+        # lane's stand-in for a real power-button press. An emptyDisk
+        # volume does not survive that: KubeVirt recreates it blank on
+        # every VMI, so a real power cycle after deploy wiped the
+        # deployed disk (partitioning, ezio-replicated image, and the
+        # efibootmgr Boot0006 entry finalize wrote all vanished, leaving
+        # the reboot with nothing bootable). Real bare-metal disks are
+        # not wiped by a power cycle, so this PVC - which does survive
+        # VMI recreation - is what makes the BMC lane model that.
+        # storageClassName local-path matches the cluster default these
+        # lanes already rely on (see the store/staging PVCs above).
+        # volumeMode Filesystem, not Block: local-path is a
+        # directory-backed provisioner with no raw block device to hand
+        # out, and KubeVirt presents a Filesystem-mode PVC's disk image
+        # to the guest as the same virtio block device emptyDisk did, so
+        # the guest-visible device (and kezio's serial-based disk
+        # matching) is unchanged.
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: ${TARGET_VM_NAME}-data
+            namespace: kezio-system
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            volumeMode: Filesystem
+            storageClassName: local-path
+            resources:
+              requests:
+                storage: 4Gi
+          EOF
+
       - name: Create the target KubeVirt VirtualMachine, powered off
         if: ${{ inputs.bmc_mode }}
         # `running: false`: unlike the non-bmc_mode path, this VM is
@@ -1764,8 +1801,8 @@ jobs:
                       networkName: kezio-boot-network-vm
                 volumes:
                   - name: data
-                    emptyDisk:
-                      capacity: 4Gi
+                    persistentVolumeClaim:
+                      claimName: ${TARGET_VM_NAME}-data
           EOF
 
       - name: "Assert the VM is off before any Machine is created (the harness did not start it)"
