@@ -45,13 +45,27 @@ kustomize build config/agentserver | kubectl apply -f -
    actually waits on it - set `DEPLOYER=agent` on the same Deployment
    (see `cmd/main.go`'s `deployerFactoryFromEnv`). Leaving `DEPLOYER`
    unset keeps the fake deployer, which never talks to this endpoint.
-5. **Make the Service reachable from the boot network.** Same
-   requirement as `config/bootserver`'s Service: kezio-agent reaches it
-   directly from the target machine's network, so a bare `ClusterIP` is
-   not enough outside a single-cluster test. This Service and the boot
-   config server's are two different Services on two different
-   container ports fronting the same Pod, so each needs its own
-   reachability path patched in (a NodePort, a LoadBalancer, hostNetwork,
-   or a reverse proxy on the boot network) - whatever address this one
-   ends up reachable at is what `BOOT_AGENT_SERVER_URL` (step 2) must
-   name.
+5. **Make the server reachable from the boot network - front it with
+   kezio-bootd.** Same requirement as `config/bootserver`'s Service:
+   kezio-agent reaches it directly from the target machine's network, so
+   a bare `ClusterIP` is not enough outside a single-cluster test. The
+   prescribed way to close that gap is `config/bootd`'s reverse proxy:
+   set `BOOTD_AGENT_UPSTREAM_URL` on `kezio-bootd`'s Deployment to this
+   Service's in-cluster URL (its cluster-DNS name, for example
+   `http://kezio-agent-server.kezio-system.svc.cluster.local:8091` - not
+   its ClusterIP literal, which changes if the Service is ever
+   recreated), and set `BOOT_AGENT_SERVER_URL` (step 2) to **bootd's
+   own** address on the boot segment instead of this Service's - the
+   same bootd address `config/bootserver/README.md` has kezio-agent
+   reach the boot config server through, since one bootd instance
+   proxies both. bootd is already a Multus-attached pod sitting directly
+   on that segment, so it needs no further exposure of its own; every
+   `/agent/...` request it receives reverse-proxies straight to this
+   Service. A production deployment with one provisioning VLAN per site
+   runs one bootd instance per site this way, each proxying to this same
+   cluster-wide Service - see `config/bootd/README.md`'s "Per-site
+   addressing" section for the multisite shape. A site not using bootd's
+   proxy can still patch this Service directly instead (a NodePort, a
+   LoadBalancer, hostNetwork, or its own reverse proxy) and set
+   `BOOT_AGENT_SERVER_URL` to that address; bootd's proxy is the default
+   path, not the only one.

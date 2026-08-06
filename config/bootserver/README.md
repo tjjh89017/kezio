@@ -61,10 +61,25 @@ kustomize build config/bootserver | kubectl apply -f -
      `boot-artifacts-init-patch.yaml` already fetches both binaries into
      that same directory, so this route works with no further overlay
      either.
-2. **Make the Service reachable from the boot network.** `service.yaml`
-   ships as `ClusterIP`, the safe default; GRUB running on firmware
-   cannot reach a ClusterIP from outside the cluster network. Patch it
-   in a further overlay (NodePort, a LoadBalancer, hostNetwork, or a
-   reverse proxy on the boot network) to match however `kezio-bootd`'s
-   segment actually reaches the cluster, and set `BOOT_SERVER_URL`
-   accordingly.
+2. **Make the server reachable from the boot network - front it with
+   kezio-bootd.** `service.yaml` ships as `ClusterIP`, the safe default;
+   GRUB running on firmware cannot reach a ClusterIP from outside the
+   cluster network. The prescribed way to close that gap is
+   `config/bootd`'s reverse proxy: set `BOOTD_BOOT_UPSTREAM_URL` on
+   `kezio-bootd`'s Deployment to this Service's in-cluster URL (its
+   cluster-DNS name, for example
+   `http://kezio-boot-server.kezio-system.svc.cluster.local:8090` - not
+   its ClusterIP literal, which changes if the Service is ever
+   recreated), and set `BOOT_SERVER_URL` here to **bootd's own** address
+   on the boot segment instead of this Service's. bootd is already a
+   Multus-attached pod sitting directly on that segment (see
+   `config/bootd/README.md`'s "Why Multus, not hostNetwork" reasoning),
+   so it needs no further exposure of its own; every `/boot/...` request
+   it receives reverse-proxies straight to this Service. A production
+   deployment with one provisioning VLAN per site runs one bootd
+   instance per site this way, each proxying to this same cluster-wide
+   Service - see `config/bootd/README.md`'s "Per-site addressing"
+   section for the multisite shape. A site not using bootd's proxy can
+   still patch this Service directly instead (NodePort, a LoadBalancer,
+   hostNetwork) and set `BOOT_SERVER_URL` to that address; bootd's proxy
+   is the default path, not the only one.

@@ -92,6 +92,50 @@ server reachable on the segment by other means.
    attachment and, if the segments are on different subnets, its own
    overlay), not by raising this replica count.
 
+## Reverse-proxying the agent and boot config servers
+
+bootd can also front the two in-cluster HTTP APIs a net-booting machine
+needs: `internal/agentserver`'s registration/poll/progress endpoints and
+`internal/bootserver`'s GRUB config and live-artifact endpoints (see
+`config/agentserver/README.md` and `config/bootserver/README.md`). Set
+`BOOTD_AGENT_UPSTREAM_URL` and/or `BOOTD_BOOT_UPSTREAM_URL` to those
+servers' in-cluster base URLs (their Services' cluster-DNS names, for
+example
+`http://kezio-agent-server.kezio-system.svc.cluster.local:8091`) and
+bootd reverse-proxies every `/agent/...` request to the first and every
+`/boot/...` request to the second, listening on `BOOTD_PROXY_ADDR`
+(default: `BOOTD_SERVER_IP` with port 80 - the boot segment's own
+address, not every interface the pod happens to have). Point
+`BOOTD_BOOT_CONFIG_URL` (above) and the agent's `kezio.server=` source
+(`BOOT_SERVER_URL` / `BOOT_AGENT_SERVER_URL`, see those READMEs) at that
+same bootd address instead of a separately-exposed Service, and a
+machine on this boot segment needs exactly one reachable address for the
+whole boot-to-registration flow: this bootd pod's own.
+
+Both upstream URLs are independent and both default to unset - a bootd
+deployment that sets neither behaves exactly as it did before this proxy
+existed, still answering DHCP/PXE/TFTP alone and proxying nothing.
+Enabling one enables only that route prefix; the other is still whatever
+it was before (unproxied, or proxied by a second bootd instance at a
+different site - see "Per-site addressing" below).
+
+## Per-site addressing: production VLANs and multisite deploy the same way
+
+This model scales to a production deployment with one provisioning VLAN
+per site the same way it does in a single-segment lab: each site's bootd
+instance gets its own `BOOTD_SERVER_IP` on its own segment, its own
+`BOOTD_PROXY_ADDR`, and its own copy of `BOOTD_AGENT_UPSTREAM_URL` /
+`BOOTD_BOOT_UPSTREAM_URL` pointing at the (shared, cluster-wide)
+agent/boot Services - there is exactly one `internal/agentserver` and one
+`internal/bootserver` for the whole cluster, but every site's bootd
+reverse-proxies to them independently, so every site's machines still
+only ever need to reach their own local bootd address. Deploying a
+second (or third, ...) `config/bootd` overlay with a different
+`BOOTD_SERVER_IP`/`BOOTD_PROVISIONING_CIDR`/Multus attachment per site,
+each with the proxy env vars above pointing at the same in-cluster
+Services, is the whole multisite story - no per-site copy of the agent
+or boot server itself is needed.
+
 ## UEFI HTTP Boot is not supported
 
 dnsmasq's proxyDHCP engine only answers `PXEClient` requests; a

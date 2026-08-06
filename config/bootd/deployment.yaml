@@ -143,17 +143,50 @@ spec:
             # that server (dhcp-relay); leave unset for proxyDHCP only.
             # - name: BOOTD_DHCP_RELAY_SERVER
             #   value: "REPLACE_WITH_SITE_DHCP_SERVER_IP"
-            # BOOTD_BOOT_CONFIG_URL: SITE-SPECIFIC, the boot config
-            # server's (config/bootserver) base URL as machines on the
-            # boot segment reach it - the same value as that server's
-            # BOOT_SERVER_URL, e.g. "http://192.0.2.1:8090". With it
-            # set, bootd serves the GRUB bootstrap config at
-            # grub/grub.cfg over TFTP, which is what hands the netboot
+            # BOOTD_BOOT_CONFIG_URL: SITE-SPECIFIC, the URL a netbooting
+            # machine fetches its per-MAC GRUB config from. With the
+            # BOOTD_*_UPSTREAM_URL proxy enabled below, this is bootd's
+            # OWN address on the boot segment (BOOTD_SERVER_IP plus
+            # BOOTD_PROXY_ADDR's port, e.g. "http://192.0.2.1:80") -
+            # bootd's own reverse proxy is what actually answers
+            # /boot/grub.cfg-<mac>, forwarding it to the boot config
+            # server (config/bootserver) named by BOOTD_BOOT_UPSTREAM_URL
+            # below. With it set, bootd serves the GRUB bootstrap config
+            # at grub/grub.cfg over TFTP, which is what hands the netboot
             # GRUB image (see hack/live-image/build.sh) off to that
-            # server's per-MAC config; without it, a netbooting machine
-            # loads GRUB and then stops at the grub> prompt.
+            # per-MAC config; without it, a netbooting machine loads GRUB
+            # and then stops at the grub> prompt.
             # - name: BOOTD_BOOT_CONFIG_URL
-            #   value: "REPLACE_WITH_BOOT_SERVER_URL"
+            #   value: "REPLACE_WITH_BOOTD_OWN_URL"
+            # BOOTD_AGENT_UPSTREAM_URL / BOOTD_BOOT_UPSTREAM_URL
+            # (optional, SITE-SPECIFIC once set): the in-cluster base
+            # URLs of internal/agentserver and internal/bootserver (see
+            # config/agentserver's and config/bootserver's own Services),
+            # for example
+            # "http://kezio-agent-server.kezio-system.svc.cluster.local:8091"
+            # and
+            # "http://kezio-boot-server.kezio-system.svc.cluster.local:8090".
+            # Setting either turns on bootd's reverse proxy
+            # (BOOTD_PROXY_ADDR below): every /agent/... request bootd
+            # receives forwards to the first, every /boot/... request to
+            # the second - so a live-booted kezio-agent and a netbooting
+            # machine both reach the whole HTTP surface through this one
+            # bootd address instead of each service needing its own
+            # separate reachability path on the boot segment. Leave both
+            # unset (the default) to keep bootd exactly as before this
+            # proxy existed - it proxies nothing, and something else
+            # (a further overlay) is responsible for making those two
+            # Services reachable from the boot segment.
+            # - name: BOOTD_AGENT_UPSTREAM_URL
+            #   value: "http://kezio-agent-server.kezio-system.svc.cluster.local:8091"
+            # - name: BOOTD_BOOT_UPSTREAM_URL
+            #   value: "http://kezio-boot-server.kezio-system.svc.cluster.local:8090"
+            # BOOTD_PROXY_ADDR (optional): the address the reverse proxy
+            # above listens on, once enabled. Defaults to
+            # BOOTD_SERVER_IP with port 80; override only if that default
+            # collides with something else on the boot segment.
+            # - name: BOOTD_PROXY_ADDR
+            #   value: "REPLACE_WITH_BOOTD_BOOT_NETWORK_IP:80"
             - name: BOOTD_TFTP_DIR
               value: /tftp
           ports:
@@ -163,6 +196,14 @@ spec:
             - name: pxe
               containerPort: 4011
               protocol: UDP
+            # proxy-http: only actually listened on once
+            # BOOTD_AGENT_UPSTREAM_URL or BOOTD_BOOT_UPSTREAM_URL above
+            # is set; harmless to declare unconditionally, the same way
+            # the tftp port below is declared regardless of whether
+            # BOOTD_BOOT_CONFIG_URL is set.
+            - name: proxy-http
+              containerPort: 80
+              protocol: TCP
             - name: tftp
               containerPort: 69
               protocol: UDP
