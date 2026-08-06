@@ -14,8 +14,14 @@ COPY go.mod go.mod
 COPY go.sum go.sum
 RUN go mod download
 
+# The whole api/ and internal/ trees are copied, not just the packages
+# image-service currently imports: a hand-picked subset silently falls
+# out of sync with image-service's actual imports over time (see
+# docker/bootd/Dockerfile's history). Copying the full trees means the
+# build context always has whatever image-service actually needs.
 COPY cmd/image-service/ cmd/image-service/
-COPY internal/imageservice/ internal/imageservice/
+COPY api/ api/
+COPY internal/ internal/
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o image-service ./cmd/image-service
 

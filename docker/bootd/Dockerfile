@@ -16,10 +16,15 @@ COPY go.mod go.mod
 COPY go.sum go.sum
 RUN go mod download
 
+# The whole api/ and internal/ trees are copied, not just the packages
+# bootd currently imports: bootd's own imports change independently of
+# this Dockerfile, and a hand-picked subset silently falls out of sync
+# with them (as happened when the reverse proxy started importing
+# internal/agentapi). Copying the full trees means the build context
+# always has whatever bootd actually needs.
 COPY cmd/bootd/ cmd/bootd/
 COPY api/ api/
-COPY internal/bootd/ internal/bootd/
-COPY internal/bootserver/ internal/bootserver/
+COPY internal/ internal/
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o bootd ./cmd/bootd
 
