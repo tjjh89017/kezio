@@ -201,7 +201,9 @@ env:
 
   # The provisioning L2 segment, same shape as e2e-boot-path-kubevirt.yml.
   PROVISIONING_BRIDGE: kezio-prov0
-  # Three distinct addresses on that segment, kept apart deliberately:
+  # Distinct addresses on that segment, kept apart deliberately (and all
+  # outside the lease server's dhcp-range 192.0.2.10-100 below, so a
+  # leased address can never collide with any of them):
   #   - PROVISIONING_HOST_IP: the runner host's own address on the
   #     bridge. It anchors only the socat TCP forwards for the
   #     boot/agent servers below - it is NOT bootd's address (bootd
@@ -212,10 +214,22 @@ env:
   #     relay giaddr, and the TFTP next-server bootd advertises - so
   #     firmware TFTPs straight into bootd's pod with no host-side
   #     UDP/69 forward in the path.
+  #   - PROVISIONING_TRACKER_NET1_IP / PROVISIONING_SEEDER_NET1_IP: the
+  #     static addresses the kezio-tracker-network / kezio-seeder-network
+  #     NetworkAttachmentDefinitions assign to the opentracker and ezio
+  #     seeder pods' net1. This is the same shape config/seeder/README.md
+  #     prescribes for a real deployment (a routable data-network
+  #     secondary NIC on both pods): the seeder announces to the tracker
+  #     from its own bridge address and every address a .torrent or a
+  #     tracker response carries is on-link for the target VM - the VM
+  #     never needs a route into the cluster's pod network, and no
+  #     NAT/DNAT ever touches the announce path (the no-NAT rule).
   #   - PROVISIONING_CIDR: the whole segment, handed to bootd as
   #     BOOTD_PROVISIONING_CIDR (its proxyDHCP dhcp-range).
   PROVISIONING_HOST_IP: 192.0.2.1/24
   PROVISIONING_BOOTD_NET1_IP: 192.0.2.2/24
+  PROVISIONING_TRACKER_NET1_IP: 192.0.2.4/24
+  PROVISIONING_SEEDER_NET1_IP: 192.0.2.5/24
   PROVISIONING_CIDR: 192.0.2.0/24
   # The stand-in "existing site DHCP server" lives in its own netns
   # behind a routed veth off the runner host (see the "Start a
@@ -685,32 +699,13 @@ jobs:
               sudo nft insert rule inet filter FORWARD iifname "${PROVISIONING_BRIDGE}" oifname "${PROVISIONING_BRIDGE}" accept
           fi
 
-          # Also allow routed traffic between the bridge and the cluster's
-          # pod network, both directions, scoped to the node's pod CIDR.
-          # The target VM's ezio leecher joins the seeder's swarm by
-          # connecting straight to the seeder pod's IP:16881 (the address
-          # the tracker hands out - see config/seeder/README.md's no-NAT
-          # rule) and announces to the opentracker Service's ClusterIP,
-          # which kube-proxy's PREROUTING DNATs to the tracker pod before
-          # this chain sees it. Both flows arrive on the bridge and leave
-          # into the pod network (and back), and the FORWARD policy is
-          # DROP once the cluster is up (run 31067834491's diagnostics
-          # dump shows the chain), so without these two accepts the swarm
-          # traffic dies here. Same idempotent -C-before--I shape as the
-          # bridge-to-bridge rule above.
-          pod_cidr="$(kubectl get node -o jsonpath='{.items[0].spec.podCIDR}')"
-          if command -v iptables >/dev/null 2>&1; then
-            sudo iptables -C FORWARD -i "${PROVISIONING_BRIDGE}" -d "${pod_cidr}" -j ACCEPT 2>/dev/null || \
-              sudo iptables -I FORWARD -i "${PROVISIONING_BRIDGE}" -d "${pod_cidr}" -j ACCEPT
-            sudo iptables -C FORWARD -o "${PROVISIONING_BRIDGE}" -s "${pod_cidr}" -j ACCEPT 2>/dev/null || \
-              sudo iptables -I FORWARD -o "${PROVISIONING_BRIDGE}" -s "${pod_cidr}" -j ACCEPT
-          fi
-          if command -v nft >/dev/null 2>&1 && sudo nft list table inet filter >/dev/null 2>&1; then
-            sudo nft list chain inet filter FORWARD 2>/dev/null | grep -q "iifname \"${PROVISIONING_BRIDGE}\" ip daddr ${pod_cidr} accept" || \
-              sudo nft insert rule inet filter FORWARD iifname "${PROVISIONING_BRIDGE}" ip daddr "${pod_cidr}" accept
-            sudo nft list chain inet filter FORWARD 2>/dev/null | grep -q "oifname \"${PROVISIONING_BRIDGE}\" ip saddr ${pod_cidr} accept" || \
-              sudo nft insert rule inet filter FORWARD oifname "${PROVISIONING_BRIDGE}" ip saddr "${pod_cidr}" accept
-          fi
+          # No bridge<->pod-network accepts, on purpose: the target VM's
+          # whole world lives on this bridge. Every peer it talks to -
+          # bootd's net1, the opentracker and ezio-seeder pods' net1
+          # (Multus-attached below with static bridge addresses), and the
+          # host's own socat forwards - is a port on this same bridge, so
+          # the port-to-port ACCEPT above covers all of it and the VM
+          # needs no route into the cluster's pod network at all.
 
       - name: Fill UDP checksums for PXE DHCP crossing the provisioning bridge
         # The target VM's virtio-net leaves UDP checksums to be filled in
@@ -816,23 +811,26 @@ jobs:
             sudo nft list chain inet filter FORWARD 2>/dev/null | grep -q "iifname \"kezio-lease0\" oifname \"${PROVISIONING_BRIDGE}\" accept" || \
               sudo nft insert rule inet filter FORWARD iifname "kezio-lease0" oifname "${PROVISIONING_BRIDGE}" accept
           fi
-          # dhcp-option 3 (router): the runner host's own bridge address,
-          # explicitly. Left to its default on a relayed request, dnsmasq
-          # advertises giaddr as the router - bootd's net1 (192.0.2.2),
-          # observed as "option: 3 router 192.0.2.2" in run 31067834491's
-          # host-dnsmasq.log - and bootd's pod does not forward, so every
-          # off-subnet packet the VM ever sends (the ezio leecher's
-          # tracker announce and its BT connection to the seeder pod's
-          # 10.42.x.x:16881, see "Deploy image-service+seeder..." below)
-          # black-holes inside the bootd pod. The runner host IS this
-          # segment's real gateway: it owns the bridge address and routes
-          # into the cluster's pod network.
+          # dhcp-option=3 with no value: suppress the router option
+          # entirely. Left unset, dnsmasq defaults a relayed request's
+          # router to giaddr - bootd's net1 (192.0.2.2), observed as
+          # "option: 3 router 192.0.2.2" in run 31067834491's
+          # host-dnsmasq.log - a black hole, since bootd's pod does not
+          # forward. But the VM needs no router at all: everything it
+          # ever talks to is on-link on this /24 - bootd's net1
+          # (TFTP/DHCP), the host's socat forwards on 192.0.2.1
+          # (8090/8091), the opentracker pod's net1 (the announce URL)
+          # and the ezio seeder pod's net1 (the BT peer address the
+          # tracker hands out), both Multus-attached to this same bridge
+          # (see "Deploy image-service+seeder..." below). Handing out no
+          # default route makes that a structural guarantee: the VM
+          # cannot route off the provisioning segment even by accident.
           cat <<EOF | sudo tee /etc/kezio-host-dnsmasq.conf
           port=0
           bind-interfaces
           listen-address=${LEASE_SERVER_IP}
           dhcp-range=192.0.2.10,192.0.2.100,255.255.255.0,12h
-          dhcp-option=option:router,${PROVISIONING_HOST_IP%%/*}
+          dhcp-option=3
           no-ping
           log-dhcp
           log-facility=${RUNNER_TEMP}/host-dnsmasq.log
@@ -1006,7 +1004,7 @@ jobs:
           kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
 
       - name: Create the provisioning NetworkAttachmentDefinitions
-        # TWO NADs on the SAME bridge, split on purpose:
+        # FOUR NADs on the SAME bridge, split on purpose:
         #
         # kezio-boot-network (static ipam) is for the bootd pod ONLY.
         # bootd's net1 must carry a fixed address
@@ -1016,6 +1014,25 @@ jobs:
         # the TFTP next-server. The runner host keeps
         # PROVISIONING_HOST_IP on the same bridge, so the two never
         # collide.
+        #
+        # kezio-tracker-network / kezio-seeder-network (static ipam) are
+        # for the opentracker and ezio-seeder pods, one each, so every
+        # swarm participant sits directly on this bridge with a fixed
+        # address (PROVISIONING_TRACKER_NET1_IP /
+        # PROVISIONING_SEEDER_NET1_IP) - the e2e realization of
+        # config/seeder/README.md's data-network requirement (the
+        # commented-out k8s.v1.cni.cncf.io/networks annotation both
+        # production Deployments carry; see
+        # networkattachmentdefinition.example.yaml). The seeder's
+        # announce then leaves its own net1 (the static /24 gives it the
+        # connected route) with its bridge address as the source, and the
+        # tracker registers it at an address that is on-link for the
+        # target VM - announce IP == reachable IP, no NAT anywhere (the
+        # no-NAT rule). One NAD per pod because the static ipam plugin
+        # hands every attaching pod the same address; a shared NAD would
+        # assign duplicates. No tuning chain either: unlike bootd's net1,
+        # these carry ordinary unicast within the /24, which the
+        # connected route already satisfies under any rp_filter setting.
         #
         # kezio-boot-network-vm ("ipam": {}) is for the target VM's
         # provisioning NIC. The VM must NOT attach the static-ipam NAD:
@@ -1076,6 +1093,35 @@ jobs:
                 ]
               }
           EOF
+          for nad_spec in "kezio-tracker-network:${PROVISIONING_TRACKER_NET1_IP}" "kezio-seeder-network:${PROVISIONING_SEEDER_NET1_IP}"; do
+            nad_name="${nad_spec%%:*}"
+            nad_addr="${nad_spec#*:}"
+            cat <<EOF | kubectl apply -f -
+          apiVersion: k8s.cni.cncf.io/v1
+          kind: NetworkAttachmentDefinition
+          metadata:
+            name: ${nad_name}
+            namespace: kezio-system
+          spec:
+            config: |
+              {
+                "cniVersion": "0.3.1",
+                "name": "${nad_name}",
+                "plugins": [
+                  {
+                    "type": "bridge",
+                    "bridge": "${PROVISIONING_BRIDGE}",
+                    "ipam": {
+                      "type": "static",
+                      "addresses": [
+                        {"address": "${nad_addr}"}
+                      ]
+                    }
+                  }
+                ]
+              }
+          EOF
+          done
           # No tuning chain here: the VM's traffic is bridged at L2
           # straight through virt-launcher's pod into the guest, so the
           # pod netns's IP-layer reverse-path filter never sees it.
@@ -1135,40 +1181,61 @@ jobs:
           cd ../..
           bin/kustomize build config/e2e-deploy-path | kubectl apply -f -
 
-          # SEEDER_TRACKER_URL uses the opentracker Service's ClusterIP
-          # as a literal, not its cluster-DNS name and not a socat
-          # forward on the bridge address (the way 8090/8091 are
-          # forwarded below). This one URL ends up in every .torrent's
-          # announce field for BOTH swarm sides - the seeder reconciler's
-          # torrents and the .torrent bytes the agent server hands the
-          # target VM's leecher - and opentracker registers each peer at
-          # its announce's source address:
-          #   - The DNS name resolves fine in-cluster but the VM has no
-          #     cluster DNS, so its leecher could never announce at all
-          #     (run 31067834491: WritingContent stalled at 0%, the
-          #     tracker's only peer was the seeder). The ClusterIP
-          #     literal is the same address the name resolves to, so the
-          #     seeder's announce path is unchanged, and the VM can
-          #     reach it by routing: its default gateway is the runner
-          #     host (dhcp-option:router above), where kube-proxy's
-          #     PREROUTING DNAT applies to forwarded traffic too.
-          #   - A socat forward would re-originate the seeder's announce
-          #     from the host, registering the seeder at the host's
-          #     cluster-side address instead of its pod IP:16881 - the
-          #     exact announce!=reachable mismatch config/seeder/
-          #     README.md's no-NAT rule forbids - and the leecher would
-          #     be handed a dead peer address.
-          # Read before the `kubectl set env` below so the controller
-          # (seeder reconciler + agent server) starts with the final URL
-          # and no restart is needed; the Service already exists (the
-          # apply above created it) and its ClusterIP is immutable.
-          tracker_clusterip="$(kubectl -n kezio-system get svc kezio-opentracker -o jsonpath='{.spec.clusterIP}')"
+          # Attach the opentracker and ezio-seeder pods to the
+          # provisioning bridge, each through its own static-ipam NAD
+          # (created in "Create the provisioning
+          # NetworkAttachmentDefinitions" above - see that step's comment
+          # for the full swarm-on-the-bridge reasoning). This is the
+          # exact annotation config/seeder's production Deployments carry
+          # commented out, applied here as a workflow patch so the
+          # production manifests keep their site-neutral defaults. Same
+          # strategic-merge shape as bootd's attachment patch below (and
+          # for the same reason: a JSON Patch on the annotations path
+          # would clobber the whole map). Patched before the rollout
+          # waits below, so those waits cover the re-rolled,
+          # bridge-attached pods.
+          kubectl -n kezio-system patch deployment/kezio-opentracker --type=strategic -p='{
+            "spec":{"template":{"metadata":{"annotations":{"k8s.v1.cni.cncf.io/networks":"kezio-tracker-network"}}}}
+          }'
+          kubectl -n kezio-system patch deployment/kezio-ezio-seeder --type=strategic -p='{
+            "spec":{"template":{"metadata":{"annotations":{"k8s.v1.cni.cncf.io/networks":"kezio-seeder-network"}}}}
+          }'
 
+          # SEEDER_TRACKER_URL is the opentracker pod's own bridge
+          # address (its Multus net1, just attached above) - not the
+          # kezio-opentracker Service's ClusterIP, not a cluster-DNS
+          # name, and not a socat forward on the host's bridge address.
+          # This one URL ends up in every .torrent's announce field for
+          # BOTH swarm sides - the seeder reconciler's torrents and the
+          # .torrent bytes the agent server hands the target VM's
+          # leecher - and opentracker registers each peer at its
+          # announce's source address, so both properties below are
+          # load-bearing:
+          #   - The VM reaches it on-link: 192.0.2.4 is on the VM's own
+          #     /24, no gateway, no cluster DNS, and no route into the
+          #     pod network needed (a ClusterIP literal - the previous
+          #     shape - forced exactly that route, plus kube-proxy DNAT).
+          #   - The seeder's announce leaves its own net1 with source
+          #     192.0.2.5 (the connected route its static /24 installs),
+          #     so the tracker registers the seeder at the one address
+          #     the VM's leecher can actually connect to on port 16881 -
+          #     announce IP == reachable IP, nothing NATs the path in
+          #     either direction (config/seeder/README.md's no-NAT
+          #     rule). A socat hop on 6969 would re-originate the
+          #     announce from the host and break exactly this.
+          # opentracker binds 0.0.0.0 by default (its -i flag exists to
+          # narrow that; config/seeder/opentracker-deployment.yaml passes
+          # only -p 6969), so it answers on net1 with no extra config -
+          # the curl below proves it from the host's own bridge address.
+          # Set in the same `kubectl set env` as everything else, before
+          # the rollout waits, so the controller (seeder reconciler +
+          # agent server) starts with the final URL and never needs a
+          # restart.
           kubectl -n kezio-system set env deployment/kezio-controller-manager \
             INGEST_IMAGE="${INGEST_IMG}" \
             INGEST_STORE_PVC=kezio-store \
             INGEST_STAGING_PVC=kezio-image-service-staging \
-            SEEDER_TRACKER_URL="http://${tracker_clusterip}:6969/announce" \
+            SEEDER_TRACKER_URL="http://${PROVISIONING_TRACKER_NET1_IP%%/*}:6969/announce" \
             SEEDER_STORE_ROOT=/store \
             SEEDER_SERVICE_NAMESPACE=kezio-system \
             SEEDER_SERVICE_NAME=kezio-ezio-seeder \
@@ -1194,14 +1261,40 @@ jobs:
             kubectl rollout status deployment/"${d}" -n kezio-system --timeout=180s
           done
 
+          # Fail fast if either swarm pod's Multus attachment did not
+          # actually happen - same reasoning (and the same
+          # non-terminating-pod selection) as bootd's network-status
+          # check below: the patched annotation only records the
+          # *request*, and a CNI ADD failure leaves the pod running
+          # normally on eth0 alone, which would only surface 20+ minutes
+          # later as a leech stalled at 0%.
+          for spec in "opentracker:kezio-tracker-network" "ezio-seeder:kezio-seeder-network"; do
+            component="${spec%%:*}"
+            nad_name="${spec#*:}"
+            pod_name="$(kubectl -n kezio-system get pods -l app.kubernetes.io/component="${component}" -o json \
+              | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)][0].metadata.name')"
+            if [ -z "${pod_name}" ] || [ "${pod_name}" = "null" ]; then
+              echo "::error::no non-terminating ${component} pod found" >&2
+              exit 1
+            fi
+            network_status="$(kubectl -n kezio-system get pod "${pod_name}" \
+              -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}')"
+            if ! grep -q "${nad_name}" <<<"${network_status}"; then
+              echo "::error::${component} pod ${pod_name} has no ${nad_name} attachment in its network-status; got: ${network_status}" >&2
+              exit 1
+            fi
+          done
+
           # Same early-failure shape as the socat forwards' curl check
-          # below: prove the tracker actually answers HTTP on the
-          # ClusterIP baked into the announce URL. No -f: an HTTP error
-          # body (opentracker answers a parameterless /announce with a
+          # below: prove the tracker actually answers HTTP on its bridge
+          # address - the one baked into the announce URL above -
+          # reached from the host's own port on the same bridge, the
+          # same L2 path the VM will use. No -f: an HTTP error body
+          # (opentracker answers a parameterless /announce with a
           # bencoded failure) still proves TCP+HTTP reachability; only a
           # connect failure should fail the job here.
-          if ! curl -s -o /dev/null --max-time 10 "http://${tracker_clusterip}:6969/announce"; then
-            echo "::error::opentracker not reachable at ${tracker_clusterip}:6969 (the announce URL every .torrent carries)" >&2
+          if ! curl -s -o /dev/null --max-time 10 "http://${PROVISIONING_TRACKER_NET1_IP%%/*}:6969/announce"; then
+            echo "::error::opentracker not reachable at ${PROVISIONING_TRACKER_NET1_IP%%/*}:6969 on the provisioning bridge (the announce URL every .torrent carries)" >&2
             exit 1
           fi
 
@@ -1249,8 +1342,10 @@ jobs:
         # forwarded this way: a socat hop would re-originate the
         # seeder's announce from the host and register the seeder at
         # the wrong address (see the SEEDER_TRACKER_URL comment in the
-        # deploy step above). HTTP is announce-source-agnostic, so 8090/
-        # 8091 have no such constraint and socat is fine for them.
+        # deploy step above) - which is why the tracker and seeder pods
+        # sit on the bridge themselves, via their own Multus
+        # attachments, instead. HTTP is announce-source-agnostic, so
+        # 8090/8091 have no such constraint and socat is fine for them.
         run: |
           set -euo pipefail
           command -v socat >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq socat)
