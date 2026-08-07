@@ -162,7 +162,7 @@ jobs:
         run: |
           {
             echo "## Boot-artifacts staging probe"
-            echo "- expected outcome: deployment/kezio-controller-manager becomes Ready with all six artifacts present"
+            echo "- expected outcome: deployment/kezio-controller-manager becomes Ready with the fetched boot artifacts present"
           } >>"${GITHUB_STEP_SUMMARY}"
 
       - name: Dump diagnostics on failure

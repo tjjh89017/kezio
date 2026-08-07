@@ -16,9 +16,13 @@ description: >-
   plumbing in one place instead of three.
 
   expect-ready controls what this action asserts: true (the default)
-  waits for the rollout and confirms all six boot artifacts are present
-  and readable in the running manager container; false waits instead for
-  the initContainer to report an image-pull failure and treats that as
+  waits for the rollout and confirms the boot artifacts fetch-boot-artifacts
+  copies (vmlinuz, initrd.img, filesystem.squashfs, manifest.json - not
+  shimx64.efi/grubx64.efi, which bootd's own initContainer fetches
+  separately) are present and non-empty on the node, read straight out of
+  the pod's emptyDir rather than through `kubectl exec` (the manager image
+  is distroless and has no shell or `test` to exec); false waits instead
+  for the initContainer to report an image-pull failure and treats that as
   success - the mode a probe run uses to prove a suspected regression
   still reproduces.
 
@@ -37,18 +41,24 @@ inputs:
     description: >-
       Label the namespace pod-security.kubernetes.io/enforce=restricted
       before deploying, the same label test/e2e/e2e_test.go's BeforeAll
-      applies for the always-on Go e2e suite - the KubeVirt lanes that
-      deploy by hand (unlike that suite) currently skip this label
-      entirely, so the numeric-UID/restricted-PSA contract
-      docker/boot-artifacts/Dockerfile and the initContainer's
-      securityContext exist for goes untested there. Default true so a
-      probe run genuinely exercises that contract.
+      applies for the always-on Go e2e suite. The real KubeVirt lanes
+      label the namespace enforce=privileged instead, because bootd's
+      dnsmasq needs NET_ADMIN/NET_RAW - outside both the restricted and
+      baseline PSA profiles. This action never deploys bootd (it only
+      wires the manager's own fetch-boot-artifacts initContainer), so
+      that NET_ADMIN/NET_RAW need does not apply here, and restricted
+      stays the stricter, deliberate choice: it is the only place that
+      exercises the numeric-UID/restricted-PSA contract
+      docker/boot-artifacts/Dockerfile and this initContainer's
+      securityContext exist for, which the by-hand KubeVirt lanes skip
+      entirely under enforce=privileged. Default true so a probe run
+      genuinely exercises that contract.
     required: false
     default: "true"
   expect-ready:
     description: >-
-      true asserts the rollout succeeds and all six artifacts are
-      readable in the manager container. false asserts the
+      true asserts the rollout succeeds and the fetched boot artifacts
+      are present and non-empty in the pod's emptyDir. false asserts the
       fetch-boot-artifacts initContainer instead reaches an image-pull
       failure - the mode that proves a suspected regression reproduces.
     required: false
@@ -173,20 +183,47 @@ runs:
         kubectl -n "${NAMESPACE}" describe pod "${reproduced}"
         echo "pod-name=${reproduced}" >> "$GITHUB_OUTPUT"
 
-    - name: Verify all six boot artifacts are present and readable in the manager container
+    - name: Verify the fetched boot artifacts are present and readable in the shared emptyDir
       if: ${{ inputs.expect-ready == 'true' }}
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
         POD_NAME: ${{ steps.resolve-pod.outputs.pod-name }}
+      # `kubectl exec -c manager -- test` cannot be the checker: the
+      # manager image is distroless, so `test` doesn't exist in it and
+      # every exec fails with "executable file not found in $PATH" -
+      # indistinguishable, to a script that only checks the exit code,
+      # from the artifact itself being missing. Both callers of this
+      # action run their own single-node RKE2 on the runner that already
+      # executes this step, so the emptyDir kubelet mounted into the pod
+      # is a plain host path this step can stat directly with tools (sudo,
+      # test, find) guaranteed to exist here - no in-container tooling
+      # assumed, so a real absence and a broken checker cannot be
+      # confused.
       run: |
         set -euo pipefail
-        for f in vmlinuz initrd.img filesystem.squashfs shimx64.efi grubx64.efi manifest.json; do
-          if ! kubectl -n "${NAMESPACE}" exec "${POD_NAME}" -c manager -- test -r "/boot-artifacts/${f}"; then
-            echo "::error::/boot-artifacts/${f} is missing or unreadable in the manager container of pod ${POD_NAME}" >&2
-            kubectl -n "${NAMESPACE}" exec "${POD_NAME}" -c manager -- ls -la /boot-artifacts || true
+        pod_uid="$(kubectl -n "${NAMESPACE}" get pod "${POD_NAME}" -o jsonpath='{.metadata.uid}')"
+        if [ -z "${pod_uid}" ]; then
+          echo "::error::could not resolve metadata.uid for pod ${POD_NAME} - cannot locate its emptyDir on the node, so artifact presence was NOT checked" >&2
+          exit 1
+        fi
+        artifacts_dir="/var/lib/kubelet/pods/${pod_uid}/volumes/kubernetes.io~empty-dir/boot-artifacts"
+        if ! sudo test -d "${artifacts_dir}"; then
+          echo "::error::${artifacts_dir} does not exist on the node - the boot-artifacts emptyDir was never mounted, so artifact presence was NOT checked" >&2
+          exit 1
+        fi
+        # config/e2e-boot-path/boot-artifacts-init-patch.yaml's own
+        # fetch-boot-artifacts cp list - shimx64.efi/grubx64.efi are
+        # deliberately absent here, copied instead by bootd's own
+        # initContainer (config/bootd/deployment.yaml), so checking for
+        # them against the manager's emptyDir would report a permanent,
+        # by-design "missing" that has nothing to do with this probe.
+        for f in vmlinuz initrd.img filesystem.squashfs manifest.json; do
+          if ! sudo test -s "${artifacts_dir}/${f}"; then
+            echo "::error::${artifacts_dir}/${f} is missing or empty" >&2
+            sudo ls -la "${artifacts_dir}" || true
             exit 1
           fi
         done
-        echo "All six boot artifacts are present and readable under /boot-artifacts in ${POD_NAME}'s manager container."
-        kubectl -n "${NAMESPACE}" exec "${POD_NAME}" -c manager -- ls -la /boot-artifacts
+        echo "All fetched boot artifacts are present and non-empty in ${artifacts_dir} (pod ${POD_NAME})."
+        sudo ls -la "${artifacts_dir}"
