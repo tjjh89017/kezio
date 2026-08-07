@@ -152,7 +152,7 @@ on:
           (see .github/actions/deploy-existing-dhcp). Deliberately a
           different, pinned third-party image from kezio-bootd's own -
           the two dnsmasq instances must stay distinguishable in logs
-          and pcap.
+          bundle.
         required: false
         type: string
         default: "jpillora/dnsmasq:1.1@sha256:78a9c6711031a557d9c6a79a0b6e060c4ac09de3a8755c78d690acb55b4ccd15"
@@ -451,7 +451,7 @@ jobs:
         # Multus-attached address, and none of them ever addresses this
         # one - see that variable's own comment for why it exists
         # anyway (the "Deploy kezio-bootd" step's post-deploy curl
-        # probe). tcpdump (below) captures on the bridge device
+        # probe).
         # regardless of whether it carries an address.
         run: |
           set -euo pipefail
@@ -645,24 +645,6 @@ jobs:
           else
             sudo ethtool -K "${PROVISIONING_BRIDGE}" tx off || true
           fi
-
-      - name: Start capturing the provisioning bridge (tcpdump)
-        # Definitive instrumentation regardless of whether the checksum
-        # fix above is the actual/only cause: capture every DHCP/TFTP
-        # frame that crosses the bridge, from before the target VM even
-        # exists through however this job ends, so a future failure has
-        # the real wire contents (including whether the checksum field
-        # is actually zero/invalid) to look at instead of only inference
-        # from the FORWARD counters. Backgrounded the same way the
-        # console capture below is; `|| true` on both the install and the
-        # capture start so a runner without tcpdump (or a permissions
-        # hiccup) never fails the job over an optional diagnostic.
-        run: |
-          set -euo pipefail
-          sudo apt-get install -y --no-install-recommends tcpdump || true
-          sudo -- sh -c "nohup tcpdump -i '${PROVISIONING_BRIDGE}' -w '${RUNNER_TEMP}/bridge.pcap' \
-            udp port 67 or port 68 or port 69 or tcp port 80 \
-            >/tmp/tcpdump-bridge.log 2>&1 &"
 
       - name: Install local-path-provisioner and mark it the default StorageClass
         # RKE2 ships no default StorageClass (k3s bundled local-path by
@@ -1224,73 +1206,6 @@ jobs:
           bootd-ip: ${{ env.PROVISIONING_BOOTD_NET1_IP }}
           expected-commit: ${{ github.sha }}
           build-boot-artifacts: ${{ inputs.build_boot_artifacts }}
-
-      - name: Start capturing bootd's pod network namespace (nsenter tcpdump on net1)
-        # bridge.pcap (started above) only proves a frame crossed
-        # kezio-prov0's ports on the HOST side - it cannot see whether
-        # that frame then actually entered bootd's own network namespace
-        # over the Multus veth, since that boundary and the kernel's
-        # IP-layer delivery decisions past it (routing, reverse-path
-        # filtering, netns-local firewall rules) are invisible to a
-        # host-side capture. Tapping net1 from inside the pod's own
-        # network namespace is the only way to see whether a DISCOVER
-        # actually reached bootd's interface at all - something bootd's
-        # own logs never mention either way.
-        #
-        # Reached via nsenter into the sandbox's namespace (resolved
-        # through crictl, RKE2's bundled container runtime CLI) rather
-        # than `kubectl debug`: bootd's own image ships no tcpdump, so a
-        # `kubectl debug` ephemeral container would need to pull a
-        # separate debug image before it could start capturing, losing
-        # exactly the early packets this capture exists to catch (it
-        # must be running before the target VM is even created below).
-        # nsenter reaches the same namespace directly using the tcpdump
-        # binary the "Start capturing the provisioning bridge" step above
-        # already installed on this host, with no image pull and no
-        # dependency on the ephemeral-containers feature being enabled.
-        #
-        # crictl is pointed explicitly at RKE2's own containerd socket
-        # (-r): its default endpoint probe only tries
-        # /run/containerd/containerd.sock, /run/crio/crio.sock and
-        # /var/run/cri-dockerd.sock, none of which exist on an RKE2 node
-        # (RKE2 bundles containerd under /run/k3s/containerd instead, the
-        # same socket "Import images into RKE2 containerd" above already
-        # targets with `ctr -a`) - left unset, every crictl call here
-        # exits non-zero.
-        #
-        # This is a diagnostic instrument only: it must never fail the
-        # job. `set +e` plus an explicit ::warning:: and early exit 0 on
-        # each resolution step guarantee the step always exits 0,
-        # regardless of whether crictl, nsenter or tcpdump are present or
-        # able to resolve bootd's sandbox.
-        run: |
-          set +e
-          crictl_endpoint="unix:///run/k3s/containerd/containerd.sock"
-
-          sandbox_id="$(sudo crictl -r "${crictl_endpoint}" pods --name "${BOOTD_POD_NAME}" -q 2>/tmp/crictl-bootd-netns.log | head -1)"
-          if [ -z "${sandbox_id}" ]; then
-            echo "::warning::bootd pod-netns capture: crictl could not resolve a sandbox ID for pod ${BOOTD_POD_NAME} via ${crictl_endpoint} - skipping this diagnostic capture, it does not affect the e2e result"
-            cat /tmp/crictl-bootd-netns.log >&2
-            exit 0
-          fi
-
-          sandbox_pid="$(sudo crictl -r "${crictl_endpoint}" inspectp -o go-template --template '{{.info.pid}}' "${sandbox_id}" 2>/tmp/crictl-bootd-netns.log)"
-          if [ -z "${sandbox_pid}" ]; then
-            echo "::warning::bootd pod-netns capture: crictl could not resolve the sandbox pid for ${sandbox_id} - skipping this diagnostic capture, it does not affect the e2e result"
-            cat /tmp/crictl-bootd-netns.log >&2
-            exit 0
-          fi
-
-          if ! command -v tcpdump >/dev/null 2>&1; then
-            echo "::warning::bootd pod-netns capture: tcpdump not found on the runner - skipping this diagnostic capture, it does not affect the e2e result"
-            exit 0
-          fi
-
-          sudo -- sh -c "nohup nsenter -t '${sandbox_pid}' -n -- tcpdump -i net1 -w '${RUNNER_TEMP}/bootd-netns.pcap' \
-            udp port 67 or port 68 or port 69 or tcp port 80 \
-            >/tmp/tcpdump-bootd-netns.log 2>&1 &" \
-            || echo "::warning::bootd pod-netns capture: failed to start nsenter/tcpdump inside bootd's netns - skipping this diagnostic capture, it does not affect the e2e result"
-          exit 0
 
       - name: Ingest the marker-customized Ubuntu image through kezioctl
         run: |
@@ -2549,48 +2464,9 @@ jobs:
           echo "===== ${PROVISIONING_BRIDGE} offload settings ====="
           ethtool -k "${PROVISIONING_BRIDGE}" | head || true
 
-      - name: Stop the bridge capture and flush it to the artifact
-        if: always()
-        # Runs unconditionally (not just on failure) so a passing run
-        # also leaves a record of what actually crossed the bridge -
-        # the same reasoning "Upload E2E diagnostics artifacts" below
-        # gives for uploading unconditionally. tcpdump only flushes its
-        # pcap writer cleanly on SIGTERM, so signal it and give it a
-        # moment before reading the file back; both steps are `|| true`
-        # since a runner where the capture never started (tcpdump
-        # missing) must not fail the job over a missing optional file.
-        run: |
-          set +e
-          sudo pkill -TERM -f "tcpdump -i ${PROVISIONING_BRIDGE}"
-          sleep 2
-          if [ -s "${RUNNER_TEMP}/bridge.pcap" ]; then
-            sudo chmod 0644 "${RUNNER_TEMP}/bridge.pcap"
-            tcpdump -vvv -r "${RUNNER_TEMP}/bridge.pcap" > "${RUNNER_TEMP}/bridge-pcap.txt" 2>&1
-          fi
-
-      - name: Stop bootd's pod-netns capture and flush it to the artifact
-        if: always()
-        # Same reasoning as "Stop the bridge capture" above, for the
-        # capture "Start capturing bootd's pod network namespace" started
-        # inside bootd's own network namespace: matched on the pcap
-        # output path (nsenter itself is a short-lived wrapper process
-        # that has already exited by the time this step runs - only the
-        # tcpdump it exec'd survives, and pkill -f matches its full
-        # command line including that path) rather than on a saved PID,
-        # since a pod restart between the two steps would make a saved
-        # PID stale.
-        run: |
-          set +e
-          sudo pkill -TERM -f "tcpdump -i net1 -w ${RUNNER_TEMP}/bootd-netns.pcap"
-          sleep 2
-          if [ -s "${RUNNER_TEMP}/bootd-netns.pcap" ]; then
-            sudo chmod 0644 "${RUNNER_TEMP}/bootd-netns.pcap"
-            tcpdump -vvv -r "${RUNNER_TEMP}/bootd-netns.pcap" > "${RUNNER_TEMP}/bootd-netns-pcap.txt" 2>&1
-          fi
-
       - name: Collect the always-on diagnostics bundle
         if: always()
-        # Unconditional, like the pcap flushes above: bootd's pod log
+        # Unconditional: bootd's pod log
         # carries dnsmasq's forwarded per-request log-dhcp decision lines
         # (see internal/bootd's forwardLines), controller-manager's log
         # is where the boot server's own per-request lines land (see
@@ -2657,10 +2533,6 @@ jobs:
             ${{ runner.temp }}/console.log
             ${{ runner.temp }}/diagnostics-dump.log
             ${{ runner.temp }}/diagnostics-kubevirtbmc-dump.log
-            ${{ runner.temp }}/bridge.pcap
-            ${{ runner.temp }}/bridge-pcap.txt
-            ${{ runner.temp }}/bootd-netns.pcap
-            ${{ runner.temp }}/bootd-netns-pcap.txt
             ${{ runner.temp }}/bootd.log
             ${{ runner.temp }}/existing-dhcp.log
             ${{ runner.temp }}/controller-manager.log
