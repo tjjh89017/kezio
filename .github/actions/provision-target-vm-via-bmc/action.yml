@@ -1,0 +1,435 @@
+name: Provision the target VM through a real KubeVirtBMC/Redfish endpoint
+
+description: >-
+  The initial BMC-driven provisioning sequence
+  e2e-kubevirt-reusable.yml's "deploy-kubevirt" job runs after ingest
+  finishes: creates the BMC credentials Secret, the target VM's
+  power-cycle-surviving data disk PVC, and the VirtualMachine itself
+  powered off (`running: false`); asserts the harness never started it;
+  creates KubeVirtBMC's VirtualMachineBMC for it and waits for both the
+  VirtualMachineBMC and its virtbmc pod to become Ready; verifies the
+  Redfish endpoint answers and reports the VM off; then creates the
+  Machine CR with spec.bmc pointing at that endpoint and asserts kezio's
+  own Register step (not the harness) is what powers the VM on and gets
+  its VMI to Ready. See this action's own inline comments for the full
+  "why" behind each step - moved verbatim, not redesigned.
+
+  Every value comes from the calling job's own env (BMC_CREDS_SECRET,
+  TARGET_VM_NAME, TARGET_VM_MAC, TARGET_VM_DISK_SERIAL,
+  BMC_REDFISH_ADDRESS, IMAGE_NAME), not declared inputs - composite
+  action steps run as part of the calling job, so that env is already in
+  scope.
+
+runs:
+  using: composite
+  steps:
+    - name: Create the BMC credentials Secret
+      # Shared by both sides of the BMC relationship: KubeVirtBMC's
+      # VirtualMachineBMC.spec.authSecretRef reads the same
+      # "username"/"password" keys kezio's
+      # Machine.spec.bmc.credentialsSecretRef does (KubeVirtBMC's
+      # bmcUserKey/bmcPasswordKey constants match
+      # internal/bmc/credentials.go's SecretKeyUsername/SecretKeyPassword
+      # exactly), so one Secret authenticates kezio's Redfish client
+      # against KubeVirtBMC's Redfish server.
+      shell: bash
+      run: |
+        set -euo pipefail
+        BMC_PASSWORD="$(openssl rand -hex 16)"
+        echo "::add-mask::${BMC_PASSWORD}"
+        kubectl -n kezio-system create secret generic "${BMC_CREDS_SECRET}" \
+          --type=kubernetes.io/basic-auth \
+          --from-literal=username=kezio-e2e \
+          --from-literal=password="${BMC_PASSWORD}" \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: Create the target VM's data disk PVC
+      # The power-cycle step (in the calling workflow, after
+      # provisioning) recreates the VMI to consume KubeVirtBMC's one-shot
+      # PXE override, which is the BMC lane's stand-in for a real
+      # power-button press. An emptyDisk volume does not survive that:
+      # KubeVirt recreates it blank on every VMI, so a real power cycle
+      # after deploy wiped the deployed disk (partitioning,
+      # ezio-replicated image, and the efibootmgr Boot0006 entry finalize
+      # wrote all vanished, leaving the reboot with nothing bootable).
+      # Real bare-metal disks are not wiped by a power cycle, so this
+      # PVC - which does survive VMI recreation - is what makes the BMC
+      # lane model that. storageClassName local-path matches the cluster
+      # default these lanes already rely on. volumeMode Filesystem, not
+      # Block: local-path is a directory-backed provisioner with no raw
+      # block device to hand out, and KubeVirt presents a
+      # Filesystem-mode PVC's disk image to the guest as the same virtio
+      # block device emptyDisk did, so the guest-visible device (and
+      # kezio's serial-based disk matching) is unchanged.
+      shell: bash
+      run: |
+        cat <<EOF | kubectl apply -f -
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: ${TARGET_VM_NAME}-data
+          namespace: kezio-system
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          volumeMode: Filesystem
+          storageClassName: local-path
+          resources:
+            requests:
+              storage: 4Gi
+        EOF
+
+    - name: Create the target KubeVirt VirtualMachine, powered off
+      # `running: false`: this VM is never started here. Neither device
+      # carries a permanent bootOrder: KubeVirtBMC's Register call
+      # (SetOneTimePXEBoot) patches its own interface-first order onto
+      # the VM spec for that one boot and backs up whatever was there
+      # before (nothing, here) so its bootorderrestore controller can
+      # put it back once the VMI that consumed the override is gone. A
+      # permanent bootOrder here would keep QEMU's "bootorder" fw_cfg
+      # file non-empty on every subsequent boot too, and OVMF's
+      # QemuBootOrderLib rewrites/filters the NVRAM BootOrder from that
+      # file whenever it is present and non-empty - discarding the
+      # persistent efibootmgr entry kezio-agent writes at finalize
+      # (which carries no bootindex) before the post-deploy reboot ever
+      # reaches it, and falling back to the PXE entry, then UiApp. With
+      # no static bootOrder, fw_cfg's "bootorder" file goes back to
+      # absent/empty after the one-shot is consumed and restored, so
+      # OVMF leaves NVRAM BootOrder untouched on the reboot into disk -
+      # the same behavior real firmware has with no BMC-issued boot
+      # override in effect.
+      shell: bash
+      run: |
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kubevirt.io/v1
+        kind: VirtualMachine
+        metadata:
+          name: ${TARGET_VM_NAME}
+          namespace: kezio-system
+        spec:
+          running: false
+          template:
+            metadata:
+              labels:
+                kubevirt.io/vm: ${TARGET_VM_NAME}
+            spec:
+              domain:
+                cpu:
+                  cores: 2
+                resources:
+                  requests:
+                    memory: 3Gi
+                firmware:
+                  bootloader:
+                    efi:
+                      secureBoot: false
+                      # Persist the EFI variable store: real bare-metal
+                      # NVRAM survives power cycles, so the efibootmgr
+                      # boot entry kezio-agent writes at finalize must
+                      # survive the reboot into disk.
+                      persistent: true
+                devices:
+                  interfaces:
+                    - name: provisioning
+                      macAddress: "${TARGET_VM_MAC}"
+                      bridge: {}
+                  disks:
+                    - name: data
+                      serial: "${TARGET_VM_DISK_SERIAL}"
+                      disk:
+                        bus: virtio
+                    - name: cloudinitdisk
+                      disk:
+                        bus: virtio
+              networks:
+                - name: provisioning
+                  multus:
+                    networkName: kezio-boot-network-vm
+              volumes:
+                - name: data
+                  persistentVolumeClaim:
+                    claimName: ${TARGET_VM_NAME}-data
+                - name: cloudinitdisk
+                  cloudInitNoCloud:
+                    # run46 (commit f397696) proved
+                    # qemu-guest-agent.service crash-loops in the guest
+                    # and permanently fails (systemd StartLimitBurst
+                    # exhausted) before ever staying up long enough to
+                    # connect, which is why AgentConnected never
+                    # appeared even though the deployed disk itself
+                    # booted. This VM persists across the BMC
+                    # power-cycle's VMI recreation, so the seed stays
+                    # attached and is picked up on every boot of the
+                    # deployed image, including after PowerOn.
+                    userData: |
+                      #cloud-config
+                      write_files:
+                        - path: /etc/systemd/system/qemu-guest-agent.service.d/override.conf
+                          content: |
+                            [Unit]
+                            StartLimitIntervalSec=0
+                            [Service]
+                            Restart=always
+                            RestartSec=1
+                      runcmd:
+                        - systemctl daemon-reload
+                        - systemctl enable --now qemu-guest-agent.service
+        EOF
+
+    - name: "Assert the VM is off before any Machine is created (the harness did not start it)"
+      # Bounded wait, not a one-shot check: right after `kubectl apply`,
+      # KubeVirt's controller may not have populated
+      # status.printableStatus yet, so an empty status here is a
+      # populate-lag race, not a real power state problem. A Running
+      # status, though, is never lag - it means the VM actually came up,
+      # which must fail immediately.
+      shell: bash
+      run: |
+        set -euo pipefail
+        deadline=$(( $(date +%s) + 120 ))
+        while true; do
+          status="$(kubectl get vm "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.status.printableStatus}' || true)"
+          echo "$(date -Is) VM printableStatus: ${status:-<none>}"
+          [ "${status}" = "Stopped" ] && break
+          if [ "${status}" = "Running" ]; then
+            echo "::error::VM ${TARGET_VM_NAME} printableStatus = Running, want Stopped - it must be off until kezio's controller powers it on through the BMC." >&2
+            exit 1
+          fi
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::VM ${TARGET_VM_NAME} printableStatus = ${status:-<none>}, want Stopped - it must be off until kezio's controller powers it on through the BMC." >&2
+            exit 1
+          fi
+          sleep 5
+        done
+        if kubectl get vmi "${TARGET_VM_NAME}" -n kezio-system >/dev/null 2>&1; then
+          echo "::error::A VirtualMachineInstance already exists for ${TARGET_VM_NAME}; the VM must not be running yet." >&2
+          exit 1
+        fi
+
+    - name: Create the KubeVirtBMC VirtualMachineBMC for the target VM
+      # Gives the VM a Redfish endpoint: KubeVirtBMC's VirtualMachineBMC
+      # controller creates a Pod running the "virtbmc" agent (talking to
+      # the Kubernetes API, translating Redfish calls into VirtualMachine
+      # Start/Stop/Restart and boot order patches) and a ClusterIP
+      # Service named "<virtualMachineRef.name>-virtbmc" in front of it,
+      # on port 80 (plain HTTP - KubeVirtBMC does not terminate TLS on
+      # this port, hence "redfish+http" rather than "redfish" in
+      # BMC_REDFISH_ADDRESS). No IPMI simulator is enabled; this job only
+      # exercises the Redfish side, matching kezio's redfish:// driver.
+      shell: bash
+      run: |
+        cat <<EOF | kubectl apply -f -
+        apiVersion: bmc.kubevirt.io/v1beta1
+        kind: VirtualMachineBMC
+        metadata:
+          name: ${TARGET_VM_NAME}
+          namespace: kezio-system
+        spec:
+          virtualMachineRef:
+            name: ${TARGET_VM_NAME}
+          authSecretRef:
+            name: ${BMC_CREDS_SECRET}
+        EOF
+
+    - name: Wait for the VirtualMachineBMC to become Ready
+      shell: bash
+      run: |
+        set -euo pipefail
+        deadline=$(( $(date +%s) + 180 ))
+        while true; do
+          ready="$(kubectl get virtualmachinebmc "${TARGET_VM_NAME}" -n kezio-system \
+            -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' || true)"
+          clusterip="$(kubectl get virtualmachinebmc "${TARGET_VM_NAME}" -n kezio-system \
+            -o jsonpath='{.status.clusterIP}' || true)"
+          echo "$(date -Is) VirtualMachineBMC Ready=${ready:-<none>} clusterIP=${clusterip:-<none>}"
+          [ "${ready}" = "True" ] && [ -n "${clusterip}" ] && break
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::VirtualMachineBMC ${TARGET_VM_NAME} did not become Ready within the timeout." >&2
+            kubectl get virtualmachinebmc "${TARGET_VM_NAME}" -n kezio-system -o yaml
+            exit 1
+          fi
+          sleep 5
+        done
+        kubectl get virtualmachinebmc "${TARGET_VM_NAME}" -n kezio-system -o yaml
+        kubectl -n kezio-system rollout status deployment 2>/dev/null || true
+        kubectl -n kezio-system get pods -l app=virtbmc 2>/dev/null || true
+
+    - name: Wait for the virtbmc pod to become Ready
+      # The VirtualMachineBMC Ready condition just checked above only
+      # means KubeVirtBMC's Service got a ClusterIP (reason:
+      # ServiceReady) - it says nothing about whether the virtbmc pod
+      # behind that Service has passed its own readinessProbe on
+      # /redfish/v1 (initialDelaySeconds 2, periodSeconds 10) yet. Moving
+      # straight to the curl check on that signal alone can hit the
+      # Service while it still has zero ready endpoints, which surfaces
+      # as a plain connection refused. kubevirt.io/virtualmachinebmc-name
+      # is the label KubeVirtBMC's own controller applies to this pod
+      # (its VirtualMachineBMCNameLabel constant).
+      shell: bash
+      run: |
+        set -euo pipefail
+        kubectl -n kezio-system wait --for=condition=Ready pod \
+          -l "kubevirt.io/virtualmachinebmc-name=${TARGET_VM_NAME}" --timeout=180s
+
+    - name: "Verify the Redfish endpoint is reachable and reports the VM off"
+      # Exercised from inside the cluster with a throwaway Pod (the
+      # Service is ClusterIP-only, same as kezio's other in-cluster
+      # services); the same call the controller's Register step is about
+      # to make, done here by hand first so a broken Redfish endpoint
+      # fails with a clear diagnostic instead of surfacing only as a
+      # Machine stuck in Error. The curl call itself is additionally
+      # retried a few times: the pod-Ready wait above closes the main
+      # race, but a belt-and-braces retry absorbs a first-connection
+      # blip on an endpoint that only just turned ready, without masking
+      # a real, persistent failure.
+      shell: bash
+      run: |
+        set -euo pipefail
+        BMC_USERNAME="$(kubectl get secret "${BMC_CREDS_SECRET}" -n kezio-system -o jsonpath='{.data.username}' | base64 -d)"
+        BMC_PASSWORD="$(kubectl get secret "${BMC_CREDS_SECRET}" -n kezio-system -o jsonpath='{.data.password}' | base64 -d)"
+        echo "::add-mask::${BMC_PASSWORD}"
+
+        # --overrides carries the whole container spec (image, command,
+        # stdin) because a restricted-PSA securityContext must be merged
+        # in via the generated pod's JSON - kubectl run has no flag for
+        # it. Explicit numeric runAsUser/runAsGroup because this image's
+        # own USER is the non-numeric "curl_user", which restricted PSA
+        # can't resolve to verify runAsNonRoot. kezio-system now enforces
+        # privileged PSA (bootd's dnsmasq needs NET_ADMIN/NET_RAW), so
+        # this override is no longer required for admission; it is kept
+        # so this throwaway pod stays as strict as every other pod in
+        # the lane.
+        redfish_overrides="$(jq -n \
+          --arg name "kezio-e2e-redfish-check" \
+          --arg image "curlimages/curl:8.21.0" \
+          --arg auth "${BMC_USERNAME}:${BMC_PASSWORD}" \
+          --arg url "http://${TARGET_VM_NAME}-virtbmc.kezio-system.svc.cluster.local/redfish/v1/Systems/1" \
+          '{
+            apiVersion: "v1",
+            kind: "Pod",
+            spec: {
+              securityContext: {
+                runAsNonRoot: true,
+                seccompProfile: {type: "RuntimeDefault"}
+              },
+              containers: [{
+                name: $name,
+                image: $image,
+                stdin: true,
+                command: ["curl", "-sf", "-u", $auth, $url],
+                securityContext: {
+                  allowPrivilegeEscalation: false,
+                  runAsNonRoot: true,
+                  runAsUser: 100,
+                  runAsGroup: 101,
+                  capabilities: {drop: ["ALL"]},
+                  seccompProfile: {type: "RuntimeDefault"}
+                }
+              }]
+            }
+          }')"
+
+        redfish_body=""
+        last_err=""
+        last_phase=""
+        for attempt in $(seq 1 5); do
+          # A fresh pod name per attempt: reusing one fixed name would
+          # race a leftover pod from a failed attempt instead of a clean
+          # retry.
+          #
+          # Output is read from `kubectl logs`, not from an attached
+          # stream: `kubectl run -i --rm --quiet` can exit 0 with empty
+          # captured stdout if the pod's curl finishes before the attach
+          # stream is established, which would otherwise be misread as a
+          # successful-but-empty response. Running detached
+          # (--attach=false) and waiting for the pod phase before
+          # reading its logs avoids that race entirely.
+          pod_name="kezio-e2e-redfish-check-${attempt}"
+          phase=""
+          body=""
+          if kubectl run "${pod_name}" -n kezio-system \
+            --attach=false --restart=Never --image=curlimages/curl:8.21.0 --quiet \
+            --overrides="${redfish_overrides}" 2>&1; then
+            if kubectl wait --for=jsonpath='{.status.phase}'=Succeeded \
+              "pod/${pod_name}" -n kezio-system --timeout=60s >/dev/null 2>&1; then
+              phase="Succeeded"
+            else
+              phase="$(kubectl get "pod/${pod_name}" -n kezio-system -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+            fi
+            body="$(kubectl logs "pod/${pod_name}" -n kezio-system 2>&1 || true)"
+            kubectl delete "pod/${pod_name}" -n kezio-system --ignore-not-found >/dev/null 2>&1
+          else
+            phase="PodCreateFailed"
+          fi
+          last_phase="${phase}"
+          if [ "${phase}" = "Succeeded" ] && [ -n "${body}" ]; then
+            redfish_body="${body}"
+            last_err=""
+            break
+          fi
+          last_err="${body}"
+          redfish_body=""
+          echo "attempt ${attempt}/5: curl against the Redfish endpoint failed (pod phase: ${phase}), retrying in 5s: ${last_err}"
+          sleep 5
+        done
+        if [ -z "${redfish_body}" ]; then
+          echo "::error::Redfish endpoint still unreachable after 5 attempts (last pod phase: ${last_phase}): ${last_err}" >&2
+          exit 1
+        fi
+        echo "Redfish ComputerSystem response: ${redfish_body}"
+
+        power_state="$(jq -r '.PowerState' <<<"${redfish_body}")"
+        if [ "${power_state}" != "Off" ]; then
+          echo "::error::Redfish reports PowerState=${power_state}, want Off before Register runs." >&2
+          exit 1
+        fi
+
+    - name: Create the Machine CR, with spec.bmc pointing at KubeVirtBMC's Redfish endpoint
+      # No manual power-on, no manual boot-order flip: the controller's
+      # Register step (internal/deployer/agent.go) is what must call
+      # SetOneTimePXEBoot and PowerOn against BMC_REDFISH_ADDRESS to
+      # bring this Machine up.
+      shell: bash
+      run: |
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha1
+        kind: Machine
+        metadata:
+          name: ${TARGET_VM_NAME}
+          namespace: kezio-system
+        spec:
+          bmc:
+            address: ${BMC_REDFISH_ADDRESS}
+            credentialsSecretRef:
+              name: ${BMC_CREDS_SECRET}
+          bootMACAddress: "${TARGET_VM_MAC}"
+          online: true
+          targetDisk:
+            serialNumber: "${TARGET_VM_DISK_SERIAL}"
+          imageRef:
+            name: ${IMAGE_NAME}
+        EOF
+
+    - name: "Assert kezio powered the VM on through the BMC (not the harness)"
+      # The only thing that has touched this VM since it was created
+      # `running: false` is the Machine CR just created above. If the VM
+      # comes up, it came up because agentDeployer.Register called the
+      # BMC.
+      shell: bash
+      run: |
+        set -euo pipefail
+        deadline=$(( $(date +%s) + 180 ))
+        while true; do
+          status="$(kubectl get vm "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.status.printableStatus}' || true)"
+          echo "$(date -Is) VM printableStatus: ${status:-<none>}"
+          case "${status}" in
+            Running) break ;;
+          esac
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::VM ${TARGET_VM_NAME} never reached Running after the Machine was created - kezio's Register did not power it on through the BMC." >&2
+            kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o yaml
+            exit 1
+          fi
+          sleep 5
+        done
+        kubectl wait vmi/"${TARGET_VM_NAME}" -n kezio-system --for=condition=Ready --timeout=180s

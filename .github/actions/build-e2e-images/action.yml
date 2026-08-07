@@ -1,0 +1,107 @@
+name: Build the e2e lane's component images
+
+description: >-
+  Builds every image e2e-kubevirt-reusable.yml's "deploy-kubevirt" job
+  needs from source and loads each one locally (never pushes): the
+  ingest/seeder/image-service trio through `docker buildx build` with
+  GitHub Actions layer caching (shared with publish.yml's scope names),
+  the manager and bootd images through their own `make docker-build*`
+  targets, kezioctl, and - when build-boot-artifacts is set - the live
+  boot image and kezio-boot-artifacts image built from this checkout's
+  own cmd/agent, the only way this job boots an agent built from the
+  commit under test rather than build-live-image.yml's last published
+  one. RKE2 is installed in a later, separate step (it owns the
+  containerd these images get imported into), so importing them happens
+  later too, in its own step - not here.
+
+  Every image tag and build input (INGEST_IMG, SEEDER_IMG,
+  IMAGE_SERVICE_IMG, EZIO_REF, MANAGER_IMG, BOOTD_IMG, BOOT_ARTIFACTS_IMG)
+  comes from the calling job's own env, not declared inputs - composite
+  action steps run as part of the calling job, so that env is already in
+  scope.
+
+inputs:
+  build-boot-artifacts:
+    description: >-
+      Mirrors the reusable workflow's own build_boot_artifacts input:
+      when true, also builds the live boot image and kezio-boot-artifacts
+      image from this checkout.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Warm the ingest/seeder/image-service image caches
+      # Same shape as test-e2e.yml's image-path job: builds (and loads
+      # locally, never pushes) the three images `make docker-build-*`
+      # build later, with GitHub Actions' layer cache under the same
+      # scope names publish.yml uses, so this job and a push to main
+      # share one warm cache instead of both paying the from-source
+      # debian:sid seeder build cost. The seeder build additionally
+      # takes EZIO_REF as a build-arg, so an ezio-repo caller's ezio_ref
+      # input actually selects which ezio revision gets built (see
+      # docker/seeder/Dockerfile's own EZIO_REF ARG comment).
+      shell: bash
+      run: |
+        set -euo pipefail
+        for spec in "ingest:docker/ingest/Dockerfile:${INGEST_IMG}" "seeder:docker/seeder/Dockerfile:${SEEDER_IMG}" "image-service:docker/image-service/Dockerfile:${IMAGE_SERVICE_IMG}"; do
+          IFS=: read -r scope dockerfile tag <<< "${spec}"
+          build_args=()
+          if [ "${scope}" = "seeder" ]; then
+            build_args+=(--build-arg "EZIO_REF=${EZIO_REF}")
+          fi
+          docker buildx build \
+            --file "${dockerfile}" \
+            --tag "${tag}" \
+            --cache-from "type=gha,scope=${scope}" \
+            --cache-to "type=gha,mode=max,scope=${scope}" \
+            "${build_args[@]}" \
+            --load \
+            .
+        done
+
+    - name: Build the manager image
+      # Import happens later, in its own "Import images into RKE2
+      # containerd" step, once RKE2 (which owns the containerd this
+      # needs to import into) is actually installed.
+      shell: bash
+      run: |
+        set -euo pipefail
+        go mod tidy
+        make docker-build IMG="${MANAGER_IMG}"
+
+    - name: Build the bootd image
+      shell: bash
+      run: |
+        set -euo pipefail
+        make docker-build-bootd BOOTD_IMG="${BOOTD_IMG}"
+
+    - name: Build kezioctl
+      shell: bash
+      run: |
+        set -euo pipefail
+        make build-kezioctl
+
+    - name: Build the live boot image and kezio-boot-artifacts image
+      # The one path that boots a kezio-agent built from the commit under
+      # test, not build-live-image.yml's last published one - see
+      # build_boot_artifacts's own input description on the reusable
+      # workflow. Runs the exact same script build-live-image.yml budgets
+      # 90 minutes for on its own; the calling job's own timeout-minutes
+      # already carries that same order of extra headroom when this step
+      # is opted into, since running it does not shrink any other step's
+      # cost. AGENT_COMMIT ties the manifest.json this produces to the
+      # checked-out commit explicitly, rather than leaving
+      # hack/live-image/build.sh to `git rev-parse HEAD` a checkout
+      # actions/checkout@v7 leaves in detached-HEAD state (which resolves
+      # fine either way, but naming it here is one less thing to trust
+      # implicitly) - the calling workflow's "Assert the boot artifacts
+      # agent commit" step reads this same value back out to prove it.
+      if: ${{ inputs.build-boot-artifacts == 'true' }}
+      shell: bash
+      env:
+        AGENT_COMMIT: ${{ github.sha }}
+      run: |
+        set -euo pipefail
+        hack/live-image/build.sh
+        make docker-build-boot-artifacts BOOT_ARTIFACTS_IMG="${BOOT_ARTIFACTS_IMG}"
