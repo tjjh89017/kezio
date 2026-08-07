@@ -26,6 +26,7 @@ resources:
   - ../default
   - ../image-service
   - ../seeder
+  - ../ingest
   - store-pvc.yaml
 
 patches:

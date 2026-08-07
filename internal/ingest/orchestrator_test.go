@@ -57,11 +57,12 @@ func baseFakeBlkid() *fakeBlkid {
 
 func baseDeps() Dependencies {
 	return Dependencies{
-		Downloader: &fakeDownloader{content: []byte("qcow2-body")},
-		QemuImg:    &fakeQemuImg{format: "qcow2", rawSize: fixtureRawSize},
-		Sfdisk:     &fakeSfdisk{json: []byte(fixtureSfdiskJSON)},
-		Blkid:      baseFakeBlkid(),
-		Partclone:  &fakePartclone{},
+		Downloader:   &fakeDownloader{content: []byte("qcow2-body")},
+		QemuImg:      &fakeQemuImg{format: "qcow2", rawSize: fixtureRawSize},
+		Sfdisk:       &fakeSfdisk{json: []byte(fixtureSfdiskJSON)},
+		Blkid:        baseFakeBlkid(),
+		Partclone:    &fakePartclone{},
+		LayoutWriter: &fakeLayoutWriter{},
 	}
 }
 
@@ -75,12 +76,17 @@ func TestRun_Success(t *testing.T) {
 		WorkDir:      t.TempDir(),
 	}
 
-	res := Run(context.Background(), cfg, baseDeps())
+	deps := baseDeps()
+	layoutWriter := deps.LayoutWriter.(*fakeLayoutWriter)
+	res := Run(context.Background(), cfg, deps)
 	if !res.Success {
 		t.Fatalf("expected success, got error %q", res.Error)
 	}
 	if res.Disk == nil {
 		t.Fatal("expected a non-nil Disk")
+	}
+	if len(layoutWriter.written) != 1 || layoutWriter.written[0] != fixtureSfdiskJSON {
+		t.Errorf("layoutWriter.written = %v, want exactly one call with the fixture sfdisk JSON", layoutWriter.written)
 	}
 	if res.Disk.SizeBytes != fixtureRawSize {
 		t.Errorf("SizeBytes = %d, want %d", res.Disk.SizeBytes, fixtureRawSize)
@@ -129,6 +135,50 @@ func TestRun_Success(t *testing.T) {
 	}
 	if layout.Slots[0].IsBlank() {
 		t.Errorf("esp slot should not be blank: %+v", layout.Slots[0])
+	}
+}
+
+// A missing LayoutWriter must fail the run outright rather than silently
+// skip persisting the layout ConfigMap: cmd/ingest always wires one in
+// production (see buildFromEnv), so a nil value here signals a wiring
+// bug, not an optional feature.
+func TestRun_NoLayoutWriterFails(t *testing.T) {
+	deps := baseDeps()
+	deps.LayoutWriter = nil
+
+	cfg := Config{
+		ImageName:    "golden",
+		SourceURL:    "https://example.com/golden.qcow2",
+		SourceFormat: "qcow2",
+		StoreRoot:    t.TempDir(),
+		WorkDir:      t.TempDir(),
+	}
+
+	res := Run(context.Background(), cfg, deps)
+	if res.Success {
+		t.Fatal("expected failure when no LayoutWriter is configured")
+	}
+}
+
+// A LayoutWriter failure must fail the whole run: without the layout
+// ConfigMap, the Image controller has nothing to record at
+// status.disk.layoutRef and would otherwise advance the Image to Ready
+// on incomplete state.
+func TestRun_LayoutWriterFailurePropagates(t *testing.T) {
+	deps := baseDeps()
+	deps.LayoutWriter = &fakeLayoutWriter{err: fmt.Errorf("configmap create forbidden")}
+
+	cfg := Config{
+		ImageName:    "golden",
+		SourceURL:    "https://example.com/golden.qcow2",
+		SourceFormat: "qcow2",
+		StoreRoot:    t.TempDir(),
+		WorkDir:      t.TempDir(),
+	}
+
+	res := Run(context.Background(), cfg, deps)
+	if res.Success {
+		t.Fatal("expected failure when the layout writer fails")
 	}
 }
 

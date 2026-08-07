@@ -168,3 +168,18 @@ func (f *fakePartclone) Clone(_ context.Context, fsType, source, targetDir strin
 	defer func() { _ = f2.Close() }()
 	return store.WriteTorrentInfo(f2, info)
 }
+
+// fakeLayoutWriter records every sfdiskJSON value it was asked to
+// persist, standing in for the real Kubernetes-API-backed LayoutWriter.
+type fakeLayoutWriter struct {
+	written []string
+	err     error
+}
+
+func (f *fakeLayoutWriter) WriteLayoutConfigMap(_ context.Context, sfdiskJSON string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.written = append(f.written, sfdiskJSON)
+	return nil
+}

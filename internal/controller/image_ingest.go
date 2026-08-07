@@ -31,7 +31,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
 	"github.com/tjjh89017/kezio/internal/ingest"
@@ -309,6 +308,15 @@ func (r *ImageReconciler) buildIngestJob(image *keziov1alpha1.Image, jobName str
 
 	env := []corev1.EnvVar{
 		{Name: "IMAGE_NAME", Value: image.Name},
+		// IMAGE_NAMESPACE/IMAGE_UID/IMAGE_API_VERSION/IMAGE_KIND let the
+		// ingest binary set an owner reference on the layout ConfigMap
+		// it writes on success (see ingest.ImageOwnerRef), without
+		// granting the Job's ServiceAccount permission to read Images
+		// themselves.
+		{Name: "IMAGE_NAMESPACE", Value: image.Namespace},
+		{Name: "IMAGE_UID", Value: string(image.UID)},
+		{Name: "IMAGE_API_VERSION", Value: keziov1alpha1.GroupVersion.String()},
+		{Name: "IMAGE_KIND", Value: "Image"},
 		{Name: "SOURCE_URL", Value: image.Spec.Source.URL},
 		{Name: "SOURCE_FORMAT", Value: image.Spec.Source.Format},
 		{Name: "SOURCE_CHECKSUM", Value: image.Spec.Source.Checksum},
@@ -432,8 +440,8 @@ func (r *ImageReconciler) handleIngestJobSucceeded(ctx context.Context, image *k
 		return r.advance(ctx, image, keziov1alpha1.ImageStateFailed, reasonIngestFailed, message)
 	}
 
-	layoutRefName := imageLayoutConfigMapName(image.Name)
-	if err := r.ensureLayoutConfigMap(ctx, image, layoutRefName, result.Disk.SfdiskJSON); err != nil {
+	layoutRefName := ingest.LayoutConfigMapName(image.Name)
+	if err := r.verifyLayoutConfigMap(ctx, image, layoutRefName); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -529,30 +537,26 @@ func (r *ImageReconciler) readIngestResult(ctx context.Context, image *keziov1al
 	return ingest.Result{}, fmt.Errorf("ingest job %s completed with no pod termination message", job.Name)
 }
 
-// ensureLayoutConfigMap creates or updates the ConfigMap
-// status.disk.layoutRef names, holding the verbatim sfdisk JSON dump,
-// owner-ref'd to image so it is garbage collected with it.
-func (r *ImageReconciler) ensureLayoutConfigMap(ctx context.Context, image *keziov1alpha1.Image, name, sfdiskJSON string) error {
-	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: image.Namespace}}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
-		if cm.Data == nil {
-			cm.Data = map[string]string{}
+// verifyLayoutConfigMap checks that name (the ingest binary's
+// deterministic layout ConfigMap name for image - see
+// ingest.LayoutConfigMapName) exists in image's namespace. The ingest
+// Job itself creates this ConfigMap directly through the Kubernetes API
+// on success (see internal/ingest.WriteLayoutConfigMap); by the time a
+// Job reports Succeeded, that write has already happened, so a missing
+// ConfigMap here means the Job's ServiceAccount lacks the RBAC to write
+// it (or some other wiring bug) - a hard error, not a state this
+// reconciler silently tolerates.
+func (r *ImageReconciler) verifyLayoutConfigMap(ctx context.Context, image *keziov1alpha1.Image, name string) error {
+	cm := &corev1.ConfigMap{}
+	key := types.NamespacedName{Name: name, Namespace: image.Namespace}
+	if err := r.Get(ctx, key, cm); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("ingest job for image %s succeeded but its layout configmap %s does not exist "+
+				"(check the ingest ServiceAccount's ConfigMap RBAC)", image.Name, name)
 		}
-		cm.Data["sfdisk.json"] = sfdiskJSON
-		return ctrl.SetControllerReference(image, cm, r.Scheme)
-	})
-	if err != nil {
-		return fmt.Errorf("ensure layout configmap %s: %w", name, err)
+		return fmt.Errorf("get layout configmap %s: %w", name, err)
 	}
 	return nil
-}
-
-// imageLayoutConfigMapName returns the deterministic ConfigMap name for
-// an Image's sfdisk layout dump. Unlike a Job name, a ConfigMap name
-// follows the (253-char) DNS subdomain rules, so no truncation is
-// needed here even though it is for ingestJobName.
-func imageLayoutConfigMapName(imageName string) string {
-	return imageName + "-layout"
 }
 
 // maxJobNameLength is the Kubernetes Job name limit (a DNS-1035 label:

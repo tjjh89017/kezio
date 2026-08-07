@@ -148,7 +148,8 @@ jobs:
 
           kubectl -n kezio-system set env deployment/kezio-controller-manager \
             INGEST_IMAGE="${INGEST_IMG}" \
-            INGEST_STAGING_PVC=kezio-image-service-staging
+            INGEST_STAGING_PVC=kezio-image-service-staging \
+            INGEST_SERVICE_ACCOUNT=kezio-ingest
 
           kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
           kubectl rollout status deployment/kezio-image-service -n kezio-system --timeout=180s

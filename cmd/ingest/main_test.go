@@ -44,6 +44,10 @@ func TestBuildFromEnv_Minimal(t *testing.T) {
 	t.Setenv("STORE_ROOT", storeRoot)
 	t.Setenv("WORK_DIR", workDir)
 	t.Setenv("STAGING_ROOT", "")
+	t.Setenv("IMAGE_NAMESPACE", "default")
+	t.Setenv("IMAGE_UID", "11111111-1111-1111-1111-111111111111")
+	t.Setenv("IMAGE_API_VERSION", "kezio.kojuro.date/v1alpha1")
+	t.Setenv("IMAGE_KIND", "Image")
 
 	cfg, deps, err := buildFromEnv()
 	if err != nil {
@@ -58,6 +62,9 @@ func TestBuildFromEnv_Minimal(t *testing.T) {
 	if deps.Downloader == nil || deps.QemuImg == nil || deps.Sfdisk == nil || deps.Blkid == nil || deps.Partclone == nil {
 		t.Errorf("expected every non-staging dependency to be wired: %+v", deps)
 	}
+	if deps.LayoutWriter == nil {
+		t.Error("expected a LayoutWriter to be wired")
+	}
 }
 
 func TestBuildFromEnv_WithStaging(t *testing.T) {
@@ -69,6 +76,10 @@ func TestBuildFromEnv_WithStaging(t *testing.T) {
 	t.Setenv("STORE_ROOT", storeRoot)
 	t.Setenv("WORK_DIR", t.TempDir())
 	t.Setenv("STAGING_ROOT", stagingRoot)
+	t.Setenv("IMAGE_NAMESPACE", "default")
+	t.Setenv("IMAGE_UID", "11111111-1111-1111-1111-111111111111")
+	t.Setenv("IMAGE_API_VERSION", "kezio.kojuro.date/v1alpha1")
+	t.Setenv("IMAGE_KIND", "Image")
 
 	_, deps, err := buildFromEnv()
 	if err != nil {
@@ -105,6 +116,10 @@ func TestRealWiring_StagedSourceWithoutStagingRoot(t *testing.T) {
 	t.Setenv("STORE_ROOT", storeRoot)
 	t.Setenv("WORK_DIR", workDir)
 	t.Setenv("STAGING_ROOT", "")
+	t.Setenv("IMAGE_NAMESPACE", "default")
+	t.Setenv("IMAGE_UID", "11111111-1111-1111-1111-111111111111")
+	t.Setenv("IMAGE_API_VERSION", "kezio.kojuro.date/v1alpha1")
+	t.Setenv("IMAGE_KIND", "Image")
 
 	cfg, deps, err := buildFromEnv()
 	if err != nil {

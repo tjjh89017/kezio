@@ -33,6 +33,7 @@ resources:
   - ../default
   - ../image-service
   - ../seeder
+  - ../ingest
   - store-pvc.yaml
   - boot-server-service.yaml
   - agent-server-service.yaml

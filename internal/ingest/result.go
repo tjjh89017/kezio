@@ -30,11 +30,11 @@ import (
 // Kubernetes caps a termination message at 4KiB, so this payload is kept
 // to a compact per-partition summary; it deliberately excludes the full
 // extent lists and piece hashes (those stay in torrent.info inside the
-// store) and the sfdisk JSON dump is included verbatim only because a
-// realistic partition count keeps it well under the cap - an image with
-// an unusually large partition table could overflow it, a known limit of
-// this handoff mechanism (see the ingest package doc and the Image
-// reconciler's Job success handling).
+// store) and the verbatim sfdisk JSON dump, which an unusually large
+// partition table could grow past the cap on its own. The ingest binary
+// writes that dump directly into the layout ConfigMap through the
+// Kubernetes API instead (see LayoutConfigMapName and
+// WriteLayoutConfigMap) - this result channel never carries it.
 type Result struct {
 	// Success is true when ingest completed and every field below is
 	// populated. False means Error explains what went wrong and Disk is
@@ -56,10 +56,6 @@ type ResultDisk struct {
 	// PartitionTable is "gpt" or "mbr" (api/v1alpha1's
 	// PartitionTableGPT / PartitionTableMBR).
 	PartitionTable string `json:"partitionTable"`
-	// SfdiskJSON is the verbatim `sfdisk --json` dump of the disk. The
-	// Image reconciler stores this in the ConfigMap status.disk.layoutRef
-	// names.
-	SfdiskJSON string `json:"sfdiskJSON"`
 	// Partitions lists every partition ingest processed, in partition
 	// number order.
 	Partitions []ResultPartition `json:"partitions"`

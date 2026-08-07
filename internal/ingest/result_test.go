@@ -27,7 +27,6 @@ func TestResultRoundTrip(t *testing.T) {
 		Disk: &ResultDisk{
 			SizeBytes:      123456,
 			PartitionTable: "gpt",
-			SfdiskJSON:     `{"partitiontable":{}}`,
 			Partitions: []ResultPartition{
 				{Number: 1, Role: "esp", FSType: "vfat", UsedBytes: 100, InfoHash: "abc123"},
 				{Number: 2, Role: "swap", UUID: "some-uuid"},

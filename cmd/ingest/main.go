@@ -50,6 +50,8 @@ import (
 	"strconv"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/types"
+
 	"github.com/tjjh89017/kezio/internal/imageservice"
 	"github.com/tjjh89017/kezio/internal/ingest"
 )
@@ -154,10 +156,21 @@ func buildFromEnv() (ingest.Config, ingest.Dependencies, error) {
 	sourceURL := os.Getenv("SOURCE_URL")
 	sourceFormat := os.Getenv("SOURCE_FORMAT")
 	storeRoot := os.Getenv("STORE_ROOT")
-	if imageName == "" || sourceURL == "" || sourceFormat == "" || storeRoot == "" {
+	// IMAGE_NAMESPACE/IMAGE_UID/IMAGE_API_VERSION/IMAGE_KIND identify the
+	// Image this Job runs for, so the layout ConfigMap this binary
+	// writes on success can carry an owner reference back to it (see
+	// ingest.ImageOwnerRef and internal/controller's buildIngestJob,
+	// which sets all four alongside IMAGE_NAME).
+	imageNamespace := os.Getenv("IMAGE_NAMESPACE")
+	imageUID := os.Getenv("IMAGE_UID")
+	imageAPIVersion := os.Getenv("IMAGE_API_VERSION")
+	imageKind := os.Getenv("IMAGE_KIND")
+	if imageName == "" || sourceURL == "" || sourceFormat == "" || storeRoot == "" ||
+		imageNamespace == "" || imageUID == "" || imageAPIVersion == "" || imageKind == "" {
 		return ingest.Config{}, ingest.Dependencies{}, fmt.Errorf(
-			"missing required environment: IMAGE_NAME=%q SOURCE_URL=%q SOURCE_FORMAT=%q STORE_ROOT=%q",
-			imageName, sourceURL, sourceFormat, storeRoot)
+			"missing required environment: IMAGE_NAME=%q SOURCE_URL=%q SOURCE_FORMAT=%q STORE_ROOT=%q "+
+				"IMAGE_NAMESPACE=%q IMAGE_UID=%q IMAGE_API_VERSION=%q IMAGE_KIND=%q",
+			imageName, sourceURL, sourceFormat, storeRoot, imageNamespace, imageUID, imageAPIVersion, imageKind)
 	}
 
 	workDir := os.Getenv("WORK_DIR")
@@ -183,6 +196,12 @@ func buildFromEnv() (ingest.Config, ingest.Dependencies, error) {
 		Sfdisk:     execSfdisk{},
 		Blkid:      execBlkid{},
 		Partclone:  execPartclone{},
+		LayoutWriter: newInClusterLayoutWriter(imageNamespace, ingest.ImageOwnerRef{
+			Name:       imageName,
+			UID:        types.UID(imageUID),
+			APIVersion: imageAPIVersion,
+			Kind:       imageKind,
+		}),
 	}
 
 	if stagingRoot := os.Getenv("STAGING_ROOT"); stagingRoot != "" {

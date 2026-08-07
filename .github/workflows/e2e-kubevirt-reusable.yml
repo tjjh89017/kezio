@@ -1017,6 +1017,7 @@ jobs:
             INGEST_IMAGE="${INGEST_IMG}" \
             INGEST_STORE_PVC=kezio-store \
             INGEST_STAGING_PVC=kezio-image-service-staging \
+            INGEST_SERVICE_ACCOUNT=kezio-ingest \
             SEEDER_TRACKER_URL="http://${PROVISIONING_TRACKER_NET1_IP%%/*}:6969/announce" \
             SEEDER_STORE_ROOT=/store \
             SEEDER_DEPLOYMENT_IMAGE="${SEEDER_IMG}" \

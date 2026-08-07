@@ -86,6 +86,13 @@ type Dependencies struct {
 	// cloned. nil means the real syscall.Statfs-backed implementation;
 	// tests set it to simulate an arbitrary reported free-space figure.
 	Statfs statfsFunc
+	// LayoutWriter persists the layout ConfigMap (the sfdisk dump) once
+	// a run otherwise succeeds - see LayoutWriter's doc comment for why
+	// this happens here rather than through the Image controller.
+	// Required: run returns an error if this is nil, since without it a
+	// successful ingest would leave the Image controller unable to find
+	// the ConfigMap it expects at status.disk.layoutRef.
+	LayoutWriter LayoutWriter
 }
 
 // Run executes the full ingest pipeline described in the package doc
@@ -103,6 +110,10 @@ func Run(ctx context.Context, cfg Config, deps Dependencies) Result {
 }
 
 func run(ctx context.Context, cfg Config, deps Dependencies) (*ResultDisk, error) {
+	if deps.LayoutWriter == nil {
+		return nil, fmt.Errorf("no layout writer configured")
+	}
+
 	// scratchDir is where partclone writes each partition's content
 	// directly, on the store's own filesystem, before publishContent's
 	// final same-filesystem rename into contents/ (see processPartition
@@ -179,6 +190,10 @@ func run(ctx context.Context, cfg Config, deps Dependencies) (*ResultDisk, error
 		return nil, fmt.Errorf("write image layout: %w", err)
 	}
 
+	if err := deps.LayoutWriter.WriteLayoutConfigMap(ctx, string(sfdiskJSON)); err != nil {
+		return nil, fmt.Errorf("write layout configmap: %w", err)
+	}
+
 	if staged && deps.StagedRemover != nil {
 		// Best-effort: the content is already durably stored at this
 		// point, so a cleanup failure must not fail an otherwise
@@ -190,7 +205,6 @@ func run(ctx context.Context, cfg Config, deps Dependencies) (*ResultDisk, error
 	return &ResultDisk{
 		SizeBytes:      diskSize,
 		PartitionTable: parsed.PartitionTable,
-		SfdiskJSON:     string(sfdiskJSON),
 		Partitions:     partitions,
 	}, nil
 }

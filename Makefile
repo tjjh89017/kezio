@@ -390,6 +390,7 @@ deploy-image-path: manifests kustomize ## Deploy image-service+seeder+store and 
 		INGEST_IMAGE=${INGEST_IMG} \
 		INGEST_STORE_PVC=kezio-store \
 		INGEST_STAGING_PVC=kezio-image-service-staging \
+		INGEST_SERVICE_ACCOUNT=kezio-ingest \
 		SEEDER_TRACKER_URL=http://kezio-opentracker.kezio-system.svc.cluster.local:6969/announce \
 		SEEDER_STORE_ROOT=/store \
 		SEEDER_SERVICE_NAMESPACE=kezio-system \
