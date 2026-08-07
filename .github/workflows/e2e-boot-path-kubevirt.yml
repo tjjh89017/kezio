@@ -68,6 +68,32 @@ on:
         required: false
         type: string
         default: "jpillora/dnsmasq:1.1@sha256:78a9c6711031a557d9c6a79a0b6e060c4ac09de3a8755c78d690acb55b4ccd15"
+      dhcp_scenario:
+        description: >-
+          Which of kezio-bootd's three DHCP scenarios this run drives
+          through a real PXE boot to agent registration (mirrors
+          Clonezilla lite server's own use-existing-dhcpd vs.
+          start-new-dhcpd split, plus kezio's own relay addition -
+          see internal/bootd.Config's RelayServerIP/LeaseMode doc
+          comments):
+            - relay (default): proxyDHCP + BOOTD_DHCP_RELAY_SERVER,
+              relaying every request to the existing-dhcp stand-in
+              server below - the scenario this lane has always run.
+            - no-relay: proxyDHCP beside the existing-dhcp stand-in
+              server, with BOOTD_DHCP_RELAY_SERVER left unset - bootd
+              answers only the PXE portion of the exchange and the
+              stand-in server answers the lease directly on the wire,
+              with no relay leg at all.
+            - lease: BOOTD_LEASE_MODE instead - no stand-in DHCP
+              server is deployed at all, and bootd's own dnsmasq is
+              the segment's sole DHCP lease authority.
+        required: false
+        type: choice
+        options:
+          - relay
+          - no-relay
+          - lease
+        default: relay
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -120,9 +146,17 @@ env:
   PROVISIONING_EXISTING_DHCP_NET1_IP: 192.0.2.3/24
   PROVISIONING_CIDR: 192.0.2.0/24
   PROVISIONING_DHCP_RANGE: "192.0.2.10,192.0.2.100,255.255.255.0,12h"
+  # Same pool the existing-dhcp stand-in's own PROVISIONING_DHCP_RANGE
+  # draws from - reused (not derived from it) so the "lease" scenario's
+  # BOOTD_LEASE_RANGE_START/END do not depend on parsing that string,
+  # and kept clear of PROVISIONING_HOST_IP/PROVISIONING_BOOTD_NET1_IP
+  # (.1/.2), which stay statically assigned regardless of scenario.
+  PROVISIONING_LEASE_RANGE_START: "192.0.2.10"
+  PROVISIONING_LEASE_RANGE_END: "192.0.2.100"
   TARGET_VM_MAC: "52:54:00:be:ef:01"
   TARGET_VM_DISK_SERIAL: "KEZIOE2EVMDISK01"
   EXISTING_DHCP_IMG: ${{ inputs.existing_dhcp_image }}
+  DHCP_SCENARIO: ${{ inputs.dhcp_scenario }}
   # See "Build the live boot image and kezio-boot-artifacts image" below
   # for the build_boot_artifacts branch; the default pulls the published
   # image directly, no local build or import at all.
@@ -130,7 +164,9 @@ env:
 
 jobs:
   boot-path-kubevirt:
-    name: Boot a KubeVirt VM through the real PXE/GRUB/agent chain
+    name: >-
+      Boot a KubeVirt VM through the real PXE/GRUB/agent chain
+      (${{ inputs.dhcp_scenario }} DHCP scenario)
     runs-on: ubuntu-latest
     # PXE discovery, TFTP, the live kernel/initrd HTTP fetch, and the
     # squashfs live-boot are each on the order of tens of seconds to a
@@ -150,6 +186,15 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+
+      - name: "Announce the DHCP scenario under test"
+        # Printed once, up front, so a red run is attributable to a
+        # specific scenario from the job log/summary alone - the job's
+        # own name (above) already carries it too, but that only shows
+        # up in the workflow run list, not inside the log a triager
+        # opens first.
+        run: |
+          echo "::notice::boot-path-kubevirt: DHCP scenario under test = ${DHCP_SCENARIO}"
 
       - name: Fail fast unless /dev/kvm is usable
         # Never fall back to TCG (software) emulation: it hides real PXE
@@ -462,6 +507,12 @@ jobs:
 
       - name: Deploy the existing-dhcp pod on the provisioning bridge
         id: existing-dhcp
+        # Skipped in the "lease" scenario: that scenario proves bootd's
+        # own dnsmasq is the segment's sole DHCP authority, which needs
+        # no other DHCP server present on the wire at all (not even one
+        # bootd never relays to) - see the dhcp_scenario input's own
+        # description.
+        if: ${{ inputs.dhcp_scenario != 'lease' }}
         uses: ./.github/actions/deploy-existing-dhcp
         with:
           namespace: kezio-system
@@ -491,10 +542,24 @@ jobs:
           #   kezio-boot-server; bootd renders this URL into the
           #   grub/grub.cfg it serves over TFTP for the netboot GRUB
           #   image.
-          # - BOOTD_DHCP_RELAY_SERVER: the existing-dhcp pod's own net1
-          #   address (deployed just above), on the SAME /24 as bootd's
-          #   own net1 - the relay is a plain on-link unicast, no
-          #   host-side routing involved.
+          # - BOOTD_DHCP_RELAY_SERVER (relay scenario only): the
+          #   existing-dhcp pod's own net1 address (deployed just
+          #   above), on the SAME /24 as bootd's own net1 - the relay
+          #   is a plain on-link unicast, no host-side routing
+          #   involved. Left unset in the no-relay scenario (bootd runs
+          #   pure proxyDHCP beside the same existing-dhcp pod) and in
+          #   the lease scenario (no existing-dhcp pod exists to relay
+          #   to at all).
+          # - BOOTD_LEASE_MODE / BOOTD_LEASE_RANGE_START/END (lease
+          #   scenario only): makes bootd's own dnsmasq the segment's
+          #   DHCP lease authority instead of a proxyDHCP front - see
+          #   internal/bootd.Config's LeaseMode doc comment. The range
+          #   is pinned to PROVISIONING_LEASE_RANGE_START/END rather
+          #   than left to auto-derive from BOOTD_PROVISIONING_CIDR:
+          #   auto-derivation would start at the subnet's first host
+          #   address, which collides with PROVISIONING_HOST_IP and
+          #   PROVISIONING_BOOTD_NET1_IP (.1/.2) - both still statically
+          #   assigned on this segment regardless of scenario.
           # - BOOTD_AGENT_UPSTREAM_URL / BOOTD_BOOT_UPSTREAM_URL: the
           #   in-cluster (ClusterIP) Services the target VM - which lives
           #   on the raw kezio-prov0 bridge with no cluster DNS and no
@@ -507,13 +572,35 @@ jobs:
           #   firmware or kezio-agent sends to bootd's own address above
           #   now forwards to the real service - no socat, no
           #   separately-exposed Service.
+          scenario_env=()
+          case "${DHCP_SCENARIO}" in
+            relay)
+              scenario_env+=(BOOTD_DHCP_RELAY_SERVER="${PROVISIONING_EXISTING_DHCP_NET1_IP%%/*}")
+              ;;
+            no-relay)
+              # Pure proxyDHCP: BOOTD_DHCP_RELAY_SERVER stays unset, so
+              # bootd never touches lease traffic - the existing-dhcp
+              # pod deployed above answers the lease directly.
+              ;;
+            lease)
+              scenario_env+=(
+                BOOTD_LEASE_MODE=true
+                BOOTD_LEASE_RANGE_START="${PROVISIONING_LEASE_RANGE_START}"
+                BOOTD_LEASE_RANGE_END="${PROVISIONING_LEASE_RANGE_END}"
+              )
+              ;;
+            *)
+              echo "::error::unknown dhcp_scenario '${DHCP_SCENARIO}' (expected relay, no-relay, or lease)" >&2
+              exit 1
+              ;;
+          esac
           kubectl -n kezio-system set env deployment/kezio-bootd \
             BOOTD_SERVER_IP="${PROVISIONING_BOOTD_NET1_IP%%/*}" \
             BOOTD_PROVISIONING_CIDR="${PROVISIONING_CIDR}" \
-            BOOTD_DHCP_RELAY_SERVER="${PROVISIONING_EXISTING_DHCP_NET1_IP%%/*}" \
             BOOTD_BOOT_CONFIG_URL="http://${PROVISIONING_BOOTD_NET1_IP%%/*}:80" \
             BOOTD_AGENT_UPSTREAM_URL="http://kezio-agent-server.kezio-system.svc.cluster.local:8091" \
-            BOOTD_BOOT_UPSTREAM_URL="http://kezio-boot-server.kezio-system.svc.cluster.local:8090"
+            BOOTD_BOOT_UPSTREAM_URL="http://kezio-boot-server.kezio-system.svc.cluster.local:8090" \
+            "${scenario_env[@]}"
           # config/bootd already wires its own fetch-boot-artifacts
           # initContainer (docker/boot-artifacts/Dockerfile via `cp`) and
           # a plain emptyDir "tftp" volume it populates - no volume patch needed
@@ -700,13 +787,15 @@ jobs:
           esac
 
       - name: "Verify the DHCP relay leg reached the existing-dhcp server"
-        # See e2e-kubevirt-reusable.yml's step of the same name for the
-        # full reasoning: this does NOT assert "a lease is obtainable
-        # only through the relay" (the VM may legitimately take either
-        # the existing-dhcp pod's own direct offer or bootd's relayed
-        # copy - both are real, both are on-segment). It instead proves
-        # the relay leg itself fired - the Machine reaching Available
-        # above already means the PXE handshake this checks happened.
+        # relay scenario only. See e2e-kubevirt-reusable.yml's step of
+        # the same name for the full reasoning: this does NOT assert "a
+        # lease is obtainable only through the relay" (the VM may
+        # legitimately take either the existing-dhcp pod's own direct
+        # offer or bootd's relayed copy - both are real, both are
+        # on-segment). It instead proves the relay leg itself fired -
+        # the Machine reaching Available above already means the PXE
+        # handshake this checks happened.
+        if: ${{ inputs.dhcp_scenario == 'relay' }}
         run: |
           set -euo pipefail
           bootd_ip="${PROVISIONING_BOOTD_NET1_IP%%/*}"
@@ -724,6 +813,52 @@ jobs:
           if ! grep -qF "DHCPDISCOVER" <<<"${existing_dhcp_log}" || ! grep -qF "DHCPOFFER" <<<"${existing_dhcp_log}"; then
             echo "::error::existing-dhcp's own log shows no DHCPDISCOVER/DHCPOFFER exchange - it never actually answered the request bootd's log says it relayed." >&2
             echo "${existing_dhcp_log}"
+            exit 1
+          fi
+
+      - name: "Verify the no-relay proxyDHCP scenario answered leases directly"
+        # no-relay scenario only: proves the inverse of the relay
+        # check above - bootd never relayed anything (BOOTD_DHCP_RELAY_
+        # SERVER was left unset in the "Deploy kezio-bootd..." step),
+        # and the existing-dhcp pod deployed alongside it answered the
+        # DISCOVER/lease exchange on its own, which is what the Machine
+        # reaching Available above depended on getting an address from.
+        if: ${{ inputs.dhcp_scenario == 'no-relay' }}
+        run: |
+          set -euo pipefail
+          bootd_log="$(kubectl -n kezio-system logs deployment/kezio-bootd --all-containers --tail=-1)"
+          if grep -qF "DHCP relay at" <<<"${bootd_log}"; then
+            echo "::error::bootd's dnsmasq log shows a DHCP relay line in the no-relay scenario - BOOTD_DHCP_RELAY_SERVER must stay unset here." >&2
+            echo "${bootd_log}"
+            exit 1
+          fi
+
+          existing_dhcp_log="$(kubectl -n kezio-system logs deployment/kezio-existing-dhcp --all-containers --tail=-1)"
+          if ! grep -qF "DHCPDISCOVER" <<<"${existing_dhcp_log}" || ! grep -qF "DHCPACK" <<<"${existing_dhcp_log}"; then
+            echo "::error::existing-dhcp's own log shows no DHCPDISCOVER/DHCPACK exchange - it never answered a lease directly, which pure proxyDHCP beside it depends on." >&2
+            echo "${existing_dhcp_log}"
+            exit 1
+          fi
+
+      - name: "Verify the lease scenario made bootd its own segment's lease authority"
+        # lease scenario only: no existing-dhcp pod was ever deployed
+        # (see the "Deploy the existing-dhcp pod..." step's own
+        # condition), so a lease can only have come from bootd's own
+        # dnsmasq (BOOTD_LEASE_MODE) - confirm both that absence and
+        # that bootd's log actually shows it issuing a lease (DHCPACK),
+        # not just answering the PXE portion of the exchange.
+        if: ${{ inputs.dhcp_scenario == 'lease' }}
+        run: |
+          set -euo pipefail
+          if kubectl -n kezio-system get deployment/kezio-existing-dhcp >/dev/null 2>&1; then
+            echo "::error::kezio-existing-dhcp exists in the lease scenario - the segment must carry no stand-in DHCP server at all so bootd is unambiguously the lease authority." >&2
+            exit 1
+          fi
+
+          bootd_log="$(kubectl -n kezio-system logs deployment/kezio-bootd --all-containers --tail=-1)"
+          if ! grep -qF "DHCPACK" <<<"${bootd_log}"; then
+            echo "::error::bootd's dnsmasq log shows no DHCPACK - it never issued a lease of its own under BOOTD_LEASE_MODE." >&2
+            echo "${bootd_log}"
             exit 1
           fi
 
