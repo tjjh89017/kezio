@@ -95,7 +95,18 @@ jobs:
     # comment); the timeout below covers that wait, two RKE2
     # start/restart cycles, and two small `docker build`/`docker save`
     # cycles with real headroom.
-    timeout-minutes: 15
+    #
+    # 20, not the previous 15: run 31139406453 measured ~140s to get
+    # through the rke2-server restart, and the "Install cert-manager"
+    # step's own comment explains why that step's per-deployment wait
+    # is now 300s instead of 180s. Summing the worst case for every step
+    # at its own measured or newly-raised ceiling (140 + 300 for
+    # cert-manager's three-deployment loop's first, slowest wait + ~120
+    # for the build step, measured at 122s in run 31137011968 + the
+    # fixed 330s image-gc wait + up to 120s for deploy-boot-path-overlay
+    # to resolve) lands near 17.5 minutes; 20 leaves real margin without
+    # a large arbitrary jump.
+    timeout-minutes: 20
     steps:
       - name: Clone the code
         uses: actions/checkout@v7
@@ -174,11 +185,21 @@ jobs:
         # kezio CRD carries a webhook, and the controller-manager cannot
         # serve admission requests until cert-manager has minted its
         # serving certificate.
+        #
+        # --timeout=300s, not the previous 180s: run 31139406453 timed
+        # out here at 180s right after the "Tighten kubelet image-gc
+        # thresholds" step's own rke2-server restart, with the node
+        # reporting NotReady moments later - a real cert-manager rollout
+        # normally clears this wait in well under a minute (see run
+        # 31137011968's untightened "Install cert-manager" step, 45s
+        # total), so 300s gives that restart's own settling time real
+        # room without masking a genuine hang the way a much larger
+        # value would.
         run: |
           set -euo pipefail
           kubectl apply -f "https://github.com/cert-manager/cert-manager/releases/download/v1.21.1/cert-manager.yaml"
           for d in cert-manager cert-manager-webhook cert-manager-cainjector; do
-            kubectl wait deployment.apps/"${d}" --for condition=Available --namespace cert-manager --timeout=180s
+            kubectl wait deployment.apps/"${d}" --for condition=Available --namespace cert-manager --timeout=300s
           done
 
       - name: Write fake boot artifacts
