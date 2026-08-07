@@ -83,15 +83,20 @@ spec:
             port: 8081
           initialDelaySeconds: 5
           periodSeconds: 10
-        # TODO(user): Configure the resources accordingly based on the project requirements.
-        # More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+        # Sized for what this manager actually hosts: the controllers,
+        # the webhooks, the agent server, and the boot server that
+        # streams the multi-hundred-MB live boot artifacts to every
+        # netbooting machine. The scaffold's 128Mi limit OOM-killed the
+        # manager mid-netboot (exit 137), which broke every in-flight
+        # boot through bootd's reverse proxy. If 512Mi is ever hit,
+        # profile for a leak instead of raising this again.
         resources:
           limits:
             cpu: 500m
-            memory: 128Mi
+            memory: 512Mi
           requests:
             cpu: 10m
-            memory: 64Mi
+            memory: 256Mi
         volumeMounts: []
       volumes: []
       serviceAccountName: controller-manager
