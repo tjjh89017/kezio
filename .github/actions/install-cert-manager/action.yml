@@ -1,0 +1,31 @@
+name: Install cert-manager
+
+description: >-
+  Installs cert-manager and waits for its three deployments to become
+  Available. The single source of truth for the cert-manager version pin -
+  every kezio CRD carries a webhook, and the controller-manager cannot serve
+  admission requests until cert-manager has minted its serving certificate,
+  so every caller (the KubeVirt VM lanes via install-cluster-addons, and the
+  boot-artifacts staging probe directly) needs this same step. Called
+  directly by callers that need only cert-manager, and by
+  install-cluster-addons for callers that also need KubeVirt/CDI.
+
+inputs:
+  version:
+    description: 'cert-manager release to install, e.g. "v1.21.1". Defaults to the pin every caller shares.'
+    required: false
+    default: "v1.21.1"
+
+runs:
+  using: composite
+  steps:
+    - name: Install cert-manager
+      shell: bash
+      env:
+        CERT_MANAGER_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        kubectl apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"
+        for d in cert-manager cert-manager-webhook cert-manager-cainjector; do
+          kubectl wait deployment.apps/"${d}" --for condition=Available --namespace cert-manager --timeout=180s
+        done

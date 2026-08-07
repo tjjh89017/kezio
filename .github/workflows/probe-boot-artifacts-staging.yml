@@ -41,12 +41,6 @@ env:
   # the plumbing against the same RKE2 this project already trusts, not
   # a different version that happens to behave differently.
   RKE2_VERSION: "v1.36.2+rke2r1"
-  # Same pin the KubeVirt lanes carry in their own env block (see
-  # e2e-boot-path-kubevirt.yml, e2e-kubevirt-reusable.yml,
-  # e2e-scale-multisite-kubevirt.yml) - keeping the name and value
-  # identical here, rather than a locally-invented default, is what
-  # lets a future single source of truth replace all four at once.
-  CERT_MANAGER_VERSION: "v1.21.1"
   MANAGER_IMG: "example.com/kezio:probe-boot-artifacts"
   BOOT_ARTIFACTS_IMG: "example.com/kezio-boot-artifacts:probe-boot-artifacts"
 
@@ -96,16 +90,11 @@ jobs:
           kubectl get nodes -o wide
 
       - name: Install cert-manager
-        # Required the same way test-e2e.yml's lanes need it: every
-        # kezio CRD carries a webhook, and the controller-manager cannot
-        # serve admission requests until cert-manager has minted its
-        # serving certificate.
-        run: |
-          set -euo pipefail
-          kubectl apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"
-          for d in cert-manager cert-manager-webhook cert-manager-cainjector; do
-            kubectl wait deployment.apps/"${d}" --for condition=Available --namespace cert-manager --timeout=180s
-          done
+        # Shared with the KubeVirt lanes via install-cert-manager rather
+        # than a locally-pinned version - too heavy to also pull in
+        # install-cluster-addons' KubeVirt/CDI here (this probe stays
+        # deliberately KubeVirt/CDI-free, see the job comment above).
+        uses: ./.github/actions/install-cert-manager
 
       - name: Write fake boot artifacts
         uses: ./.github/actions/write-fake-boot-artifacts

@@ -15,9 +15,6 @@ description: >-
   before creating any NetworkAttachmentDefinition or VirtualMachine.
 
 inputs:
-  cert-manager-version:
-    description: 'cert-manager release to install, e.g. "v1.21.1".'
-    required: true
   kubevirt-version:
     description: 'KubeVirt release to install, e.g. "v1.9.0".'
     required: true
@@ -32,15 +29,9 @@ runs:
       # Installed before KubeVirt, both for node-contention reasons and
       # (for callers that go on to install KubeVirtBMC) because it is
       # also a hard prerequisite for KubeVirtBMC's webhook certificate.
-      shell: bash
-      env:
-        CERT_MANAGER_VERSION: ${{ inputs.cert-manager-version }}
-      run: |
-        set -euo pipefail
-        kubectl apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"
-        for d in cert-manager cert-manager-webhook cert-manager-cainjector; do
-          kubectl wait deployment.apps/"${d}" --for condition=Available --namespace cert-manager --timeout=180s
-        done
+      # Delegates to install-cert-manager, the single place the version
+      # pin lives, instead of carrying its own copy.
+      uses: ./.github/actions/install-cert-manager
 
     - name: Install KubeVirt
       # The KubevirtSeccompProfile feature gate plus seccompConfiguration

@@ -80,7 +80,6 @@ env:
   # Pin every version this job depends on for the KubeVirt topology -
   # bump deliberately, not as a side effect of an unrelated change.
   RKE2_VERSION: "v1.36.2+rke2r1"
-  CERT_MANAGER_VERSION: "v1.21.1"
   KUBEVIRT_VERSION: "v1.9.0"
   CDI_VERSION: "v1.65.0"
 
@@ -335,7 +334,6 @@ jobs:
         # provisioning NetworkAttachmentDefinitions" step below needs.
         uses: ./.github/actions/install-cluster-addons
         with:
-          cert-manager-version: ${{ env.CERT_MANAGER_VERSION }}
           kubevirt-version: ${{ env.KUBEVIRT_VERSION }}
           cdi-version: ${{ env.CDI_VERSION }}
 
