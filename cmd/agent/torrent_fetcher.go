@@ -25,18 +25,16 @@ import (
 )
 
 // torrentFetchTimeout bounds a single GET attempt for one content
-// partition's .torrent file - generous relative to the file's own tiny
-// size (it scales with piece count, not with the partition's own data),
-// since a slow attempt here should time out and retry rather than stall
-// the whole deploy.
+// partition's .torrent file (tiny; it scales with piece count, not
+// partition data size), so a slow attempt times out and retries rather
+// than stalling the whole deploy.
 const torrentFetchTimeout = 30 * time.Second
 
-// torrentFetchAttempts is how many times httpTorrentFetcher tries a GET
-// before giving up. The per-Image seeder pod this URL points at may
-// still be starting (no ordering dependency ties a Machine's deploy to
-// its seeder Deployment becoming Ready), so a handful of retries with
-// backoff covers that startup window without hanging indefinitely on a
-// URL that is simply wrong.
+// torrentFetchAttempts is how many times httpTorrentFetcher retries a
+// GET: the per-Image seeder pod may still be starting (no ordering
+// dependency ties a Machine's deploy to its seeder Deployment becoming
+// Ready), so a few retries cover that window without hanging forever on
+// a URL that is simply wrong.
 const torrentFetchAttempts = 5
 
 // torrentFetchBackoff is the delay between retries, doubling on each

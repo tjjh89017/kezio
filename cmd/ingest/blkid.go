@@ -34,14 +34,10 @@ const blkidNoSignatureExitCode = 2
 
 // execBlkid implements ingest.Blkid by shelling out to blkid against a
 // partition slice file. Like qemu-img and sfdisk, blkid reads a regular
-// file the same way it reads a block device, so this needs no privilege.
-// Checked for the same class of root-owned-default-path failure that hit
-// partclone's logfile: blkid only writes its /run/blkid/blkid.tab cache
-// when scanning real block devices, never for a plain regular file (as
-// confirmed by running this exact command as uid 65532 against a scratch
-// file with no /run/blkid present); sfdisk --json and qemu-img
-// info/convert take no default root-owned path either. No fix needed
-// here.
+// file the same way it reads a block device, so this needs no privilege:
+// unlike partclone's logfile, blkid never writes its /run/blkid/blkid.tab
+// cache when scanning a plain regular file (verified running as uid
+// 65532 with no /run/blkid present).
 type execBlkid struct{}
 
 func (execBlkid) Detect(ctx context.Context, path string) (ingest.FSInfo, error) {

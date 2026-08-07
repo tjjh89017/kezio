@@ -8,47 +8,30 @@
 # sha256sums - comes out of dist/live/ as one set for
 # .github/workflows/build-live-image.yml to publish together.
 #
-# Tool choice: Debian live-build, not dracut+livenet.
+# Tool choice: Debian live-build, not dracut+livenet. The initrd's only
+# job at boot is to DHCP the NIC, fetch the squashfs over HTTP from the
+# kernel cmdline's fetch=... URL, overlay a writable tmpfs over it, and
+# pivot into it. live-boot (pulled in by config/package-lists/
+# kezio.list.chroot) already implements that sequence and speaks the
+# same boot=live fetch=<url> contract internal/bootserver's grub.go
+# renders (see renderNetBootConfig), so `lb build` needs no hand-written
+# initrd logic. dracut's livenet module would need custom assembly to
+# reach the same behavior for no benefit live-boot doesn't provide.
 #
-# The initrd this image ships has one job at boot: DHCP the NIC, fetch
-# the squashfs over HTTP from the URL the kernel cmdline carries
-# (fetch=...), overlay a writable tmpfs over the read-only squashfs, and
-# Tool choice: Debian live-build, not dracut+livenet.
-#
-# The initrd this image ships has one job at boot: DHCP the NIC, fetch
-# the squashfs over HTTP from the URL the kernel cmdline carries
-# (fetch=...), overlay a writable tmpfs over the read-only squashfs, and
-# pivot into it. live-boot (a Debian package, pulled in by
-# config/package-lists/kezio.list.chroot) already implements exactly
-# that sequence and already speaks the same boot=live fetch=<url>
-# cmdline contract that internal/bootserver's grub.go renders - see
-# renderNetBootConfig. Choosing live-boot means this build script needs
-# no hand-written initrd logic at all: `lb build` produces a working
-# kernel+initrd+squashfs triple directly. dracut's livenet module covers
-# similar ground with a leaner initrd, but reaching the same fetch+
-# overlay+pivot behavior means assembling and testing that dracut module
-# by hand - more custom initrd logic for no behavior this image needs
-# that live-boot does not already provide. Given the goal is a working
-# image with the least custom initrd logic, live-build wins.
-#
-# How this script runs live-build: entirely inside containers, so the
-# host needs nothing beyond Docker. `lb build` itself needs to create
-# device nodes, mount pseudo-filesystems, and chroot while assembling
-# the squashfs - the live-build container below therefore runs with
-# --privileged. There is no narrower --cap-add set that reliably covers
-# every mount/chroot/loop operation lb build performs across its
-# stages; --privileged is the documented, honest requirement, not a
-# convenience shortcut. The CI workflow (.github/workflows/
-# build-live-image.yml) runs on ubuntu-latest, whose runner already
-# supports privileged Docker containers.
+# This script runs live-build entirely inside containers, so the host
+# needs nothing beyond Docker. `lb build` needs to create device nodes,
+# mount pseudo-filesystems, and chroot while assembling the squashfs, so
+# the live-build container runs with --privileged; no narrower
+# --cap-add set reliably covers every mount/chroot/loop operation it
+# performs. The CI runner (ubuntu-latest) supports privileged containers.
 #
 # Determinism: this script pins what upstream itself pins (the ezio
-# release tag docker/seeder/Dockerfile builds by default) and otherwise tracks
-# Debian sid, the same as every other kezio image - see
-# docker/seeder/Dockerfile's own header for why sid, not a snapshot pin, is the right
-# tradeoff here. A byte-identical rebuild is not a goal; a rebuild from
-# the same commit producing a working image with the same package set
-# is.
+# release tag docker/seeder/Dockerfile builds by default) and otherwise
+# tracks Debian sid, the same as every other kezio image (see
+# docker/seeder/Dockerfile's header for why sid, not a snapshot pin, is
+# the right tradeoff). A byte-identical rebuild is not the goal; a
+# rebuild from the same commit producing a working image with the same
+# package set is.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -80,21 +63,18 @@ cleanup_includes() {
 
 stage_ezio_build_inputs() {
 	# ezio is compiled *inside* the live-build chroot by
-	# hooks/live/0400-build-ezio.hook.chroot, not built in a separate
-	# Docker image and copied in: the live image's chroot is a full
-	# Debian sid system with its own glibc/libstdc++/etc that it is
-	# actively using while `lb build` assembles it, and staging a
-	# separately-built binary's shared-library closure over those system
-	# paths (the approach docker/seeder/Dockerfile's runtime stage uses, which
-	# is fine for that image's empty distroless base) corrupts the
-	# chroot mid-extraction. Building against the chroot's own apt
-	# snapshot instead guarantees ABI consistency by construction, the
-	# same lesson docker/seeder/Dockerfile's builder-stage comment already
-	# records for the seeder image.
+	# hooks/live/0400-build-ezio.hook.chroot, not built separately and
+	# copied in: the chroot is a full Debian sid system actively using
+	# its own glibc/libstdc++/etc while `lb build` assembles it, and
+	# staging a separately-built binary's shared-library closure over
+	# those paths corrupts the chroot mid-extraction (the distroless
+	# approach docker/seeder/Dockerfile's runtime stage uses works only
+	# because that base is empty). Building against the chroot's own apt
+	# snapshot guarantees ABI consistency by construction instead.
 	#
-	# All this function does is hand that hook its input: the pinned ref.
-	# Staged under includes.chroot so it lands in the chroot before hooks
-	# run; the hook removes it again once ezio is built.
+	# This function only hands the hook its input: the pinned ref,
+	# staged under includes.chroot so it lands in the chroot before
+	# hooks run; the hook removes it again once ezio is built.
 	log "staging ezio ${ezio_ref} for the in-chroot build"
 	local stage_dir="${live_dir}/config/includes.chroot/usr/local/src/kezio-ezio"
 	mkdir -p "${stage_dir}"
@@ -103,38 +83,29 @@ stage_ezio_build_inputs() {
 
 stage_signed_boot_binaries() {
 	# shimx64.efi and grubx64.efi are what kezio-bootd serves over TFTP
-	# (internal/bootd.ShimFilename / GrubFilename) - PXE-booting UEFI
-	# firmware chainloads the signed shim, which then chainloads grub,
-	# which loads the GRUB config internal/bootserver renders. kezio
-	# never builds either binary itself: Secure Boot's entire point is
-	# that the shim is signed by a chain the firmware already trusts,
-	# which only a distribution's own signed package can provide (the
-	# same reasoning the KubeVirt e2e lane's now-removed "Source
-	# shimx64.efi/grubx64.efi from signed packages" step used to record
-	# inline). Pulling shim-signed/grub-efi-amd64-signed from
-	# debian:sid - the same base image run_live_build already uses -
-	# keeps this one version-pin (Debian sid) the single source of
-	# truth for every package this script touches, rather than adding
-	# a second, host-apt-dependent code path.
+	# (internal/bootd.ShimFilename / GrubFilename): PXE-booting UEFI
+	# firmware chainloads the signed shim, which chainloads grub, which
+	# loads the GRUB config internal/bootserver renders. kezio never
+	# builds either binary itself - Secure Boot requires a chain the
+	# firmware already trusts, which only a distribution's own signed
+	# package provides. Pulling shim-signed/grub-efi-amd64-signed from
+	# debian:sid (the same base image run_live_build uses) keeps Debian
+	# sid the single version-pin for every package this script touches.
 	#
 	# The GRUB build extracted here is grubnetx64.efi.signed - the
-	# NETBOOT variant - published under the name grubx64.efi (the fixed
-	# name shim requests from the directory it was itself loaded from,
-	# so the published name cannot change without patching shim). The
-	# package's plain grubx64.efi.signed is the DISK-boot build: Debian
-	# builds it with the embedded prefix "/EFI/debian" (see the grub2
-	# source's debian/build-efi-images), so loaded over TFTP it looks
-	# for a local disk it cannot have yet, prints "error: unable to
-	# find boot device.", and drops to a bare grub> prompt - the
-	# observed end state of shipping it to a PXE client. The netboot
-	# build instead embeds prefix "/grub" resolved against the device
-	# it was loaded from, i.e. (tftp,<next-server>)/grub, and its
-	# embedded memdisk bootstrap sources grub.cfg from there -
-	# satisfied by kezio-bootd serving its rendered config at
-	# grub/grub.cfg (see internal/bootd.GrubConfigPath). The image is
-	# monolithic (every module in Debian's NET_MODULES list, http and
-	# tftp included, is built in), so no x86_64-efi module tree needs
-	# publishing alongside it.
+	# NETBOOT variant - published as grubx64.efi (the fixed name shim
+	# requests from the directory it was loaded from, so the published
+	# name cannot change without patching shim). The package's plain
+	# grubx64.efi.signed is the DISK-boot build: Debian embeds prefix
+	# "/EFI/debian" in it, so loaded over TFTP it looks for a local disk
+	# it cannot have yet and drops to a bare grub> prompt. The netboot
+	# build instead embeds prefix "/grub" resolved against the device it
+	# was loaded from, i.e. (tftp,<next-server>)/grub, satisfied by
+	# kezio-bootd serving its rendered config at grub/grub.cfg (see
+	# internal/bootd.GrubConfigPath). The image is monolithic (every
+	# module in Debian's NET_MODULES list, http and tftp included, is
+	# built in), so no x86_64-efi module tree needs publishing alongside
+	# it.
 	log "extracting shimx64.efi/grubnetx64.efi from Debian's signed packages"
 	docker run --rm \
 		-v "${dist_dir}:/out" \
@@ -202,19 +173,12 @@ build_agent() {
 	mkdir -p "${out_dir}"
 
 	# A plain golang:1.26 container, not a Dockerfile target: cmd/agent
-	# has no build-time inputs beyond the module itself (unlike ezio,
-	# which is built from an upstream source tree inside the live-build
-	# chroot - see hooks/live/0400-build-ezio.hook.chroot), so a one-off
-	# `go build` run is the whole job. GOCACHE/GOPATH point at a writable
-	# path inside the container since the repo itself is bind-mounted
-	# read-only - go build must never write into the source tree it is
-	# building from. GIT_CONFIG_* silences `go build`'s VCS stamping step
-	# (it shells out to git) refusing to touch a checkout it does not
-	# own: the checkout's UID rarely matches this container's, root
-	# included since git's ownership check does not exempt root, and
-	# that mismatch varies by host/runner - setting safe.directory here
-	# rather than relying on the environment already having it keeps the
-	# build reproducible regardless.
+	# has no build-time inputs beyond the module itself, so a one-off
+	# `go build` is the whole job. GOCACHE/GOPATH point at a writable
+	# path since the repo is bind-mounted read-only. GIT_CONFIG_* sets
+	# safe.directory so `go build`'s VCS-stamping git call does not
+	# refuse a checkout whose UID mismatches the container's (root
+	# included, since git's ownership check does not exempt it).
 	docker run --rm \
 		-v "${repo_root}:/workspace:ro" \
 		-v "${out_dir}:/out" \
@@ -263,27 +227,18 @@ collect_artifacts() {
 	cp "${binary_live}/initrd.img" "${dist_dir}/initrd.img"
 	cp "${binary_live}/filesystem.squashfs" "${dist_dir}/filesystem.squashfs"
 
-	# manifest.json: sizes and sha256s for every artifact, so the CI
-	# step summary can report them against the 100-300 MiB squashfs
-	# target and so internal/bootserver's KernelPath/InitrdPath/
-	# SquashfsPath defaults (which these three filenames match) have
-	# something to check integrity against downstream. shimx64.efi and
-	# grubx64.efi (staged by stage_signed_boot_binaries) are listed here
-	# too, now that they are published alongside the live image instead
-	# of being sourced separately by each consumer.
+	# manifest.json: sizes and sha256s for every artifact, so the CI step
+	# summary can report them against the 100-300 MiB squashfs target and
+	# downstream can check integrity against internal/bootserver's
+	# KernelPath/InitrdPath/SquashfsPath defaults.
 	#
-	# agentCommit: the full git SHA build_agent's checkout was at when it
+	# agentCommit: the git SHA build_agent's checkout was at when it
 	# cross-compiled cmd/agent into this image (AGENT_COMMIT overrides it
-	# for a caller that already knows the SHA, e.g. a CI workflow that
-	# checked out a detached ref; otherwise `git rev-parse HEAD` reads it
-	# straight from the checkout build_agent itself just built from).
-	# This is what lets a consumer - a human, or an e2e lane's own
-	# version-assertion step - tell which kezio-agent commit a given
-	# kezio-boot-artifacts image actually carries, instead of trusting an
-	# image tag alone: a lane pinned to a published release can otherwise
-	# go green while silently booting a stale agent (see
-	# .github/workflows/e2e-kubevirt-reusable.yml's "Assert the boot
-	# artifacts agent commit" step).
+	# for a caller that already knows the SHA). Lets a consumer tell
+	# which kezio-agent commit a given kezio-boot-artifacts image
+	# actually carries instead of trusting an image tag alone - a lane
+	# pinned to a published release could otherwise go green while
+	# silently booting a stale agent.
 	local agent_commit="${AGENT_COMMIT:-$(cd "${repo_root}" && git rev-parse HEAD)}"
 	(
 		cd "${dist_dir}"
@@ -302,14 +257,12 @@ collect_artifacts() {
 	)
 	log "manifest written to ${dist_dir}/manifest.json (agentCommit ${agent_commit})"
 
-	# sha256sums: a plain GNU-coreutils-format checksum file (one
-	# "<sha256>  <name>" line per artifact, manifest.json included) for
-	# the GitHub Release asset set this script's artifacts still publish
-	# to (human download; see .github/workflows/build-live-image.yml) so
-	# a downloader can `sha256sum -c` instead of parsing manifest.json's
-	# JSON just to verify integrity. Runtime consumers no longer need
-	# this: docker/boot-artifacts/Dockerfile bakes these same files into
-	# an OCI image, whose digest is what the pull path verifies instead.
+	# sha256sums: a GNU-coreutils-format checksum file (one
+	# "<sha256>  <name>" line per artifact, manifest.json included) so a
+	# human downloading the GitHub Release asset can `sha256sum -c`
+	# instead of parsing manifest.json. Runtime consumers instead verify
+	# the OCI image digest docker/boot-artifacts/Dockerfile bakes these
+	# files into.
 	(
 		cd "${dist_dir}"
 		sha256sum vmlinuz initrd.img filesystem.squashfs shimx64.efi grubx64.efi manifest.json >sha256sums

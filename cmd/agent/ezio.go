@@ -35,23 +35,21 @@ import (
 // image alongside kezio-agent (see hack/live-image).
 const ezioBinary = "ezio"
 
-// defaultEzioPort is the local ezio daemon's default gRPC listen port -
-// no reason to vary it, since kezio-agent runs exactly one local ezio
-// daemon at a time, for one machine's own deployment.
+// defaultEzioPort is the local ezio daemon's default gRPC listen port;
+// kezio-agent only ever runs one local daemon, so it never needs to vary.
 const defaultEzioPort = 50051
 
 // ezioStartupTimeout bounds how long Launch waits for the freshly
-// spawned daemon to answer GetVersion before giving up: long enough for
-// process startup and libtorrent init on a slow machine, short enough
-// that a daemon that will never come up does not wedge the whole deploy
-// silently.
+// spawned daemon to answer GetVersion: long enough for a slow machine's
+// startup and libtorrent init, short enough not to silently wedge the
+// deploy on a daemon that never comes up.
 const ezioStartupTimeout = 15 * time.Second
 
 // ezioLauncher implements deploy.EzioLauncher by spawning a real local
 // `ezio` process and dialing it over loopback gRPC (internal/seeder).
-// AddTorrent against this daemon always names a raw partition device as
-// save_path (see internal/agent/deploy's package doc comment) - Launch
-// itself never passes -F, which is what puts the daemon in that mode.
+// Launch never passes -F, so AddTorrent against this daemon always names
+// a raw partition device as save_path (see internal/agent/deploy's
+// package doc comment).
 type ezioLauncher struct {
 	// Logf receives ezio's own stdout/stderr, line by line, plus its
 	// exit outcome - see forwardLines and spawnEzio. Nil discards them,
@@ -115,26 +113,17 @@ func (l ezioLauncher) Launch(ctx context.Context, tuning *keziov1alpha1.MachineE
 
 // spawnEzio starts the local ezio daemon with args and wires its stdout
 // and stderr into l.Logf line by line, tagged "ezio stdout"/"ezio
-// stderr" so its own output rides the same live serial console
-// kezio-agent's own log lines already do (see deploy.Executor.Console's
-// doc comment for that path) and stays attributable to ezio there,
-// rather than landing on kezio-agent's own inherited file descriptors
-// indistinguishable from anything else writing to them. This is the
-// only place kezio-agent runs an ezio daemon at all (the seeder side,
-// docker/seeder/entrypoint.sh, execs ezio directly as its container's
-// own process, so its stdout/stderr already are the container's own
-// log stream with nothing to wire here).
+// stderr" so it rides kezio-agent's own log path (deploy.Executor.Console)
+// attributably instead of landing on inherited file descriptors. This is
+// the only place kezio-agent spawns an ezio daemon; on the seeder side,
+// docker/seeder/entrypoint.sh execs ezio as the container's own process
+// with nothing to wire.
 //
-// The two forwarding goroutines only stop once their pipe reports EOF,
-// which the kernel only delivers once the process has actually exited
-// (cleanly, killed, or crashed) and closed its end - so every line ezio
-// wrote before dying is read and logged before this function's own
-// reaper goroutine below logs the exit outcome; nothing buffered here
-// can be lost to a race with process exit. Once both pipes are drained,
-// a third goroutine reaps the process and logs whether it exited
-// cleanly or not - the one line that turns a wedged ezio and a crashed
-// one from indistinguishable ("no more output") into an unambiguous
-// diagnosis.
+// The forwarding goroutines exit only on pipe EOF, which the kernel
+// delivers only after the process has exited and closed its end, so no
+// line ezio wrote is lost to a race with process exit. A third goroutine
+// then reaps the process and logs its exit outcome, distinguishing a
+// wedged ezio from a crashed one.
 func (l ezioLauncher) spawnEzio(args []string) (stop func() error, err error) {
 	//nolint:gosec // args are built entirely from Machine.spec.ezio integer fields, never free-form input
 	cmd := exec.Command(l.binary(), args...)
@@ -172,12 +161,9 @@ func (l ezioLauncher) spawnEzio(args []string) (stop func() error, err error) {
 }
 
 // forwardLines copies each line of r into l.Logf, prefixed with label,
-// until r hits EOF or a read error - see spawnEzio's doc comment for
-// why that boundary is exactly the process's own exit, never earlier.
-// A read error other than EOF (bufio.Scanner.Err() returns nil on EOF)
-// ends forwarding early and is itself logged, the same discipline
-// internal/bootd's dnsmasq supervisor applies to its own child's
-// output.
+// until r hits EOF or a read error (see spawnEzio's doc comment for why
+// that boundary is the process's own exit). A read error other than EOF
+// ends forwarding early and is itself logged.
 func (l ezioLauncher) forwardLines(label string, r io.Reader) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {

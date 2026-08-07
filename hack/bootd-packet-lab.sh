@@ -17,15 +17,13 @@
 # TestDnsmasqLab) against a real PXE-shaped client
 # (internal/bootd/lab_client_test.go's TestDnsmasqLabClient), joined by
 # a veth pair split across two network namespaces, and asserts on the
-# packets that actually cross the wire. This is not a GitHub Actions
-# job: it needs CAP_NET_ADMIN/CAP_NET_RAW/CAP_SYS_ADMIN (network
-# namespaces, veth, and dnsmasq's own DHCP sockets) that a shared CI
-# runner does not grant. Run it locally, or in a privileged container -
-# see the example below.
+# packets that actually cross the wire. Not a GitHub Actions job: it
+# needs CAP_NET_ADMIN/CAP_NET_RAW/CAP_SYS_ADMIN (network namespaces,
+# veth, dnsmasq's own DHCP sockets) a shared CI runner does not grant.
+# Run it locally, or in a privileged container - see the example below.
 #
-# It exercises exactly the two scenarios documented in
-# docs/physical-lab-deployment.md as covered only manually before this
-# script existed:
+# It exercises the two scenarios documented in
+# docs/physical-lab-deployment.md:
 #
 #   - Scenario 1: proxyDHCP alongside an on-segment DHCP server, no
 #     relay (BOOTD_LAB_RELAY left unset). An enrolled MAC gets a

@@ -15,12 +15,10 @@ limitations under the License.
 */
 
 // Command agent is kezio-agent: the binary that runs in the live boot
-// environment (see hack/live-image), replacing the kezio-agent-stub
-// placeholder script. It reads its controller URL and single-use boot
-// token off the kernel cmdline (kezio.server=, kezio.token=; the same
-// values the placeholder stub logged and nothing more), collects the
-// machine's hardware inventory, registers with the controller
-// (internal/agentserver on the other end), and then polls for its next
+// environment (see hack/live-image). It reads its controller URL and
+// single-use boot token off the kernel cmdline (kezio.server=,
+// kezio.token=), collects the machine's hardware inventory, registers
+// with the controller (internal/agentserver), and polls for its next
 // action. See internal/agent for the actual logic; this file is only
 // process wiring (signal handling, logging, exit codes).
 package main
@@ -37,10 +35,9 @@ import (
 	"github.com/tjjh89017/kezio/internal/agent/deploy"
 )
 
-// consolePath is where deploy.Executor.Console's belt-and-braces boot
-// summary echo is written - see that field's doc comment for why. This
-// is the live boot environment's serial console device, the same one
-// every e2e diagnostics dump's console capture reads from.
+// consolePath is the live boot environment's serial console device,
+// where deploy.Executor.Console echoes the boot summary and which every
+// e2e diagnostics dump's console capture reads from.
 const consolePath = "/dev/console"
 
 func main() {
@@ -53,14 +50,11 @@ func main() {
 	}
 	log.Printf("kezio-agent: booted; kezio.server=%s kezio.token=%s", cmdline.Server, redactToken(cmdline.Token))
 
-	// console stays a nil io.Writer (not a typed-nil *os.File) when the
-	// open fails, so deploy.Executor.Console's own nil check - not an
-	// interface holding a nil, non-functional *os.File - is what decides
-	// whether the echo is attempted. A failure to open it is logged and
-	// otherwise ignored: the terminal progress report remains the
-	// primary channel (see deploy.Executor.Console's doc comment), so a
-	// live environment without a usable console device must not fail
-	// the agent over it.
+	// console stays a nil io.Writer (not a typed-nil *os.File) on open
+	// failure, so deploy.Executor.Console's nil check sees a real nil
+	// rather than an interface holding a non-functional *os.File. A
+	// missing console device is logged and otherwise non-fatal; the
+	// terminal progress report remains the primary channel.
 	var console io.Writer
 	if f, err := os.OpenFile(consolePath, os.O_WRONLY, 0); err != nil {
 		log.Printf("kezio-agent: opening %s for the finalize boot summary echo failed "+
@@ -87,13 +81,9 @@ func main() {
 }
 
 // redactToken returns a short, non-reversible summary of a boot token
-// for log lines: the token is a live, single-use credential, so it must
-// never appear in full in a log a bystander could read over someone's
-// shoulder or that ends up in a serial console capture picked up by
-// unrelated tooling. The stub script this binary replaces logged the
-// token in full; that was acceptable only because it was never anything
-// but a placeholder proving the cmdline plumbing worked, not a real
-// credential flow.
+// for log lines: the token is a live, single-use credential and must
+// never appear in full in a log that a bystander or unrelated tooling
+// might read (e.g. a serial console capture).
 func redactToken(token string) string {
 	if len(token) <= 8 {
 		return "<redacted>"

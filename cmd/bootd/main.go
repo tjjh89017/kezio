@@ -19,11 +19,10 @@ limitations under the License.
 // network boot (see internal/bootd's package doc comment for the full
 // design). Unlike the controller-manager binary (cmd/main.go), bootd
 // does not reconcile anything - it runs a minimal controller-runtime
-// manager purely to get a live-updated cache of Machine boot MAC
+// manager only to get a live-updated cache of Machine boot MAC
 // addresses (internal/bootd's MACCache), with no leader election, no
-// webhook server, and metrics disabled by default, since none of those
-// apply to a per-site, non-reconciling process that is meant to run one
-// replica per boot segment, not compete for leadership across sites.
+// webhook server, and metrics disabled by default: it runs one replica
+// per boot segment and never competes for leadership across sites.
 package main
 
 import (
@@ -145,15 +144,10 @@ func main() {
 			setupLog.Error(err, "unable to add proxy server")
 			os.Exit(1)
 		}
-		// Readiness now means something a caller can act on: with the
-		// proxy enabled, "ready" is true only once it has actually
+		// With the proxy enabled, "ready" must mean it has actually
 		// bound and can answer a request (ProxyServer.Ready), not just
-		// "the process started". Before this check existed, bootd's
-		// pod reported Ready the instant the container ran regardless
-		// of whether this proxy ever came up - which is what let
-		// config/bootd's Deployment (no readinessProbe at all) and a
-		// caller's `kubectl rollout status` race ahead of the proxy's
-		// own bind, then hit a connection that was never coming.
+		// that the process started, or `kubectl rollout status` can
+		// race ahead of the proxy's own bind.
 		if err := mgr.AddReadyzCheck("boot-config-proxy", func(_ *http.Request) error {
 			if !proxy.Ready() {
 				return errors.New("boot config proxy has not bound its listener yet")
@@ -164,12 +158,10 @@ func main() {
 			os.Exit(1)
 		}
 	} else {
-		// No proxy configured at all: readiness has nothing proxy-side
-		// to reflect, so fall back to the same trivial check healthz
-		// uses - a deployment that never sets BOOTD_AGENT_UPSTREAM_URL/
-		// BOOTD_BOOT_UPSTREAM_URL still gets a working /readyz endpoint
-		// (config/bootd's readinessProbe targets it unconditionally)
-		// rather than one that 404s for lack of any registered check.
+		// No proxy configured: readiness has nothing proxy-side to
+		// reflect, so fall back to the same trivial check healthz uses -
+		// config/bootd's readinessProbe targets /readyz unconditionally,
+		// so it must exist even with no registered check.
 		if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 			setupLog.Error(err, "unable to set up readiness check")
 			os.Exit(1)
@@ -210,9 +202,9 @@ type bootdConfig struct {
 }
 
 // bootdConfigFromEnv builds bootdConfig from the process environment.
-// Every variable below is required unless noted, since bootd - unlike
-// the controller-manager's optional bootserver/seeder subsystems - has
-// no useful inert default: a bootd process whose dnsmasq cannot answer
+// Every variable below is required unless noted: unlike the
+// controller-manager's optional bootserver/seeder subsystems, bootd has
+// no useful inert default - a bootd process whose dnsmasq cannot answer
 // the provisioning segment is not doing anything at all.
 //
 //   - BOOTD_SERVER_IP: bootd's own IPv4 address on the provisioning
@@ -260,12 +252,11 @@ type bootdConfig struct {
 //     rendered GRUB bootstrap config at grub/grub.cfg over TFTP (see
 //     internal/bootd.GrubConfigPath), which is what hands the netboot
 //     GRUB image off to that server's per-MAC config. Unset, the path
-//     is not served and a netbooting machine stops at the GRUB prompt
-//   - bootd logs the gap at startup rather than failing, so a
-//     deployment that only exercises the DHCP/TFTP front (or predates
-//     this variable) keeps its previous behavior. Must be an http URL
-//     (GRUB's netboot image has no TLS stack); anything else is a
-//     startup error.
+//     is not served and a netbooting machine stops at the GRUB prompt -
+//     bootd logs the gap at startup rather than failing, so a
+//     deployment that only exercises the DHCP/TFTP front still works.
+//     Must be an http URL (GRUB's netboot image has no TLS stack);
+//     anything else is a startup error.
 //   - BOOTD_BOOT_FILENAME: optional override for the PXE boot filename
 //     handed out (default internal/bootd.DefaultBootFilename,
 //     "shimx64.efi").
@@ -303,11 +294,10 @@ type bootdConfig struct {
 //     have (see bootd.DefaultProxyAddr). Ignored, along with both
 //     upstream URLs, when neither upstream URL is set.
 //
-// BOOTD_HTTP_BOOT_URL, BOOTD_DHCP_ADDR, and BOOTD_PXE_ADDR are no
-// longer supported (dnsmasq's proxyDHCP engine does not answer UEFI
-// HTTP Boot clients, and its DHCP ports are the well-known 67/4011
-// only); setting any of them is an error rather than a silent no-op,
-// so a deployment relying on the removed behavior fails loudly.
+// BOOTD_HTTP_BOOT_URL, BOOTD_DHCP_ADDR, and BOOTD_PXE_ADDR are not
+// supported (dnsmasq's proxyDHCP engine does not answer UEFI HTTP Boot
+// clients, and its DHCP ports are the well-known 67/4011 only); setting
+// any of them is a startup error rather than a silent no-op.
 func bootdConfigFromEnv() (bootdConfig, error) {
 	for _, removed := range []string{"BOOTD_HTTP_BOOT_URL", "BOOTD_DHCP_ADDR", "BOOTD_PXE_ADDR"} {
 		if os.Getenv(removed) != "" {

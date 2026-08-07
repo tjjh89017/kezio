@@ -25,10 +25,9 @@ import (
 )
 
 // execRunner implements deploy.Runner by shelling out to the live
-// environment's own tools (sfdisk, blockdev, mkfs.*, mkswap -
-// all present in the live boot image; see hack/live-image). It is the
-// only place in kezio-agent that actually runs a command against a real
-// device.
+// environment's own tools (sfdisk, blockdev, mkfs.*, mkswap; see
+// hack/live-image). It is the only place in kezio-agent that runs a
+// command against a real device.
 type execRunner struct{}
 
 func (execRunner) Run(ctx context.Context, stdin []byte, name string, args ...string) ([]byte, error) {
