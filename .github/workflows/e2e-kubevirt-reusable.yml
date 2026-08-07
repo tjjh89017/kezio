@@ -941,24 +941,11 @@ jobs:
             "spec":{"template":{"metadata":{"annotations":{"k8s.v1.cni.cncf.io/networks":"kezio-tracker-network"}}}}
           }'
 
-          # kezio-ezio-seeder (config/seeder's shared fleet - the
-          # EndpointSlice-driven Deployment SeederReconciler pushes every
-          # Ready Image's content onto) is deliberately scaled to zero
-          # for this lane and never patched onto the provisioning bridge
-          # at all: SEEDER_DEPLOYMENT_IMAGE below opts into the per-Image
-          # Deployment path instead (see
-          # internal/controller/seeder_deployment.go), and this lane
-          # exists to prove *that* path actually serves the target, not
-          # the shared fleet. With zero replicas the shared fleet has no
-          # running pod for the entire job - nothing to bind
-          # kezio-seeder-network's address, nothing for SeederReconciler
-          # to sync even if it were enabled (it is not - see
-          # SEEDER_SERVICE_NAME below) - so attribution is unambiguous by
-          # elimination: whatever the target leeches from, it cannot be
-          # this Deployment. kezio-seeder-network's static-ipam address
-          # is free for the per-Image Deployment's own pod to reuse (see
-          # the "Attach the per-Image seeder Deployment..." step below).
-          kubectl -n kezio-system scale deployment/kezio-ezio-seeder --replicas=0
+          # The shared seeder fleet no longer exists in the repo: the
+          # per-Image seeder Deployment (SEEDER_DEPLOYMENT_IMAGE below)
+          # is the only seeding path, so attribution needs no
+          # scale-to-zero - a step below asserts the legacy Deployment
+          # is absent outright.
 
           # SEEDER_TRACKER_URL is the opentracker pod's own bridge
           # address (its Multus net1, just attached above) - not the
@@ -991,20 +978,13 @@ jobs:
           # per-Image seeder Deployment reconciler) starts with the
           # final URL and never needs a restart.
           #
-          # SEEDER_SERVICE_NAMESPACE/SEEDER_SERVICE_NAME are deliberately
-          # NOT set: SeederConfig.enabled() (internal/controller/
-          # seeder_controller.go) requires both, so leaving them unset
-          # keeps SeederReconciler (the shared-fleet controller) from
-          # ever registering at all - it never lists the
-          # kezio-ezio-seeder EndpointSlice, never dials it, never adds
-          # anything to it. SEEDER_TRACKER_URL/SEEDER_STORE_ROOT stay set
-          # regardless: agentServerConfigFromEnv reuses them verbatim to
-          # build the .torrent bytes the target's leecher gets from its
-          # deploy plan, and SEEDER_DEPLOYMENT_* below reuses the same
-          # two fields to add content to the per-Image Deployment's own
+          # SEEDER_TRACKER_URL stays set: the per-Image seeder path
+          # bakes it into every published .torrent's announce field, and
+          # SEEDER_DEPLOYMENT_* below configures the per-Image
+          # Deployment's own
           # pod - neither depends on the shared fleet being enabled.
           #
-          # SEEDER_DEPLOYMENT_IMAGE/_STORE_PVC opt into the per-Image
+          # SEEDER_DEPLOYMENT_IMAGE opts into the per-Image
           # seeder Deployment path this lane exists to exercise (see
           # internal/controller/seeder_deployment.go); the grace period
           # is cut from its 5-minute production default down to 45s so
@@ -1024,13 +1004,10 @@ jobs:
           # points the target VM's leecher at.
           kubectl -n kezio-system set env deployment/kezio-controller-manager \
             INGEST_IMAGE="${INGEST_IMG}" \
-            INGEST_STORE_PVC=kezio-store \
             INGEST_STAGING_PVC=kezio-image-service-staging \
             INGEST_SERVICE_ACCOUNT=kezio-ingest \
             SEEDER_TRACKER_URL="http://${PROVISIONING_TRACKER_NET1_IP%%/*}:6969/announce" \
-            SEEDER_STORE_ROOT=/store \
             SEEDER_DEPLOYMENT_IMAGE="${SEEDER_IMG}" \
-            SEEDER_DEPLOYMENT_STORE_PVC=kezio-store \
             SEEDER_DEPLOYMENT_GRACE_PERIOD=45s \
             SEEDER_DEPLOYMENT_NETWORK=kezio-seeder-network \
             BOOT_SERVER_ADDR=:8090 \
@@ -1046,11 +1023,7 @@ jobs:
             fetch-boot-artifacts="${BOOT_ARTIFACTS_IMG}"
 
           kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
-          # kezio-ezio-seeder is included here too: with 0 desired
-          # replicas (see the scale-to-zero above) rollout status returns
-          # immediately, so this still doubles as confirmation the scale
-          # actually took.
-          for d in kezio-image-service kezio-ezio-seeder kezio-opentracker; do
+          for d in kezio-image-service kezio-opentracker; do
             kubectl rollout status deployment/"${d}" -n kezio-system --timeout=180s
           done
 
@@ -2304,15 +2277,11 @@ jobs:
         #     itself - this is the actual serve, not just the setup.
         run: |
           set -euo pipefail
-          shared_fleet_replicas="$(kubectl -n kezio-system get deployment/kezio-ezio-seeder -o jsonpath='{.spec.replicas}')"
-          if [ "${shared_fleet_replicas}" != "0" ]; then
-            echo "::error::shared-fleet kezio-ezio-seeder has spec.replicas=${shared_fleet_replicas}, want 0 - attribution to the per-Image Deployment would not be unambiguous." >&2
-            exit 1
-          fi
-          shared_fleet_running="$(kubectl -n kezio-system get pods -l app.kubernetes.io/component=ezio-seeder,app.kubernetes.io/name=kezio -o json \
-            | jq '[.items[] | select(.metadata.ownerReferences[]?.name == "kezio-ezio-seeder")] | length')"
-          if [ "${shared_fleet_running}" != "0" ]; then
-            echo "::error::found ${shared_fleet_running} pod(s) still owned by the shared-fleet kezio-ezio-seeder Deployment - it should have zero." >&2
+          # The shared fleet was removed from the repo entirely; its
+          # Deployment must not exist at all, which keeps attribution
+          # unambiguous by construction.
+          if kubectl -n kezio-system get deployment/kezio-ezio-seeder >/dev/null 2>&1; then
+            echo "::error::legacy shared-fleet deployment/kezio-ezio-seeder exists - it was removed from the repo and nothing should recreate it." >&2
             exit 1
           fi
 
@@ -2570,9 +2539,6 @@ jobs:
           echo "===== ingest Job(s) ====="
           kubectl get jobs -n kezio-system -l kezio.kojuro.date/image -o wide
           kubectl logs -n kezio-system -l kezio.kojuro.date/image --all-containers --tail=1000
-          echo "===== shared-fleet seeder logs (expected: no pod, kezio-ezio-seeder is scaled to zero in this lane) ====="
-          kubectl -n kezio-system get deployment/kezio-ezio-seeder -o wide
-          kubectl -n kezio-system logs deployment/kezio-ezio-seeder --tail=1000
           echo "===== per-Image seeder Deployment logs ====="
           if [ -n "${SEEDER_DEPLOYMENT_NAME:-}" ]; then
             kubectl -n kezio-system get deployment "${SEEDER_DEPLOYMENT_NAME}" -o yaml
@@ -2669,7 +2635,6 @@ jobs:
             kezio-existing-dhcp:existing-dhcp.log
             kezio-opentracker:opentracker.log
             kezio-image-service:image-service.log
-            kezio-ezio-seeder:ezio-seeder.log
           job-label-selectors: |
             kezio.kojuro.date/image:ingest.log
           resources: |
