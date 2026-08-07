@@ -14,6 +14,16 @@ name: Probe - bootserver HTTP hop
 # hack/live-image/build.sh is not needed to prove the HTTP layer works),
 # then asserts real HTTP status codes and content lengths for both
 # GET /boot/artifacts/<file> and GET /boot/grub.cfg-<mac>.
+#
+# Also exercises .github/actions/assert-boot-artifacts-agent-commit - the
+# same commit-freshness check every real KubeVirt lane runs against
+# bootd - port-forwarded to this real bootserver instead of standing up
+# bootd itself (out of scope here; bootd is just a reverse proxy in
+# front of this same manifest.json route). What's real: the manager
+# binary, the HTTP route, the assertion script. What's faked: the boot
+# artifact bytes (write-fake-boot-artifacts) and, for the second
+# assertion call only, the expected commit (deliberately wrong, to prove
+# the FAIL path fires and is not a no-op that only ever passes).
 on:
   workflow_dispatch: {}
   workflow_call: {}
@@ -185,6 +195,55 @@ jobs:
             exit 1
           fi
 
+      - name: Port-forward kezio-boot-server for the assertion action (runs on the runner, not in-cluster)
+        run: |
+          set -euo pipefail
+          kubectl -n kezio-system port-forward svc/kezio-boot-server 18090:8090 >/tmp/port-forward.log 2>&1 &
+          echo $! > /tmp/port-forward.pid
+          for _ in $(seq 1 30); do
+            curl -sf -o /dev/null http://127.0.0.1:18090/boot/artifacts/manifest.json && break
+            sleep 1
+          done
+          curl -sf -o /dev/null http://127.0.0.1:18090/boot/artifacts/manifest.json
+
+      # The fake artifact's agentCommit is genuinely github.sha (written by
+      # write-fake-boot-artifacts above), so this is a real match, not a
+      # scripted one - proves the assertion's PASS path.
+      - name: Assert the boot artifacts agent commit - matching commit must pass
+        uses: ./.github/actions/assert-boot-artifacts-agent-commit
+        with:
+          bootd-ip: "127.0.0.1"
+          port: "18090"
+          expected-commit: ${{ github.sha }}
+          build-boot-artifacts: "true"
+
+      # Deliberately expects a commit the manifest does NOT report, with
+      # build-boot-artifacts true so a mismatch is a hard failure - proves
+      # the assertion's FAIL path actually fires instead of only ever
+      # having been observed passing.
+      - name: Assert the boot artifacts agent commit - mismatch must fail (expect this step to fail)
+        id: assert-mismatch
+        continue-on-error: true
+        uses: ./.github/actions/assert-boot-artifacts-agent-commit
+        with:
+          bootd-ip: "127.0.0.1"
+          port: "18090"
+          expected-commit: "0000000000000000000000000000000000dead"
+          build-boot-artifacts: "true"
+
+      - name: Verify the mismatch assertion actually failed
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.assert-mismatch.outcome }}" != "failure" ]; then
+            echo "::error::the mismatch case was expected to fail (outcome=failure) but reported outcome=${{ steps.assert-mismatch.outcome }} - the assertion is not detecting a real mismatch" >&2
+            exit 1
+          fi
+          echo "Confirmed: the assertion action fails outright on a deliberate commit mismatch."
+
+      - name: Stop the port-forward
+        if: always()
+        run: kill "$(cat /tmp/port-forward.pid)" 2>/dev/null || true
+
       - name: Record the result
         if: always()
         run: |
@@ -194,6 +253,7 @@ jobs:
             echo "- GET /boot/artifacts/<file> for vmlinuz/initrd.img/filesystem.squashfs/manifest.json"
             echo "- GET /boot/artifacts/<missing> (404, no listing)"
             echo "- GET /boot/grub.cfg-<unknown-mac> (fixed boot-local config)"
+            echo "- assert-boot-artifacts-agent-commit: PASS on a real match, and FAIL on a deliberate mismatch"
           } >>"${GITHUB_STEP_SUMMARY}"
 
       - name: Dump diagnostics on failure

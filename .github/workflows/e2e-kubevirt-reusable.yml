@@ -1222,38 +1222,16 @@ jobs:
         # The point of this step: a lane can never again go green while
         # silently booting a stale kezio-agent - it either proves the
         # agent it just booted was built from this commit
-        # (build_boot_artifacts), or it says out loud, in the log and
-        # the job summary, exactly which commit it actually booted
-        # instead. hack/live-image/build.sh writes manifest.json's
-        # "agentCommit" from the checkout that cross-compiled cmd/agent
-        # into the image (see that script's own comment); bootd's own
-        # reverse proxy already serves it back out at
-        # /boot/artifacts/manifest.json, the same endpoint the "Deploy
-        # kezio-bootd..." step above already curled to prove
-        # reachability.
-        run: |
-          set -euo pipefail
-          bootd_ip="${PROVISIONING_BOOTD_NET1_IP%%/*}"
-          agent_commit="$(curl -sf "http://${bootd_ip}:80/boot/artifacts/manifest.json" | jq -r '.agentCommit // "unknown"')"
-          if [ "${agent_commit}" = "${GITHUB_SHA}" ]; then
-            result="FRESH - this run exercised the commit under test's own kezio-agent."
-            echo "Boot artifacts agent commit ${agent_commit} matches the commit under test."
-          elif [ "${{ inputs.build_boot_artifacts }}" = "true" ]; then
-            result="MISMATCH (unexpected - build_boot_artifacts was set)"
-          else
-            result="STALE / PINNED - this run booted build-live-image.yml's last published kezio-agent, NOT the commit under test. Set build_boot_artifacts: true to exercise agent-side changes."
-            echo "::notice::Boot artifacts agent commit ${agent_commit} does not match the commit under test (${GITHUB_SHA}) - this is the pinned default (boot_artifacts_image), not a failure. Set build_boot_artifacts: true to boot this commit's own kezio-agent."
-          fi
-          {
-            echo "## Boot artifacts agent commit"
-            echo "- commit under test: \`${GITHUB_SHA}\`"
-            echo "- booted kezio-agent built from: \`${agent_commit}\`"
-            echo "- result: ${result}"
-          } >>"${GITHUB_STEP_SUMMARY}"
-          if [ "${agent_commit}" != "${GITHUB_SHA}" ] && [ "${{ inputs.build_boot_artifacts }}" = "true" ]; then
-            echo "::error::build_boot_artifacts was set to build a fresh kezio-boot-artifacts image from ${GITHUB_SHA}, but the deployed image reports agentCommit=${agent_commit}. The freshness build did not actually take effect." >&2
-            exit 1
-          fi
+        # (build_boot_artifacts), or it says out loud exactly which
+        # commit it actually booted instead. hack/live-image/build.sh
+        # writes manifest.json's "agentCommit" from the checkout that
+        # cross-compiled cmd/agent into the image; bootd's own reverse
+        # proxy already serves it back out at /boot/artifacts/manifest.json.
+        uses: ./.github/actions/assert-boot-artifacts-agent-commit
+        with:
+          bootd-ip: ${{ env.PROVISIONING_BOOTD_NET1_IP }}
+          expected-commit: ${{ github.sha }}
+          build-boot-artifacts: ${{ inputs.build_boot_artifacts }}
 
       - name: Start capturing bootd's pod network namespace (nsenter tcpdump on net1)
         # bridge.pcap (started above) only proves a frame crossed

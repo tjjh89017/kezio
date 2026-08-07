@@ -590,35 +590,11 @@ jobs:
           fi
 
       - name: Assert the boot artifacts agent commit
-        # Mirrors e2e-kubevirt-reusable.yml's own step of the same name -
-        # see that file's comment for the full reasoning: this is what
-        # makes a stale kezio-agent fail loudly (build_boot_artifacts
-        # set) or at least say so out loud (the pinned default), instead
-        # of a lane going green while silently booting last month's
-        # agent.
-        run: |
-          set -euo pipefail
-          bootd_ip="${PROVISIONING_BOOTD_NET1_IP%%/*}"
-          agent_commit="$(curl -sf "http://${bootd_ip}:80/boot/artifacts/manifest.json" | jq -r '.agentCommit // "unknown"')"
-          if [ "${agent_commit}" = "${GITHUB_SHA}" ]; then
-            result="FRESH - this run exercised the commit under test's own kezio-agent."
-            echo "Boot artifacts agent commit ${agent_commit} matches the commit under test."
-          elif [ "${{ inputs.build_boot_artifacts }}" = "true" ]; then
-            result="MISMATCH (unexpected - build_boot_artifacts was set)"
-          else
-            result="STALE / PINNED - this run booted build-live-image.yml's last published kezio-agent, NOT the commit under test. Set build_boot_artifacts: true to exercise agent-side changes."
-            echo "::notice::Boot artifacts agent commit ${agent_commit} does not match the commit under test (${GITHUB_SHA}) - this is the pinned default (boot_artifacts_image), not a failure. Set build_boot_artifacts: true to boot this commit's own kezio-agent."
-          fi
-          {
-            echo "## Boot artifacts agent commit"
-            echo "- commit under test: \`${GITHUB_SHA}\`"
-            echo "- booted kezio-agent built from: \`${agent_commit}\`"
-            echo "- result: ${result}"
-          } >>"${GITHUB_STEP_SUMMARY}"
-          if [ "${agent_commit}" != "${GITHUB_SHA}" ] && [ "${{ inputs.build_boot_artifacts }}" = "true" ]; then
-            echo "::error::build_boot_artifacts was set to build a fresh kezio-boot-artifacts image from ${GITHUB_SHA}, but the deployed image reports agentCommit=${agent_commit}. The freshness build did not actually take effect." >&2
-            exit 1
-          fi
+        uses: ./.github/actions/assert-boot-artifacts-agent-commit
+        with:
+          bootd-ip: ${{ env.PROVISIONING_BOOTD_NET1_IP }}
+          expected-commit: ${{ github.sha }}
+          build-boot-artifacts: ${{ inputs.build_boot_artifacts }}
 
       - name: Create the Machine CR for the target VM
         run: |
