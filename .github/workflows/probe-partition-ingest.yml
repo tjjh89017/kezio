@@ -132,6 +132,7 @@ jobs:
         # PVC resolves to the same thing.
         run: |
           set -euo pipefail
+          make kustomize
           cd config/manager && ../../bin/kustomize edit set image controller="${MANAGER_IMG}"
           cd ../image-service && ../../bin/kustomize edit set image image-service="${IMAGE_SERVICE_IMG}"
           cd ../..
