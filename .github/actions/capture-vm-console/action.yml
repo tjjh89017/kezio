@@ -29,8 +29,8 @@ inputs:
     default: kezio-system
   logfile:
     description: >-
-      Path the console output is appended to (recommended under
-      ${{ runner.temp }}, so it lands in a later upload-artifact step).
+      Path the console output is appended to. Put it under the runner
+      temp directory so a later upload-artifact step picks it up.
     required: true
 
 runs:
