@@ -583,8 +583,8 @@ jobs:
     # kernel/initrd/squashfs: those need a NIC on a real L2 broadcast
     # domain and a UEFI firmware actually executing GRUB, which a
     # GitHub-hosted runner's pod network cannot provide - see
-    # e2e-boot-path-kubevirt.yml (workflow_dispatch only, not run here)
-    # for that heavier, separable stage and the realism assessment behind
+    # e2e-bmc-kubevirt.yml (workflow_dispatch only, not run here) for
+    # that heavier, separable stage and the realism assessment behind
     # keeping it out of this always-on lane.
     name: Run boot-path against RKE2
     needs: [lint, test]

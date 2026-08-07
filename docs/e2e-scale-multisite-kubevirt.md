@@ -74,7 +74,7 @@ Actions job can provide - see the "does NOT claim" section above.
 
 ## Dependency on a published image (or an in-lane build)
 
-Like `e2e-deploy-kubevirt.yml` and `e2e-boot-path-kubevirt.yml`, this
+Like `e2e-kubevirt-reusable.yml` (called by `e2e-bmc-kubevirt.yml`), this
 lane needs a published `kezio-boot-artifacts` image to exist before
 either VM can even reach a live boot (`boot_artifacts_image` selects
 among what is already published; publishing itself is a maintainer

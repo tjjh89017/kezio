@@ -7,9 +7,12 @@ the image over BitTorrent onto the VM's disk, and verifies the deployed
 disk actually boots (controller status, guest agent connection, and a
 byte-for-byte content check through QGA).
 
-kezio's own `e2e-deploy-kubevirt.yml` is a thin `workflow_dispatch`
-caller of this workflow - the extraction only moved the job body, it did
-not change kezio's own trigger, gating, or behavior. The [ezio
+kezio's own `e2e-bmc-kubevirt.yml` is a thin `workflow_dispatch` caller
+of this workflow - the extraction only moved the job body, it did not
+change kezio's own trigger, gating, or behavior. The target VM is
+powered on and PXE-booted through a real KubeVirtBMC/Redfish endpoint
+(kezio's own no-BMC lane is retired - kezio never ships without a BMC
+driver). The [ezio
 repository](https://github.com/tjjh89017/ezio) - which owns the
 BitTorrent engine this scenario seeds and leeches through, and ships
 build-only CI with no test suite of its own - can call the same workflow
@@ -42,6 +45,8 @@ jobs:
 | `seeder_image` | string | `example.com/kezio-seeder:e2e-deploy` | Image tag built for the ezio seeder; built from `ezio_ref`. |
 | `image_service_image` | string | `example.com/kezio-image-service:e2e-deploy` | Image tag built for kezio-image-service (the upload/ingest front door). |
 | `opentracker_image` | string | `ghcr.io/tunisiano187/opentracker-docker:master` | BitTorrent tracker image the seeder and leecher announce against. |
+| `kubevirtbmc_version` | string | `v0.9.0` | KubeVirtBMC release tag to install. |
+| `dhcp_scenario` | choice | `no-relay` | Which of kezio-bootd's DHCP scenarios this run drives: `no-relay` (proxyDHCP beside an existing-dhcp stand-in server) or `lease` (bootd's own dnsmasq is the segment's sole DHCP authority). |
 
 No `secrets:` passthrough exists today: every image the job builds is
 built from source and loaded locally (never pushed), and every external
@@ -59,7 +64,7 @@ exists because nothing in the job needs one yet.
   (the job's own resource-check step fails fast under 4 CPUs or 14000
   MiB RAM).
 - **Dispatch gated on the kezio side.** kezio's own caller
-  (`e2e-deploy-kubevirt.yml`) is `workflow_dispatch` only and depends on
+  (`e2e-bmc-kubevirt.yml`) is `workflow_dispatch` only and depends on
   a published `kezio-boot-artifacts` image existing (see
   `boot_artifacts_image` above), unless `build_boot_artifacts` is set -
   it does not run on every push or pull request. An ezio-repo caller is

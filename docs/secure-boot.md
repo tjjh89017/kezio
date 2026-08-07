@@ -150,9 +150,9 @@ untrusted one.
 
 None of kezio's CI workflows boot with Secure Boot enabled:
 
-- `.github/workflows/e2e-boot-path-kubevirt.yml`,
-  `e2e-deploy-kubevirt.yml`, and `e2e-bmc-kubevirt.yml` each define
-  their target VM with OVMF UEFI firmware and
+- `.github/workflows/e2e-kubevirt-reusable.yml` (called by
+  `e2e-bmc-kubevirt.yml`) and `e2e-scale-multisite-kubevirt.yml` each
+  define their target VM with OVMF UEFI firmware and
   `firmware.bootloader.efi.secureBoot: false` - no Secure Boot keys are
   enrolled into any of these VMs' firmware, so none of them exercise
   the shim/GRUB/kernel signature checks at all. The shim and GRUB
