@@ -371,30 +371,28 @@ undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.
 	$(KUSTOMIZE) build config/default | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
 # deploy-image-path applies config/e2e-image-path (config/default plus
-# config/image-service and config/seeder, plus a store PVC and a store
-# mount on the manager - see that overlay's README-style comment) and
-# then wires INGEST_IMAGE/SEEDER_* onto the already-deployed
-# controller-manager with `kubectl set env`, since those values are
-# per-run image tags kustomize's static YAML has no way to express (see
+# config/image-service, see that overlay's README-style comment) and then
+# wires INGEST_IMAGE onto the already-deployed controller-manager with
+# `kubectl set env`, since that value is a per-run image tag kustomize's
+# static YAML has no way to express (see
 # config/e2e-image-path/kustomization.yaml). Used only by the e2e
 # image-path stage (test/e2e's "Image ingest and seeding" Context); run
 # `deploy` first so config/default's CRDs/RBAC/webhook/manager exist to
 # add these resources on top of.
+#
+# No seeder is deployed or wired here: this stage never creates a
+# Machine, and seeding is demand-driven by a Machine deploying the Image
+# (see internal/controller/seeder_deployment.go) - the deploy-path e2e
+# lane is where a real per-Image seeder Deployment gets exercised.
 .PHONY: deploy-image-path
-deploy-image-path: manifests kustomize ## Deploy image-service+seeder+store and wire real ingest/seeding onto the controller-manager (e2e image-path stage only).
+deploy-image-path: manifests kustomize ## Deploy image-service and wire real ingest onto the controller-manager (e2e image-path stage only).
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
 	cd config/image-service && $(KUSTOMIZE) edit set image image-service=${IMAGE_SERVICE_IMG}
-	cd config/seeder && $(KUSTOMIZE) edit set image seeder=${SEEDER_IMG}
 	$(KUSTOMIZE) build config/e2e-image-path | $(KUBECTL) apply -f -
 	$(KUBECTL) -n kezio-system set env deployment/kezio-controller-manager \
 		INGEST_IMAGE=${INGEST_IMG} \
-		INGEST_STORE_PVC=kezio-store \
 		INGEST_STAGING_PVC=kezio-image-service-staging \
-		INGEST_SERVICE_ACCOUNT=kezio-ingest \
-		SEEDER_TRACKER_URL=http://kezio-opentracker.kezio-system.svc.cluster.local:6969/announce \
-		SEEDER_STORE_ROOT=/store \
-		SEEDER_SERVICE_NAMESPACE=kezio-system \
-		SEEDER_SERVICE_NAME=kezio-ezio-seeder
+		INGEST_SERVICE_ACCOUNT=kezio-ingest
 
 # deploy-boot-path applies config/e2e-boot-path (config/default plus the
 # boot config server's and agent registration server's Services - see

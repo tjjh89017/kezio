@@ -1,11 +1,14 @@
 # Overlay used only by the e2e full-deploy KubeVirt stage
 # (.github/workflows/e2e-deploy-kubevirt.yml, workflow_dispatch only). It
-# is the union of config/e2e-image-path (real ingest + seeding) and
-# config/e2e-boot-path (the boot config server and agent registration
-# server Services), because the full-deploy stage needs both halves at
-# once: a real Image ingested through image-service/ingest/seeder, and a
-# real Machine net-booting through kezio-bootd into kezio-agent to
-# deploy that Image onto a KubeVirt VM's disk.
+# is the union of config/e2e-image-path (real ingest through image-service
+# and the per-partition-PVC/publish path) and config/e2e-boot-path (the
+# boot config server and agent registration server Services), plus
+# config/seeder (opentracker and the NAD example), because the full-deploy
+# stage needs all three at once: a real Image ingested through
+# image-service/ingest/publish, a real per-Image seeder Deployment created
+# on demand once a Machine starts deploying that Image, and a real Machine
+# net-booting through kezio-bootd into kezio-agent to deploy it onto a
+# KubeVirt VM's disk.
 #
 # It does not compose ../e2e-image-path or ../e2e-boot-path directly
 # (`resources: [../e2e-image-path, ../e2e-boot-path]`): both already
@@ -13,8 +16,8 @@
 # merge two kustomizations that each independently pull in the same base
 # (see config/e2e-boot-path/kustomization.yaml's own comment for the
 # exact error this produces). Instead this overlay pulls in ../default
-# exactly once, plus ../image-service and ../seeder (neither of which
-# includes ../default itself), plus local copies of the plain-YAML
+# exactly once, plus ../image-service, ../seeder, and ../ingest (none of
+# which includes ../default itself), plus local copies of the plain-YAML
 # resource and patch files config/e2e-image-path and config/e2e-boot-path
 # each ship. Those are local copies rather than relative-path references
 # to the originals for the same reason config/e2e-boot-path's own Service
@@ -23,26 +26,21 @@
 # kustomization's own root directory. Keep each copy in sync with its
 # origin if that file changes.
 #
-# INGEST_IMAGE, SEEDER_*, BOOT_SERVER_ADDR, BOOT_ARTIFACTS_DIR,
-# BOOT_SERVER_URL, BOOT_AGENT_SERVER_URL, AGENT_SERVER_ADDR, and DEPLOYER
-# are NOT set here (same reasoning as config/e2e-image-path and
-# config/e2e-boot-path: they need
-# per-run values kustomize's static YAML cannot express) - the workflow
-# sets them with `kubectl set env` after applying this overlay.
+# INGEST_IMAGE, SEEDER_*, SEEDER_DEPLOYMENT_*, BOOT_SERVER_ADDR,
+# BOOT_ARTIFACTS_DIR, BOOT_SERVER_URL, BOOT_AGENT_SERVER_URL,
+# AGENT_SERVER_ADDR, and DEPLOYER are NOT set here (same reasoning as
+# config/e2e-image-path and config/e2e-boot-path: they need per-run
+# values kustomize's static YAML cannot express) - the workflow sets them
+# with `kubectl set env` after applying this overlay.
 resources:
   - ../default
   - ../image-service
   - ../seeder
   - ../ingest
-  - store-pvc.yaml
   - boot-server-service.yaml
   - agent-server-service.yaml
 
 patches:
-  - path: manager-store-patch.yaml
-    target:
-      kind: Deployment
-      name: kezio-controller-manager
   - path: staging-pvc-patch.yaml
     target:
       kind: PersistentVolumeClaim

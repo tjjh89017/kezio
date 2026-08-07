@@ -17,8 +17,6 @@ limitations under the License.
 package e2e
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -30,8 +28,8 @@ import (
 	. "github.com/onsi/gomega"    // nolint:revive,staticcheck
 
 	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
-	"github.com/tjjh89017/kezio/internal/seeder"
-	"github.com/tjjh89017/kezio/internal/store"
+	"github.com/tjjh89017/kezio/internal/controller"
+	"github.com/tjjh89017/kezio/internal/ingest"
 	"github.com/tjjh89017/kezio/test/utils"
 )
 
@@ -44,12 +42,13 @@ import (
 // ginkgo binary or a hand-rolled label filter.
 var imagePathEnabled = os.Getenv("E2E_IMAGE_PATH") == "true"
 
-// Image tags for the three additional images this stage builds and
-// imports locally, the same way BeforeSuite already does for the manager
-// image (projectImage) - never pulled from a registry.
+// Image tags for the two images this stage builds and imports locally,
+// the same way BeforeSuite already does for the manager image
+// (projectImage) - never pulled from a registry. No seeder image is
+// built here (see registerImagePathContext's doc comment: there is no
+// Machine, so no per-Image seeder Deployment is ever created).
 const (
 	ingestImagePathImage       = "example.com/kezio-ingest:e2e"
-	seederImagePathImage       = "example.com/kezio-seeder:e2e"
 	imageServiceImagePathImage = "example.com/kezio-image-service:e2e"
 )
 
@@ -67,13 +66,6 @@ const (
 	imageServiceToken           = "kezio-e2e-image-path-token"
 )
 
-// imagePathTrackerURL is the opentracker announce URL the deployed
-// controller-manager is told to use (via `make deploy-image-path`'s
-// `kubectl set env SEEDER_TRACKER_URL=...`, which must stay in sync with
-// this literal) and that this file uses locally to build the leecher's
-// .torrent bytes with the same announce URL the seeder itself used.
-const imagePathTrackerURL = "http://kezio-opentracker.kezio-system.svc.cluster.local:6969/announce"
-
 // imagePathReadyTimeout bounds how long the Image takes to reach Ready:
 // this exercises a real qemu-img convert, sfdisk dump, and partclone
 // capture of a full Ubuntu cloud image inside the ingest Job, which is
@@ -81,10 +73,6 @@ const imagePathTrackerURL = "http://kezio-opentracker.kezio-system.svc.cluster.l
 // bounded - a real hang here should fail loudly, not stall the job until
 // its overall timeout.
 const imagePathReadyTimeout = 15 * time.Minute
-
-// imagePathLeechTimeout bounds how long the leecher Pod takes to finish
-// downloading one partition's content over BitTorrent from the seeder.
-const imagePathLeechTimeout = 5 * time.Minute
 
 // registerImagePathContext adds the "Image ingest and seeding" Context as
 // a Context INSIDE the same Describe("Manager", Ordered, ...) container
@@ -100,14 +88,21 @@ const imagePathLeechTimeout = 5 * time.Minute
 // function's own AfterAll doc comment) - both of which only hold if this
 // Context is registered as a true nested sibling within that same
 // container.
+//
+// This stage exercises real ingest (qemu-img/sfdisk/partclone) through
+// image-service and the per-partition-PVC/publish path only. It runs no
+// seeder: seeding is demand-driven by a Machine deploying the Image (see
+// internal/controller/seeder_deployment.go), and this stage never creates
+// a Machine, so a per-Image seeder Deployment is never expected to exist
+// for it - proving exactly that absence is one of this stage's own
+// assertions below. End-to-end seeding proof (a real per-Image seeder
+// Deployment actually serving a leecher) lives in the deploy-path e2e
+// lane, which does drive a Machine through a real deploy.
 func registerImagePathContext() {
 	Context("Image ingest and seeding (image-path)", func() {
 		var (
 			portForwards      []*exec.Cmd
 			imageServiceLocal = "127.0.0.1:18080"
-			seederGRPCLocal   = "127.0.0.1:15051"
-			leecherGRPCLocal  = "127.0.0.1:15052"
-			leecherPodName    = "kezio-e2e-leecher"
 		)
 
 		BeforeAll(func() {
@@ -117,26 +112,21 @@ func registerImagePathContext() {
 			_, statErr := os.Stat(qcow2Path)
 			Expect(statErr).NotTo(HaveOccurred(), "E2E_UBUNTU_QCOW2_PATH does not point at a readable file")
 
-			By("building the ingest, seeder, and image-service images")
+			By("building the ingest and image-service images")
 			buildAndImportImagePathImages()
 
 			By("creating the image-service bearer token Secret")
 			createImageServiceTokenSecret()
 
-			By("deploying image-service, seeder, opentracker, the store, and wiring the manager for real ingest/seeding")
+			By("deploying image-service and wiring the manager for real ingest")
 			runMake("deploy-image-path",
 				"IMG="+projectImage,
 				"IMAGE_SERVICE_IMG="+imageServiceImagePathImage,
 				"INGEST_IMG="+ingestImagePathImage,
-				"SEEDER_IMG="+seederImagePathImage,
 			)
 
 			By("waiting for every image-path Deployment to roll out")
-			deployments := []string{
-				"kezio-controller-manager", "kezio-image-service",
-				"kezio-ezio-seeder", "kezio-opentracker",
-			}
-			for _, d := range deployments {
+			for _, d := range []string{"kezio-controller-manager", "kezio-image-service"} {
 				waitForRollout(d)
 			}
 
@@ -148,11 +138,10 @@ func registerImagePathContext() {
 		})
 
 		AfterAll(func() {
-			By("stopping port-forwards and deleting the leecher Pod")
+			By("stopping port-forwards")
 			for _, pf := range portForwards {
 				stopPortForward(pf)
 			}
-			_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", leecherPodName, "-n", namespace, "--ignore-not-found"))
 
 			// Delete the Image this stage created (and wait for it)
 			// before the outer AfterAll runs "make undeploy": that
@@ -203,155 +192,93 @@ func registerImagePathContext() {
 			}
 		})
 
-		It("has the seeder report every Ready partition's content as an added torrent", func() {
+		It("publishes every content partition into its own PVC", func() {
 			image := getImage(imagePathImageName)
 
-			By("port-forwarding the seeder's gRPC control port")
-			portForwards = append(portForwards, mustPortForward("svc/kezio-ezio-seeder", seederGRPCLocal, "50051"))
-
-			By("polling GetTorrentStatus until every partition's info hash is present")
-			Eventually(func(g Gomega) {
-				present := seederTorrentHashes(g, seederGRPCLocal)
-				for _, p := range image.Status.Partitions {
-					if p.InfoHash == "" {
-						continue
-					}
-					g.Expect(present).To(HaveKey(p.InfoHash),
-						"expected the seeder to have added a torrent for partition %d (%s)", p.Number, p.Role)
-				}
-			}).WithTimeout(2 * time.Minute).WithPolling(2 * time.Second).Should(Succeed())
-		})
-
-		It("leeches the smallest partition's content from the seeder and byte-compares it against the store", func() {
-			image := getImage(imagePathImageName)
-			partition, err := utils.SmallestSeedablePartition(image.Status.Partitions)
-			Expect(err).NotTo(HaveOccurred())
-			By(fmt.Sprintf("selected partition %d (%s, %d bytes) as the smallest seedable content",
-				partition.Number, partition.Role, partition.UsedBytes))
-
-			By("reading torrent.info for that partition out of the store, via the seeder Deployment's read-only mount")
-			info := loadTorrentInfoFromSeeder(partition.InfoHash)
-			torrentBytes, err := store.BuildTorrentFile(info, imagePathTrackerURL)
+			out, err := utils.Run(exec.Command("kubectl", "get", "pvc", "-n", namespace,
+				"-l", controller.AppComponentLabel+"=partition-content", "-o", "json"))
 			Expect(err).NotTo(HaveOccurred())
 
-			By("starting a bare leecher Pod (the seeder image run as an ezio client, no seed_mode)")
-			applyManifest(fmt.Sprintf(`
-apiVersion: v1
-kind: Pod
-metadata:
-  name: %s
-  namespace: %s
-  labels:
-    app.kubernetes.io/name: kezio
-    app.kubernetes.io/component: e2e-leecher
-spec:
-  restartPolicy: Never
-  securityContext:
-    runAsNonRoot: true
-    # fsGroup: an emptyDir volume is created root:root 0755 by default,
-    # which a non-root container (runAsUser 65532 below) can read and
-    # traverse but not write into. The seeder Deployment never noticed
-    # this (it mounts the store read-only, see
-    # config/seeder/ezio-seeder-deployment.yaml), but this leecher does
-    # need to write the downloaded pieces into /leech: the kubelet
-    # chowns every volume's group ownership to fsGroup and grants it
-    # group rwx, which - combined with every container in the pod
-    # implicitly running with fsGroup as a supplementary group - is what
-    # lets uid 65532 write here.
-    fsGroup: 65532
-    seccompProfile:
-      type: RuntimeDefault
-  containers:
-    - name: leecher
-      image: %s
-      securityContext:
-        allowPrivilegeEscalation: false
-        readOnlyRootFilesystem: true
-        runAsUser: 65532
-        capabilities:
-          drop: ["ALL"]
-      volumeMounts:
-        - name: leech
-          mountPath: /leech
-  volumes:
-    - name: leech
-      emptyDir: {}
-`, leecherPodName, namespace, seederImagePathImage))
-			waitForPodRunning(leecherPodName)
-
-			By("port-forwarding the leecher's gRPC control port")
-			portForwards = append(portForwards, mustPortForward("pod/"+leecherPodName, leecherGRPCLocal, "50051"))
-
-			By("adding the torrent to the leecher without seed_mode, into an empty /leech")
-			leecherClient, err := seeder.Dial(leecherGRPCLocal)
-			Expect(err).NotTo(HaveOccurred())
-			defer func() { _ = leecherClient.Close() }()
-			Expect(leecherClient.AddTorrent(context.Background(), torrentBytes, "/leech", false,
-				seeder.DefaultMaxUploads, seeder.DefaultMaxConnections)).To(Succeed())
-
-			By("waiting for the leecher to report the torrent finished")
-			// Completion itself is already the integrity proof: ezio
-			// (libtorrent) verifies every downloaded piece's SHA-1
-			// hash against torrent.info's, and a torrent only
-			// reaches "finished" once every piece has verified. The
-			// sha256sum comparison below is belt-and-suspenders on
-			// top of that, not the primary integrity check.
-			Eventually(func(g Gomega) {
-				statuses, err := leecherClient.GetTorrentStatus(context.Background(), []string{partition.InfoHash})
-				g.Expect(err).NotTo(HaveOccurred())
-				t, ok := statuses[partition.InfoHash]
-				g.Expect(ok).To(BeTrue(), "leecher does not know about the torrent yet")
-				g.Expect(t.IsFinished).To(BeTrue(), "leecher torrent not finished yet")
-			}).WithTimeout(imagePathLeechTimeout).WithPolling(3 * time.Second).Should(Succeed())
-
-			By("byte-comparing every leeched extent file against the seeder's store copy " +
-				"(belt-and-suspenders on top of piece-hash verification)")
-			// Both paths go through store.ContentDataDir/ContentExtentPath
-			// rather than a bare "<dir>/<name>" join: the torrent leecherClient
-			// just downloaded is a BEP3 multi-file torrent named "content"
-			// (store.BuildInfoDict), so every compliant client - the leecher
-			// included - resolves each file entry as
-			// "<save_path>/content/<name>", not "<save_path>/<name>" (see
-			// internal/controller's addContent doc comment).
-			infoHash := mustParseInfoHash(partition.InfoHash)
-			for _, ext := range info.Extents {
-				name := store.ExtentFileName(ext.Offset)
-				leechedDigest := sha256sumInPod("pod/"+leecherPodName, store.ContentDataDir("/leech")+"/"+name)
-				storeDigest := sha256sumInPod("deploy/kezio-ezio-seeder", store.ContentExtentPath("/store", infoHash, ext.Offset))
-				Expect(leechedDigest).To(Equal(storeDigest), "extent file %s content mismatch between leecher and store", name)
+			var pvcList struct {
+				Items []struct {
+					Metadata struct {
+						OwnerReferences []struct {
+							Name string `json:"name"`
+						} `json:"ownerReferences"`
+					} `json:"metadata"`
+					Status struct {
+						Phase string `json:"phase"`
+					} `json:"status"`
+				} `json:"items"`
 			}
+			Expect(json.Unmarshal([]byte(out), &pvcList)).To(Succeed())
+
+			var ownedBound int
+			for _, pvc := range pvcList.Items {
+				owned := false
+				for _, ref := range pvc.Metadata.OwnerReferences {
+					if ref.Name == imagePathImageName {
+						owned = true
+					}
+				}
+				if !owned {
+					continue
+				}
+				Expect(pvc.Status.Phase).To(Equal("Bound"), "expected every partition PVC to be Bound")
+				ownedBound++
+			}
+
+			wantContentPartitions := 0
+			for _, p := range image.Status.Partitions {
+				if p.InfoHash != "" {
+					wantContentPartitions++
+				}
+			}
+			Expect(ownedBound).To(Equal(wantContentPartitions),
+				"expected one Bound partition-content PVC per content partition")
 		})
 
-		// registerSeedingBenchmarkSpec (e2e_benchmark_test.go) adds the
-		// seeding throughput baseline as one more It() in this Context,
-		// reusing the Image this BeforeAll already ingested and seeded -
-		// but only when E2E_BENCHMARK=true, so the default image-path run
-		// this Context otherwise supports never pays for the swarm.
-		if benchmarkEnabled {
-			registerSeedingBenchmarkSpec()
-		}
+		It("writes the Image's ImageLayout", func() {
+			layoutName := ingest.ImageLayoutName(imagePathImageName)
+			_, err := getJSONPath("imagelayout", layoutName, "{.metadata.name}")
+			Expect(err).NotTo(HaveOccurred(), "expected imagelayout %s to exist", layoutName)
+		})
+
+		It("creates no per-Image seeder Deployment or Pod (no Machine ever demands one)", func() {
+			out, err := utils.Run(exec.Command("kubectl", "get", "deployment", "-n", namespace,
+				"-l", fmt.Sprintf("%s=%s", controller.SeederDeploymentImageLabel, imagePathImageName),
+				"-o", "name"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out).To(BeEmpty(), "expected no seeder Deployment for an Image with no deploying Machine")
+
+			out, err = utils.Run(exec.Command("kubectl", "get", "pods", "-n", namespace,
+				"-l", fmt.Sprintf("%s=%s,%s=%s",
+					"app.kubernetes.io/name", "kezio", controller.AppComponentLabel, controller.SeederComponentValue),
+				"-o", "name"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out).To(BeEmpty(), "expected no seeder pod for an Image with no deploying Machine")
+		})
 
 		AfterEach(func() {
 			if !CurrentSpecReport().Failed() {
 				return
 			}
-			By("dumping image-path diagnostics: ingest Job, seeder, image-service, and the Image")
+			By("dumping image-path diagnostics: ingest Job, image-service, and the Image")
 			dumpImagePathDiagnostics()
 		})
 	})
 }
 
-// buildAndImportImagePathImages builds the ingest, seeder, and
-// image-service Docker images and imports them the same way BeforeSuite
-// already does for the manager image: `ctr images import` against RKE2's
-// containerd for a pre-provisioned RKE2 cluster, `kind load docker-image`
-// otherwise. None of the three is ever pulled from a registry.
+// buildAndImportImagePathImages builds the ingest and image-service
+// Docker images and imports them the same way BeforeSuite already does
+// for the manager image: `ctr images import` against RKE2's containerd
+// for a pre-provisioned RKE2 cluster, `kind load docker-image` otherwise.
+// Neither is ever pulled from a registry.
 func buildAndImportImagePathImages() {
 	runMake("docker-build-ingest", "INGEST_IMG="+ingestImagePathImage)
-	runMake("docker-build-seeder", "SEEDER_IMG="+seederImagePathImage)
 	runMake("docker-build-image-service", "IMAGE_SERVICE_IMG="+imageServiceImagePathImage)
 
-	for _, img := range []string{ingestImagePathImage, seederImagePathImage, imageServiceImagePathImage} {
+	for _, img := range []string{ingestImagePathImage, imageServiceImagePathImage} {
 		var err error
 		if e2eCluster == "rke2" {
 			err = utils.LoadImageToRKE2Containerd(img)
@@ -390,19 +317,10 @@ func waitForRollout(name string) {
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "deployment/%s did not roll out", name)
 }
 
-// waitForPodRunning waits for name in namespace to reach phase Running.
-func waitForPodRunning(name string) {
-	EventuallyWithOffset(1, func(g Gomega) {
-		phase, err := getJSONPath("pod", name, "{.status.phase}")
-		g.Expect(err).NotTo(HaveOccurred())
-		g.Expect(phase).To(Equal("Running"))
-	}).WithTimeout(2 * time.Minute).WithPolling(2 * time.Second).Should(Succeed())
-}
-
 // getImage fetches and unmarshals the named Image in namespace. Every
-// current caller (across e2e_image_path_test.go and e2e_benchmark_test.go)
-// happens to pass imagePathImageName, but the parameter is kept: this is a
-// generic kubectl-get-and-unmarshal helper, not one specific to that Image.
+// current caller happens to pass imagePathImageName, but this is a
+// generic kubectl-get-and-unmarshal helper, not one specific to that
+// Image.
 //
 //nolint:unparam // see doc comment: deliberately generic, not accidentally single-value
 func getImage(name string) *keziov1alpha1.Image {
@@ -449,59 +367,9 @@ func stopPortForward(cmd *exec.Cmd) {
 	_ = cmd.Wait()
 }
 
-// seederTorrentHashes dials the seeder at grpcAddr and returns the set of
-// info hashes it currently knows about.
-func seederTorrentHashes(g Gomega, grpcAddr string) map[string]seeder.Torrent {
-	c, err := seeder.Dial(grpcAddr)
-	g.Expect(err).NotTo(HaveOccurred())
-	defer func() { _ = c.Close() }()
-
-	statuses, err := c.GetTorrentStatus(context.Background(), nil)
-	g.Expect(err).NotTo(HaveOccurred())
-	return statuses
-}
-
-// loadTorrentInfoFromSeeder reads and parses torrent.info for hash out of
-// the store, via `kubectl exec` into the seeder Deployment (which mounts
-// the store read-only at /store - see config/seeder/ezio-seeder-deployment.yaml).
-// Reading it this way, rather than mounting the store into the test
-// process, keeps the store PVC's only consumers exactly the ones a real
-// deployment would have (ingest Job, seeder, and the manager for
-// SEEDER_STORE_ROOT).
-func loadTorrentInfoFromSeeder(hash string) *store.TorrentInfo {
-	h := mustParseInfoHash(hash)
-	path := store.ContentDirTorrentInfoPath(store.ContentDir("/store", h))
-	cmd := exec.Command("kubectl", "exec", "deploy/kezio-ezio-seeder", "-n", namespace, "--", "cat", path)
-	out, err := utils.Run(cmd)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "failed to read %s from the seeder", path)
-
-	info, err := store.ParseTorrentInfo(bytes.NewReader([]byte(out)))
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "failed to parse torrent.info for %s", hash)
-	return info
-}
-
-// sha256sumInPod runs `sha256sum <path>` inside target (a "pod/name" or
-// "deploy/name" kubectl exec target) and returns the parsed hex digest.
-func sha256sumInPod(target, path string) string {
-	cmd := exec.Command("kubectl", "exec", target, "-n", namespace, "--", "sha256sum", path)
-	out, err := utils.Run(cmd)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "sha256sum %s in %s failed", path, target)
-
-	digest, err := utils.ParseSHA256Sum(out)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred())
-	return digest
-}
-
-// mustParseInfoHash parses hash and fails the current spec on error.
-func mustParseInfoHash(hash string) store.InfoHash {
-	h, err := store.ParseInfoHash(hash)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred())
-	return h
-}
-
-// dumpImagePathDiagnostics prints the ingest Job, seeder, image-service,
-// and Image state for the image-path stage to GinkgoWriter, so a failing
-// run points at which step broke without needing the workflow's own
+// dumpImagePathDiagnostics prints the ingest Job, image-service, and
+// Image state for the image-path stage to GinkgoWriter, so a failing run
+// points at which step broke without needing the workflow's own
 // failure-log-dump step (see .github/workflows/test-e2e.yml's
 // test-e2e-image-path job) to be re-run.
 func dumpImagePathDiagnostics() {
@@ -514,7 +382,8 @@ func dumpImagePathDiagnostics() {
 			"kubectl", "get", "jobs", "-n", namespace, "-l", "kezio.kojuro.date/image", "-o", "wide")},
 		{"ingest Job logs", exec.Command(
 			"kubectl", "logs", "-n", namespace, "-l", "kezio.kojuro.date/image", "--all-containers", "--tail=500")},
-		{"seeder logs", exec.Command("kubectl", "logs", "-n", namespace, "deploy/kezio-ezio-seeder", "--tail=500")},
+		{"partition PVCs", exec.Command(
+			"kubectl", "get", "pvc", "-n", namespace, "-l", controller.AppComponentLabel+"=partition-content", "-o", "wide")},
 		{"image-service logs", exec.Command(
 			"kubectl", "logs", "-n", namespace, "deploy/kezio-image-service", "--tail=500")},
 		{"pods", exec.Command("kubectl", "get", "pods", "-n", namespace, "-o", "wide")},

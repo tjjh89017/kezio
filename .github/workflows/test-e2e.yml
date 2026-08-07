@@ -36,11 +36,11 @@ env:
   # under us on a stable branch; bump deliberately.
   RKE2_VERSION: "v1.36.2+rke2r1"
   # RKE2 has no default StorageClass (unlike k3s's bundled local-path);
-  # config/e2e-image-path's store/staging PVCs (applied by the image-path
-  # job's own Go suite) request storageClassName local-path explicitly,
-  # so this rancher/local-path-provisioner release is installed and
-  # marked default in that job below. The fast and boot-path jobs below
-  # never touch a PVC, so they install RKE2 without it.
+  # config/e2e-image-path's staging and per-partition-content PVCs
+  # request storageClassName local-path explicitly, so this
+  # rancher/local-path-provisioner release is installed and marked
+  # default in that job below. The fast and boot-path jobs below never
+  # touch a PVC, so they install RKE2 without it.
   LOCAL_PATH_PROVISIONER_VERSION: "v0.0.37"
 
 jobs:
@@ -150,24 +150,26 @@ jobs:
   test-e2e-image-path:
     # Slow lane: test/e2e's "Image ingest and seeding (image-path)"
     # Context (test/e2e/e2e_image_path_test.go), gated on E2E_IMAGE_PATH=true
-    # below. It deploys image-service + seeder + opentracker on top of the
-    # same base config/default the fast job exercises, uploads a real
-    # Ubuntu cloud image through kezioctl, and drives it through real
-    # qemu-img/sfdisk/partclone ingest, real seeding, and a real BitTorrent
-    # leech - see that file's doc comments for the full flow. This is a
-    # separate job (own runner, own RKE2, own timeout) precisely so none of
-    # that weight lands on the test-e2e job above.
+    # below. It deploys image-service on top of the same base
+    # config/default the fast job exercises, uploads a real Ubuntu cloud
+    # image through kezioctl, and drives it through real
+    # qemu-img/sfdisk/partclone ingest and the per-partition-PVC/publish
+    # path - see that file's doc comments for the full flow. This lane
+    # runs no seeder: this stage never creates a Machine, and seeding is
+    # demand-driven by a Machine deploying the Image (see
+    # internal/controller/seeder_deployment.go) - end-to-end seeding proof
+    # lives in the deploy-path lane instead. This is a separate job (own
+    # runner, own RKE2, own timeout) precisely so none of that weight
+    # lands on the test-e2e job above.
     name: Run image-path against RKE2
     runs-on: ubuntu-latest
     # Honest budget, not a guess: RKE2 + cert-manager install (~1-2m),
     # building+importing the manager/image-service/ingest images (~2-3m,
-    # small Go binaries), the seeder image (compiles ezio/libtorrent-rasterbar/
-    # grpc from source on debian:sid - the dominant cost, ~10-20m without a
-    # warm cache), downloading the Ubuntu cloud image (cached after the
-    # first run, see the cache step below), then real ingest (qemu-img
-    # convert + sfdisk + partclone over a several-hundred-MiB image, a few
-    # minutes) and a same-cluster BitTorrent leech (seconds). 60 minutes
-    # leaves headroom for a cold seeder build on an otherwise-busy runner.
+    # small Go binaries), downloading the Ubuntu cloud image (cached
+    # after the first run, see the cache step below), then real ingest
+    # (qemu-img convert + sfdisk + partclone over a several-hundred-MiB
+    # image, a few minutes). 60 minutes leaves generous headroom on an
+    # otherwise-busy runner.
     timeout-minutes: 60
     env:
       # Ubuntu's "minimal" cloud image, not the full one: honestly, a
@@ -182,7 +184,6 @@ jobs:
       # ever turns out to lack something ingest needs) is a one-line change.
       UBUNTU_CLOUD_IMAGE_URL: "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img"
       INGEST_IMG: "example.com/kezio-ingest:e2e"
-      SEEDER_IMG: "example.com/kezio-seeder:e2e"
       IMAGE_SERVICE_IMG: "example.com/kezio-image-service:e2e"
     steps:
       - name: Clone the code
@@ -209,10 +210,9 @@ jobs:
 
           # Same CPU/RAM floor as the fast job (see test-e2e's own
           # resource-check step, including its RKE2-vs-k3s bump). Disk
-          # gets its own, higher floor: this job builds four local images
-          # (one of them a from-source debian:sid C++ build) and
-          # downloads and converts a several-hundred-MiB cloud image, on
-          # top of everything the fast job already needs.
+          # gets its own, higher floor: this job builds two local images
+          # and downloads and converts a several-hundred-MiB cloud image,
+          # on top of everything the fast job already needs.
           if [ "$cpus" -lt 2 ]; then
             echo "::error::Runner has only ${cpus} CPU(s); kezio e2e needs at least 2." >&2
             exit 1
@@ -245,19 +245,18 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Warm the ingest/seeder/image-service image caches
+      - name: Warm the ingest/image-service image caches
         # Builds (and loads into the local docker daemon, never pushes -
         # this stage never depends on ghcr, see this job's own doc
-        # comment) the same three images `make docker-build-ingest`/
-        # `docker-build-seeder`/`docker-build-image-service` build later,
-        # under the same tags, with GitHub Actions' layer cache. The
-        # scope names match publish.yml's matrix exactly, so a push to
-        # main (which does depend on ghcr, unlike this job) and this job
-        # share one warm cache: whichever ran more recently pays the
-        # from-source debian:sid seeder build cost, not both.
+        # comment) the same two images `make docker-build-ingest`/
+        # `docker-build-image-service` build later, under the same tags,
+        # with GitHub Actions' layer cache. The scope names match
+        # publish.yml's matrix exactly, so a push to main (which does
+        # depend on ghcr, unlike this job) and this job share one warm
+        # cache.
         run: |
           set -euo pipefail
-          for spec in "ingest:docker/ingest/Dockerfile:${INGEST_IMG}" "seeder:docker/seeder/Dockerfile:${SEEDER_IMG}" "image-service:docker/image-service/Dockerfile:${IMAGE_SERVICE_IMG}"; do
+          for spec in "ingest:docker/ingest/Dockerfile:${INGEST_IMG}" "image-service:docker/image-service/Dockerfile:${IMAGE_SERVICE_IMG}"; do
             IFS=: read -r scope dockerfile tag <<< "${spec}"
             docker buildx build \
               --file "${dockerfile}" \
@@ -308,9 +307,10 @@ jobs:
       - name: Install local-path-provisioner and mark it the default StorageClass
         # RKE2 ships no default StorageClass (k3s bundled local-path by
         # default; RKE2 deliberately does not). config/e2e-image-path's
-        # store/staging PVCs (applied by the Go suite's own BeforeAll, not
-        # by this workflow directly) request storageClassName local-path
-        # explicitly, so that name must exist here before the suite runs.
+        # staging PVC (applied by this workflow) and the per-partition
+        # content PVCs (created by the Image reconciler during the suite
+        # run) both request storageClassName local-path explicitly, so
+        # that name must exist here before the suite runs.
         run: |
           set -euo pipefail
           kubectl apply -f "https://raw.githubusercontent.com/rancher/local-path-provisioner/${LOCAL_PATH_PROVISIONER_VERSION}/deploy/local-path-storage.yaml"
@@ -330,11 +330,10 @@ jobs:
           E2E_IMAGE_PATH=true \
           E2E_UBUNTU_QCOW2_PATH="${{ runner.temp }}/ubuntu-cloud.img" \
           INGEST_IMG="${INGEST_IMG}" \
-          SEEDER_IMG="${SEEDER_IMG}" \
           IMAGE_SERVICE_IMG="${IMAGE_SERVICE_IMG}" \
           E2E_CLUSTER=rke2 go test ./test/e2e/ -v -ginkgo.v -timeout 50m
 
-      - name: Dump operator, ingest, and seeder logs on failure
+      - name: Dump operator and ingest logs on failure
         if: failure()
         run: |
           set +e
@@ -346,15 +345,10 @@ jobs:
           kubectl get jobs -n kezio-system -l kezio.kojuro.date/image -o wide
           echo "===== ingest Job logs ====="
           kubectl logs -n kezio-system -l kezio.kojuro.date/image --all-containers --tail=500
-          echo "===== seeder logs ====="
-          kubectl logs -n kezio-system deploy/kezio-ezio-seeder --tail=500
-          echo "===== opentracker logs ====="
-          kubectl logs -n kezio-system deploy/kezio-opentracker --tail=500
+          echo "===== partition PVCs ====="
+          kubectl get pvc -n kezio-system -l app.kubernetes.io/component=partition-content -o wide
           echo "===== image-service logs ====="
           kubectl logs -n kezio-system deploy/kezio-image-service --tail=500
-          echo "===== leecher Pod ====="
-          kubectl describe pod kezio-e2e-leecher -n kezio-system
-          kubectl logs -n kezio-system kezio-e2e-leecher --tail=500
           echo "===== kezio Images ====="
           kubectl get images -A -o wide
           echo "===== events ====="

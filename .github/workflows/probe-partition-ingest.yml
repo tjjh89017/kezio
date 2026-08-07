@@ -3,11 +3,9 @@ name: Probe - partition ingest timing
 # Times real ingest (qemu-img, sfdisk, partclone) through the
 # per-partition-PVC/publish path (internal/controller/partition_storage.go,
 # image_publish.go) against a disposable single-node RKE2 cluster, with no
-# KubeVirt VM involved: only image-service and ingest are built and
-# deployed, INGEST_STORE_PVC is deliberately never set (that env var is
-# what selects the legacy shared-store path instead - see
-# IngestConfig.legacy()'s doc comment), so this is the one place in CI
-# that actually exercises the code the per-partition-PVC change added.
+# KubeVirt VM involved and no seeder: only image-service and ingest are
+# built and deployed, exercising ingest's per-partition-PVC/publish
+# handling on its own.
 #
 # Source disk images are synthesized directly on the runner with
 # parted/mkfs.ext4 over a loop device - real GPT partition tables and
@@ -126,14 +124,12 @@ jobs:
           done
 
       - name: Deploy the controller-manager and image-service, wired for the per-partition-PVC path
-        # INGEST_STORE_PVC is never set: that is the one env var that
-        # switches IngestConfig.legacy() on (see cmd/main.go's
-        # ingestConfigFromEnv), and every existing e2e lane sets it - this
-        # probe exists precisely to run the path none of them do.
         # INGEST_PARTITION_STORAGE_CLASS/INGEST_SCRATCH_STORAGE_CLASS are
-        # also left unset: local-path is this cluster's default
-        # StorageClass (patched above), so an unset storageClassName on a
-        # PVC resolves to the same thing.
+        # left unset: local-path is this cluster's default StorageClass
+        # (patched above), so an unset storageClassName on a PVC resolves
+        # to the same thing. The per-partition-PVC/publish path is the
+        # only ingest path left (the legacy shared-store shape has been
+        # removed), so no env var is needed to select it.
         run: |
           set -euo pipefail
           make kustomize
