@@ -95,8 +95,11 @@ on:
           - lease
         default: relay
 
+# Manually dispatched runs get their own group (keyed by run id) so a
+# deliberately requested verdict - or two scenario dispatches back to
+# back - cannot cancel each other; push runs keep superseding per ref.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 permissions:
