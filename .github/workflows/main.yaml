@@ -1,56 +1,271 @@
-name: E2E Tests
+name: CI
 
-# Runs the e2e suite against a real RKE2 cluster (not Kind): the suite itself
-# (test/e2e, driven by `make test-e2e E2E_CLUSTER=rke2`) installs cert-manager
-# (always "latest", never pinned - see test/utils.InstallCertManager), builds
-# the operator image, imports it into RKE2's node containerd with `ctr
-# images import`, deploys the operator with `make deploy` (kustomize), and
-# then drives an Image and a Machine through the reconcilers against this
-# cluster. Keeping that sequence inside the suite (instead of duplicating it
-# as separate workflow steps) means the same steps run identically for a
-# developer's local `make test-e2e E2E_CLUSTER=rke2` and for this workflow.
-#
-# cert-manager is required from here on: every kezio CRD carries a
-# defaulting and a validating webhook, and the controller-manager cannot
-# serve admission requests until cert-manager has minted its serving
-# certificate.
-
+# The single CI entry point: every push to main, every pull request, and
+# on-demand dispatch all funnel through this file. Tag pushes ("v*") are
+# release.yaml's job instead - see that file for the full-publish path
+# this workflow deliberately does not take (boot-artifacts here uploads
+# an ephemeral workflow artifact only, and images here never pushes on a
+# tag).
 on:
   push:
+    branches:
+      - main
   pull_request:
-  # Manual dispatch exists so a verdict can be requested deliberately:
-  # push-triggered runs are superseded by the next push (see concurrency
-  # below), which has repeatedly destroyed evidence mid-investigation.
   workflow_dispatch:
+    inputs:
+      run_e2e:
+        description: "Run the RKE2 e2e lanes."
+        required: false
+        type: boolean
+        default: true
+      run_boot_artifacts:
+        description: "Build the live boot image and upload it as a workflow artifact."
+        required: false
+        type: boolean
+        default: true
 
-# Supersede an in-flight run when a newer commit is pushed to the same ref.
-# A manually dispatched run gets its own group (keyed by run id) so no
-# later push can cancel it - the whole point of dispatching one is that
-# its verdict survives unrelated work.
+# A manual dispatch gets its own group (keyed by run id) so a later push
+# can't cancel a deliberately requested run; push/PR runs share a group
+# keyed by ref so a newer commit supersedes the previous run's verdict.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  group: main-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
-  # RKE2 version the job installs. Pinned so the e2e cluster doesn't shift
-  # under us on a stable branch; bump deliberately.
+  REGISTRY: ghcr.io
+  IMAGE_NAMESPACE: tjjh89017
+  # RKE2 version the e2e jobs install. Pinned so the e2e cluster doesn't
+  # shift under us on a stable branch; bump deliberately.
   RKE2_VERSION: "v1.36.2+rke2r1"
   # RKE2 has no default StorageClass (unlike k3s's bundled local-path);
   # config/e2e-image-path's staging and per-partition-content PVCs
   # request storageClassName local-path explicitly, so this
   # rancher/local-path-provisioner release is installed and marked
-  # default in that job below. The fast and boot-path jobs below never
-  # touch a PVC, so they install RKE2 without it.
+  # default in that job below.
   LOCAL_PATH_PROVISIONER_VERSION: "v0.0.37"
 
 jobs:
-  test-e2e:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Run linter
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+
+      - name: Check composite action.yml metadata for GitHub-evaluated expressions
+        run: go run ./hack/lint-action-metadata
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Running Tests
+        run: |
+          go mod tidy
+          make test
+
+  images:
+    # Builds the four kezio images on every push to main and every PR;
+    # only pushes to ghcr.io/tjjh89017 on a push to main (moving "latest"
+    # tag) - a PR run builds to catch a broken Dockerfile without ever
+    # authenticating to the registry. This is additive to the e2e job,
+    # which builds the manager image locally and imports it into an
+    # RKE2 node's containerd with `ctr images import` - that flow never
+    # pulls from a registry, so it is unaffected by whatever this job
+    # pushes or how long it takes to push it.
+    #
+    # kezio-boot-artifacts (docker/boot-artifacts/Dockerfile) is NOT in
+    # this matrix: it packages hack/live-image/build.sh's output, which
+    # only exists after that (many-minutes) build has run - see the
+    # boot-artifacts job below, which never pushes to ghcr, and
+    # release.yaml, which does on a "v*" tag.
+    #
+    # Image <-> Dockerfile mapping (must stay in sync with the per-binary
+    # docker-build-* targets in the Makefile):
+    #   kezio                <- Dockerfile                        (controller manager)
+    #   kezio-ipmi           <- docker/manager-ipmi/Dockerfile     (opt-in, ipmitool-enabled manager)
+    #   kezio-image-service  <- docker/image-service/Dockerfile
+    #   kezio-ingest         <- docker/ingest/Dockerfile
+    #   kezio-seeder         <- docker/seeder/Dockerfile
+    #   kezio-bootd          <- docker/bootd/Dockerfile
+    #
+    # Architecture: manager, image-service, ingest and bootd cross-compile
+    # their Go binary (BUILDPLATFORM/TARGETPLATFORM) and only need apt-get
+    # to install a handful of prebuilt runtime packages, so they build
+    # fine under QEMU emulation for both amd64 and arm64. The seeder image
+    # instead compiles ezio's C++ stack (libtorrent-rasterbar, boost,
+    # grpc) from source with cmake; doing that under QEMU emulation is
+    # very slow. Seeder therefore builds amd64-only for now - TODO: add an
+    # arm64 leg once either a native arm64 runner is available or the
+    # emulated build time has been measured and judged acceptable.
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: manager
+            image: kezio
+            dockerfile: Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - name: manager-ipmi
+            image: kezio-ipmi
+            dockerfile: docker/manager-ipmi/Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - name: image-service
+            image: kezio-image-service
+            dockerfile: docker/image-service/Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - name: ingest
+            image: kezio-ingest
+            dockerfile: docker/ingest/Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - name: seeder
+            image: kezio-seeder
+            dockerfile: docker/seeder/Dockerfile
+            # amd64-only: see the architecture note above the `on:` block.
+            platforms: linux/amd64
+          - name: bootd
+            image: kezio-bootd
+            dockerfile: docker/bootd/Dockerfile
+            platforms: linux/amd64,linux/arm64
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v7
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to ghcr.io
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build (and push on main)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platforms }}
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+  boot-artifacts:
+    # Builds the kezio live boot image (kernel + initrd + squashfs) plus
+    # the signed shimx64.efi/grubx64.efi kezio-bootd serves over TFTP,
+    # with hack/live-image/build.sh, and uploads the result as an
+    # ephemeral workflow artifact for inspection. No ghcr publish here -
+    # see release.yaml, which builds the same artifacts on a "v*" tag and
+    # publishes them to both a GitHub Release and the
+    # kezio-boot-artifacts ghcr image.
+    name: Boot artifacts
+    needs: [lint, test]
+    if: github.event_name != 'workflow_dispatch' || inputs.run_boot_artifacts
+    runs-on: ubuntu-latest
+    # `lb build` compiles ezio from source (cmake/make, the same as
+    # docker/seeder/Dockerfile's builder stage) and then assembles a full
+    # Debian sid chroot into a squashfs - budget generously.
+    timeout-minutes: 90
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v7
+
+      - name: Build live image
+        # ubuntu-latest's Docker already runs privileged containers -
+        # hack/live-image/build.sh needs that for `lb build`'s own
+        # chroot/mount work; see the script's header for why.
+        run: hack/live-image/build.sh
+
+      - name: Write size summary
+        run: |
+          {
+            echo "## Live boot image artifacts"
+            echo
+            echo "Target squashfs size: 100-300 MiB."
+            echo
+            echo "| artifact | size |"
+            echo "| --- | --- |"
+            for f in dist/live/vmlinuz dist/live/initrd.img dist/live/filesystem.squashfs dist/live/shimx64.efi dist/live/grubx64.efi; do
+              name="$(basename "${f}")"
+              size_bytes="$(stat -c%s "${f}")"
+              size_mib="$(awk -v b="${size_bytes}" 'BEGIN { printf "%.1f", b / 1048576 }')"
+              echo "| ${name} | ${size_mib} MiB |"
+            done
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: kezio-live-image
+          retention-days: 1
+          path: |
+            dist/live/vmlinuz
+            dist/live/initrd.img
+            dist/live/filesystem.squashfs
+            dist/live/shimx64.efi
+            dist/live/grubx64.efi
+            dist/live/manifest.json
+            dist/live/sha256sums
+          if-no-files-found: error
+
+  e2e-fast:
     # Fast lane: the fake-deployer, stub-ingest Image/Machine lifecycle
     # from test/e2e/e2e_test.go. Never touches image-service, ingest, or
-    # the seeder - see the image-path job below, which is additive and
-    # runs on its own runner so this job's timing never regresses because
-    # of it.
+    # the seeder - see e2e-image-path below, which is additive and runs
+    # on its own runner so this job's timing never regresses because of
+    # it.
+    #
+    # cert-manager is required from here on: every kezio CRD carries a
+    # defaulting and a validating webhook, and the controller-manager
+    # cannot serve admission requests until cert-manager has minted its
+    # serving certificate (installed by `make test-e2e` itself, always
+    # "latest" - see test/utils.InstallCertManager).
     name: Run against RKE2
+    needs: [lint, test]
+    if: github.event_name != 'workflow_dispatch' || inputs.run_e2e
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -147,7 +362,7 @@ jobs:
           echo "===== events ====="
           kubectl get events -n kezio-system --sort-by=.lastTimestamp
 
-  test-e2e-image-path:
+  e2e-image-path:
     # Slow lane: test/e2e's "Image ingest and seeding (image-path)"
     # Context (test/e2e/e2e_image_path_test.go), gated on E2E_IMAGE_PATH=true
     # below. It deploys image-service on top of the same base
@@ -160,8 +375,10 @@ jobs:
     # internal/controller/seeder_deployment.go) - end-to-end seeding proof
     # lives in the deploy-path lane instead. This is a separate job (own
     # runner, own RKE2, own timeout) precisely so none of that weight
-    # lands on the test-e2e job above.
+    # lands on the e2e-fast job above.
     name: Run image-path against RKE2
+    needs: [lint, test]
+    if: github.event_name != 'workflow_dispatch' || inputs.run_e2e
     runs-on: ubuntu-latest
     # Honest budget, not a guess: RKE2 + cert-manager install (~1-2m),
     # building+importing the manager/image-service/ingest images (~2-3m,
@@ -208,7 +425,7 @@ jobs:
           mem_mb="$(free -m | awk '/^Mem:/{print $2}')"
           disk_avail_gb="$(df -BG --output=avail / | tail -1 | tr -dc '0-9')"
 
-          # Same CPU/RAM floor as the fast job (see test-e2e's own
+          # Same CPU/RAM floor as the fast job (see e2e-fast's own
           # resource-check step, including its RKE2-vs-k3s bump). Disk
           # gets its own, higher floor: this job builds two local images
           # and downloads and converts a several-hundred-MiB cloud image,
@@ -250,8 +467,8 @@ jobs:
         # this stage never depends on ghcr, see this job's own doc
         # comment) the same two images `make docker-build-ingest`/
         # `docker-build-image-service` build later, under the same tags,
-        # with GitHub Actions' layer cache. The scope names match
-        # publish.yml's matrix exactly, so a push to main (which does
+        # with GitHub Actions' layer cache. The scope names match the
+        # images job's matrix exactly, so a push to main (which does
         # depend on ghcr, unlike this job) and this job share one warm
         # cache.
         run: |
@@ -354,7 +571,7 @@ jobs:
           echo "===== events ====="
           kubectl get events -n kezio-system --sort-by=.lastTimestamp
 
-  test-e2e-boot-path:
+  e2e-boot-path:
     # Boot-path lane: test/e2e's "Boot path (control-plane wiring)"
     # Context (test/e2e/e2e_boot_path_test.go), gated on E2E_BOOT_PATH=true
     # below. It proves the real boot config server (internal/bootserver)
@@ -370,6 +587,8 @@ jobs:
     # for that heavier, separable stage and the realism assessment behind
     # keeping it out of this always-on lane.
     name: Run boot-path against RKE2
+    needs: [lint, test]
+    if: github.event_name != 'workflow_dispatch' || inputs.run_e2e
     runs-on: ubuntu-latest
     # Small, in-process HTTP servers and one reconciler cycle per phase -
     # no image builds beyond the manager itself, no real network boot.
@@ -399,8 +618,8 @@ jobs:
           cpus="$(nproc)"
           mem_mb="$(free -m | awk '/^Mem:/{print $2}')"
 
-          # Same floor as the fast lane's own resource-check step (see
-          # its comment, including its RKE2-vs-k3s bump): this lane is no
+          # Same floor as e2e-fast's own resource-check step (see its
+          # comment, including its RKE2-vs-k3s bump): this lane is no
           # heavier than that one.
           if [ "$cpus" -lt 2 ]; then
             echo "::error::Runner has only ${cpus} CPU(s); kezio e2e needs at least 2." >&2

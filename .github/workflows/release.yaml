@@ -1,0 +1,214 @@
+name: Release
+
+# Cuts a full release from a "v*" tag: pushes all six kezio images to
+# ghcr.io/tjjh89017 under the tag (moving no "latest" - main.yaml's
+# images job owns that, on every push to main), then builds the live
+# boot image and publishes it on both channels a release needs it on -
+# a GitHub Release (human download) and the kezio-boot-artifacts ghcr
+# image (runtime consumption by config/bootserver's and config/bootd's
+# fetch-boot-artifacts initContainers).
+#
+# The release itself is created as a draft first, assets uploaded to the
+# draft, and only then published (draft=false) - so a failure partway
+# through asset upload leaves an unpublished draft instead of a
+# release that looks final but is missing artifacts.
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAMESPACE: tjjh89017
+
+jobs:
+  images:
+    # Image <-> Dockerfile mapping (must stay in sync with the
+    # per-binary docker-build-* targets in the Makefile) and the
+    # QEMU-emulation architecture note both match main.yaml's images job
+    # exactly - see that job's comments for the full rationale.
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: manager
+            image: kezio
+            dockerfile: Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - name: manager-ipmi
+            image: kezio-ipmi
+            dockerfile: docker/manager-ipmi/Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - name: image-service
+            image: kezio-image-service
+            dockerfile: docker/image-service/Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - name: ingest
+            image: kezio-ingest
+            dockerfile: docker/ingest/Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - name: seeder
+            image: kezio-seeder
+            dockerfile: docker/seeder/Dockerfile
+            # amd64-only: see main.yaml's images job for the rationale.
+            platforms: linux/amd64
+          - name: bootd
+            image: kezio-bootd
+            dockerfile: docker/bootd/Dockerfile
+            platforms: linux/amd64,linux/arm64
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v7
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platforms }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+  boot-artifacts:
+    name: Boot artifacts
+    runs-on: ubuntu-latest
+    # `lb build` compiles ezio from source (cmake/make, the same as
+    # docker/seeder/Dockerfile's builder stage) and then assembles a full
+    # Debian sid chroot into a squashfs - budget generously.
+    timeout-minutes: 90
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v7
+
+      - name: Build live image
+        # ubuntu-latest's Docker already runs privileged containers -
+        # hack/live-image/build.sh needs that for `lb build`'s own
+        # chroot/mount work; see the script's header for why.
+        run: hack/live-image/build.sh
+
+      - name: Write size summary
+        run: |
+          {
+            echo "## Live boot image artifacts"
+            echo
+            echo "Target squashfs size: 100-300 MiB."
+            echo
+            echo "| artifact | size |"
+            echo "| --- | --- |"
+            for f in dist/live/vmlinuz dist/live/initrd.img dist/live/filesystem.squashfs dist/live/shimx64.efi dist/live/grubx64.efi; do
+              name="$(basename "${f}")"
+              size_bytes="$(stat -c%s "${f}")"
+              size_mib="$(awk -v b="${size_bytes}" 'BEGIN { printf "%.1f", b / 1048576 }')"
+              echo "| ${name} | ${size_mib} MiB |"
+            done
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Create draft GitHub Release
+        # Draft-first: the release stays invisible (and "gh release
+        # view" below still finds it, so a re-run of this job for the
+        # same tag resumes instead of erroring on "already exists")
+        # until every asset has uploaded and the tag is explicitly
+        # published below - so a failure partway through asset upload
+        # never leaves a release that looks finished but is missing
+        # artifacts.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Release ${tag} already exists; uploading assets to it."
+          else
+            gh release create "${tag}" --repo "${GITHUB_REPOSITORY}" \
+              --title "${tag}" --target "${GITHUB_SHA}" --generate-notes --draft
+          fi
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "${{ github.ref_name }}" --repo "${GITHUB_REPOSITORY}" --clobber \
+            dist/live/vmlinuz \
+            dist/live/initrd.img \
+            dist/live/filesystem.squashfs \
+            dist/live/shimx64.efi \
+            dist/live/grubx64.efi \
+            dist/live/manifest.json \
+            dist/live/sha256sums
+
+      - name: Publish GitHub Release
+        # The barrier: only once every asset above has uploaded
+        # successfully does the release stop being a draft.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release edit "${{ github.ref_name }}" --repo "${GITHUB_REPOSITORY}" --draft=false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push kezio-boot-artifacts to ghcr
+        # Tagged both with the release tag itself (so a caller can pin
+        # an exact boot-artifacts version the same way it could pin a
+        # release tag) and "latest" (the default every
+        # fetch-boot-artifacts initContainer pulls).
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/boot-artifacts/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/tjjh89017/kezio-boot-artifacts:${{ github.ref_name }}
+            ghcr.io/tjjh89017/kezio-boot-artifacts:latest
