@@ -1317,21 +1317,9 @@ jobs:
             --format qcow2
 
       - name: Wait for the Image to reach Ready (real ingest - qemu-img, sfdisk, partclone)
-        run: |
-          set -euo pipefail
-          deadline=$(( $(date +%s) + 900 ))
-          while true; do
-            state="$(kubectl get image "${IMAGE_NAME}" -n kezio-system -o jsonpath='{.status.state}' || true)"
-            echo "$(date -Is) Image state: ${state:-<none>}"
-            [ "${state}" = "Ready" ] && break
-            if [ "$(date +%s)" -ge "${deadline}" ]; then
-              echo "::error::Image ${IMAGE_NAME} did not reach Ready within the timeout." >&2
-              kubectl get image "${IMAGE_NAME}" -n kezio-system -o yaml
-              exit 1
-            fi
-            sleep 5
-          done
-          kubectl get image "${IMAGE_NAME}" -n kezio-system -o yaml
+        uses: ./.github/actions/wait-for-image-ready
+        with:
+          image-name: ${{ env.IMAGE_NAME }}
 
       - name: Stop the image-service port-forward
         if: always()

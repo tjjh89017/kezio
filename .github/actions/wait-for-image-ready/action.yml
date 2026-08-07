@@ -1,0 +1,74 @@
+name: Wait for an Image to reach Ready
+
+description: >-
+  Polls Image.status.state until it reaches Ready or a deadline passes.
+  On timeout, dumps the Image, its ingest/publish Jobs (kubectl describe
+  and logs, selected by the kezio.kojuro.date/image label both Jobs
+  carry), and every PVC in the namespace (kubectl describe, which
+  includes each PVC's Events) - the pieces a stuck ingest/publish phase
+  actually depends on, not just the Image itself.
+
+inputs:
+  image-name:
+    description: Name of the Image to wait on.
+    required: true
+  namespace:
+    description: Namespace the Image lives in.
+    required: false
+    default: kezio-system
+  timeout-seconds:
+    description: How long to poll before giving up.
+    required: false
+    default: "900"
+
+runs:
+  using: composite
+  steps:
+    - name: Poll Image.status.state
+      shell: bash
+      env:
+        IMAGE_NAME: ${{ inputs.image-name }}
+        NAMESPACE: ${{ inputs.namespace }}
+        TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
+      run: |
+        set -euo pipefail
+        deadline=$(( $(date +%s) + TIMEOUT_SECONDS ))
+        while true; do
+          state="$(kubectl get image "${IMAGE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.state}' || true)"
+          echo "$(date -Is) Image state: ${state:-<none>}"
+          [ "${state}" = "Ready" ] && break
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::Image ${IMAGE_NAME} did not reach Ready within the timeout." >&2
+            echo "::group::Image ${IMAGE_NAME}"
+            kubectl get image "${IMAGE_NAME}" -n "${NAMESPACE}" -o yaml || true
+            echo "::endgroup::"
+
+            # ingestJobLabel (kezio.kojuro.date/image) is set on both the
+            # ingest Job and the publish Job (see
+            # internal/controller/image_ingest.go's ingestJobLabel), so
+            # one selector reaches whichever phase is stuck.
+            echo "::group::Jobs labelled kezio.kojuro.date/image=${IMAGE_NAME}"
+            kubectl get jobs -n "${NAMESPACE}" -l "kezio.kojuro.date/image=${IMAGE_NAME}" -o wide || true
+            for job in $(kubectl get jobs -n "${NAMESPACE}" -l "kezio.kojuro.date/image=${IMAGE_NAME}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true); do
+              echo "--- describe job/${job} ---"
+              kubectl describe job "${job}" -n "${NAMESPACE}" || true
+              echo "--- logs job/${job} (all pods, all containers) ---"
+              kubectl logs "job/${job}" -n "${NAMESPACE}" --all-containers --tail=1000 || true
+            done
+            echo "::endgroup::"
+
+            # Every PVC in the namespace, not only this Image's: a
+            # stuck-Pending partition PVC blocks the Job above regardless
+            # of which name it has, and `describe` surfaces its Events
+            # (e.g. "waiting for first consumer to be created" for a
+            # WaitForFirstConsumer StorageClass).
+            echo "::group::PersistentVolumeClaims in ${NAMESPACE}"
+            kubectl get pvc -n "${NAMESPACE}" -o wide || true
+            kubectl describe pvc -n "${NAMESPACE}" || true
+            echo "::endgroup::"
+
+            exit 1
+          fi
+          sleep 5
+        done
+        kubectl get image "${IMAGE_NAME}" -n "${NAMESPACE}" -o yaml

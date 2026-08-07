@@ -1,0 +1,15 @@
+# config/image-service/pvc.yaml requests ReadWriteMany, since a real
+# deployment may split image-service and the ingest Job across nodes.
+# The disposable single-node RKE2 cluster this overlay targets has no
+# ReadWriteMany provisioner by default; both consumers run on the same
+# node here regardless, so ReadWriteOnce + "local-path" is sufficient
+# and actually bindable.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kezio-image-service-staging
+  namespace: kezio-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
