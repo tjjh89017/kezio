@@ -20,60 +20,71 @@ import (
 	"context"
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
 )
 
-func TestLayoutConfigMapName(t *testing.T) {
-	if got, want := LayoutConfigMapName("golden"), "golden-layout"; got != want {
-		t.Errorf("LayoutConfigMapName(golden) = %q, want %q", got, want)
+func newLayoutTestClient(t *testing.T) client.Client {
+	t.Helper()
+	scheme, err := keziov1alpha1.SchemeBuilder.Build()
+	if err != nil {
+		t.Fatalf("build scheme: %v", err)
+	}
+	return fake.NewClientBuilder().WithScheme(scheme).Build()
+}
+
+func TestImageLayoutName(t *testing.T) {
+	if got, want := ImageLayoutName("golden"), "golden-layout"; got != want {
+		t.Errorf("ImageLayoutName(golden) = %q, want %q", got, want)
 	}
 }
 
-func TestWriteLayoutConfigMap_CreatesWithOwnerRef(t *testing.T) {
-	client := fake.NewClientset()
+func TestWriteImageLayout_CreatesWithOwnerRef(t *testing.T) {
+	c := newLayoutTestClient(t)
 	owner := ImageOwnerRef{Name: "golden", UID: types.UID("abc-123"), APIVersion: "kezio.kojuro.date/v1alpha1", Kind: "Image"}
 
-	if err := WriteLayoutConfigMap(context.Background(), client, "default", owner, `{"partitiontable":{}}`); err != nil {
-		t.Fatalf("WriteLayoutConfigMap: %v", err)
+	if err := WriteImageLayout(context.Background(), c, "default", owner, `{"partitiontable":{}}`); err != nil {
+		t.Fatalf("WriteImageLayout: %v", err)
 	}
 
-	cm, err := client.CoreV1().ConfigMaps("default").Get(context.Background(), "golden-layout", metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get configmap: %v", err)
+	layout := &keziov1alpha1.ImageLayout{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "golden-layout"}, layout); err != nil {
+		t.Fatalf("get imagelayout: %v", err)
 	}
-	if cm.Data[LayoutConfigMapDataKey] != `{"partitiontable":{}}` {
-		t.Errorf("cm.Data[%q] = %q, want the sfdisk JSON", LayoutConfigMapDataKey, cm.Data[LayoutConfigMapDataKey])
+	if layout.Spec.SfdiskJSON != `{"partitiontable":{}}` {
+		t.Errorf("layout.Spec.SfdiskJSON = %q, want the sfdisk JSON", layout.Spec.SfdiskJSON)
 	}
-	if len(cm.OwnerReferences) != 1 {
-		t.Fatalf("got %d owner references, want 1", len(cm.OwnerReferences))
+	if len(layout.OwnerReferences) != 1 {
+		t.Fatalf("got %d owner references, want 1", len(layout.OwnerReferences))
 	}
-	ref := cm.OwnerReferences[0]
+	ref := layout.OwnerReferences[0]
 	if ref.Name != owner.Name || ref.UID != owner.UID || ref.APIVersion != owner.APIVersion || ref.Kind != owner.Kind {
 		t.Errorf("owner reference = %+v, want it to match %+v", ref, owner)
 	}
 }
 
-func TestWriteLayoutConfigMap_UpdatesExisting(t *testing.T) {
+func TestWriteImageLayout_UpdatesExisting(t *testing.T) {
 	owner := ImageOwnerRef{Name: "golden", UID: types.UID("abc-123"), APIVersion: "kezio.kojuro.date/v1alpha1", Kind: "Image"}
-	client := fake.NewClientset()
-	if err := WriteLayoutConfigMap(context.Background(), client, "default", owner, `{"first":true}`); err != nil {
-		t.Fatalf("first WriteLayoutConfigMap: %v", err)
+	c := newLayoutTestClient(t)
+	if err := WriteImageLayout(context.Background(), c, "default", owner, `{"first":true}`); err != nil {
+		t.Fatalf("first WriteImageLayout: %v", err)
 	}
 
-	if err := WriteLayoutConfigMap(context.Background(), client, "default", owner, `{"second":true}`); err != nil {
-		t.Fatalf("second WriteLayoutConfigMap: %v", err)
+	if err := WriteImageLayout(context.Background(), c, "default", owner, `{"second":true}`); err != nil {
+		t.Fatalf("second WriteImageLayout: %v", err)
 	}
 
-	cm, err := client.CoreV1().ConfigMaps("default").Get(context.Background(), "golden-layout", metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get configmap: %v", err)
+	layout := &keziov1alpha1.ImageLayout{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "golden-layout"}, layout); err != nil {
+		t.Fatalf("get imagelayout: %v", err)
 	}
-	if cm.Data[LayoutConfigMapDataKey] != `{"second":true}` {
-		t.Errorf("cm.Data[%q] = %q, want the second write to win", LayoutConfigMapDataKey, cm.Data[LayoutConfigMapDataKey])
+	if layout.Spec.SfdiskJSON != `{"second":true}` {
+		t.Errorf("layout.Spec.SfdiskJSON = %q, want the second write to win", layout.Spec.SfdiskJSON)
 	}
-	if len(cm.OwnerReferences) != 1 {
-		t.Fatalf("got %d owner references after update, want 1", len(cm.OwnerReferences))
+	if len(layout.OwnerReferences) != 1 {
+		t.Fatalf("got %d owner references after update, want 1", len(layout.OwnerReferences))
 	}
 }

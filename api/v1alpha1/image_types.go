@@ -188,9 +188,9 @@ type ImageDiskStatus struct {
 	// +kubebuilder:validation:Enum=gpt;mbr
 	// +optional
 	PartitionTable string `json:"partitionTable,omitempty"`
-	// LayoutRef names the ConfigMap holding the sfdisk JSON dump of the
-	// disk layout. This dump carries the GPT disk GUID and partition type
-	// GUIDs so a restored disk matches the source exactly.
+	// LayoutRef names the ImageLayout holding the sfdisk JSON dump of the
+	// disk layout (see ImageLayoutSpec.SfdiskJSON). It always resolves in
+	// this Image's own namespace.
 	// +optional
 	LayoutRef *NameRef `json:"layoutRef,omitempty"`
 }

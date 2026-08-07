@@ -20,18 +20,20 @@ import (
 	"context"
 	"fmt"
 
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/config"
 
+	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
 	"github.com/tjjh89017/kezio/internal/ingest"
 )
 
 // inClusterLayoutWriter implements ingest.LayoutWriter, building its
-// Kubernetes clientset lazily on first use rather than in buildFromEnv:
-// rest.InClusterConfig only succeeds inside a real pod, so constructing
-// it eagerly would break every unit test that calls buildFromEnv outside
-// a cluster even when the run under test never reaches the point of
-// writing the layout ConfigMap (see cmd/ingest/main_test.go).
+// controller-runtime client lazily on first use rather than in
+// buildFromEnv: config.GetConfig only succeeds inside a real pod (or
+// with KUBECONFIG set), so constructing it eagerly would break every
+// unit test that calls buildFromEnv outside a cluster even when the run
+// under test never reaches the point of writing the ImageLayout (see
+// cmd/ingest/main_test.go).
 type inClusterLayoutWriter struct {
 	namespace string
 	owner     ingest.ImageOwnerRef
@@ -43,14 +45,18 @@ func newInClusterLayoutWriter(namespace string, owner ingest.ImageOwnerRef) inge
 	return &inClusterLayoutWriter{namespace: namespace, owner: owner}
 }
 
-func (w *inClusterLayoutWriter) WriteLayoutConfigMap(ctx context.Context, sfdiskJSON string) error {
-	cfg, err := rest.InClusterConfig()
+func (w *inClusterLayoutWriter) WriteLayout(ctx context.Context, sfdiskJSON string) error {
+	cfg, err := config.GetConfig()
 	if err != nil {
 		return fmt.Errorf("load in-cluster kubernetes config: %w", err)
 	}
-	client, err := kubernetes.NewForConfig(cfg)
+	scheme, err := keziov1alpha1.SchemeBuilder.Build()
+	if err != nil {
+		return fmt.Errorf("build kezio scheme: %w", err)
+	}
+	c, err := client.New(cfg, client.Options{Scheme: scheme})
 	if err != nil {
 		return fmt.Errorf("build kubernetes client: %w", err)
 	}
-	return ingest.WriteLayoutConfigMap(ctx, client, w.namespace, w.owner, sfdiskJSON)
+	return ingest.WriteImageLayout(ctx, c, w.namespace, w.owner, sfdiskJSON)
 }

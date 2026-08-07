@@ -33,22 +33,18 @@ import (
 	"github.com/tjjh89017/kezio/internal/seederdeploy"
 )
 
-// sfdiskJSONKey is the ConfigMap data key holding the verbatim sfdisk
-// JSON dump, matching internal/controller's ensureLayoutConfigMap.
-const sfdiskJSONKey = "sfdisk.json"
-
 // buildDeployPlan builds machine's DeployPlan, or reports that it is not
 // ready yet. A nil plan with a nil error means "not ready - answer
 // ActionWait", the same outcome as any other not-yet-resolved state; a
 // non-nil error means building hit something unexpected (a Ready Image
-// missing the layout ConfigMap it should have, a store I/O failure) that
+// missing the ImageLayout it should have, a store I/O failure) that
 // is worth logging server-side, but the caller still answers ActionWait
 // for it rather than surfacing a 5xx to the agent - the agent has no
 // action to take on a broken plan besides waiting for the next poll to
 // find a fixed one.
 //
 // buildDeployPlan is deliberately not memoized or cached anywhere: it
-// reads the Image(s) and their layout ConfigMap fresh on every call and
+// reads the Image(s) and their ImageLayout fresh on every call and
 // builds every content partition's .torrent bytes fresh (see
 // buildImagePlan), so a plan handed to the agent always reflects the
 // current cluster state - there is nothing here to invalidate.
@@ -161,15 +157,12 @@ func buildImagePlan(ctx context.Context, c client.Client, defaultNS string, imag
 		return nil, nil, false, nil
 	}
 
-	cmName := image.Status.Disk.LayoutRef.Name
-	cm := &corev1.ConfigMap{}
-	if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: cmName}, cm); err != nil {
-		return nil, nil, false, fmt.Errorf("get layout configmap %s/%s: %w", ns, cmName, err)
+	layoutName := image.Status.Disk.LayoutRef.Name
+	layout := &keziov1alpha1.ImageLayout{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: layoutName}, layout); err != nil {
+		return nil, nil, false, fmt.Errorf("get imagelayout %s/%s: %w", ns, layoutName, err)
 	}
-	sfdiskJSON, ok := cm.Data[sfdiskJSONKey]
-	if !ok {
-		return nil, nil, false, fmt.Errorf("layout configmap %s/%s missing key %q", ns, cmName, sfdiskJSONKey)
-	}
+	sfdiskJSON := layout.Spec.SfdiskJSON
 
 	partitions := make([]agentapi.PlanPartition, 0, len(image.Status.Partitions))
 	for _, p := range image.Status.Partitions {

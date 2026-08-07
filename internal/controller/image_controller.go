@@ -68,11 +68,11 @@ type ImageReconciler struct {
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=images/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=images/finalizers,verbs=update
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines,verbs=get;list;watch
+// +kubebuilder:rbac:groups=kezio.kojuro.date,resources=imagelayouts,verbs=get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile fetches the Image, dispatches to onDelete if it is being

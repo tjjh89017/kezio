@@ -5,6 +5,7 @@ resources:
 - bases/kezio.kojuro.date_images.yaml
 - bases/kezio.kojuro.date_posthooks.yaml
 - bases/kezio.kojuro.date_machines.yaml
+- bases/kezio.kojuro.date_imagelayouts.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

@@ -359,7 +359,7 @@ func TestHandleNext_ProvisioningReadyReturnsDeployPlan(t *testing.T) {
 		{Number: 1, Role: keziov1alpha1.PartitionRoleData, FSType: "ext4"},
 	})
 	// newTestServer's fake client needs a scheme that also knows
-	// ConfigMap; build this test's client directly instead of going
+	// ImageLayout; build this test's client directly instead of going
 	// through newTestServer.
 	c := newPlanTestClient(t, machine, image, cm)
 	s := New(c, Config{TrackerURL: testTrackerURL})

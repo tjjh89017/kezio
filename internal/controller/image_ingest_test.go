@@ -311,15 +311,15 @@ var _ = Describe("Image Controller, ingest mode", func() {
 			Expect(err).NotTo(HaveOccurred())
 			createIngestPod(ctx, jobKey.Name, jobKey.Name+"-pod", string(data))
 
-			// The real ingest Job writes its own layout ConfigMap
-			// directly through the Kubernetes API (see
-			// internal/ingest.WriteLayoutConfigMap) rather than relying
-			// on the controller to build it from the result; envtest
-			// never runs a real Job, so this stands in for that write.
+			// The real ingest Job writes its own ImageLayout directly
+			// through the Kubernetes API (see
+			// internal/ingest.WriteImageLayout) rather than relying on
+			// the controller to build it from the result; envtest never
+			// runs a real Job, so this stands in for that write.
 			const fixtureSfdiskJSON = `{"partitiontable":{"label":"gpt"}}`
-			Expect(k8sClient.Create(ctx, &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{Name: ingest.LayoutConfigMapName(resourceName), Namespace: namespace},
-				Data:       map[string]string{"sfdisk.json": fixtureSfdiskJSON},
+			Expect(k8sClient.Create(ctx, &keziov1alpha1.ImageLayout{
+				ObjectMeta: metav1.ObjectMeta{Name: ingest.ImageLayoutName(resourceName), Namespace: namespace},
+				Spec:       keziov1alpha1.ImageLayoutSpec{SfdiskJSON: fixtureSfdiskJSON},
 			})).To(Succeed())
 
 			By("reconciling, which reads the ingest result and moves to the publish phase")
@@ -361,10 +361,10 @@ var _ = Describe("Image Controller, ingest mode", func() {
 			Expect(final.Status.Partitions[0].InfoHash).To(Equal("aa"))
 			Expect(final.Status.Partitions[1].UUID).To(Equal("swap-uuid"))
 
-			cm := &corev1.ConfigMap{}
-			cmKey := types.NamespacedName{Name: final.Status.Disk.LayoutRef.Name, Namespace: namespace}
-			Expect(k8sClient.Get(ctx, cmKey, cm)).To(Succeed())
-			Expect(cm.Data["sfdisk.json"]).To(Equal(fixtureSfdiskJSON))
+			layout := &keziov1alpha1.ImageLayout{}
+			layoutKey := types.NamespacedName{Name: final.Status.Disk.LayoutRef.Name, Namespace: namespace}
+			Expect(k8sClient.Get(ctx, layoutKey, layout)).To(Succeed())
+			Expect(layout.Spec.SfdiskJSON).To(Equal(fixtureSfdiskJSON))
 
 			By("deleting the ingest scratch PVC once publish has succeeded")
 			// envtest runs a real API server (with its built-in
@@ -421,9 +421,9 @@ var _ = Describe("Image Controller, ingest mode", func() {
 			}
 			data, err := ingest.MarshalResult(result)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(k8sClient.Create(ctx, &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{Name: ingest.LayoutConfigMapName(resourceName), Namespace: namespace},
-				Data:       map[string]string{"sfdisk.json": `{"partitiontable":{"label":"gpt"}}`},
+			Expect(k8sClient.Create(ctx, &keziov1alpha1.ImageLayout{
+				ObjectMeta: metav1.ObjectMeta{Name: ingest.ImageLayoutName(resourceName), Namespace: namespace},
+				Spec:       keziov1alpha1.ImageLayoutSpec{SfdiskJSON: `{"partitiontable":{"label":"gpt"}}`},
 			})).To(Succeed())
 			createIngestPod(ctx, jobKey.Name, jobKey.Name+"-pod", string(data))
 
@@ -515,9 +515,9 @@ var _ = Describe("Image Controller, ingest mode", func() {
 			data, err := ingest.MarshalResult(result)
 			Expect(err).NotTo(HaveOccurred())
 			createIngestPod(ctx, jobKey.Name, jobKey.Name+"-pod", string(data))
-			Expect(k8sClient.Create(ctx, &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{Name: ingest.LayoutConfigMapName(resourceName), Namespace: namespace},
-				Data:       map[string]string{"sfdisk.json": `{"partitiontable":{"label":"gpt"}}`},
+			Expect(k8sClient.Create(ctx, &keziov1alpha1.ImageLayout{
+				ObjectMeta: metav1.ObjectMeta{Name: ingest.ImageLayoutName(resourceName), Namespace: namespace},
+				Spec:       keziov1alpha1.ImageLayoutSpec{SfdiskJSON: `{"partitiontable":{"label":"gpt"}}`},
 			})).To(Succeed())
 
 			final, err := reconcileImageUntil(ctx, r, key, 3, func(i *keziov1alpha1.Image) bool {
@@ -535,13 +535,13 @@ var _ = Describe("Image Controller, ingest mode", func() {
 			Expect(apierrors.IsNotFound(partitionErr)).To(BeTrue())
 		})
 
-		It("errors out (rather than silently advancing) when the Job succeeded but its layout configmap is missing", func() {
-			// The real ingest Job writes its own layout ConfigMap
-			// directly (see internal/ingest.WriteLayoutConfigMap); a
-			// completed Job with no ConfigMap means that write never
-			// happened - most likely missing RBAC on the ingest
-			// ServiceAccount - and must surface as a hard error rather
-			// than let the Image advance with an unrecorded layoutRef.
+		It("errors out (rather than silently advancing) when the Job succeeded but its ImageLayout is missing", func() {
+			// The real ingest Job writes its own ImageLayout directly
+			// (see internal/ingest.WriteImageLayout); a completed Job
+			// with no ImageLayout means that write never happened -
+			// most likely missing RBAC on the ingest ServiceAccount -
+			// and must surface as a hard error rather than let the
+			// Image advance with an unrecorded layoutRef.
 			const resourceName = "ingest-job-missing-layout-configmap"
 			namespace := "default"
 			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
@@ -577,11 +577,11 @@ var _ = Describe("Image Controller, ingest mode", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 			createIngestPod(ctx, jobKey.Name, jobKey.Name+"-pod", string(data))
-			// Deliberately no layout ConfigMap created here.
+			// Deliberately no ImageLayout created here.
 
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring(ingest.LayoutConfigMapName(resourceName)))
+			Expect(err.Error()).To(ContainSubstring(ingest.ImageLayoutName(resourceName)))
 		})
 
 		It("moves to Failed when the Job fails, using the result's error message", func() {

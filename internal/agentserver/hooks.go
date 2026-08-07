@@ -33,6 +33,7 @@ import (
 
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=posthooks,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 
 // resolveHooks builds the ordered agentapi.ResolvedHook list for a
 // deploy: imageRefs (the OS Image's own spec.postHookRefs) first, then

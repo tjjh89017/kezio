@@ -8,6 +8,15 @@ rules:
   - ""
   resources:
   - configmaps
+  - pods
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - persistentvolumeclaims
   verbs:
   - create
@@ -16,15 +25,6 @@ rules:
   - list
   - patch
   - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - pods
-  - secrets
-  verbs:
-  - get
-  - list
   - watch
 - apiGroups:
   - apps
@@ -62,6 +62,14 @@ rules:
   - discovery.k8s.io
   resources:
   - endpointslices
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - kezio.kojuro.date
+  resources:
+  - imagelayouts
   verbs:
   - get
   - list

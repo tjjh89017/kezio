@@ -176,7 +176,7 @@ type fakeLayoutWriter struct {
 	err     error
 }
 
-func (f *fakeLayoutWriter) WriteLayoutConfigMap(_ context.Context, sfdiskJSON string) error {
+func (f *fakeLayoutWriter) WriteLayout(_ context.Context, sfdiskJSON string) error {
 	if f.err != nil {
 		return f.err
 	}

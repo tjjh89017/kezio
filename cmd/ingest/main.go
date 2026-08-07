@@ -157,8 +157,8 @@ func buildFromEnv() (ingest.Config, ingest.Dependencies, error) {
 	sourceFormat := os.Getenv("SOURCE_FORMAT")
 	storeRoot := os.Getenv("STORE_ROOT")
 	// IMAGE_NAMESPACE/IMAGE_UID/IMAGE_API_VERSION/IMAGE_KIND identify the
-	// Image this Job runs for, so the layout ConfigMap this binary
-	// writes on success can carry an owner reference back to it (see
+	// Image this Job runs for, so the ImageLayout this binary writes on
+	// success can carry an owner reference back to it (see
 	// ingest.ImageOwnerRef and internal/controller's buildIngestJob,
 	// which sets all four alongside IMAGE_NAME).
 	imageNamespace := os.Getenv("IMAGE_NAMESPACE")

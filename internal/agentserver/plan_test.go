@@ -77,12 +77,12 @@ func fixtureTorrentInfo(t *testing.T) store.InfoHash {
 	return hash
 }
 
-// readyImage builds a Ready Image object named name, with a layout
-// ConfigMap named name+"-cm" holding sfdiskJSON, and the given
-// partitions. It returns the Image and the ConfigMap, both ready to seed
-// a fake client with.
-func readyImage(name, sfdiskJSON string, partitions []keziov1alpha1.ImagePartitionStatus) (*keziov1alpha1.Image, *corev1.ConfigMap) {
-	cmName := name + "-cm"
+// readyImage builds a Ready Image object named name, with an ImageLayout
+// named name+"-cm" holding sfdiskJSON, and the given partitions. It
+// returns the Image and the ImageLayout, both ready to seed a fake
+// client with.
+func readyImage(name, sfdiskJSON string, partitions []keziov1alpha1.ImagePartitionStatus) (*keziov1alpha1.Image, *keziov1alpha1.ImageLayout) {
+	layoutName := name + "-cm"
 	image := &keziov1alpha1.Image{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec: keziov1alpha1.ImageSpec{
@@ -92,16 +92,16 @@ func readyImage(name, sfdiskJSON string, partitions []keziov1alpha1.ImagePartiti
 			State: keziov1alpha1.ImageStateReady,
 			Disk: &keziov1alpha1.ImageDiskStatus{
 				PartitionTable: keziov1alpha1.PartitionTableGPT,
-				LayoutRef:      &keziov1alpha1.NameRef{Name: cmName},
+				LayoutRef:      &keziov1alpha1.NameRef{Name: layoutName},
 			},
 			Partitions: partitions,
 		},
 	}
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: cmName, Namespace: "default"},
-		Data:       map[string]string{sfdiskJSONKey: sfdiskJSON},
+	layout := &keziov1alpha1.ImageLayout{
+		ObjectMeta: metav1.ObjectMeta{Name: layoutName, Namespace: "default"},
+		Spec:       keziov1alpha1.ImageLayoutSpec{SfdiskJSON: sfdiskJSON},
 	}
-	return image, cm
+	return image, layout
 }
 
 // testSeederPodIP is the fixture PodIP seederPodFixture's pod carries -
@@ -414,8 +414,8 @@ func TestBuildDeployPlan_ImageFailedIsNotThePlanBuildersJob(t *testing.T) {
 	}
 }
 
-func TestBuildDeployPlan_MissingLayoutConfigMapIsAnError(t *testing.T) {
-	image, _ := readyImage("os-image", "{}", nil) // ConfigMap deliberately not seeded
+func TestBuildDeployPlan_MissingImageLayoutIsAnError(t *testing.T) {
+	image, _ := readyImage("os-image", "{}", nil) // ImageLayout deliberately not seeded
 
 	machine := &keziov1alpha1.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-01", Namespace: "default"},
@@ -436,7 +436,7 @@ func TestBuildDeployPlan_MissingLayoutConfigMapIsAnError(t *testing.T) {
 
 	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
 	if err == nil {
-		t.Fatal("buildDeployPlan: want an error for a missing layout ConfigMap")
+		t.Fatal("buildDeployPlan: want an error for a missing ImageLayout")
 	}
 	if plan != nil {
 		t.Fatalf("plan = %+v, want nil alongside the error", plan)

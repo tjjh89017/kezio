@@ -440,8 +440,8 @@ func (r *ImageReconciler) handleIngestJobSucceeded(ctx context.Context, image *k
 		return r.advance(ctx, image, keziov1alpha1.ImageStateFailed, reasonIngestFailed, message)
 	}
 
-	layoutRefName := ingest.LayoutConfigMapName(image.Name)
-	if err := r.verifyLayoutConfigMap(ctx, image, layoutRefName); err != nil {
+	layoutRefName := ingest.ImageLayoutName(image.Name)
+	if err := r.verifyImageLayout(ctx, image, layoutRefName); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -537,24 +537,24 @@ func (r *ImageReconciler) readIngestResult(ctx context.Context, image *keziov1al
 	return ingest.Result{}, fmt.Errorf("ingest job %s completed with no pod termination message", job.Name)
 }
 
-// verifyLayoutConfigMap checks that name (the ingest binary's
-// deterministic layout ConfigMap name for image - see
-// ingest.LayoutConfigMapName) exists in image's namespace. The ingest
-// Job itself creates this ConfigMap directly through the Kubernetes API
-// on success (see internal/ingest.WriteLayoutConfigMap); by the time a
-// Job reports Succeeded, that write has already happened, so a missing
-// ConfigMap here means the Job's ServiceAccount lacks the RBAC to write
-// it (or some other wiring bug) - a hard error, not a state this
-// reconciler silently tolerates.
-func (r *ImageReconciler) verifyLayoutConfigMap(ctx context.Context, image *keziov1alpha1.Image, name string) error {
-	cm := &corev1.ConfigMap{}
+// verifyImageLayout checks that name (the ingest binary's deterministic
+// ImageLayout name for image - see ingest.ImageLayoutName) exists in
+// image's namespace. The ingest Job itself creates this ImageLayout
+// directly through the Kubernetes API on success (see
+// internal/ingest.WriteImageLayout); by the time a Job reports
+// Succeeded, that write has already happened, so a missing ImageLayout
+// here means the Job's ServiceAccount lacks the RBAC to write it (or
+// some other wiring bug) - a hard error, not a state this reconciler
+// silently tolerates.
+func (r *ImageReconciler) verifyImageLayout(ctx context.Context, image *keziov1alpha1.Image, name string) error {
+	layout := &keziov1alpha1.ImageLayout{}
 	key := types.NamespacedName{Name: name, Namespace: image.Namespace}
-	if err := r.Get(ctx, key, cm); err != nil {
+	if err := r.Get(ctx, key, layout); err != nil {
 		if apierrors.IsNotFound(err) {
-			return fmt.Errorf("ingest job for image %s succeeded but its layout configmap %s does not exist "+
-				"(check the ingest ServiceAccount's ConfigMap RBAC)", image.Name, name)
+			return fmt.Errorf("ingest job for image %s succeeded but its imagelayout %s does not exist "+
+				"(check the ingest ServiceAccount's ImageLayout RBAC)", image.Name, name)
 		}
-		return fmt.Errorf("get layout configmap %s: %w", name, err)
+		return fmt.Errorf("get imagelayout %s: %w", name, err)
 	}
 	return nil
 }

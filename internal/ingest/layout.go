@@ -20,30 +20,25 @@ import (
 	"context"
 	"fmt"
 
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
 )
 
-// LayoutConfigMapDataKey is the ConfigMap data key holding the verbatim
-// `sfdisk --json` dump. internal/agentserver's deploy plan builder reads
-// this same key by its own literal constant (sfdiskJSONKey) - keep both
-// in sync if this value ever changes.
-const LayoutConfigMapDataKey = "sfdisk.json"
-
-// LayoutConfigMapName returns the deterministic ConfigMap name for an
+// ImageLayoutName returns the deterministic ImageLayout name for an
 // Image's sfdisk layout dump. Shared between the ingest binary, which
-// creates/updates this ConfigMap directly through the Kubernetes API on
-// success, and the Image controller, which only verifies it exists
+// creates/updates this ImageLayout directly through the Kubernetes API
+// on success, and the Image controller, which only verifies it exists
 // before recording it in status.disk.layoutRef.
-func LayoutConfigMapName(imageName string) string {
+func ImageLayoutName(imageName string) string {
 	return imageName + "-layout"
 }
 
-// ImageOwnerRef identifies the Image an ingest run is for, so the layout
-// ConfigMap it writes can carry an owner reference back to that Image
+// ImageOwnerRef identifies the Image an ingest run is for, so the
+// ImageLayout it writes can carry an owner reference back to that Image
 // (for cascading garbage collection) without granting the ingest Job's
 // ServiceAccount permission to read Images themselves - the Image
 // controller passes these fields to the Job as environment variables
@@ -55,24 +50,24 @@ type ImageOwnerRef struct {
 	Kind       string
 }
 
-// LayoutWriter persists the layout ConfigMap once ingest has captured a
+// LayoutWriter persists the ImageLayout once ingest has captured a
 // disk's sfdisk dump. The real implementation talks to the Kubernetes
 // API directly (see cmd/ingest); tests wire a fake.
 type LayoutWriter interface {
-	WriteLayoutConfigMap(ctx context.Context, sfdiskJSON string) error
+	WriteLayout(ctx context.Context, sfdiskJSON string) error
 }
 
-// WriteLayoutConfigMap creates or updates the layout ConfigMap for
-// owner's Image in namespace, owner-ref'd to it, holding sfdiskJSON
-// under LayoutConfigMapDataKey. This is the ingest Job's own side of
-// moving the sfdisk dump off the container termination message (see
-// Result's doc comment): the Job writes this ConfigMap itself rather
-// than relaying the dump back through the Image controller, since the
-// controller's own result channel is the 4KiB-capped termination
-// message this exists to stop overflowing.
-func WriteLayoutConfigMap(ctx context.Context, client kubernetes.Interface, namespace string, owner ImageOwnerRef, sfdiskJSON string) error {
-	name := LayoutConfigMapName(owner.Name)
-	cms := client.CoreV1().ConfigMaps(namespace)
+// WriteImageLayout creates or updates the ImageLayout for owner's Image
+// in namespace, owner-ref'd to it, holding sfdiskJSON in
+// spec.sfdiskJSON. This is the ingest Job's own side of moving the
+// sfdisk dump off the container termination message (see Result's doc
+// comment): the Job writes this object itself rather than relaying the
+// dump back through the Image controller, since the controller's own
+// result channel is the 4KiB-capped termination message this exists to
+// stop overflowing.
+func WriteImageLayout(ctx context.Context, c client.Client, namespace string, owner ImageOwnerRef, sfdiskJSON string) error {
+	name := ImageLayoutName(owner.Name)
+	key := client.ObjectKey{Name: name, Namespace: namespace}
 	ownerRefs := []metav1.OwnerReference{{
 		APIVersion: owner.APIVersion,
 		Kind:       owner.Kind,
@@ -80,54 +75,52 @@ func WriteLayoutConfigMap(ctx context.Context, client kubernetes.Interface, name
 		UID:        owner.UID,
 	}}
 
-	existing, err := cms.Get(ctx, name, metav1.GetOptions{})
-	switch {
+	existing := &keziov1alpha1.ImageLayout{}
+	switch err := c.Get(ctx, key, existing); {
 	case apierrors.IsNotFound(err):
-		cm := &corev1.ConfigMap{
+		layout := &keziov1alpha1.ImageLayout{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:            name,
 				Namespace:       namespace,
 				OwnerReferences: ownerRefs,
 			},
-			Data: map[string]string{LayoutConfigMapDataKey: sfdiskJSON},
+			Spec: keziov1alpha1.ImageLayoutSpec{SfdiskJSON: sfdiskJSON},
 		}
-		if _, err := cms.Create(ctx, cm, metav1.CreateOptions{}); err != nil {
-			return fmt.Errorf("create layout configmap %s: %w", name, err)
+		if err := c.Create(ctx, layout); err != nil {
+			return fmt.Errorf("create imagelayout %s: %w", name, err)
 		}
 		return nil
 	case err != nil:
-		return fmt.Errorf("get layout configmap %s: %w", name, err)
+		return fmt.Errorf("get imagelayout %s: %w", name, err)
 	}
 
 	updated := existing.DeepCopy()
-	if updated.Data == nil {
-		updated.Data = map[string]string{}
-	}
-	updated.Data[LayoutConfigMapDataKey] = sfdiskJSON
+	updated.Spec.SfdiskJSON = sfdiskJSON
 	updated.OwnerReferences = ownerRefs
-	if _, err := cms.Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
-		return fmt.Errorf("update layout configmap %s: %w", name, err)
+	if err := c.Update(ctx, updated); err != nil {
+		return fmt.Errorf("update imagelayout %s: %w", name, err)
 	}
 	return nil
 }
 
-// clientsetLayoutWriter adapts WriteLayoutConfigMap to the LayoutWriter
+// clientLayoutWriter adapts WriteImageLayout to the LayoutWriter
 // interface, binding a fixed client/namespace/owner for the lifetime of
 // one ingest run.
-type clientsetLayoutWriter struct {
-	client    kubernetes.Interface
+type clientLayoutWriter struct {
+	client    client.Client
 	namespace string
 	owner     ImageOwnerRef
 }
 
-func (w *clientsetLayoutWriter) WriteLayoutConfigMap(ctx context.Context, sfdiskJSON string) error {
-	return WriteLayoutConfigMap(ctx, w.client, w.namespace, w.owner, sfdiskJSON)
+func (w *clientLayoutWriter) WriteLayout(ctx context.Context, sfdiskJSON string) error {
+	return WriteImageLayout(ctx, w.client, w.namespace, w.owner, sfdiskJSON)
 }
 
 // NewLayoutWriter builds the LayoutWriter a production ingest run wires:
-// client is expected to be backed by the Job pod's in-cluster
-// ServiceAccount credentials (see cmd/ingest), namespace is the Image's
-// namespace, and owner identifies the Image to own the ConfigMap.
-func NewLayoutWriter(client kubernetes.Interface, namespace string, owner ImageOwnerRef) LayoutWriter {
-	return &clientsetLayoutWriter{client: client, namespace: namespace, owner: owner}
+// c is expected to be backed by the Job pod's in-cluster ServiceAccount
+// credentials and a scheme that knows the kezio API group (see
+// cmd/ingest), namespace is the Image's namespace, and owner identifies
+// the Image to own the ImageLayout.
+func NewLayoutWriter(c client.Client, namespace string, owner ImageOwnerRef) LayoutWriter {
+	return &clientLayoutWriter{client: c, namespace: namespace, owner: owner}
 }

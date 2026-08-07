@@ -1,6 +1,6 @@
 # Standalone kustomization for the ingest Job's own RBAC: a ServiceAccount
-# plus the Role/RoleBinding letting it create/get/update ConfigMaps in its
-# own namespace (see internal/ingest.WriteLayoutConfigMap). It is
+# plus the Role/RoleBinding letting it create/get/update ImageLayouts in
+# its own namespace (see internal/ingest.WriteImageLayout). It is
 # deliberately not one of config/default's resources, the same reasoning
 # as config/image-service and config/seeder: real ingest is opt-in, gated
 # by IngestConfig.enabled() (INGEST_IMAGE unset means no ingest Jobs ever
@@ -12,7 +12,7 @@
 # and set INGEST_SERVICE_ACCOUNT=kezio-ingest on the controller-manager
 # Deployment (see IngestConfig.ServiceAccountName) so the ingest Job's pod
 # actually runs as this ServiceAccount instead of the namespace default,
-# which has no ConfigMap RBAC at all.
+# which has no ImageLayout RBAC at all.
 namespace: kezio-system
 namePrefix: kezio-
 
