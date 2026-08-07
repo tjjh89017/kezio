@@ -132,6 +132,77 @@ NetworkAttachmentDefinition this depends on (a placeholder - it is
 site-specific and not applied by this kustomization) and its extended
 comments on IPAM choice (static vs. `whereabouts`, and why not DHCP).
 
+## Provisioning-segment address pool
+
+**Hard prerequisite:** the provisioning network `SEEDER_DEPLOYMENT_NETWORK`
+names must carry enough addresses for every per-Image seeder Deployment
+a site can have running at once, not just one. Each seeder pod is
+single-homed on this network - the Multus default-network annotation
+replaces its whole default attachment - so `pod.Status.PodIP` is the
+one address that Deployment's pod uses. One (Image, site) pair holds
+one seeder Deployment (see "Per-Image, on-demand seeding" above); a
+site where several Images can be deploying at the same time therefore
+needs an address for each one of them, concurrently.
+
+**Sizing rule:**
+
+```
+pool size >= (max concurrently active Images at the site) x replicas, PLUS HEADROOM
+```
+
+"Concurrently active Images at the site" is the largest number of
+distinct Images any Machine at that site is deploying, or retrying a
+provisioning failure for, at the same moment
+(`machineHoldsSeederReference`). "Replicas" is each seeder Deployment's
+own replica count (`buildSeederDeployment` sets 1 today). Headroom
+absorbs the grace period (`SEEDER_DEPLOYMENT_GRACE_PERIOD`, default
+5m) that keeps a just-emptied Deployment's pod - and its address -
+alive for a while after the last Machine referencing it stops
+deploying, plus (with `whereabouts`) any leaked allocation that has not
+yet been reclaimed. Size generously: an address in a dedicated
+provisioning-segment pool is cheap relative to a seeder Deployment that
+fails to start because the pool ran dry.
+
+Two example NADs cover this:
+
+- `networkattachmentdefinition.example.yaml` - a single static address.
+  Correct only for a site where at most one Image is ever deploying at
+  a time (a lab, a small single-Image site).
+- `networkattachmentdefinition-whereabouts.example.yaml` - a
+  range-based `whereabouts` pool. **RECOMMENDED for any real site**,
+  since it is the only one of the two that scales past one concurrently
+  active Image.
+
+**With `whereabouts`, the `ip-reconciler` CronJob is required, not
+optional.** `whereabouts` leaks allocations on ungraceful pod deletion,
+and per-Image seeder Deployments are a high-churn create/delete pattern
+by design - every deploy start and grace-period expiry creates or
+deletes a pod, so this leak path is exercised constantly, not as a rare
+edge case. Deploy `whereabouts`' own `ip-reconciler` CronJob
+(https://github.com/k8snetworkplumbingwg/whereabouts/tree/master/doc#ip-reconciler)
+alongside the NAD; without it, a leaked pool slowly starves new seeder
+Deployments of addresses until nothing can start.
+
+**Two ports must be reachable across the provisioning segment** for
+every peer that needs to reach a seeder pod: the fixed BitTorrent
+listen port (`16881` - see "Fixed BT listen port" below; stable because
+each pod gets its own network namespace) and the `.torrent` HTTP
+endpoint's port `8080` (`seederdeploy.TorrentHTTPPort`), which the
+agent fetches a partition's `.torrent` from directly at
+`http://<PodIP>:8080/torrents/<infohash>`.
+
+**Namespace-qualified `SEEDER_DEPLOYMENT_NETWORK`:** Multus resolves an
+unqualified `default-network` annotation value in its own system
+namespace (`kube-system`), not the pod's namespace the way the ordinary
+`k8s.v1.cni.cncf.io/networks` annotation is resolved. A bare NAD name
+set on `SEEDER_DEPLOYMENT_NETWORK` would therefore silently point at a
+NAD that does not exist there. The operator already accounts for this:
+`seederPodAnnotations` qualifies a bare name with the seeder
+Deployment's own namespace (`<namespace>/<name>`) before stamping the
+annotation, so `SEEDER_DEPLOYMENT_NETWORK` can be set to either a bare
+name (qualified automatically) or an already-qualified
+`<namespace>/<name>` value.
+
 ## Cross-network baseline: routed L3, not overlay/NAT
 
 The no-NAT rule above is a peer-to-peer requirement; it also applies

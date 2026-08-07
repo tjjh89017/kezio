@@ -8,6 +8,15 @@
 # k8s.v1.cni.cncf.io/networks annotation on the seeder and opentracker
 # Deployments to actually attach it.
 #
+# THIS IS THE SINGLE-IMAGE/LAB SHAPE: one static address, good for a
+# site where at most one Image is ever being deployed at a time (a lab,
+# a small single-Image site). A site where several Images can be
+# deploying concurrently needs one address per concurrently active
+# (Image, site) seeder Deployment, not one address total - see
+# networkattachmentdefinition-whereabouts.example.yaml (the RECOMMENDED
+# shape for real, multi-Image sites) and README.md's
+# "Provisioning-segment address pool" section for the sizing rule.
+#
 # Requires the Multus CNI meta-plugin
 # (https://github.com/k8snetworkplumbingwg/multus-cni) and its
 # NetworkAttachmentDefinition CRD to already be installed cluster-wide;
@@ -62,7 +71,12 @@
 #     (https://github.com/k8snetworkplumbingwg/whereabouts) when
 #     addresses should come from a shared pool instead of being hand
 #     assigned per pod; still stable for the pod's lifetime once
-#     allocated.
+#     allocated. See networkattachmentdefinition-whereabouts.example.yaml
+#     for that shape: it is the RECOMMENDED choice once a site can have
+#     more than one Image deploying at once, since each per-Image seeder
+#     Deployment (README.md's "Per-Image, on-demand seeding") needs its
+#     own address, not a single one shared across every Image at the
+#     site.
 #
 # DHCP IPAM is deliberately not recommended here: it works too, but pulls
 # in a cluster-wide DHCP daemon dependency (cni-dhcp) purely to solve a

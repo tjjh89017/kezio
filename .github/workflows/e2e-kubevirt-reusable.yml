@@ -830,6 +830,15 @@ jobs:
                 ]
               }
           EOF
+          # One static address per NAD is correct here: this lane runs a
+          # single central tracker and, at most, one seeder Deployment at
+          # a time (single-Image lane). A site where several Images can
+          # be deploying concurrently needs one address per concurrently
+          # active seeder Deployment instead - see
+          # config/seeder/networkattachmentdefinition-whereabouts.example.yaml
+          # and config/seeder/README.md's "Provisioning-segment address
+          # pool" section for that shape; do not convert this lane's NADs
+          # to it.
           for nad_spec in "kezio-tracker-network:${PROVISIONING_TRACKER_NET1_IP}" "kezio-seeder-network:${PROVISIONING_SEEDER_NET1_IP}"; do
             nad_name="${nad_spec%%:*}"
             nad_addr="${nad_spec#*:}"

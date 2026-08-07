@@ -280,14 +280,17 @@ yourself.
 
 ### Option 2: same subnet/bridge as the targets, via Multus
 
-Attach the tracker and each seeder pod to the same data-network bridge
-the target machines' data NICs live on, as a Multus secondary
-interface (`net1`), the same way `config/bootd` attaches its own
-provisioning interface
-(`config/seeder/networkattachmentdefinition.example.yaml`). `eth0`
-stays for cluster-internal traffic only; the data network carries
-BitTorrent peer connections and tracker announce/response traffic
-directly, with no Service and no NAT in the path at all.
+Attach the tracker and every per-Image seeder pod to the same
+data-network bridge the target machines' data NICs live on, as a
+Multus secondary interface, the same way `config/bootd` attaches its
+own provisioning interface
+(`config/seeder/networkattachmentdefinition.example.yaml`,
+`config/seeder/networkattachmentdefinition-whereabouts.example.yaml`).
+`SEEDER_DEPLOYMENT_NETWORK` names the NAD a seeder pod's whole default
+network attachment is replaced with, so `eth0` stays for
+cluster-internal traffic only; the data network carries BitTorrent peer
+connections and tracker announce/response traffic directly, with no
+Service and no NAT in the path at all.
 
 This is the shape kezio's own end-to-end lanes use today
 (`.github/workflows/e2e-kubevirt-reusable.yml` creates
@@ -295,10 +298,16 @@ This is the shape kezio's own end-to-end lanes use today
 the seeder, all as static-IPAM Multus attachments on the same
 provisioning bridge).
 
-This option needs a Multus attachment per site for every tracker/seeder
-pod (or, for a single central tracker, at least routed reachability to
-whichever site-local bridge it needs to answer from), but avoids
-building and maintaining a separate L3 exposure layer.
+**This option needs one address per concurrently active (Image, site)
+seeder Deployment, not one address per site.** The operator creates one
+seeder Deployment - one pod, one address - per Image currently
+deploying at a site (`config/seeder/README.md`'s "Per-Image, on-demand
+seeding"); a site where several Images can be deploying at once needs
+that many addresses available at once. See
+`config/seeder/README.md`'s "Provisioning-segment address pool" section
+for the sizing rule and why a real site should use the `whereabouts`
+example NAD, not the single-static-address one, once more than one
+Image can be active at a time.
 
 ### Common ground: routing, not a default-route flip
 
@@ -311,11 +320,13 @@ CIDRs untouched (`config/seeder/README.md`, "Routing").
 ### The tracker is not replicated per site
 
 There is exactly one tracker in a kezio deployment
-(`config/seeder/README.md`, "Per-site seeders"). It must be reachable,
-by whichever option above, from every site. A site-local seeder is a
-second replica of the same `ezio-seeder` component, added as another
-endpoint of the same Kubernetes Service - see that section for the
-full pattern before adding a second site.
+(`config/seeder/README.md`, "WAN swarm tuning"; opentracker is deployed
+once, by `config/seeder`). It must be reachable, by whichever option
+above, from every site. Seeder Deployments, by contrast, are per
+(Image, site): the operator creates and removes one on demand for each
+site actively deploying that Image
+(`config/seeder/README.md`'s "Per-Image, on-demand seeding") - see that
+section for the full pattern before adding a second site.
 
 ## 4. Secure Boot
 
