@@ -227,16 +227,16 @@ func main() {
 		setupLog.Error(err, "invalid ingest configuration")
 		os.Exit(1)
 	}
-	// Computed before seederDeploymentConfigFromEnv, which reuses its
-	// tracker/store/tuning fields the same way agentServerConfigFromEnv
-	// does below - one tracker URL and one store mount serve every
-	// consumer that builds a .torrent, not a separate set per consumer.
-	seederCfg, err := seederConfigFromEnv()
+	// Computed before seederDeploymentConfigFromEnv and
+	// agentServerConfigFromEnv below, which both reuse it - one tracker
+	// URL and one tuning default serve every consumer that builds a
+	// .torrent, not a separate set per consumer.
+	tracker, err := trackerConfigFromEnv()
 	if err != nil {
-		setupLog.Error(err, "invalid seeder configuration")
+		setupLog.Error(err, "invalid tracker configuration")
 		os.Exit(1)
 	}
-	seederDeploymentConfig, err := seederDeploymentConfigFromEnv(seederCfg)
+	seederDeploymentConfig, err := seederDeploymentConfigFromEnv(tracker)
 	if err != nil {
 		setupLog.Error(err, "invalid seeder deployment configuration")
 		os.Exit(1)
@@ -263,14 +263,6 @@ func main() {
 		DeployerFactory: deployerFactoryFromEnv(mgr.GetClient()),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Machine")
-		os.Exit(1)
-	}
-	if err := (&controller.SeederReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Seeder: seederCfg,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "Seeder")
 		os.Exit(1)
 	}
 	if webhooksEnabled() {
@@ -308,7 +300,7 @@ func main() {
 		}
 	}
 
-	agentConfig, err := agentServerConfigFromEnv(seederCfg)
+	agentConfig, err := agentServerConfigFromEnv(tracker)
 	if err != nil {
 		setupLog.Error(err, "invalid agent server configuration")
 		os.Exit(1)
@@ -370,16 +362,9 @@ func webhooksEnabled() bool {
 // existing deployment and the e2e suite) yields the zero IngestConfig,
 // which keeps the Image reconciler on its stub fast path - no ingest
 // Job is ever created, and no scratch or staging volume is required.
-// Setting INGEST_IMAGE opts into the real ingest pipeline.
-//
-// There are two shapes this can take, matching
-// controller.IngestConfig.LegacySharedStoreVolume's doc comment:
-// setting INGEST_STORE_PVC keeps the pre-per-partition-PVC shared-store
-// behavior the shared seeder fleet still needs; leaving it unset (the
-// path a fresh deployment wiring up the per-Image seeder Deployment
-// should take) has the reconciler create a fresh per-Image scratch PVC
-// and, once ingest succeeds, one PVC per partition (see IngestConfig's
-// own doc comment) - no store PVC to name at all.
+// Setting INGEST_IMAGE opts into the real ingest pipeline: the
+// reconciler creates a fresh per-Image scratch PVC and, once ingest
+// succeeds, one PVC per partition (see IngestConfig's own doc comment).
 // INGEST_SCRATCH_STORAGE_CLASS and INGEST_PARTITION_STORAGE_CLASS
 // optionally pick each's StorageClass (empty uses the cluster/namespace
 // default). INGEST_PARTITION_ACCESS_MODES optionally overrides the
@@ -405,20 +390,6 @@ func ingestConfigFromEnv() (controller.IngestConfig, error) {
 		PartitionStorageClassName: os.Getenv("INGEST_PARTITION_STORAGE_CLASS"),
 		ServiceAccountName:        os.Getenv("INGEST_SERVICE_ACCOUNT"),
 	}
-	// INGEST_STORE_PVC selects IngestConfig.LegacySharedStoreVolume
-	// instead of the per-partition-PVC path: the shared seeder fleet
-	// (SEEDER_SERVICE_NAME/SEEDER_SERVICE_NAMESPACE) still serves every
-	// Ready Image straight out of one permanently-accumulating store
-	// volume, and has not been migrated to per-partition PVCs (a
-	// separate, larger piece of work - see
-	// controller.IngestConfig.LegacySharedStoreVolume's doc comment). A
-	// deployment that runs only the per-Image seeder Deployment path
-	// should leave this unset.
-	if storePVC := os.Getenv("INGEST_STORE_PVC"); storePVC != "" {
-		cfg.LegacySharedStoreVolume = &corev1.VolumeSource{
-			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: storePVC},
-		}
-	}
 	if size := os.Getenv("INGEST_SCRATCH_STORAGE_SIZE"); size != "" {
 		q, err := resource.ParseQuantity(size)
 		if err != nil {
@@ -439,53 +410,42 @@ func ingestConfigFromEnv() (controller.IngestConfig, error) {
 	return cfg, nil
 }
 
-// seederConfigFromEnv builds the seeder reconciler's SeederConfig from
-// the environment. Leaving SEEDER_TRACKER_URL unset (the default for
-// every existing deployment and the e2e suite) yields the zero
-// SeederConfig, which SeederReconciler.SetupWithManager recognizes as
-// disabled and does not register a controller for at all - no seeder
-// Service or store volume is ever required. Setting SEEDER_TRACKER_URL
-// opts in; SEEDER_STORE_ROOT, SEEDER_SERVICE_NAMESPACE, and
-// SEEDER_SERVICE_NAME must then also be set:
+// trackerConfig carries the tracker URL and cluster-wide default
+// AddTorrent tuning every consumer that builds a .torrent shares - the
+// per-Image seeder Deployment (seederDeploymentConfigFromEnv) and the
+// agent registration server (agentServerConfigFromEnv) - so
+// SEEDER_TRACKER_URL/SEEDER_MAX_UPLOADS/SEEDER_MAX_CONNECTIONS are read
+// once rather than once per consumer.
+type trackerConfig struct {
+	URL    string
+	Tuning *keziov1alpha1.MachineEzioTuning
+}
+
+// trackerConfigFromEnv reads trackerConfig from the environment. Leaving
+// SEEDER_TRACKER_URL unset (the default for every existing deployment
+// and the e2e suite) yields the zero trackerConfig: per-Image seeder
+// Deployments are still created and torn down by their reference count,
+// and the agent registration server still starts - only the
+// content-adding/torrent-building half of each is skipped (see
+// SeederDeploymentConfig.TrackerURL's doc comment).
 //
 //   - SEEDER_TRACKER_URL is inserted as every built .torrent's announce
 //     URL (see internal/store.BuildTorrentFile).
-//   - SEEDER_STORE_ROOT is the store's local filesystem root. Unlike the
-//     ingest Job (which gets its store volume from IngestConfig at Job
-//     creation time), the manager container itself needs the store
-//     mounted read-only for this: it reads contents/<hash>/torrent.info
-//     directly to build the .torrent bytes it hands to ezio. Mounting
-//     that volume onto the controller-manager Deployment is left to the
-//     cluster operator (see config/seeder's README), the same
-//     deploy-time customization gap IngestConfig's own volumes have
-//     today.
-//   - SEEDER_SERVICE_NAMESPACE and SEEDER_SERVICE_NAME locate the seeder
-//     Service (see config/seeder/service.yaml); the reconciler resolves
-//     it to individual Ready backends via EndpointSlices.
-//   - SEEDER_GRPC_PORT_NAME optionally overrides the EndpointPort name
-//     carrying the seeder's gRPC port (default "grpc").
 //   - SEEDER_MAX_UPLOADS / SEEDER_MAX_CONNECTIONS optionally override
-//     the cluster-wide default per-torrent AddTorrent tuning this
-//     reconciler applies to every content torrent it adds (see
-//     config/seeder/README.md's "WAN swarm tuning" section). Unset
-//     leaves seeder.DefaultMaxUploads/DefaultMaxConnections in effect.
-func seederConfigFromEnv() (controller.SeederConfig, error) {
+//     the cluster-wide default per-torrent AddTorrent tuning applied to
+//     every content torrent added (see config/seeder/README.md's "WAN
+//     swarm tuning" section). Unset leaves
+//     seeder.DefaultMaxUploads/DefaultMaxConnections in effect.
+func trackerConfigFromEnv() (trackerConfig, error) {
 	trackerURL := os.Getenv("SEEDER_TRACKER_URL")
 	if trackerURL == "" {
-		return controller.SeederConfig{}, nil
+		return trackerConfig{}, nil
 	}
 	ezioTuning, err := ezioTuningFromEnv("SEEDER_MAX_UPLOADS", "SEEDER_MAX_CONNECTIONS")
 	if err != nil {
-		return controller.SeederConfig{}, err
+		return trackerConfig{}, err
 	}
-	return controller.SeederConfig{
-		TrackerURL:       trackerURL,
-		StoreRoot:        os.Getenv("SEEDER_STORE_ROOT"),
-		ServiceNamespace: os.Getenv("SEEDER_SERVICE_NAMESPACE"),
-		ServiceName:      os.Getenv("SEEDER_SERVICE_NAME"),
-		GRPCPortName:     os.Getenv("SEEDER_GRPC_PORT_NAME"),
-		EzioTuning:       ezioTuning,
-	}, nil
+	return trackerConfig{URL: trackerURL, Tuning: ezioTuning}, nil
 }
 
 // seederDeploymentConfigFromEnv builds the Image reconciler's
@@ -507,16 +467,16 @@ func seederConfigFromEnv() (controller.SeederConfig, error) {
 // the behavior every existing deployment and the envtest suite already
 // exercise.
 //
-// seeder carries the tracker URL a per-Image Deployment's pod is
+// tracker carries the tracker URL a per-Image Deployment's pod is
 // actually seeded through (SeederDeploymentConfig.TrackerURL), reused
 // verbatim rather than introducing a second, parallel
 // SEEDER_DEPLOYMENT_TRACKER_URL naming the same tracker - the identical
-// reasoning agentServerConfigFromEnv gives for reusing SeederConfig
+// reasoning agentServerConfigFromEnv gives for reusing trackerConfig
 // itself. Leaving SEEDER_TRACKER_URL unset still lets per-Image
 // Deployments be created and torn down by their reference count; it
 // just means nothing ever adds content to them (see
 // SeederDeploymentConfig.contentEnabled).
-func seederDeploymentConfigFromEnv(seeder controller.SeederConfig) (controller.SeederDeploymentConfig, error) {
+func seederDeploymentConfigFromEnv(tracker trackerConfig) (controller.SeederDeploymentConfig, error) {
 	image := os.Getenv("SEEDER_DEPLOYMENT_IMAGE")
 	if image == "" {
 		return controller.SeederDeploymentConfig{}, nil
@@ -524,8 +484,8 @@ func seederDeploymentConfigFromEnv(seeder controller.SeederConfig) (controller.S
 
 	cfg := controller.SeederDeploymentConfig{
 		Image:      image,
-		TrackerURL: seeder.TrackerURL,
-		EzioTuning: seeder.EzioTuning,
+		TrackerURL: tracker.URL,
+		EzioTuning: tracker.Tuning,
 		Network:    os.Getenv("SEEDER_DEPLOYMENT_NETWORK"),
 	}
 	if raw := os.Getenv("SEEDER_DEPLOYMENT_GRACE_PERIOD"); raw != "" {
@@ -674,9 +634,9 @@ func bootServerConfigFromEnv() (*bootserver.Config, error) {
 // separate from SEEDER_MAX_UPLOADS/SEEDER_MAX_CONNECTIONS: the seeder
 // pods and each machine's leecher can reasonably want different
 // defaults (a seeder serves every site at once; a leecher serves only
-// itself), so this reuses SeederConfig for the tracker setting alone,
+// itself), so this reuses trackerConfig for the tracker setting alone,
 // not its tuning.
-func agentServerConfigFromEnv(seeder controller.SeederConfig) (*agentserver.Config, error) {
+func agentServerConfigFromEnv(tracker trackerConfig) (*agentserver.Config, error) {
 	addr := os.Getenv("AGENT_SERVER_ADDR")
 	if addr == "" {
 		return nil, nil
@@ -687,7 +647,7 @@ func agentServerConfigFromEnv(seeder controller.SeederConfig) (*agentserver.Conf
 	}
 	return &agentserver.Config{
 		Addr:         addr,
-		TrackerURL:   seeder.TrackerURL,
+		TrackerURL:   tracker.URL,
 		EzioDefaults: ezioDefaults,
 	}, nil
 }

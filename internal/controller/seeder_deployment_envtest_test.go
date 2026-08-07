@@ -19,6 +19,10 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
+	"os"
+	"path/filepath"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -33,8 +37,138 @@ import (
 
 	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
 	"github.com/tjjh89017/kezio/internal/ingest"
+	"github.com/tjjh89017/kezio/internal/seeder"
 	"github.com/tjjh89017/kezio/internal/store"
 )
+
+// fakeDaemon stands in for one ezio daemon's torrent set, shared by every
+// fakeSeederClient dialed against the same target: AddTorrent adds
+// durably, GetTorrentStatus reflects everything added so far.
+type fakeDaemon struct {
+	mu       sync.Mutex
+	torrents map[string]seeder.Torrent
+}
+
+func newFakeDaemon() *fakeDaemon {
+	return &fakeDaemon{torrents: make(map[string]seeder.Torrent)}
+}
+
+type fakeSeederClient struct{ d *fakeDaemon }
+
+func (c fakeSeederClient) AddTorrent(_ context.Context, _ []byte, savePath string, _ bool, _, _ int32) error {
+	c.d.mu.Lock()
+	defer c.d.mu.Unlock()
+	// The content hash is the save_path's leaf directory name.
+	hash := filepath.Base(savePath)
+	c.d.torrents[hash] = seeder.Torrent{Hash: hash}
+	return nil
+}
+
+func (c fakeSeederClient) PauseTorrent(_ context.Context, hash string) error {
+	c.d.mu.Lock()
+	defer c.d.mu.Unlock()
+	t := c.d.torrents[hash]
+	t.IsPaused = true
+	c.d.torrents[hash] = t
+	return nil
+}
+
+func (c fakeSeederClient) ResumeTorrent(_ context.Context, hash string) error {
+	c.d.mu.Lock()
+	defer c.d.mu.Unlock()
+	t := c.d.torrents[hash]
+	t.IsPaused = false
+	c.d.torrents[hash] = t
+	return nil
+}
+
+func (c fakeSeederClient) GetTorrentStatus(_ context.Context, _ []string) (map[string]seeder.Torrent, error) {
+	c.d.mu.Lock()
+	defer c.d.mu.Unlock()
+	out := make(map[string]seeder.Torrent, len(c.d.torrents))
+	maps.Copy(out, c.d.torrents)
+	return out, nil
+}
+
+func (c fakeSeederClient) Close() error { return nil }
+
+// fakeSeederRegistry hands out (and remembers) one *fakeDaemon per dial
+// target, so a test can dial the "same daemon" repeatedly.
+type fakeSeederRegistry struct {
+	mu      sync.Mutex
+	daemons map[string]*fakeDaemon
+}
+
+func newFakeSeederRegistry() *fakeSeederRegistry {
+	return &fakeSeederRegistry{daemons: make(map[string]*fakeDaemon)}
+}
+
+func (r *fakeSeederRegistry) dial(target string) (SeederEZIOClient, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	d, ok := r.daemons[target]
+	if !ok {
+		d = newFakeDaemon()
+		r.daemons[target] = d
+	}
+	return fakeSeederClient{d: d}, nil
+}
+
+// writeFixtureContent writes a minimal, valid content directory (a
+// torrent.info plus its one extent file nested under the content/ data
+// subdirectory, both required by
+// store.LoadContentDirTorrentInfo/store.ValidateContentDir - see
+// store.ContentDataDir) under a fresh temp store root, and returns the
+// root and the content's info hash.
+func writeFixtureContent() (root string, hash store.InfoHash) {
+	root, err := os.MkdirTemp("", "seeder-store-*")
+	Expect(err).NotTo(HaveOccurred())
+	DeferCleanup(func() { _ = os.RemoveAll(root) })
+
+	info := &store.TorrentInfo{
+		BlockSize:   4096,
+		BlocksTotal: 100,
+		Extents:     []store.Extent{{Offset: 0, Length: store.PieceSize}},
+		PieceHashes: []store.PieceHash{{1, 2, 3, 4, 5}},
+	}
+	hash, err = store.ComputeInfoHash(info)
+	Expect(err).NotTo(HaveOccurred())
+
+	dir := store.ContentDir(root, hash)
+	Expect(os.MkdirAll(store.ContentDataDir(dir), 0o755)).To(Succeed())
+
+	infoFile, err := os.Create(store.ContentTorrentInfoPath(root, hash)) //nolint:gosec // test fixture path
+	Expect(err).NotTo(HaveOccurred())
+	Expect(store.WriteTorrentInfo(infoFile, info)).To(Succeed())
+	Expect(infoFile.Close()).To(Succeed())
+
+	extentPath := store.ContentExtentPath(root, hash, 0)
+	Expect(os.WriteFile(extentPath, make([]byte, store.PieceSize), 0o644)).To(Succeed()) //nolint:gosec // test fixture path
+
+	return root, hash
+}
+
+// createReadyImage creates an Image that is immediately Ready with one
+// partition carrying hash, bypassing the ingest state machine.
+func createReadyImage(ctx context.Context, hash store.InfoHash) *keziov1alpha1.Image {
+	image := &keziov1alpha1.Image{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("img-%s", rand.String(5)),
+			Namespace: "default",
+		},
+		Spec: keziov1alpha1.ImageSpec{
+			Source: keziov1alpha1.ImageSource{Format: keziov1alpha1.ImageFormatRaw},
+		},
+	}
+	Expect(k8sClient.Create(ctx, image)).To(Succeed())
+
+	image.Status.State = keziov1alpha1.ImageStateReady
+	image.Status.Partitions = []keziov1alpha1.ImagePartitionStatus{
+		{Role: "data", InfoHash: hash.String()},
+	}
+	Expect(k8sClient.Status().Update(ctx, image)).To(Succeed())
+	return image
+}
 
 // seederDeploymentTestGracePeriod is a fixed, arbitrary grace period the
 // tests below advance a fake clock past or stop short of; its value only
@@ -127,12 +261,10 @@ func seederDeploymentsForImage(ctx context.Context, image *keziov1alpha1.Image) 
 // Deployment left over for image (envtest runs no garbage collector, so
 // an owner-reference alone never actually reaps one here), and then
 // drains image's finalizer (deleteImageAndFinalize). reconcileImage runs
-// the real ImageReconciler (unlike seeder_controller_test.go's
-// createReadyImage callers, which never touch the reconciler and so
-// never attach a finalizer), so leaving an Image behind here would leak
-// a Ready Image - with the fixture's fixed content hash - into every
-// other envtest spec in this shared suite that lists Ready Images
-// (notably SeederReconciler's readyContentHashes).
+// the real ImageReconciler, which attaches a finalizer, so leaving an
+// Image behind here would leak a Ready Image - with the fixture's fixed
+// content hash - into every other envtest spec in this shared suite that
+// lists Ready Images.
 func cleanupSeederTest(ctx context.Context, r *ImageReconciler, image *keziov1alpha1.Image, machines ...*keziov1alpha1.Machine) {
 	for _, m := range machines {
 		ExpectWithOffset(1, client.IgnoreNotFound(k8sClient.Delete(ctx, m))).To(Succeed())

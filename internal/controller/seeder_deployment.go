@@ -38,6 +38,18 @@ import (
 	"github.com/tjjh89017/kezio/internal/seederdeploy"
 )
 
+// SeederEZIOClient is the subset of internal/seeder.Client a seeder
+// content-syncing path needs. Production wiring wraps *seeder.Client
+// (via seeder.Dial); tests substitute a fake to exercise reconcile logic
+// against an in-memory ezio double without a network connection.
+type SeederEZIOClient interface {
+	AddTorrent(ctx context.Context, torrent []byte, savePath string, seedMode bool, maxUploads, maxConnections int32) error
+	GetTorrentStatus(ctx context.Context, hashes []string) (map[string]seeder.Torrent, error)
+	PauseTorrent(ctx context.Context, hash string) error
+	ResumeTorrent(ctx context.Context, hash string) error
+	Close() error
+}
+
 // seederBTPort is the fixed BitTorrent listen port every per-Image
 // seeder container uses. Fixed (not ephemeral) for the same reason
 // config/seeder/ezio-seeder-deployment.yaml's EZIO_BT_PORT is fixed: each

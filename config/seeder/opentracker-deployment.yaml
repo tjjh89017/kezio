@@ -20,8 +20,7 @@ spec:
         app.kubernetes.io/component: opentracker
       # annotations:
       #   # Attaches a routable data-network interface via Multus, the
-      #   # same as the ezio seeder Deployment (see
-      #   # ezio-seeder-deployment.yaml's identical annotation and
+      #   # same one each per-Image seeder pod attaches (see
       #   # networkattachmentdefinition.example.yaml for the full
       #   # explanation). The tracker needs this too: an HTTP announce
       #   # response is only useful to a leecher at another site if the
