@@ -130,12 +130,14 @@ jobs:
           # deploy-boot-path-overlay labels this namespace enforce=restricted
           # (its own restrict-psa default); kubectl run's generated pod spec
           # carries no securityContext at all, so the API server rejects it
-          # outright under that PSA level - the overrides below are what
-          # satisfy it, not a stylistic choice.
+          # outright under that PSA level. runAsUser must be numeric here -
+          # curlimages/curl's image sets USER curl_user (a name), and the
+          # kubelet cannot verify runAsNonRoot against a non-numeric user -
+          # 100 is that image's actual uid.
           kubectl -n kezio-system run kezio-probe-curl \
             --image=curlimages/curl:8.11.1 \
             --restart=Never \
-            --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"kezio-probe-curl","image":"curlimages/curl:8.11.1","command":["sleep","600"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}' \
+            --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":100,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"kezio-probe-curl","image":"curlimages/curl:8.11.1","command":["sleep","600"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}' \
             --command -- sleep 600
           kubectl -n kezio-system wait pod/kezio-probe-curl --for=condition=Ready --timeout=60s
 
