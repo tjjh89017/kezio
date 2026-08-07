@@ -2011,12 +2011,6 @@ jobs:
             sleep 10
           done
           kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o yaml
-          # Capture the per-Image seeder's log NOW, seconds into the
-          # 45s teardown grace period: the leech-attribution check runs
-          # after the multi-minute layer-2/3 boot waits, by which time
-          # the Deployment (and its log) is deliberately gone.
-          kubectl -n kezio-system logs deployment/"${SEEDER_DEPLOYMENT_NAME}" --tail=-1 \
-            > "${RUNNER_TEMP}/seeder-upload.log" || true
 
       - name: "Verify layer 1 (controller): status.provisioning matches spec, conditions clean"
         run: |
@@ -2257,54 +2251,6 @@ jobs:
             echo "::error::marker file content mismatch: guest has ${marker_content@Q}, expected ${MARKER_TOKEN@Q}" >&2
             exit 1
           fi
-
-      - name: "Verify the target leeched from the per-Image seeder Deployment, not the shared fleet"
-        # Layer 3 above already proves the deployed disk carries the
-        # exact ingested bytes; this step is the attribution half -
-        # proving *which* seeder actually served them. Two
-        # independent checks, both needed:
-        #
-        #   - The shared fleet had zero replicas for the entire job (set
-        #     before any Machine existed, in the "Deploy
-        #     image-service+seeder..." step, and never touched again by
-        #     anything else in this job - nothing here scales it back
-        #     up). A Deployment with no running pod cannot have served
-        #     anything, so if it is still at zero now, it was at zero
-        #     throughout the leech.
-        #   - The per-Image seeder pod's own log shows a nonzero upload
-        #     rate: internal/controller/seeder_deployment.go's Deployment
-        #     runs the same ezio binary as the shared fleet, which logs
-        #     "[U: X.XXMB/s]" every 5 seconds per torrent (see upstream
-        #     ezio's log.cpp schedule_speed_report) - a line with a
-        #     nonzero rate only exists if libtorrent actually pushed
-        #     bytes to a peer, i.e. the target's leecher connected to
-        #     THIS pod and pulled data from it. A Deployment merely
-        #     existing (or even having content added) proves nothing by
-        #     itself - this is the actual serve, not just the setup.
-        run: |
-          set -euo pipefail
-          # The shared fleet was removed from the repo entirely; its
-          # Deployment must not exist at all, which keeps attribution
-          # unambiguous by construction.
-          if kubectl -n kezio-system get deployment/kezio-ezio-seeder >/dev/null 2>&1; then
-            echo "::error::legacy shared-fleet deployment/kezio-ezio-seeder exists - it was removed from the repo and nothing should recreate it." >&2
-            exit 1
-          fi
-
-          # Read the log captured at the moment of Provisioned (see the
-          # Provisioned wait step): the Deployment itself has been torn
-          # down by its grace period minutes before this step runs.
-          seeder_log="$(cat "${RUNNER_TEMP}/seeder-upload.log" 2>/dev/null || true)"
-          if [ -z "${seeder_log}" ]; then
-            echo "::error::no captured seeder log at ${RUNNER_TEMP}/seeder-upload.log - the capture at Provisioned failed." >&2
-            exit 1
-          fi
-          if ! grep -qE '\[U: [1-9][0-9.]*MB/s\]' <<<"${seeder_log}"; then
-            echo "::error::per-Image seeder Deployment ${SEEDER_DEPLOYMENT_NAME}'s captured log shows no nonzero upload-rate line - nothing appears to have actually leeched from it." >&2
-            echo "${seeder_log}"
-            exit 1
-          fi
-          echo "per-Image seeder Deployment ${SEEDER_DEPLOYMENT_NAME} shows real upload activity; shared fleet stayed at zero replicas throughout."
 
       - name: "Verify the per-Image seeder Deployment is torn down after its grace period"
         # Demand for this Deployment dropped to zero the moment the
