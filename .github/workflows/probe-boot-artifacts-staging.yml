@@ -1,0 +1,226 @@
+name: Probe - boot-artifacts staging
+
+# Answers, in minutes instead of the 30-90 the real KubeVirt lanes take,
+# whether the fetch-boot-artifacts plumbing itself works: the Dockerfile,
+# the numeric-UID/restricted-PSA contract, `cp -a` into the shared
+# emptyDir, the containerd import, and `kubectl set image` - every layer
+# a stale or missing kezio-boot-artifacts image could be blamed on. It
+# uses FAKE artifacts (see .github/actions/write-fake-boot-artifacts) so
+# it never pays hack/live-image/build.sh's ~90 minute cost; what is under
+# test here is the plumbing around the artifacts, not their content.
+#
+# reproduce_known_failure defaults to true because this probe exists to
+# answer a live question: run 31134471424 (a real KubeVirt e2e lane) hit
+# `Failed to pull image "example.com/kezio-boot-artifacts:e2e-deploy" ...
+# not found` (ImagePullBackOff) on the fetch-boot-artifacts
+# initContainer, several minutes after `docker save | ctr images import`
+# had already reported success for that same image - while the manager's
+# own image, imported in the same batch and put to immediate use, pulled
+# fine. That gap (unused import -> later pull failure, next to an
+# in-use import that never failed) is the signature of the node's own
+# kubelet image garbage collection reclaiming the not-yet-referenced
+# image before anything ever ran a container from it: kubelet's image GC
+# only ever evicts images no running container currently references, and
+# checks on a fixed ~5 minute period regardless of how tight its
+# threshold is set - which lines up with the several-minute gap the real
+# run actually shows between a successful import and the failed pull.
+# Setting reproduce_known_failure true tightens the cluster's image-gc
+# thresholds to force that same eviction deterministically within this
+# job's own budget (a short sleep past one GC period) instead of waiting
+# on real disk pressure from a from-source multi-image build, and this
+# job asserts that the initContainer reaches ImagePullBackOff exactly the
+# way the real run did. Setting it false skips the threshold tightening
+# and the wait, asserting the normal, fast, green path instead - the
+# mode a future CI restructure would dispatch as a preflight gate before
+# ever starting an expensive VM lane.
+on:
+  workflow_dispatch:
+    inputs:
+      reproduce_known_failure:
+        description: >-
+          Tighten image-gc thresholds and wait out a GC period so the
+          fetch-boot-artifacts initContainer's image-pull failure from
+          run 31134471424 reproduces deterministically. false runs the
+          fast, normal green path instead.
+        required: false
+        type: boolean
+        default: true
+  workflow_call:
+    inputs:
+      reproduce_known_failure:
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Same pin as test-e2e.yml's always-on lanes - this probe must measure
+  # the plumbing against the same RKE2 this project already trusts, not
+  # a different version that happens to behave differently.
+  RKE2_VERSION: "v1.36.2+rke2r1"
+  MANAGER_IMG: "example.com/kezio:probe-boot-artifacts"
+  BOOT_ARTIFACTS_IMG: "example.com/kezio-boot-artifacts:probe-boot-artifacts"
+
+jobs:
+  boot-artifacts-staging:
+    name: Stage fake boot artifacts and verify the fetch-boot-artifacts initContainer
+    runs-on: ubuntu-latest
+    # This is meant to be fast: no `lb build`, no from-source seeder
+    # compile, no KubeVirt/CDI. reproduce_known_failure adds a fixed wait
+    # past one kubelet image-gc period (see this workflow's own header
+    # comment); the timeout below covers that wait plus RKE2 install and
+    # two small `docker build`/`docker save` cycles with real headroom.
+    timeout-minutes: 15
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Write the RKE2 config (must exist before the service starts)
+        env:
+          REPRODUCE_KNOWN_FAILURE: ${{ inputs.reproduce_known_failure }}
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /etc/rancher/rke2
+          if [ "${REPRODUCE_KNOWN_FAILURE}" = "true" ]; then
+          # Tight enough that the very first periodic image-gc scan
+          # evicts any image no running container currently
+          # references - see this workflow's header comment for why
+          # that scan's own fixed ~5 minute period, not the threshold
+          # value itself, is what the "wait past one GC period" step
+          # below is really timed against.
+          cat <<'EOF' | sudo tee /etc/rancher/rke2/config.yaml
+          write-kubeconfig-mode: "0644"
+          cni: canal
+          kubelet-arg:
+            - "image-gc-high-threshold-percent=1"
+            - "image-gc-low-threshold-percent=0"
+          EOF
+          else
+          cat <<'EOF' | sudo tee /etc/rancher/rke2/config.yaml
+          write-kubeconfig-mode: "0644"
+          cni: canal
+          EOF
+          fi
+
+      - name: Install RKE2
+        run: |
+          set -euo pipefail
+          curl -sfL https://get.rke2.io | sudo INSTALL_RKE2_VERSION="${RKE2_VERSION}" sh -
+          sudo systemctl enable --now rke2-server.service
+
+          sudo ln -sf /var/lib/rancher/rke2/bin/kubectl /usr/local/bin/kubectl
+          sudo ln -sf /var/lib/rancher/rke2/bin/ctr /usr/local/bin/ctr
+          sudo ln -sf /var/lib/rancher/rke2/bin/crictl /usr/local/bin/crictl
+
+          echo "KUBECONFIG=/etc/rancher/rke2/rke2.yaml" >> "$GITHUB_ENV"
+          export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+          for _ in $(seq 1 90); do
+            [ "$(kubectl get nodes --no-headers 2>/dev/null | wc -l)" -ge 1 ] && break
+            sleep 2
+          done
+          kubectl wait --for=condition=Ready node --all --timeout=300s
+          kubectl get nodes -o wide
+
+      - name: Install cert-manager
+        # Required the same way test-e2e.yml's lanes need it: every
+        # kezio CRD carries a webhook, and the controller-manager cannot
+        # serve admission requests until cert-manager has minted its
+        # serving certificate.
+        run: |
+          set -euo pipefail
+          kubectl apply -f "https://github.com/cert-manager/cert-manager/releases/download/v1.21.1/cert-manager.yaml"
+          for d in cert-manager cert-manager-webhook cert-manager-cainjector; do
+            kubectl wait deployment.apps/"${d}" --for condition=Available --namespace cert-manager --timeout=180s
+          done
+
+      - name: Write fake boot artifacts
+        uses: ./.github/actions/write-fake-boot-artifacts
+        with:
+          agent-commit: ${{ github.sha }}
+
+      - name: Build the manager and boot-artifacts images
+        run: |
+          set -euo pipefail
+          go mod tidy
+          make docker-build IMG="${MANAGER_IMG}"
+          make docker-build-boot-artifacts BOOT_ARTIFACTS_IMG="${BOOT_ARTIFACTS_IMG}"
+
+      - name: Import images into RKE2 containerd
+        # Exactly the command real lanes use (see e2e-boot-path-kubevirt.yml's
+        # "Build and import the ... image" steps): RKE2's containerd
+        # socket is still under /run/k3s/containerd (a leftover of RKE2's
+        # k3s lineage), and plain "ctr" needs both -a and -n spelled out.
+        run: |
+          set -euo pipefail
+          for img in "${MANAGER_IMG}" "${BOOT_ARTIFACTS_IMG}"; do
+            docker save "${img}" | sudo ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images import -
+          done
+          echo "::group::Images now known to containerd"
+          sudo ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images ls | grep -E 'kezio(-boot-artifacts)?:probe-boot-artifacts' || true
+          echo "::endgroup::"
+
+      - name: Wait past one kubelet image-gc period
+        if: ${{ inputs.reproduce_known_failure }}
+        # See this workflow's own header comment: kubelet's image
+        # garbage collector runs on a fixed ~5 minute period regardless
+        # of how tight the threshold is; this wait guarantees at least
+        # one scan has happened since the import above, with the
+        # just-imported boot-artifacts image still referenced by no
+        # running container (nothing has requested it yet - the
+        # Deployment carrying its initContainer is only created in the
+        # next step) and therefore eligible for eviction under the
+        # threshold this job's RKE2 config set to force exactly that.
+        run: |
+          set -euo pipefail
+          echo "Sleeping 330s so at least one kubelet image-gc scan runs before the fetch-boot-artifacts initContainer ever asks for ${BOOT_ARTIFACTS_IMG}..."
+          sleep 330
+
+      - name: Deploy and wire the fetch-boot-artifacts initContainer
+        uses: ./.github/actions/deploy-boot-path-overlay
+        with:
+          manager-img: ${{ env.MANAGER_IMG }}
+          boot-artifacts-img: ${{ env.BOOT_ARTIFACTS_IMG }}
+          expect-ready: ${{ !inputs.reproduce_known_failure }}
+
+      - name: Record the result
+        if: always()
+        env:
+          REPRODUCE_KNOWN_FAILURE: ${{ inputs.reproduce_known_failure }}
+        run: |
+          {
+            echo "## Boot-artifacts staging probe"
+            echo "- reproduce_known_failure: \`${REPRODUCE_KNOWN_FAILURE}\`"
+            if [ "${REPRODUCE_KNOWN_FAILURE}" = "true" ]; then
+              echo "- expected outcome: fetch-boot-artifacts reaches ImagePullBackOff/ErrImagePull (mirrors run 31134471424)"
+            else
+              echo "- expected outcome: deployment/kezio-controller-manager becomes Ready with all six artifacts present"
+            fi
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          echo "===== nodes ====="
+          kubectl get nodes -o wide
+          echo "===== kezio-system pods ====="
+          kubectl get pods -n kezio-system -o wide
+          echo "===== controller-manager describe ====="
+          kubectl -n kezio-system describe deployment/kezio-controller-manager
+          echo "===== controller-manager logs ====="
+          kubectl -n kezio-system logs deployment/kezio-controller-manager --all-containers --tail=500
+          echo "===== events ====="
+          kubectl get events -n kezio-system --sort-by=.lastTimestamp
+          echo "===== containerd images ====="
+          sudo ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images ls || true

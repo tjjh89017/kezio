@@ -1,0 +1,217 @@
+name: Probe - bootserver HTTP hop
+
+# Answers, directly, the one hop nothing currently observes: after GRUB
+# fetches its bootstrap grub.cfg over TFTP, it fetches the REAL config
+# plus kernel/initrd/squashfs over HTTP from the manager-side bootserver
+# (internal/bootserver). That package logs grub.cfg requests only on
+# anomaly paths, GET /boot/artifacts/... goes through http.ServeFile with
+# no logging at all, and every KubeVirt lane's tcpdump filter is "udp
+# port 67 or 68 or 69" - HTTP traffic on this hop is never captured
+# anywhere today. This probe curls the real bootserver directly instead
+# of inferring anything about it from YAML: it deploys the real manager
+# binary (not a stand-in) with FAKE staged artifacts (see
+# .github/actions/write-fake-boot-artifacts - the ~90 minute
+# hack/live-image/build.sh is not needed to prove the HTTP layer works),
+# then asserts real HTTP status codes and content lengths for both
+# GET /boot/artifacts/<file> and GET /boot/grub.cfg-<mac>.
+on:
+  workflow_dispatch: {}
+  workflow_call: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  RKE2_VERSION: "v1.36.2+rke2r1"
+  MANAGER_IMG: "example.com/kezio:probe-bootserver-http"
+  BOOT_ARTIFACTS_IMG: "example.com/kezio-boot-artifacts:probe-bootserver-http"
+
+jobs:
+  bootserver-http:
+    name: Curl the real bootserver's grub.cfg and artifact routes
+    runs-on: ubuntu-latest
+    # No `lb build`, no KubeVirt/CDI, no VM boot: this is RKE2 + cert-manager
+    # + one small Go binary + a handful of curl calls.
+    timeout-minutes: 12
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Write the RKE2 config (must exist before the service starts)
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /etc/rancher/rke2
+          cat <<'EOF' | sudo tee /etc/rancher/rke2/config.yaml
+          write-kubeconfig-mode: "0644"
+          cni: canal
+          EOF
+
+      - name: Install RKE2
+        run: |
+          set -euo pipefail
+          curl -sfL https://get.rke2.io | sudo INSTALL_RKE2_VERSION="${RKE2_VERSION}" sh -
+          sudo systemctl enable --now rke2-server.service
+
+          sudo ln -sf /var/lib/rancher/rke2/bin/kubectl /usr/local/bin/kubectl
+          sudo ln -sf /var/lib/rancher/rke2/bin/ctr /usr/local/bin/ctr
+          sudo ln -sf /var/lib/rancher/rke2/bin/crictl /usr/local/bin/crictl
+
+          echo "KUBECONFIG=/etc/rancher/rke2/rke2.yaml" >> "$GITHUB_ENV"
+          export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+          for _ in $(seq 1 90); do
+            [ "$(kubectl get nodes --no-headers 2>/dev/null | wc -l)" -ge 1 ] && break
+            sleep 2
+          done
+          kubectl wait --for=condition=Ready node --all --timeout=300s
+          kubectl get nodes -o wide
+
+      - name: Install cert-manager
+        run: |
+          set -euo pipefail
+          kubectl apply -f "https://github.com/cert-manager/cert-manager/releases/download/v1.21.1/cert-manager.yaml"
+          for d in cert-manager cert-manager-webhook cert-manager-cainjector; do
+            kubectl wait deployment.apps/"${d}" --for condition=Available --namespace cert-manager --timeout=180s
+          done
+
+      - name: Write fake boot artifacts
+        uses: ./.github/actions/write-fake-boot-artifacts
+        with:
+          agent-commit: ${{ github.sha }}
+
+      - name: Build the manager and boot-artifacts images
+        run: |
+          set -euo pipefail
+          go mod tidy
+          make docker-build IMG="${MANAGER_IMG}"
+          make docker-build-boot-artifacts BOOT_ARTIFACTS_IMG="${BOOT_ARTIFACTS_IMG}"
+
+      - name: Import images into RKE2 containerd
+        run: |
+          set -euo pipefail
+          for img in "${MANAGER_IMG}" "${BOOT_ARTIFACTS_IMG}"; do
+            docker save "${img}" | sudo ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images import -
+          done
+
+      - name: Deploy the real bootserver with the fake artifacts staged
+        uses: ./.github/actions/deploy-boot-path-overlay
+        with:
+          manager-img: ${{ env.MANAGER_IMG }}
+          boot-artifacts-img: ${{ env.BOOT_ARTIFACTS_IMG }}
+          expect-ready: true
+
+      - name: Start an in-cluster curl pod
+        # A real curl client reaching kezio-boot-server's ClusterIP over
+        # cluster DNS, the same Service and port real lanes' reverse
+        # proxies (kezio-bootd) forward to - see
+        # config/e2e-boot-path/boot-server-service.yaml. Kept running
+        # (sleep) so later steps can exec multiple requests through it
+        # instead of paying a fresh `kubectl run` per request.
+        run: |
+          set -euo pipefail
+          kubectl -n kezio-system run kezio-probe-curl \
+            --image=curlimages/curl:8.11.1 \
+            --restart=Never \
+            --command -- sleep 600
+          kubectl -n kezio-system wait pod/kezio-probe-curl --for=condition=Ready --timeout=60s
+
+      - name: Assert GET /boot/artifacts/<file> returns real bytes with a real Content-Length
+        run: |
+          set -euo pipefail
+          base="http://kezio-boot-server.kezio-system.svc.cluster.local:8090"
+          fail=0
+          for f in vmlinuz initrd.img filesystem.squashfs manifest.json; do
+            expected_len="$(wc -c < "dist/live/${f}")"
+            response="$(kubectl -n kezio-system exec kezio-probe-curl -- \
+              curl -sS -o /tmp/body -D - --max-time 10 "${base}/boot/artifacts/${f}")"
+            status="$(printf '%s' "${response}" | awk 'NR==1{print $2}')"
+            content_length="$(printf '%s' "${response}" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-length"{print $2}')"
+            echo "GET /boot/artifacts/${f} -> status=${status} content-length=${content_length} (expected ${expected_len})"
+            if [ "${status}" != "200" ]; then
+              echo "::error::GET /boot/artifacts/${f} returned HTTP ${status}, expected 200" >&2
+              fail=1
+            fi
+            if [ "${content_length}" != "${expected_len}" ]; then
+              echo "::error::GET /boot/artifacts/${f} Content-Length was ${content_length}, expected ${expected_len} (the fake artifact's real size)" >&2
+              fail=1
+            fi
+          done
+          if [ "${fail}" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Assert GET /boot/artifacts/<missing> 404s (no directory listing, no leak)
+        run: |
+          set -euo pipefail
+          base="http://kezio-boot-server.kezio-system.svc.cluster.local:8090"
+          status="$(kubectl -n kezio-system exec kezio-probe-curl -- \
+            curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "${base}/boot/artifacts/does-not-exist")"
+          echo "GET /boot/artifacts/does-not-exist -> status=${status}"
+          if [ "${status}" != "404" ]; then
+            echo "::error::GET /boot/artifacts/does-not-exist returned HTTP ${status}, expected 404" >&2
+            exit 1
+          fi
+
+      - name: Assert GET /boot/grub.cfg-<unknown-mac> returns the fixed boot-local config
+        # No Machine is registered in this probe, so every MAC is
+        # unknown - handleGrubConfig's fail-secure "boot local disk"
+        # branch (internal/bootserver/server.go) is the one real,
+        # deterministic response this probe can assert without also
+        # standing up a Machine CR and a minted token.
+        run: |
+          set -euo pipefail
+          base="http://kezio-boot-server.kezio-system.svc.cluster.local:8090"
+          mac="52:54:00:be:ef:99"
+          response="$(kubectl -n kezio-system exec kezio-probe-curl -- \
+            curl -sS -o /tmp/grub-body -D - --max-time 10 "${base}/boot/grub.cfg-${mac}")"
+          status="$(printf '%s' "${response}" | awk 'NR==1{print $2}')"
+          echo "GET /boot/grub.cfg-${mac} -> status=${status}"
+          if [ "${status}" != "200" ]; then
+            echo "::error::GET /boot/grub.cfg-${mac} returned HTTP ${status}, expected 200" >&2
+            exit 1
+          fi
+          kubectl -n kezio-system cp kezio-probe-curl:/tmp/grub-body "${RUNNER_TEMP}/grub-body" -c kezio-probe-curl
+          cat "${RUNNER_TEMP}/grub-body"
+          if ! grep -qF 'this machine does not need the live boot environment right now' "${RUNNER_TEMP}/grub-body"; then
+            echo "::error::GET /boot/grub.cfg-${mac} body did not contain the expected fixed boot-local config text" >&2
+            exit 1
+          fi
+
+      - name: Record the result
+        if: always()
+        run: |
+          {
+            echo "## Bootserver HTTP hop probe"
+            echo "Curled the real internal/bootserver HTTP routes over cluster DNS against fake, plumbing-only artifacts:"
+            echo "- GET /boot/artifacts/<file> for vmlinuz/initrd.img/filesystem.squashfs/manifest.json"
+            echo "- GET /boot/artifacts/<missing> (404, no listing)"
+            echo "- GET /boot/grub.cfg-<unknown-mac> (fixed boot-local config)"
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          echo "===== kezio-system pods ====="
+          kubectl get pods -n kezio-system -o wide
+          echo "===== controller-manager logs ====="
+          kubectl -n kezio-system logs deployment/kezio-controller-manager --all-containers --tail=500
+          echo "===== kezio-boot-server Service/Endpoints ====="
+          kubectl -n kezio-system get svc,endpoints kezio-boot-server -o wide
+          echo "===== probe curl pod ====="
+          kubectl -n kezio-system describe pod kezio-probe-curl || true
+          echo "===== events ====="
+          kubectl get events -n kezio-system --sort-by=.lastTimestamp
+
+      - name: Clean up the curl pod
+        if: always()
+        run: |
+          kubectl -n kezio-system delete pod kezio-probe-curl --ignore-not-found --wait=false
