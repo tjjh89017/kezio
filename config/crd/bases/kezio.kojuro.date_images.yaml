@@ -64,16 +64,13 @@ spec:
 
               Immutability is enforced per field below (self == oldSelf on each of
               Source, Bootable, OSFamily, PostHookRefs, and Params) rather than once
-              on the whole struct. A single whole-object rule here previously read
-              "self == oldSelf" directly on ImageSpec; it is deliberately not used
-              because Params is schemaless (x-kubernetes-preserve-unknown-fields):
-              CEL's equality over a struct that embeds an unstructured/schemaless
-              field is markedly more fragile across apiserver versions and object
-              shapes than equality over that struct's individually-typed fields, and
-              a spurious inequality anywhere in the struct fails the whole update.
-              Splitting the rule per field means a quirk isolated to Params cannot
-              block updates that never touch Source, Bootable, OSFamily, or
-              PostHookRefs, and vice versa.
+              on the whole struct: Params is schemaless
+              (x-kubernetes-preserve-unknown-fields), and CEL's equality over a
+              struct embedding an unstructured field is markedly more fragile across
+              apiserver versions and object shapes than equality over individually
+              typed fields, with a spurious inequality anywhere failing the whole
+              update. Splitting the rule per field means a quirk isolated to Params
+              cannot block updates that never touch the others, and vice versa.
             properties:
               bootable:
                 default: true
