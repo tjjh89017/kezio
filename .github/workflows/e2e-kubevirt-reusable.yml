@@ -2480,6 +2480,19 @@ jobs:
             echo "--- ${p} securityContext ---"
             kubectl -n kezio-system get "${p}" \
               -o jsonpath='{.spec.securityContext}{"\n"}{range .spec.initContainers[*]}{.name}{": "}{.securityContext}{"\n"}{end}'
+            echo "--- ${p} restart count ---"
+            kubectl -n kezio-system get "${p}" \
+              -o jsonpath='{range .status.containerStatuses[*]}{.name}{": restartCount="}{.restartCount}{" lastState="}{.lastState}{"\n"}{end}'
+            # manager --previous first: "controller-manager logs" above
+            # (kubectl logs deployment/... --all-containers) only ever
+            # returns the *current* attempt, so a manager crash mid-run
+            # (for example, one that breaks an in-flight boot-artifact
+            # fetch bootd was reverse-proxying through it - see
+            # ProxyServer.newReverseProxy's ErrorHandler) would otherwise
+            # leave no trace of why: the current attempt's log starts
+            # fresh at the restart, well after whatever caused it.
+            echo "--- ${p} manager logs (--previous) ---"
+            kubectl -n kezio-system logs "${p}" -c manager --previous --tail=500 || true
             echo "--- ${p} fetch-boot-artifacts logs (--previous) ---"
             kubectl -n kezio-system logs "${p}" -c fetch-boot-artifacts --previous --tail=200 || \
               kubectl -n kezio-system logs "${p}" -c fetch-boot-artifacts --tail=200 || true
@@ -2532,6 +2545,11 @@ jobs:
                 ip addr show net1 2>&1
               ' || true
             fi
+            echo "--- ${p} restart count ---"
+            kubectl -n kezio-system get "${p}" \
+              -o jsonpath='{range .status.containerStatuses[*]}{.name}{": restartCount="}{.restartCount}{" lastState="}{.lastState}{"\n"}{end}'
+            echo "--- ${p} bootd logs (--previous) ---"
+            kubectl -n kezio-system logs "${p}" -c bootd --previous --tail=500 || true
             echo "--- ${p} fetch-boot-artifacts logs (--previous) ---"
             kubectl -n kezio-system logs "${p}" -c fetch-boot-artifacts --previous --tail=200 || \
               kubectl -n kezio-system logs "${p}" -c fetch-boot-artifacts --tail=200 || true
