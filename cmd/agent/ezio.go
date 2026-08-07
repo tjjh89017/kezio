@@ -17,11 +17,13 @@ limitations under the License.
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
-	"os"
+	"io"
 	"os/exec"
 	"strconv"
+	"sync"
 	"time"
 
 	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
@@ -50,9 +52,31 @@ const ezioStartupTimeout = 15 * time.Second
 // AddTorrent against this daemon always names a raw partition device as
 // save_path (see internal/agent/deploy's package doc comment) - Launch
 // itself never passes -F, which is what puts the daemon in that mode.
-type ezioLauncher struct{}
+type ezioLauncher struct {
+	// Logf receives ezio's own stdout/stderr, line by line, plus its
+	// exit outcome - see forwardLines and spawnEzio. Nil discards them,
+	// the same convention as deploy.Executor.Logf.
+	Logf func(format string, args ...any)
+	// Binary is the ezio executable to run. Empty means ezioBinary.
+	// Overridable only so tests can point it at a fake script; production
+	// always leaves this unset.
+	Binary string
+}
 
-func (ezioLauncher) Launch(ctx context.Context, tuning *keziov1alpha1.MachineEzioTuning) (deploy.EzioHandle, error) {
+func (l ezioLauncher) log(format string, args ...any) {
+	if l.Logf != nil {
+		l.Logf(format, args...)
+	}
+}
+
+func (l ezioLauncher) binary() string {
+	if l.Binary != "" {
+		return l.Binary
+	}
+	return ezioBinary
+}
+
+func (l ezioLauncher) Launch(ctx context.Context, tuning *keziov1alpha1.MachineEzioTuning) (deploy.EzioHandle, error) {
 	port := defaultEzioPort
 	if tuning != nil && tuning.Port != nil {
 		port = int(*tuning.Port)
@@ -69,19 +93,9 @@ func (ezioLauncher) Launch(ctx context.Context, tuning *keziov1alpha1.MachineEzi
 		}
 	}
 
-	//nolint:gosec // args are built entirely from Machine.spec.ezio integer fields, never free-form input
-	cmd := exec.Command(ezioBinary, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		return deploy.EzioHandle{}, fmt.Errorf("starting local ezio daemon: %w", err)
-	}
-
-	stop := func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		return cmd.Process.Kill()
+	stop, err := l.spawnEzio(args)
+	if err != nil {
+		return deploy.EzioHandle{}, err
 	}
 
 	client, err := dialEzioWhenReady(ctx, addr)
@@ -97,6 +111,81 @@ func (ezioLauncher) Launch(ctx context.Context, tuning *keziov1alpha1.MachineEzi
 			return stop()
 		},
 	}, nil
+}
+
+// spawnEzio starts the local ezio daemon with args and wires its stdout
+// and stderr into l.Logf line by line, tagged "ezio stdout"/"ezio
+// stderr" so its own output rides the same live serial console
+// kezio-agent's own log lines already do (see deploy.Executor.Console's
+// doc comment for that path) and stays attributable to ezio there,
+// rather than landing on kezio-agent's own inherited file descriptors
+// indistinguishable from anything else writing to them. This is the
+// only place kezio-agent runs an ezio daemon at all (the seeder side,
+// docker/seeder/entrypoint.sh, execs ezio directly as its container's
+// own process, so its stdout/stderr already are the container's own
+// log stream with nothing to wire here).
+//
+// The two forwarding goroutines only stop once their pipe reports EOF,
+// which the kernel only delivers once the process has actually exited
+// (cleanly, killed, or crashed) and closed its end - so every line ezio
+// wrote before dying is read and logged before this function's own
+// reaper goroutine below logs the exit outcome; nothing buffered here
+// can be lost to a race with process exit. Once both pipes are drained,
+// a third goroutine reaps the process and logs whether it exited
+// cleanly or not - the one line that turns a wedged ezio and a crashed
+// one from indistinguishable ("no more output") into an unambiguous
+// diagnosis.
+func (l ezioLauncher) spawnEzio(args []string) (stop func() error, err error) {
+	//nolint:gosec // args are built entirely from Machine.spec.ezio integer fields, never free-form input
+	cmd := exec.Command(l.binary(), args...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("opening local ezio daemon stdout pipe: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("opening local ezio daemon stderr pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("starting local ezio daemon: %w", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); l.forwardLines("ezio stdout", stdout) }()
+	go func() { defer wg.Done(); l.forwardLines("ezio stderr", stderr) }()
+	go func() {
+		wg.Wait()
+		if waitErr := cmd.Wait(); waitErr != nil {
+			l.log("local ezio daemon exited: %v", waitErr)
+		} else {
+			l.log("local ezio daemon exited cleanly")
+		}
+	}()
+
+	return func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return cmd.Process.Kill()
+	}, nil
+}
+
+// forwardLines copies each line of r into l.Logf, prefixed with label,
+// until r hits EOF or a read error - see spawnEzio's doc comment for
+// why that boundary is exactly the process's own exit, never earlier.
+// A read error other than EOF (bufio.Scanner.Err() returns nil on EOF)
+// ends forwarding early and is itself logged, the same discipline
+// internal/bootd's dnsmasq supervisor applies to its own child's
+// output.
+func (l ezioLauncher) forwardLines(label string, r io.Reader) {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		l.log("%s: %s", label, scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		l.log("reading %s failed; log forwarding stopped early: %v", label, err)
+	}
 }
 
 // dialEzioWhenReady dials addr and polls GetVersion until it succeeds or

@@ -75,7 +75,7 @@ func main() {
 		Logf:          log.Printf,
 		Executor: &deploy.Executor{
 			Runner:  execRunner{},
-			Ezio:    ezioLauncher{},
+			Ezio:    ezioLauncher{Logf: log.Printf},
 			Logf:    log.Printf,
 			Console: console,
 		},
