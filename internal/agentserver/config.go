@@ -36,18 +36,6 @@ type Config struct {
 	// Addr is the address the HTTP server listens on, for example
 	// ":8091".
 	Addr string
-	// StoreRoot is the store's local filesystem root, mounted read-only
-	// into the manager container out-of-band - the same volume and the
-	// same requirement internal/controller.SeederConfig.StoreRoot
-	// documents (see config/seeder's README): this server reads
-	// contents/<hash>/torrent.info directly to build the .torrent bytes
-	// a DeployPlan hands the agent. Leaving it empty is not an error by
-	// itself; it just means GET .../next can never build a plan for an
-	// Image with a content partition; every reconcile-worthy poll then
-	// answers ActionWait forever, which is easy to mistake for "still
-	// resolving" instead of "misconfigured" - operators enabling
-	// AGENT_SERVER_ADDR should also set AGENT_STORE_ROOT.
-	StoreRoot string
 	// TrackerURL is inserted as the "announce" field of every .torrent
 	// this server builds (see internal/store.BuildTorrentFile) -
 	// typically the same value as SEEDER_TRACKER_URL, since the agent's

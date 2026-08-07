@@ -1,6 +1,8 @@
-# Byte-identical copy of config/e2e-image-path/store-pvc.yaml; see
-# kustomization.yaml in this directory for why this overlay keeps local
-# copies instead of referencing the originals by relative path.
+# Copy of config/e2e-image-path/store-pvc.yaml (see that file's own
+# comment for what this PVC is for and why it is the legacy shared-store
+# shape); see kustomization.yaml in this directory for why this overlay
+# keeps local copies instead of referencing the originals by relative
+# path.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

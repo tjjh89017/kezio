@@ -307,18 +307,25 @@ spec:
                       - swap
                       - msr
                       type: string
-                    torrentInfoRef:
+                    torrentInfo:
                       description: |-
-                        TorrentInfoRef names the small metadata artifact (the canonical
-                        "torrent.info") ingest produced for this partition.
-                      properties:
-                        name:
-                          type: string
-                        namespace:
-                          type: string
-                      required:
-                      - name
-                      type: object
+                        TorrentInfo is the raw bytes of this partition's canonical
+                        "torrent.info" (see internal/store.TorrentInfo), present once
+                        ingest has produced torrent metadata for it. Carried inline in
+                        status rather than left on a filesystem the manager would have to
+                        mount: this partition's content lives in its own PVC (see
+                        internal/controller's partitionPVCName), so nothing but the
+                        per-Image seeder Deployment - which mounts that PVC directly -
+                        ever needs the content bytes; every other consumer (the per-Image
+                        seeder content sync, an agent's DeployPlan) only needs this small
+                        metadata blob to build a .torrent, and can do so straight from
+                        status with no store mount at all. A torrent.info this large would
+                        itself be a very large partition (its size scales with piece
+                        count, not partition size, at roughly 20 bytes per 16MiB piece -
+                        see internal/store.PieceSize), so this is not expected to strain
+                        the status object in practice.
+                      format: byte
+                      type: string
                     usedBytes:
                       description: UsedBytes is the amount of data ingest captured
                         for this partition.

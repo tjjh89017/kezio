@@ -200,7 +200,7 @@ func buildPlanPartition(cfg Config, imageNS, imageName, targetDisk string, p kez
 	case p.Role == keziov1alpha1.PartitionRoleSwap && p.UUID != "":
 		part.SwapUUID = p.UUID
 	case p.InfoHash != "":
-		torrentBytes, err := buildPartitionTorrent(cfg, p.InfoHash)
+		torrentBytes, err := buildPartitionTorrent(cfg, p.TorrentInfo)
 		if err != nil {
 			return agentapi.PlanPartition{}, fmt.Errorf("image %s/%s partition %d: %w", imageNS, imageName, p.Number, err)
 		}
@@ -211,20 +211,17 @@ func buildPlanPartition(cfg Config, imageNS, imageName, targetDisk string, p kez
 	return part, nil
 }
 
-// buildPartitionTorrent reads infoHashHex's torrent.info from the store
-// (cfg.StoreRoot) and bencodes it into a complete .torrent file with
-// cfg.TrackerURL as the announce URL, the same construction
-// internal/controller.SeederReconciler.addContent uses to hand ezio the
-// same content's .torrent bytes.
-func buildPartitionTorrent(cfg Config, infoHashHex string) ([]byte, error) {
-	infoHash, err := store.ParseInfoHash(infoHashHex)
+// buildPartitionTorrent bencodes a partition's torrent.info (carried
+// inline in ImagePartitionStatus - this partition's content lives in its
+// own PVC, which only the per-Image seeder Deployment mounts, so this
+// server never touches a store volume at all) into a complete .torrent
+// file with cfg.TrackerURL as the announce URL, the same construction
+// internal/controller's per-Image seeder content sync uses to hand ezio
+// the same content's .torrent bytes.
+func buildPartitionTorrent(cfg Config, torrentInfoBytes []byte) ([]byte, error) {
+	info, err := store.ParseTorrentInfoBytes(torrentInfoBytes)
 	if err != nil {
-		return nil, err
-	}
-	contentDir := store.ContentDir(cfg.StoreRoot, infoHash)
-	info, err := store.LoadContentDirTorrentInfo(contentDir)
-	if err != nil {
-		return nil, fmt.Errorf("load torrent.info: %w", err)
+		return nil, fmt.Errorf("parse torrent.info: %w", err)
 	}
 	torrentBytes, err := store.BuildTorrentFile(info, cfg.TrackerURL)
 	if err != nil {

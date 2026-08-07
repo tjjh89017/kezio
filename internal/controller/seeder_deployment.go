@@ -109,29 +109,21 @@ const seederDeploymentNamePrefix = "kezio-seeder-"
 type SeederDeploymentConfig struct {
 	// Image is the ezio-seeder container image reference.
 	Image string
-	// StoreVolume is mounted read-only into every seeder Deployment this
-	// reconciler creates, at storeMountPath. It is expected to be the
-	// same store the ingest pipeline writes to (see IngestConfig's
-	// StoreVolume) - a seeder with its own, separately provisioned store
-	// would have nothing to serve.
-	StoreVolume corev1.VolumeSource
 	// GracePeriod overrides defaultSeederGracePeriod when positive.
 	GracePeriod time.Duration
 	// Now returns the current time. Defaults to time.Now; tests override
 	// it to drive the grace-period countdown without sleeping.
 	Now func() time.Time
 
-	// TrackerURL and StoreRoot are the same tracker/store settings
-	// SeederConfig itself carries (see cmd/main.go's
-	// seederDeploymentConfigFromEnv, which reuses them verbatim rather
-	// than a second, parallel set of variables naming the same tracker
-	// and the same store). Needed by syncSeederDeploymentContent to
-	// build the .torrent bytes it adds to a per-Image Deployment's pod.
-	// Left empty, Deployments are still created and torn down by their
-	// reference count (see contentEnabled) - only the content-adding
-	// half is skipped.
+	// TrackerURL is inserted as the "announce" field of every .torrent
+	// syncSeederDeploymentContent builds from an Image's own
+	// ImagePartitionStatus.TorrentInfo (no store volume is read here -
+	// a partition's content lives in its own PVC, mounted directly onto
+	// this Deployment's pod - see buildSeederDeployment). Left empty,
+	// Deployments are still created and torn down by their reference
+	// count (see contentEnabled) - only the content-adding half is
+	// skipped.
 	TrackerURL string
-	StoreRoot  string
 	// EzioTuning carries the cluster-wide default AddTorrent tuning
 	// (MaxUploads/MaxConnections) applied to every content torrent
 	// syncSeederDeploymentContent adds. Nil falls back to
@@ -151,11 +143,11 @@ func (c SeederDeploymentConfig) enabled() bool {
 }
 
 // contentEnabled reports whether syncSeederDeploymentContent has enough
-// configuration (a tracker URL and a store to read torrent.info from)
+// configuration (a tracker URL to bencode into every .torrent it builds)
 // to actually add content to a per-Image seeder Deployment's pod. See
-// TrackerURL/StoreRoot's own doc comment for what runs with this false.
+// TrackerURL's own doc comment for what runs with this false.
 func (c SeederDeploymentConfig) contentEnabled() bool {
-	return c.TrackerURL != "" && c.StoreRoot != ""
+	return c.TrackerURL != ""
 }
 
 // dial opens a client to target, defaulting to seeder.Dial - the same
@@ -459,13 +451,13 @@ func (r *ImageReconciler) syncSeederDeploymentContent(ctx context.Context, image
 		return nil
 	}
 
-	var hashes []string
+	var partitions []keziov1alpha1.ImagePartitionStatus
 	for _, p := range image.Status.Partitions {
 		if p.InfoHash != "" {
-			hashes = append(hashes, p.InfoHash)
+			partitions = append(partitions, p)
 		}
 	}
-	if len(hashes) == 0 {
+	if len(partitions) == 0 {
 		return nil
 	}
 
@@ -483,18 +475,21 @@ func (r *ImageReconciler) syncSeederDeploymentContent(ctx context.Context, image
 			continue
 		}
 		target := net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(seederDeploymentGRPCPort))
-		if err := r.addSeederDeploymentContent(ctx, target, hashes); err != nil {
+		if err := r.addSeederDeploymentContent(ctx, target, partitions); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", target, err))
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// addSeederDeploymentContent adds whichever of hashes target does not
-// already know about (per GetTorrentStatus), each read from the store
-// and bencoded the same way SeederReconciler.addContent does for the
-// shared fleet.
-func (r *ImageReconciler) addSeederDeploymentContent(ctx context.Context, target string, hashes []string) error {
+// addSeederDeploymentContent adds whichever of partitions target does
+// not already know about (per GetTorrentStatus), building each
+// .torrent from the partition's own inline TorrentInfo (no store
+// volume read - see SeederDeploymentConfig.TrackerURL's doc comment)
+// and pointing AddTorrent's save_path at that partition's own mounted
+// PVC (see partitionMountPath, the same path buildSeederDeployment
+// mounted it at).
+func (r *ImageReconciler) addSeederDeploymentContent(ctx context.Context, target string, partitions []keziov1alpha1.ImagePartitionStatus) error {
 	c, err := r.SeederDeployment.dial(target)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
@@ -506,27 +501,23 @@ func (r *ImageReconciler) addSeederDeploymentContent(ctx context.Context, target
 		return fmt.Errorf("get torrent status: %w", err)
 	}
 
-	for _, hash := range hashes {
-		if _, ok := existing[hash]; ok {
+	for _, p := range partitions {
+		if _, ok := existing[p.InfoHash]; ok {
 			continue
 		}
-		infoHash, err := store.ParseInfoHash(hash)
+		info, err := store.ParseTorrentInfoBytes(p.TorrentInfo)
 		if err != nil {
-			return fmt.Errorf("parse content hash %s: %w", hash, err)
-		}
-		contentDir := store.ContentDir(r.SeederDeployment.StoreRoot, infoHash)
-		info, err := store.LoadContentDirTorrentInfo(contentDir)
-		if err != nil {
-			return fmt.Errorf("load torrent.info for %s: %w", hash, err)
+			return fmt.Errorf("parse torrent.info for %s: %w", p.InfoHash, err)
 		}
 		torrentBytes, err := store.BuildTorrentFile(info, r.SeederDeployment.TrackerURL)
 		if err != nil {
-			return fmt.Errorf("build torrent file for %s: %w", hash, err)
+			return fmt.Errorf("build torrent file for %s: %w", p.InfoHash, err)
 		}
+		contentDir := partitionMountPath(p.Number)
 		if err := c.AddTorrent(ctx, torrentBytes, contentDir, true,
 			seeder.ResolveMaxUploads(r.SeederDeployment.EzioTuning),
 			seeder.ResolveMaxConnections(r.SeederDeployment.EzioTuning)); err != nil {
-			return fmt.Errorf("add content %s: %w", hash, err)
+			return fmt.Errorf("add content %s: %w", p.InfoHash, err)
 		}
 	}
 	return nil
@@ -597,9 +588,29 @@ func (r *ImageReconciler) podsForDeployment(ctx context.Context, dep *appsv1.Dep
 func (r *ImageReconciler) buildSeederDeployment(image *keziov1alpha1.Image, site string) (*appsv1.Deployment, error) {
 	replicas := int32(1)
 	labels := map[string]string{
-		"app.kubernetes.io/name":      "kezio",
-		"app.kubernetes.io/component": "ezio-seeder",
-		seederDeploymentImageLabel:    image.Name,
+		"app.kubernetes.io/name":   "kezio",
+		appComponentLabel:          "ezio-seeder",
+		seederDeploymentImageLabel: image.Name,
+	}
+
+	// One volume/mount per content partition, read-only: this
+	// Deployment's whole storage need is exactly the partitions its own
+	// Image owns, so it never mounts anything wider than that (compare
+	// the single shared store volume every seeder used to mount).
+	var volumes []corev1.Volume
+	var mounts []corev1.VolumeMount
+	for _, p := range image.Status.Partitions {
+		if p.InfoHash == "" {
+			continue
+		}
+		volName := fmt.Sprintf("content-%d", p.Number)
+		volumes = append(volumes, corev1.Volume{Name: volName, VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				ClaimName: partitionPVCName(image.Name, p.Number),
+				ReadOnly:  true,
+			},
+		}})
+		mounts = append(mounts, corev1.VolumeMount{Name: volName, MountPath: partitionMountPath(p.Number), ReadOnly: true})
 	}
 
 	trueVal := true
@@ -638,16 +649,12 @@ func (r *ImageReconciler) buildSeederDeployment(image *keziov1alpha1.Image, site
 							AllowPrivilegeEscalation: &falseVal,
 							ReadOnlyRootFilesystem:   &trueVal,
 							Capabilities: &corev1.Capabilities{
-								Drop: []corev1.Capability{"ALL"},
+								Drop: []corev1.Capability{dropAllCapabilities},
 							},
 						},
-						VolumeMounts: []corev1.VolumeMount{
-							{Name: storeVolumeName, MountPath: storeMountPath, ReadOnly: true},
-						},
+						VolumeMounts: mounts,
 					}},
-					Volumes: []corev1.Volume{
-						{Name: storeVolumeName, VolumeSource: r.SeederDeployment.StoreVolume},
-					},
+					Volumes: volumes,
 				},
 			},
 		},

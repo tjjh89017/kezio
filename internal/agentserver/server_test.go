@@ -362,7 +362,7 @@ func TestHandleNext_ProvisioningReadyReturnsDeployPlan(t *testing.T) {
 	// ConfigMap; build this test's client directly instead of going
 	// through newTestServer.
 	c := newPlanTestClient(t, machine, image, cm)
-	s := New(c, Config{StoreRoot: t.TempDir(), TrackerURL: testTrackerURL})
+	s := New(c, Config{TrackerURL: testTrackerURL})
 	s.Now = func() time.Time { return now }
 
 	rec := doNext(s.Handler(), testMachineName, testSessionToken)

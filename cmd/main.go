@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -31,6 +32,7 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -366,30 +368,68 @@ func webhooksEnabled() bool {
 // ingestConfigFromEnv builds the Image reconciler's IngestConfig from
 // the environment. Leaving INGEST_IMAGE unset (the default for every
 // existing deployment and the e2e suite) yields the zero IngestConfig,
-// which keeps the Image reconciler on its stub fast path - no ingest Job
-// is ever created, and no store or staging volume is required. Setting
-// INGEST_IMAGE opts into the real ingest pipeline; INGEST_STORE_PVC must
-// then also be set, naming the PersistentVolumeClaim the ingest Job
-// mounts as its store volume. INGEST_STAGING_PVC is optional (only
-// needed to ingest kezio-staged:// sources); INGEST_SERVICE_ACCOUNT is
-// optional.
+// which keeps the Image reconciler on its stub fast path - no ingest
+// Job is ever created, and no scratch or staging volume is required.
+// Setting INGEST_IMAGE opts into the real ingest pipeline.
+//
+// There are two shapes this can take, matching
+// controller.IngestConfig.LegacySharedStoreVolume's doc comment:
+// setting INGEST_STORE_PVC keeps the pre-per-partition-PVC shared-store
+// behavior the shared seeder fleet still needs; leaving it unset (the
+// path a fresh deployment wiring up the per-Image seeder Deployment
+// should take) has the reconciler create a fresh per-Image scratch PVC
+// and, once ingest succeeds, one PVC per partition (see IngestConfig's
+// own doc comment) - no store PVC to name at all.
+// INGEST_SCRATCH_STORAGE_CLASS and INGEST_PARTITION_STORAGE_CLASS
+// optionally pick each's StorageClass (empty uses the cluster/namespace
+// default). INGEST_PARTITION_ACCESS_MODES optionally overrides the
+// per-partition PVCs' access modes as a comma-separated list (for
+// example "ReadWriteMany"); left unset, ReadWriteOnce applies, correct
+// for a single-node cluster but not for a per-Image seeder Deployment
+// that must schedule across more than one node (see
+// IngestConfig.PartitionStorageClassName's doc comment).
+// INGEST_SCRATCH_STORAGE_SIZE optionally overrides the ingest scratch
+// PVC's requested capacity (a Kubernetes quantity, for example "20Gi");
+// left unset, IngestConfig's own default applies. INGEST_STAGING_PVC
+// is optional (only needed to ingest kezio-staged:// sources);
+// INGEST_SERVICE_ACCOUNT is optional.
 func ingestConfigFromEnv() (controller.IngestConfig, error) {
 	image := os.Getenv("INGEST_IMAGE")
 	if image == "" {
 		return controller.IngestConfig{}, nil
 	}
 
-	storePVC := os.Getenv("INGEST_STORE_PVC")
-	if storePVC == "" {
-		return controller.IngestConfig{}, fmt.Errorf("INGEST_IMAGE is set but INGEST_STORE_PVC is not")
-	}
-
 	cfg := controller.IngestConfig{
-		Image: image,
-		StoreVolume: corev1.VolumeSource{
+		Image:                     image,
+		ScratchStorageClassName:   os.Getenv("INGEST_SCRATCH_STORAGE_CLASS"),
+		PartitionStorageClassName: os.Getenv("INGEST_PARTITION_STORAGE_CLASS"),
+		ServiceAccountName:        os.Getenv("INGEST_SERVICE_ACCOUNT"),
+	}
+	// INGEST_STORE_PVC selects IngestConfig.LegacySharedStoreVolume
+	// instead of the per-partition-PVC path: the shared seeder fleet
+	// (SEEDER_SERVICE_NAME/SEEDER_SERVICE_NAMESPACE) still serves every
+	// Ready Image straight out of one permanently-accumulating store
+	// volume, and has not been migrated to per-partition PVCs (a
+	// separate, larger piece of work - see
+	// controller.IngestConfig.LegacySharedStoreVolume's doc comment). A
+	// deployment that runs only the per-Image seeder Deployment path
+	// should leave this unset.
+	if storePVC := os.Getenv("INGEST_STORE_PVC"); storePVC != "" {
+		cfg.LegacySharedStoreVolume = &corev1.VolumeSource{
 			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: storePVC},
-		},
-		ServiceAccountName: os.Getenv("INGEST_SERVICE_ACCOUNT"),
+		}
+	}
+	if size := os.Getenv("INGEST_SCRATCH_STORAGE_SIZE"); size != "" {
+		q, err := resource.ParseQuantity(size)
+		if err != nil {
+			return controller.IngestConfig{}, fmt.Errorf("invalid INGEST_SCRATCH_STORAGE_SIZE: %w", err)
+		}
+		cfg.ScratchStorageSize = q
+	}
+	if modes := os.Getenv("INGEST_PARTITION_ACCESS_MODES"); modes != "" {
+		for _, m := range strings.Split(modes, ",") {
+			cfg.PartitionAccessModes = append(cfg.PartitionAccessModes, corev1.PersistentVolumeAccessMode(strings.TrimSpace(m)))
+		}
 	}
 	if stagingPVC := os.Getenv("INGEST_STAGING_PVC"); stagingPVC != "" {
 		cfg.StagingVolume = &corev1.VolumeSource{
@@ -453,20 +493,18 @@ func seederConfigFromEnv() (controller.SeederConfig, error) {
 // SEEDER_DEPLOYMENT_IMAGE unset (the default for every existing
 // deployment and the e2e suite) yields the zero SeederDeploymentConfig,
 // which disables per-Image seeder Deployments entirely - no Deployment
-// is ever created and no store volume is required. Setting
-// SEEDER_DEPLOYMENT_IMAGE opts in; SEEDER_DEPLOYMENT_STORE_PVC must then
-// also be set, naming the same store PersistentVolumeClaim the seeder
-// containers mount read-only (see config/seeder/README.md's "store PVC"
-// prerequisite - this is the identical volume, not a separate one).
+// is ever created. Setting SEEDER_DEPLOYMENT_IMAGE opts in. There is no
+// store PVC to name here any more: each Deployment mounts exactly its
+// own Image's partition PVCs, which the Image reconciler already
+// creates during publishing (see IngestConfig and partitionPVCName).
 // SEEDER_DEPLOYMENT_GRACE_PERIOD is optional (a Go duration string, for
 // example "5m"); left unset, the reconciler's own default applies (see
 // SeederDeploymentConfig.gracePeriod).
 //
-// seeder carries the tracker URL and store root a per-Image Deployment's
-// pod is actually seeded through (SeederDeploymentConfig.TrackerURL/
-// StoreRoot), reused verbatim rather than introducing a second,
-// parallel set of SEEDER_DEPLOYMENT_TRACKER_URL/SEEDER_DEPLOYMENT_STORE_ROOT
-// variables naming the same tracker and the same store - the identical
+// seeder carries the tracker URL a per-Image Deployment's pod is
+// actually seeded through (SeederDeploymentConfig.TrackerURL), reused
+// verbatim rather than introducing a second, parallel
+// SEEDER_DEPLOYMENT_TRACKER_URL naming the same tracker - the identical
 // reasoning agentServerConfigFromEnv gives for reusing SeederConfig
 // itself. Leaving SEEDER_TRACKER_URL unset still lets per-Image
 // Deployments be created and torn down by their reference count; it
@@ -478,19 +516,9 @@ func seederDeploymentConfigFromEnv(seeder controller.SeederConfig) (controller.S
 		return controller.SeederDeploymentConfig{}, nil
 	}
 
-	storePVC := os.Getenv("SEEDER_DEPLOYMENT_STORE_PVC")
-	if storePVC == "" {
-		return controller.SeederDeploymentConfig{}, fmt.Errorf(
-			"SEEDER_DEPLOYMENT_IMAGE is set but SEEDER_DEPLOYMENT_STORE_PVC is not")
-	}
-
 	cfg := controller.SeederDeploymentConfig{
-		Image: image,
-		StoreVolume: corev1.VolumeSource{
-			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: storePVC},
-		},
+		Image:      image,
 		TrackerURL: seeder.TrackerURL,
-		StoreRoot:  seeder.StoreRoot,
 		EzioTuning: seeder.EzioTuning,
 	}
 	if raw := os.Getenv("SEEDER_DEPLOYMENT_GRACE_PERIOD"); raw != "" {
@@ -618,19 +646,19 @@ func bootServerConfigFromEnv() (*bootserver.Config, error) {
 // the server to the manager at all. Setting AGENT_SERVER_ADDR (for
 // example ":8091") opts in.
 //
-// Building a DeployPlan needs the same two things
-// seederConfigFromEnv's SeederConfig already carries - a tracker URL and
-// a read-only store mount, for the identical reason SeederConfig's own
-// doc comment gives (reading contents/<hash>/torrent.info to build
-// .torrent bytes) - so this reuses seeder verbatim rather than
-// introducing a second, parallel set of AGENT_TRACKER_URL /
-// AGENT_STORE_ROOT variables naming the same tracker and the same
-// volume. A deployment that sets AGENT_SERVER_ADDR without also setting
-// SEEDER_TRACKER_URL / SEEDER_STORE_ROOT (see config/seeder's README)
-// still starts - GET .../next then never has enough to build a plan for
-// an Image with a content partition, and answers ActionWait forever
-// instead of failing outright, the same graceful degradation
-// buildDeployPlan gives an unexpected build error.
+// Building a DeployPlan needs a tracker URL to bencode into every
+// .torrent it builds (see agentserver.buildPartitionTorrent) - the same
+// one seederConfigFromEnv's SeederConfig already carries, reused
+// verbatim rather than introducing a second, parallel
+// AGENT_TRACKER_URL naming the same tracker. It needs no store mount:
+// a partition's torrent.info now rides inline on
+// ImagePartitionStatus.TorrentInfo, so this server reads it straight
+// from the Image object. A deployment that sets AGENT_SERVER_ADDR
+// without also setting SEEDER_TRACKER_URL still starts - GET .../next
+// then never has enough to build a plan for an Image with a content
+// partition, and answers ActionWait forever instead of failing
+// outright, the same graceful degradation buildDeployPlan gives an
+// unexpected build error.
 //
 // EZIO_DEFAULT_MAX_UPLOADS / EZIO_DEFAULT_MAX_CONNECTIONS optionally set
 // the cluster-wide default per-torrent AddTorrent tuning applied to
@@ -639,8 +667,8 @@ func bootServerConfigFromEnv() (*bootserver.Config, error) {
 // separate from SEEDER_MAX_UPLOADS/SEEDER_MAX_CONNECTIONS: the seeder
 // pods and each machine's leecher can reasonably want different
 // defaults (a seeder serves every site at once; a leecher serves only
-// itself), so this reuses SeederConfig for the tracker/store settings
-// alone, not its tuning.
+// itself), so this reuses SeederConfig for the tracker setting alone,
+// not its tuning.
 func agentServerConfigFromEnv(seeder controller.SeederConfig) (*agentserver.Config, error) {
 	addr := os.Getenv("AGENT_SERVER_ADDR")
 	if addr == "" {
@@ -652,7 +680,6 @@ func agentServerConfigFromEnv(seeder controller.SeederConfig) (*agentserver.Conf
 	}
 	return &agentserver.Config{
 		Addr:         addr,
-		StoreRoot:    seeder.StoreRoot,
 		TrackerURL:   seeder.TrackerURL,
 		EzioDefaults: ezioDefaults,
 	}, nil

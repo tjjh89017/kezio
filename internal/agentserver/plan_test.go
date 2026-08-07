@@ -17,8 +17,8 @@ limitations under the License.
 package agentserver
 
 import (
+	"bytes"
 	"context"
-	"os"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -53,14 +53,13 @@ func newPlanTestClient(t *testing.T, objs ...client.Object) client.Client {
 		Build()
 }
 
-// writeFixtureContent writes a minimal, valid content directory (a
-// torrent.info plus its one extent file, nested under content/ as
-// store.LoadContentDirTorrentInfo requires) under a fresh temp store
-// root, and returns the root and the content's info hash - the same
-// fixture shape internal/controller's seeder tests use.
-func writeFixtureContent(t *testing.T) (root string, hash store.InfoHash) {
+// fixtureTorrentInfo builds a minimal, valid torrent.info and returns its
+// raw bytes alongside its info hash - the shape
+// ImagePartitionStatus.TorrentInfo carries inline in status now that a
+// partition's content lives in its own PVC rather than a shared store
+// this server would have to mount.
+func fixtureTorrentInfo(t *testing.T) (raw []byte, hash store.InfoHash) {
 	t.Helper()
-	root = t.TempDir()
 
 	info := &store.TorrentInfo{
 		BlockSize:   4096,
@@ -73,25 +72,11 @@ func writeFixtureContent(t *testing.T) (root string, hash store.InfoHash) {
 		t.Fatalf("ComputeInfoHash: %v", err)
 	}
 
-	dir := store.ContentDir(root, hash)
-	if err := os.MkdirAll(store.ContentDataDir(dir), 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	infoFile, err := os.Create(store.ContentTorrentInfoPath(root, hash)) //nolint:gosec // test fixture path
-	if err != nil {
-		t.Fatalf("create torrent.info: %v", err)
-	}
-	if err := store.WriteTorrentInfo(infoFile, info); err != nil {
+	var buf bytes.Buffer
+	if err := store.WriteTorrentInfo(&buf, info); err != nil {
 		t.Fatalf("WriteTorrentInfo: %v", err)
 	}
-	if err := infoFile.Close(); err != nil {
-		t.Fatalf("close torrent.info: %v", err)
-	}
-	extentPath := store.ContentExtentPath(root, hash, 0)
-	if err := os.WriteFile(extentPath, make([]byte, store.PieceSize), 0o644); err != nil { //nolint:gosec // test fixture path
-		t.Fatalf("write extent file: %v", err)
-	}
-	return root, hash
+	return buf.Bytes(), hash
 }
 
 // readyImage builds a Ready Image object named name, with a layout
@@ -122,10 +107,10 @@ func readyImage(name, sfdiskJSON string, partitions []keziov1alpha1.ImagePartiti
 }
 
 func TestBuildDeployPlan_OSImageWithContentSwapAndBlankPartitions(t *testing.T) {
-	storeRoot, hash := writeFixtureContent(t)
+	torrentInfoBytes, hash := fixtureTorrentInfo(t)
 
 	partitions := []keziov1alpha1.ImagePartitionStatus{
-		{Number: 1, Role: keziov1alpha1.PartitionRoleESP, FSType: "vfat", InfoHash: hash.String()},
+		{Number: 1, Role: keziov1alpha1.PartitionRoleESP, FSType: "vfat", InfoHash: hash.String(), TorrentInfo: torrentInfoBytes},
 		{Number: 2, Role: keziov1alpha1.PartitionRoleSwap, UUID: "11111111-1111-1111-1111-111111111111"},
 		{Number: 3, Role: keziov1alpha1.PartitionRoleData, FSType: "ext4"}, // blank: no infoHash, no uuid
 	}
@@ -151,7 +136,7 @@ func TestBuildDeployPlan_OSImageWithContentSwapAndBlankPartitions(t *testing.T) 
 	}
 
 	c := newPlanTestClient(t, image, cm, machine)
-	cfg := Config{StoreRoot: storeRoot, TrackerURL: testTrackerURL}
+	cfg := Config{TrackerURL: testTrackerURL}
 
 	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
 	if err != nil {
@@ -221,7 +206,6 @@ func TestBuildDeployPlan_OSImageWithContentSwapAndBlankPartitions(t *testing.T) 
 }
 
 func TestBuildDeployPlan_MultiDataImageUsesNonNVMeDeviceNaming(t *testing.T) {
-	storeRoot := t.TempDir()
 
 	image1, cm1 := readyImage("data-1", "{}", []keziov1alpha1.ImagePartitionStatus{
 		{Number: 1, Role: keziov1alpha1.PartitionRoleData, FSType: "ext4"},
@@ -250,7 +234,7 @@ func TestBuildDeployPlan_MultiDataImageUsesNonNVMeDeviceNaming(t *testing.T) {
 	}
 
 	c := newPlanTestClient(t, image1, cm1, image2, cm2, machine)
-	cfg := Config{StoreRoot: storeRoot, TrackerURL: testTrackerURL}
+	cfg := Config{TrackerURL: testTrackerURL}
 
 	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
 	if err != nil {
@@ -277,7 +261,6 @@ func TestBuildDeployPlan_MultiDataImageUsesNonNVMeDeviceNaming(t *testing.T) {
 }
 
 func TestBuildDeployPlan_NotReadyCases(t *testing.T) {
-	storeRoot := t.TempDir()
 	image, cm := readyImage("os-image", "{}", []keziov1alpha1.ImagePartitionStatus{
 		{Number: 1, Role: keziov1alpha1.PartitionRoleData, FSType: "ext4"},
 	})
@@ -314,7 +297,7 @@ func TestBuildDeployPlan_NotReadyCases(t *testing.T) {
 			machine := baseMachine()
 			tc.modify(machine)
 			c := newPlanTestClient(t, image, cm, machine)
-			cfg := Config{StoreRoot: storeRoot, TrackerURL: testTrackerURL}
+			cfg := Config{TrackerURL: testTrackerURL}
 
 			plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
 			if err != nil {
@@ -328,7 +311,6 @@ func TestBuildDeployPlan_NotReadyCases(t *testing.T) {
 }
 
 func TestBuildDeployPlan_ImageNotReadyIsNotAnError(t *testing.T) {
-	storeRoot := t.TempDir()
 	image, cm := readyImage("os-image", "{}", nil)
 	image.Status.State = keziov1alpha1.ImageStateIngesting
 
@@ -347,7 +329,7 @@ func TestBuildDeployPlan_ImageNotReadyIsNotAnError(t *testing.T) {
 	}
 
 	c := newPlanTestClient(t, image, cm, machine)
-	cfg := Config{StoreRoot: storeRoot, TrackerURL: testTrackerURL}
+	cfg := Config{TrackerURL: testTrackerURL}
 
 	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
 	if err != nil {
@@ -369,7 +351,6 @@ func TestBuildDeployPlan_ImageNotReadyIsNotAnError(t *testing.T) {
 // internal/controller/machine_controller.go), which runs before a Machine
 // referencing a failed Image is ever polled through this path again.
 func TestBuildDeployPlan_ImageFailedIsNotThePlanBuildersJob(t *testing.T) {
-	storeRoot := t.TempDir()
 	image, cm := readyImage("os-image", "{}", nil)
 	image.Status.State = keziov1alpha1.ImageStateFailed
 
@@ -388,7 +369,7 @@ func TestBuildDeployPlan_ImageFailedIsNotThePlanBuildersJob(t *testing.T) {
 	}
 
 	c := newPlanTestClient(t, image, cm, machine)
-	cfg := Config{StoreRoot: storeRoot, TrackerURL: testTrackerURL}
+	cfg := Config{TrackerURL: testTrackerURL}
 
 	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
 	if err != nil {
@@ -400,7 +381,6 @@ func TestBuildDeployPlan_ImageFailedIsNotThePlanBuildersJob(t *testing.T) {
 }
 
 func TestBuildDeployPlan_MissingLayoutConfigMapIsAnError(t *testing.T) {
-	storeRoot := t.TempDir()
 	image, _ := readyImage("os-image", "{}", nil) // ConfigMap deliberately not seeded
 
 	machine := &keziov1alpha1.Machine{
@@ -418,7 +398,7 @@ func TestBuildDeployPlan_MissingLayoutConfigMapIsAnError(t *testing.T) {
 	}
 
 	c := newPlanTestClient(t, image, machine)
-	cfg := Config{StoreRoot: storeRoot, TrackerURL: testTrackerURL}
+	cfg := Config{TrackerURL: testTrackerURL}
 
 	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
 	if err == nil {
@@ -430,10 +410,10 @@ func TestBuildDeployPlan_MissingLayoutConfigMapIsAnError(t *testing.T) {
 }
 
 func TestBuildDeployPlan_ImageRefResolvesToRefNamespaceNotMachineNamespace(t *testing.T) {
-	storeRoot, hash := writeFixtureContent(t)
+	torrentInfoBytes, hash := fixtureTorrentInfo(t)
 
 	partitions := []keziov1alpha1.ImagePartitionStatus{
-		{Number: 1, Role: keziov1alpha1.PartitionRoleESP, FSType: "vfat", InfoHash: hash.String()},
+		{Number: 1, Role: keziov1alpha1.PartitionRoleESP, FSType: "vfat", InfoHash: hash.String(), TorrentInfo: torrentInfoBytes},
 	}
 	image, cm := readyImage("os-image", `{"partitiontable":{"label":"gpt"}}`, partitions)
 	image.Namespace = "images-ns"
@@ -456,7 +436,7 @@ func TestBuildDeployPlan_ImageRefResolvesToRefNamespaceNotMachineNamespace(t *te
 	}
 
 	c := newPlanTestClient(t, image, cm, machine)
-	cfg := Config{StoreRoot: storeRoot, TrackerURL: testTrackerURL}
+	cfg := Config{TrackerURL: testTrackerURL}
 
 	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
 	if err != nil {
@@ -477,11 +457,11 @@ func TestBuildDeployPlan_ImageRefResolvesToRefNamespaceNotMachineNamespace(t *te
 }
 
 func TestBuildDeployPlan_MissingStoreContentForRecordedInfoHashIsAnError(t *testing.T) {
-	// storeRoot is a fresh, empty temp dir: the InfoHash below is
-	// well-formed but its content directory was never written, so
-	// buildPartitionTorrent's LoadContentDirTorrentInfo call must fail.
-	storeRoot := t.TempDir()
-	_, hash := writeFixtureContent(t) // only used to mint a well-formed InfoHash
+	// InfoHash is well-formed but TorrentInfo was never populated
+	// alongside it (a status write that dropped the field, or an older
+	// object predating this field), so buildPartitionTorrent's
+	// ParseTorrentInfoBytes call must fail on the empty input.
+	_, hash := fixtureTorrentInfo(t) // only used to mint a well-formed InfoHash
 
 	partitions := []keziov1alpha1.ImagePartitionStatus{
 		{Number: 1, Role: keziov1alpha1.PartitionRoleESP, FSType: "vfat", InfoHash: hash.String()},
@@ -503,7 +483,7 @@ func TestBuildDeployPlan_MissingStoreContentForRecordedInfoHashIsAnError(t *test
 	}
 
 	c := newPlanTestClient(t, image, cm, machine)
-	cfg := Config{StoreRoot: storeRoot, TrackerURL: testTrackerURL}
+	cfg := Config{TrackerURL: testTrackerURL}
 
 	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
 	if err == nil {
@@ -515,7 +495,6 @@ func TestBuildDeployPlan_MissingStoreContentForRecordedInfoHashIsAnError(t *test
 }
 
 func TestBuildDeployPlan_NoOSImageOrDataImagesReturnsNilPlan(t *testing.T) {
-	storeRoot := t.TempDir()
 
 	machine := &keziov1alpha1.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-01", Namespace: "default"},
@@ -526,7 +505,7 @@ func TestBuildDeployPlan_NoOSImageOrDataImagesReturnsNilPlan(t *testing.T) {
 	}
 
 	c := newPlanTestClient(t, machine)
-	cfg := Config{StoreRoot: storeRoot, TrackerURL: testTrackerURL}
+	cfg := Config{TrackerURL: testTrackerURL}
 
 	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
 	if err != nil {

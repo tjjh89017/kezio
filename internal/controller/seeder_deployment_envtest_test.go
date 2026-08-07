@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"time"
@@ -53,7 +54,6 @@ func newSeederDeploymentReconciler() (*ImageReconciler, *time.Time) {
 		Scheme: k8sClient.Scheme(),
 		SeederDeployment: SeederDeploymentConfig{
 			Image:       "ezio-seeder:test",
-			StoreVolume: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 			GracePeriod: seederDeploymentTestGracePeriod,
 			Now:         func() time.Time { return *clock },
 		},
@@ -382,6 +382,26 @@ func mustFixtureHash() store.InfoHash {
 	return h
 }
 
+// mustFixtureTorrentInfo builds a minimal, valid torrent.info and
+// returns its info hash alongside its raw bytes - the shape
+// ImagePartitionStatus.TorrentInfo carries inline in status, needed by
+// tests that exercise syncSeederDeploymentContent's actual
+// AddTorrent call rather than only the Deployment lifecycle.
+func mustFixtureTorrentInfo() (store.InfoHash, []byte) {
+	info := &store.TorrentInfo{
+		BlockSize:   4096,
+		BlocksTotal: 100,
+		Extents:     []store.Extent{{Offset: 0, Length: store.PieceSize}},
+		PieceHashes: []store.PieceHash{{1, 2, 3, 4, 5}},
+	}
+	hash, err := store.ComputeInfoHash(info)
+	Expect(err).NotTo(HaveOccurred())
+
+	var buf bytes.Buffer
+	Expect(store.WriteTorrentInfo(&buf, info)).To(Succeed())
+	return hash, buf.Bytes()
+}
+
 // createSeederDeploymentPod creates a ReplicaSet owned by dep and a Pod
 // owned by that ReplicaSet, with status.podIP already set to podIP -
 // standing in for what a real Deployment controller and kubelet would
@@ -438,19 +458,19 @@ var _ = Describe("Seeder Deployment content", func() {
 	const seederDeploymentContentPodIP = "10.9.9.9"
 
 	It("adds every Ready-Image content partition to the pod behind a newly created per-Image Deployment", func() {
-		fixtureRoot, hash := writeFixtureContent()
+		hash, torrentInfoBytes := mustFixtureTorrentInfo()
 		image := createReadyImage(ctx, hash)
+		image.Status.Partitions[0].TorrentInfo = torrentInfoBytes
+		Expect(k8sClient.Status().Update(ctx, image)).To(Succeed())
 		registry := newFakeSeederRegistry()
 
 		r := &ImageReconciler{
 			Client: k8sClient,
 			Scheme: k8sClient.Scheme(),
 			SeederDeployment: SeederDeploymentConfig{
-				Image:       "ezio-seeder:test",
-				StoreVolume: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-				TrackerURL:  "http://tracker.kezio-system.svc:6969/announce",
-				StoreRoot:   fixtureRoot,
-				Dial:        registry.dial,
+				Image:      "ezio-seeder:test",
+				TrackerURL: "http://tracker.kezio-system.svc:6969/announce",
+				Dial:       registry.dial,
 			},
 		}
 		key := types.NamespacedName{Name: image.Name, Namespace: image.Namespace}
@@ -474,7 +494,15 @@ var _ = Describe("Seeder Deployment content", func() {
 		target := fmt.Sprintf("%s:%d", seederDeploymentContentPodIP, seederDeploymentGRPCPort)
 		daemon := registry.daemons[target]
 		Expect(daemon).NotTo(BeNil(), "expected a dial to the per-Image seeder pod's own address")
-		Expect(daemon.torrents).To(HaveKey(hash.String()))
+		Expect(daemon.addCount).To(Equal(1), "expected exactly one AddTorrent call, for the Image's one content partition")
+		// fakeSeederClient.AddTorrent keys its recorded torrent by
+		// save_path's leaf directory name (see that fixture's own
+		// comment); a per-Image seeder Deployment's save_path is its
+		// partition's own mount path (partitionMountPath), whose leaf is
+		// the partition number - "0" here, since createReadyImage leaves
+		// Number at its zero value - not the content hash a shared-fleet
+		// save_path (store.ContentDir) would leaf into.
+		Expect(daemon.torrents).To(HaveKey("0"))
 	})
 
 	It("does not dial any pod when SeederDeployment carries no tracker/store configuration", func() {
@@ -497,6 +525,6 @@ var _ = Describe("Seeder Deployment content", func() {
 
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(dialed).To(BeFalse(), "contentEnabled() is false (no TrackerURL/StoreRoot) - nothing should have dialed the pod")
+		Expect(dialed).To(BeFalse(), "contentEnabled() is false (no TrackerURL) - nothing should have dialed the pod")
 	})
 })

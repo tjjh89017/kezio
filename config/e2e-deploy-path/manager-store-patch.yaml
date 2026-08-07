@@ -1,6 +1,8 @@
-# Byte-identical copy of config/e2e-image-path/manager-store-patch.yaml;
-# see kustomization.yaml in this directory for why this overlay keeps
-# local copies instead of referencing the originals by relative path.
+# Copy of config/e2e-image-path/manager-store-patch.yaml (see that
+# file's own comment for what this mount is for and why the per-Image
+# seeder Deployment path needs no equivalent); see kustomization.yaml in
+# this directory for why this overlay keeps local copies instead of
+# referencing the originals by relative path.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -26,6 +26,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -40,28 +41,54 @@ import (
 // to have) failed.
 const reasonIngestFailed = "IngestFailed"
 
+// reasonPublishing is the Ready condition reason while an Image sits
+// between a succeeded ingest Job and a succeeded publish Job (see
+// image_publish.go): ingest itself is done, but content has not yet
+// landed in its own per-partition PVCs, so the Image is not Ready.
+const reasonPublishing = "PublishingPartitions"
+
+// reasonPublishFailed is the Ready condition reason when the publish
+// Job fails or reports failure.
+const reasonPublishFailed = "PublishFailed"
+
 // ingestPollInterval is how often onChange re-checks an in-flight ingest
-// Job's status.
+// or publish Job's status.
 const ingestPollInterval = 5 * time.Second
 
-// storeMountPath and stagingMountPath are where the ingest Job's
-// container mounts the store and staging volumes; kezio-ingest is told
+// scratchMountPath and stagingMountPath are where the ingest Job's
+// container mounts its scratch and staging volumes; kezio-ingest is told
 // about them through the STORE_ROOT / STAGING_ROOT environment variables
 // set on its container (see cmd/ingest). workMountPath is where its
 // scratch work volume is mounted; it is always ingest.DefaultWorkDir so
 // the WORK_DIR env var this file sets and cmd/ingest's own fallback stay
 // in lockstep even if neither is read.
+//
+// scratchMountPath is deliberately not called a "store" any more: it
+// holds ingest's own working copy of a single Image's content plus the
+// per-Image publish Job's read side (see image_publish.go), never
+// something a seeder or the manager reads - a partition's actual
+// content lives in its own PVC once publishing succeeds (see
+// partitionPVCName), and its torrent.info metadata rides inline on
+// ImagePartitionStatus.
 const (
-	storeMountPath   = "/store"
+	scratchMountPath = "/store"
 	stagingMountPath = "/staging"
 	workMountPath    = ingest.DefaultWorkDir
 )
 
-// storeVolumeName is the Volume/VolumeMount name for the store, shared
-// by the ingest Job (buildIngestJob) and every per-Image seeder
-// Deployment (buildSeederDeployment) - both mount the same underlying
-// volume, just at different paths and access modes.
-const storeVolumeName = "store"
+// scratchVolumeName is the ingest Job's Volume/VolumeMount name for its
+// scratch volume (see scratchMountPath), reused by the publish Job's
+// read-only mount of the same PVC.
+const scratchVolumeName = "store"
+
+// defaultScratchStorageSize is the ingest scratch PVC's requested
+// capacity when IngestConfig.ScratchStorageSize is unset: generous
+// enough for a cloud-image-sized source (hundreds of MiB to a few GiB)
+// converted to raw plus every partition's content awaiting publish, but
+// this volume is per-Image and transient (deleted once its publish Job
+// succeeds - see deleteIngestScratchPVC), so being generous costs
+// nothing beyond the Image's own ingest window.
+const defaultScratchStorageSize = "10Gi"
 
 // ingestJobLabel marks every resource (Job, its Pods) created for one
 // Image's ingest run, and doubles as the Job's controller-runtime watch
@@ -73,15 +100,57 @@ const ingestJobLabel = "kezio.kojuro.date/image"
 // takes the stub fast path instead (see onChange's doc comment). This is
 // deliberate, not a placeholder to remove later - it is how the e2e
 // suite and any deployment without the ingest pipeline wired up keep
-// working: Ingesting -> Ready with no Job, no store, no staging volume
+// working: Ingesting -> Ready with no Job, no scratch, no staging volume
 // required.
+//
+// There is no shared store volume to configure here any more (compare
+// the single, pre-provisioned INGEST_STORE_PVC this type used to
+// require): the reconciler creates a fresh, per-Image scratch PVC for
+// the ingest Job to write into (see buildIngestScratchPVC) and, once it
+// succeeds, one PVC per partition for the publish Job to copy content
+// into (see partitionPVCName). ScratchStorageClassName and
+// PartitionStorageClassName pick the StorageClass each of those uses;
+// empty means the cluster/namespace default.
 type IngestConfig struct {
 	// Image is the kezio-ingest container image reference. Empty
 	// disables ingest Jobs.
 	Image string
-	// StoreVolume is mounted into the ingest Job's pod at
-	// storeMountPath.
-	StoreVolume corev1.VolumeSource
+	// LegacySharedStoreVolume, if set, keeps the pre-per-partition-PVC
+	// behavior: the ingest Job mounts this one volume directly (at
+	// scratchMountPath) and writes every partition's content into it
+	// permanently, with no publish phase and no per-partition PVCs -
+	// exactly what this type did before ScratchStorageClassName/
+	// PartitionStorageClassName existed. This exists solely for the
+	// shared seeder fleet (SeederConfig/SeederReconciler, untouched by
+	// this type's own change): that fleet still serves every Ready
+	// Image straight out of one shared, permanently-accumulating store
+	// volume, and has no code of its own yet to consume per-partition
+	// PVCs - migrating it is its own separate, larger piece of work.
+	// Leave this nil for the per-Image seeder Deployment path, which
+	// this type's other fields configure.
+	LegacySharedStoreVolume *corev1.VolumeSource
+	// ScratchStorageClassName is the StorageClass for the per-Image
+	// ingest scratch PVC (see buildIngestScratchPVC). Empty uses the
+	// cluster/namespace default. This volume only needs to be
+	// node-local and ReadWriteOnce: only the ingest Job and its own
+	// publish Job ever mount it, sequentially, never a seeder.
+	ScratchStorageClassName string
+	// ScratchStorageSize overrides defaultScratchStorageSize when set.
+	ScratchStorageSize resource.Quantity
+	// PartitionStorageClassName is the StorageClass for the per-partition
+	// PVCs the publish step creates (see partitionPVCName). Empty uses
+	// the cluster/namespace default. Production deployments that run a
+	// per-Image seeder Deployment across more than one node need a
+	// StorageClass whose volumes support being mounted by several nodes
+	// at once (RWX or ROX); a single-node e2e cluster can use an
+	// ordinary ReadWriteOnce class instead (see PartitionAccessModes).
+	PartitionStorageClassName string
+	// PartitionAccessModes overrides the per-partition PVCs' access
+	// modes; a nil/empty slice defaults to
+	// []corev1.ReadWriteOnce, the correct choice for a single-node
+	// cluster (see PartitionStorageClassName's doc comment for the
+	// multi-node requirement).
+	PartitionAccessModes []corev1.PersistentVolumeAccessMode
 	// StagingVolume, if non-nil, is mounted into the ingest Job's pod
 	// at stagingMountPath and STAGING_ROOT is set on its container.
 	// Only needed to ingest a kezio-staged:// source; an Image with an
@@ -96,12 +165,50 @@ func (c IngestConfig) enabled() bool {
 	return c.Image != ""
 }
 
-// reconcileIngesting drives one Image through a real ingest Job:
-// creating it if missing (idempotent - a Job name is deterministic from
-// the Image name, so a second reconcile that finds one already there
-// just adopts it), and polling its status once it exists. This is only
+// legacy reports whether ingest runs in the pre-per-partition-PVC shape
+// (see LegacySharedStoreVolume's doc comment).
+func (c IngestConfig) legacy() bool {
+	return c.LegacySharedStoreVolume != nil
+}
+
+// scratchStorageSize returns c.ScratchStorageSize, falling back to
+// defaultScratchStorageSize when unset.
+func (c IngestConfig) scratchStorageSize() resource.Quantity {
+	if c.ScratchStorageSize.IsZero() {
+		return resource.MustParse(defaultScratchStorageSize)
+	}
+	return c.ScratchStorageSize
+}
+
+// partitionAccessModes returns c.PartitionAccessModes, falling back to
+// ReadWriteOnce when unset (see IngestConfig.PartitionAccessModes).
+func (c IngestConfig) partitionAccessModes() []corev1.PersistentVolumeAccessMode {
+	if len(c.PartitionAccessModes) > 0 {
+		return c.PartitionAccessModes
+	}
+	return []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}
+}
+
+// reconcileIngesting drives one Image through real ingest: creating and
+// polling the ingest Job first (idempotent - a Job name is deterministic
+// from the Image name, so a second reconcile that finds one already
+// there just adopts it), then - once ingest has populated
+// image.Status.Partitions - handing off to reconcilePublishing to copy
+// content into its own per-partition PVCs before the Image reaches
+// Ready. Partitions being populated is what distinguishes the two
+// phases; no separate state or annotation is needed; This is only
 // called when r.Ingest is enabled (see onChange).
 func (r *ImageReconciler) reconcileIngesting(ctx context.Context, image *keziov1alpha1.Image) (ctrl.Result, error) {
+	if !r.Ingest.legacy() && image.Status.Partitions != nil {
+		return r.reconcilePublishing(ctx, image)
+	}
+
+	if !r.Ingest.legacy() {
+		if err := r.ensureIngestScratchPVC(ctx, image); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	jobKey := types.NamespacedName{Name: ingestJobName(image.Name), Namespace: image.Namespace}
 	job := &batchv1.Job{}
 	err := r.Get(ctx, jobKey, job)
@@ -129,6 +236,69 @@ func (r *ImageReconciler) reconcileIngesting(ctx context.Context, image *keziov1
 	}
 }
 
+// ingestScratchPVCName returns the deterministic per-Image ingest
+// scratch PVC name, following ingestJobName's own truncate-and-hash
+// convention so it always fits a PVC name's DNS-1123 subdomain limit.
+func ingestScratchPVCName(imageName string) string {
+	name := "kezio-ingest-scratch-" + imageName
+	if len(name) <= maxJobNameLength {
+		return name
+	}
+	sum := sha256.Sum256([]byte(imageName))
+	suffix := "-" + hex.EncodeToString(sum[:])[:8]
+	maxBaseLen := maxJobNameLength - len("kezio-ingest-scratch-") - len(suffix)
+	return "kezio-ingest-scratch-" + imageName[:maxBaseLen] + suffix
+}
+
+// ensureIngestScratchPVC creates image's ingest scratch PVC if it does
+// not already exist. Idempotent and side-effect-free on every reconcile
+// after the first, the same shape reconcileIngesting's Job creation
+// uses.
+func (r *ImageReconciler) ensureIngestScratchPVC(ctx context.Context, image *keziov1alpha1.Image) error {
+	key := types.NamespacedName{Name: ingestScratchPVCName(image.Name), Namespace: image.Namespace}
+	existing := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(ctx, key, existing); err == nil {
+		return nil
+	} else if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("get ingest scratch pvc: %w", err)
+	}
+
+	size := r.Ingest.scratchStorageSize()
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources:   corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: size}},
+		},
+	}
+	if r.Ingest.ScratchStorageClassName != "" {
+		pvc.Spec.StorageClassName = &r.Ingest.ScratchStorageClassName
+	}
+	if err := ctrl.SetControllerReference(image, pvc, r.Scheme); err != nil {
+		return fmt.Errorf("set owner reference on ingest scratch pvc: %w", err)
+	}
+	if err := r.Create(ctx, pvc); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create ingest scratch pvc: %w", err)
+	}
+	return nil
+}
+
+// deleteIngestScratchPVC removes image's ingest scratch PVC once its
+// content has been published into per-partition PVCs (see
+// handlePublishJobSucceeded): nothing reads it again after that point,
+// and it duplicates every partition's content until then, so this is
+// explicit cleanup rather than left to ordinary garbage collection on
+// Image deletion.
+func (r *ImageReconciler) deleteIngestScratchPVC(ctx context.Context, image *keziov1alpha1.Image) error {
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: ingestScratchPVCName(image.Name), Namespace: image.Namespace},
+	}
+	if err := r.Delete(ctx, pvc); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete ingest scratch pvc: %w", err)
+	}
+	return nil
+}
+
 // buildIngestJob constructs the (not yet created) Job that ingests
 // image, owner-ref'd to it so it is garbage collected with the Image and
 // so ctrl.NewControllerManagedBy's Owns(&batchv1.Job{}) watch (see
@@ -142,15 +312,21 @@ func (r *ImageReconciler) buildIngestJob(image *keziov1alpha1.Image, jobName str
 		{Name: "SOURCE_URL", Value: image.Spec.Source.URL},
 		{Name: "SOURCE_FORMAT", Value: image.Spec.Source.Format},
 		{Name: "SOURCE_CHECKSUM", Value: image.Spec.Source.Checksum},
-		{Name: "STORE_ROOT", Value: storeMountPath},
+		{Name: "STORE_ROOT", Value: scratchMountPath},
 		// WORK_DIR is set explicitly (rather than left to cmd/ingest's
 		// own "/work" fallback) so this Job template and the binary's
 		// default can never independently drift; both ultimately come
 		// from ingest.DefaultWorkDir (see workMountPath).
 		{Name: "WORK_DIR", Value: workMountPath},
 	}
+	scratchVolume := corev1.VolumeSource{
+		PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: ingestScratchPVCName(image.Name)},
+	}
+	if r.Ingest.legacy() {
+		scratchVolume = *r.Ingest.LegacySharedStoreVolume
+	}
 	volumes := []corev1.Volume{
-		{Name: storeVolumeName, VolumeSource: r.Ingest.StoreVolume},
+		{Name: scratchVolumeName, VolumeSource: scratchVolume},
 		// work is scratch space for the fetched/staged source image,
 		// the qemu-img-converted raw disk, and per-partition slices
 		// and content before they are moved into the store - never the
@@ -162,7 +338,7 @@ func (r *ImageReconciler) buildIngestJob(image *keziov1alpha1.Image, jobName str
 		{Name: "work", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 	}
 	mounts := []corev1.VolumeMount{
-		{Name: storeVolumeName, MountPath: storeMountPath},
+		{Name: scratchVolumeName, MountPath: scratchMountPath},
 		{Name: "work", MountPath: workMountPath},
 	}
 
@@ -221,7 +397,7 @@ func (r *ImageReconciler) buildIngestJob(image *keziov1alpha1.Image, jobName str
 						SecurityContext: &corev1.SecurityContext{
 							AllowPrivilegeEscalation: &falseVal,
 							Capabilities: &corev1.Capabilities{
-								Drop: []corev1.Capability{"ALL"},
+								Drop: []corev1.Capability{dropAllCapabilities},
 							},
 						},
 					}},
@@ -269,17 +445,51 @@ func (r *ImageReconciler) handleIngestJobSucceeded(ctx context.Context, image *k
 	partitions := make([]keziov1alpha1.ImagePartitionStatus, 0, len(result.Disk.Partitions))
 	for _, p := range result.Disk.Partitions {
 		partitions = append(partitions, keziov1alpha1.ImagePartitionStatus{
-			Number:    p.Number,
-			Role:      p.Role,
-			FSType:    p.FSType,
-			UsedBytes: p.UsedBytes,
-			UUID:      p.UUID,
-			InfoHash:  p.InfoHash,
+			Number:      p.Number,
+			Role:        p.Role,
+			FSType:      p.FSType,
+			UsedBytes:   p.UsedBytes,
+			UUID:        p.UUID,
+			InfoHash:    p.InfoHash,
+			TorrentInfo: p.TorrentInfo,
 		})
 	}
 	image.Status.Partitions = partitions
 
-	return r.advance(ctx, image, keziov1alpha1.ImageStateReady, reasonIngestComplete, "Image ingest complete")
+	if r.Ingest.legacy() {
+		// The shared seeder fleet reads every Ready Image's content
+		// straight out of LegacySharedStoreVolume itself (see that
+		// field's doc comment) - there is no per-Image scratch PVC to
+		// clean up and no publish phase, exactly like this reconciler
+		// behaved before per-partition PVCs existed.
+		return r.advance(ctx, image, keziov1alpha1.ImageStateReady, reasonIngestComplete, "Image ingest complete")
+	}
+
+	if !anyPartitionHasContent(partitions) {
+		// Nothing to publish (every partition is swap or blank): skip
+		// the publish phase and the scratch PVC it would otherwise need,
+		// straight to Ready.
+		if err := r.deleteIngestScratchPVC(ctx, image); err != nil {
+			return ctrl.Result{}, err
+		}
+		return r.advance(ctx, image, keziov1alpha1.ImageStateReady, reasonIngestComplete, "Image ingest complete")
+	}
+
+	return r.advance(ctx, image, keziov1alpha1.ImageStateIngesting, reasonPublishing,
+		"Image ingest complete; publishing partition content volumes")
+}
+
+// anyPartitionHasContent reports whether at least one partition carries
+// an InfoHash - content the publish phase needs to copy into its own
+// PVC. An Image made entirely of swap/blank partitions has none, and
+// skips publishing altogether.
+func anyPartitionHasContent(partitions []keziov1alpha1.ImagePartitionStatus) bool {
+	for _, p := range partitions {
+		if p.InfoHash != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // handleIngestJobFailed moves image to Failed, using the ingest result's

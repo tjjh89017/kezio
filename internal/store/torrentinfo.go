@@ -27,6 +27,7 @@ package store
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -103,6 +104,14 @@ const hexFieldWidth = 32
 // tooling treats the file: offset, length, and sha1 are read as three
 // separate ordered streams, not as one interleaved record type, which is
 // why grouping them here loses no information (see WriteTorrentInfo).
+// ParseTorrentInfoBytes parses a torrent.info file already held in
+// memory - the shape ImagePartitionStatus.TorrentInfo carries it in,
+// once ingest has copied it into status - rather than a torrent.info
+// path on a mounted store.
+func ParseTorrentInfoBytes(data []byte) (*TorrentInfo, error) {
+	return ParseTorrentInfo(bytes.NewReader(data))
+}
+
 func ParseTorrentInfo(r io.Reader) (*TorrentInfo, error) {
 	info := &TorrentInfo{}
 	haveBlockSize := false

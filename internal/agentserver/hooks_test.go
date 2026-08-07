@@ -282,8 +282,6 @@ func TestResolveHooks_UnresolvedPlaceholderIsAnError(t *testing.T) {
 // postHookRefs first, then the Machine's, using the Image's targetDisk
 // and name as the standard template values.
 func TestBuildDeployPlan_HooksResolvedFromImageAndMachine(t *testing.T) {
-	storeRoot := t.TempDir()
-
 	imageHook := &keziov1alpha1.PostHook{
 		ObjectMeta: metav1.ObjectMeta{Name: "image-hook", Namespace: "default"},
 		Spec: keziov1alpha1.PostHookSpec{
@@ -324,7 +322,7 @@ func TestBuildDeployPlan_HooksResolvedFromImageAndMachine(t *testing.T) {
 	}
 
 	c := newPlanTestClient(t, image, cm, imageHook, machineHook, machine)
-	cfg := Config{StoreRoot: storeRoot, TrackerURL: testTrackerURL}
+	cfg := Config{TrackerURL: testTrackerURL}
 
 	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
 	if err != nil {

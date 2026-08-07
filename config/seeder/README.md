@@ -62,22 +62,39 @@ Both apply into the `kezio-system` namespace.
      below).
 3. **A real data network.** See the next section.
 
-## The agent registration server reuses this same mount
+## The agent registration server needs no store mount
 
-`SEEDER_TRACKER_URL` and `SEEDER_STORE_ROOT` are not exclusive to the
-seeder reconciler: `AGENT_SERVER_ADDR`'s GET `/agent/machines/<name>/next`
-endpoint (`internal/agentserver`) builds each deployment plan's
-per-partition `.torrent` bytes the same way `SeederReconciler.addContent`
-does, from the identical `contents/<hash>/torrent.info` files under
-`SEEDER_STORE_ROOT`, announcing at the identical `SEEDER_TRACKER_URL` -
-the agent's leecher and the seeder join the same swarm. There is no
-separate `AGENT_STORE_ROOT` / `AGENT_TRACKER_URL` pair to configure: if
-`controller-manager` already has the store mounted read-only and
-`SEEDER_TRACKER_URL` set for the seeder reconciler, the agent server
-picks up both automatically. Running the agent server without the seeder
-reconciler enabled still works, but GET `.../next` can then never build a
-plan for an Image with a content partition - it answers `wait` forever
-instead of a plan, which is easy to mistake for "still resolving".
+`AGENT_SERVER_ADDR`'s GET `/agent/machines/<name>/next` endpoint
+(`internal/agentserver`) builds each deployment plan's per-partition
+`.torrent` bytes straight from `ImagePartitionStatus.TorrentInfo` -
+carried inline in the Image's own status, not read from a mounted
+store - announcing at `SEEDER_TRACKER_URL` (reused from the seeder
+reconciler's own config, the identical value the agent's leecher and
+the seeder both need to join the same swarm). There is no
+`AGENT_STORE_ROOT` to configure and nothing to mount onto
+`controller-manager` for this. Running the agent server without
+`SEEDER_TRACKER_URL` set still works, but GET `.../next` can then never
+build a plan for an Image with a content partition - it answers `wait`
+forever instead of a plan, which is easy to mistake for "still
+resolving".
+
+## Storage note: this is the legacy shared-store shape
+
+Everything above (`kezio-store`, `SEEDER_STORE_ROOT`) is specific to
+this standalone, shared seeder fleet: it still serves every Ready
+Image straight out of one PVC that accumulates forever, mounted
+`readOnly: true` by every replica - and `readOnly` does not relax the
+PVC's own access mode, so this fleet cannot scale its replica count
+past what a `ReadWriteOnce` volume allows. The per-Image seeder
+Deployment path (one Deployment per Image, created and torn down by
+Machine demand - see `internal/controller/seeder_deployment.go`) does
+not have this ceiling: it mounts only its own Image's partition PVCs,
+created and owned by that Image (`partitionPVCName`), so a production
+deployment sizing for real scale should run that path with an RWX (or
+ROX) StorageClass instead of standing up this fleet at all. This
+kustomization and `INGEST_STORE_PVC` stay supported for deployments
+still running the shared fleet; migrating it to per-partition PVCs is
+a separate piece of work.
 
 ## The no-NAT rule
 

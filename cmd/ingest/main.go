@@ -47,6 +47,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/tjjh89017/kezio/internal/imageservice"
 	"github.com/tjjh89017/kezio/internal/ingest"
@@ -58,11 +60,17 @@ func main() {
 	os.Exit(run())
 }
 
-// run builds Config/Dependencies from the environment, executes the
-// ingest pipeline, and writes the result. It returns the process exit
-// code rather than calling os.Exit itself, so it stays testable in the
-// same package.
+// run dispatches to the main ingest pipeline or the publish step,
+// selected by INGEST_MODE ("publish" opts into the latter; anything
+// else, including unset, runs the former - see internal/ingest.RunPublish's
+// doc comment for why these are separate Jobs). It returns the process
+// exit code rather than calling os.Exit itself, so it stays testable in
+// the same package.
 func run() int {
+	if os.Getenv("INGEST_MODE") == "publish" {
+		return runPublish()
+	}
+
 	cfg, deps, err := buildFromEnv()
 	if err != nil {
 		log.Printf("kezio-ingest: %v", err)
@@ -77,6 +85,61 @@ func run() int {
 		return 1
 	}
 	return 0
+}
+
+// runPublish builds a PublishConfig from the environment and runs the
+// publish step: copying each partition named in PUBLISH_PARTITIONS out
+// of the ingest scratch volume (STORE_ROOT, mounted read-only for this
+// run) into that partition's own destination directory.
+func runPublish() int {
+	cfg, err := publishConfigFromEnv()
+	if err != nil {
+		log.Printf("kezio-ingest publish: %v", err)
+		writeResult(ingest.FailureResult(err))
+		return 1
+	}
+
+	result := ingest.RunPublish(cfg)
+	writeResult(result)
+	if !result.Success {
+		log.Printf("kezio-ingest publish: failed: %s", result.Error)
+		return 1
+	}
+	return 0
+}
+
+// publishConfigFromEnv parses STORE_ROOT and PUBLISH_PARTITIONS (a
+// comma-separated list of "number:infoHash" entries, matching what
+// internal/controller's buildPublishJob writes) into a PublishConfig,
+// deriving each partition's destination directory from its number via
+// ingest.PartitionMountPath - the same convention the Job's volume
+// mounts use, so this needs no separate "where do I write" input.
+func publishConfigFromEnv() (ingest.PublishConfig, error) {
+	scratchRoot := os.Getenv("STORE_ROOT")
+	raw := os.Getenv("PUBLISH_PARTITIONS")
+	if scratchRoot == "" || raw == "" {
+		return ingest.PublishConfig{}, fmt.Errorf(
+			"missing required environment: STORE_ROOT=%q PUBLISH_PARTITIONS=%q", scratchRoot, raw)
+	}
+
+	var partitions []ingest.PublishPartition
+	for _, entry := range strings.Split(raw, ",") {
+		numberStr, hash, ok := strings.Cut(entry, ":")
+		if !ok {
+			return ingest.PublishConfig{}, fmt.Errorf("invalid PUBLISH_PARTITIONS entry %q: want number:infoHash", entry)
+		}
+		number, err := strconv.ParseInt(numberStr, 10, 32)
+		if err != nil {
+			return ingest.PublishConfig{}, fmt.Errorf("invalid PUBLISH_PARTITIONS entry %q: %w", entry, err)
+		}
+		partitions = append(partitions, ingest.PublishPartition{
+			Number:   int32(number),
+			InfoHash: hash,
+			DestDir:  ingest.PartitionMountPath(int32(number)),
+		})
+	}
+
+	return ingest.PublishConfig{ScratchRoot: scratchRoot, Partitions: partitions}, nil
 }
 
 // buildFromEnv reads the environment variables the Image controller sets
