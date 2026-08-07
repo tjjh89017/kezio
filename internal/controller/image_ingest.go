@@ -62,13 +62,11 @@ const ingestPollInterval = 5 * time.Second
 // the WORK_DIR env var this file sets and cmd/ingest's own fallback stay
 // in lockstep even if neither is read.
 //
-// scratchMountPath is deliberately not called a "store" any more: it
-// holds ingest's own working copy of a single Image's content plus the
-// per-Image publish Job's read side (see image_publish.go), never
-// something a seeder or the manager reads - a partition's actual
-// content lives in its own PVC once publishing succeeds (see
-// partitionPVCName), and its torrent.info metadata rides inline on
-// ImagePartitionStatus.
+// scratchMountPath holds ingest's own working copy of a single Image's
+// content plus the per-Image publish Job's read side (see
+// image_publish.go), never something a seeder or the manager reads - a
+// partition's actual content lives in its own PVC once publishing
+// succeeds (see partitionPVCName).
 const (
 	scratchMountPath = "/store"
 	stagingMountPath = "/staging"
@@ -102,12 +100,10 @@ const ingestJobLabel = "kezio.kojuro.date/image"
 // working: Ingesting -> Ready with no Job, no scratch, no staging volume
 // required.
 //
-// There is no shared store volume to configure here any more (compare
-// the single, pre-provisioned INGEST_STORE_PVC this type used to
-// require): the reconciler creates a fresh, per-Image scratch PVC for
-// the ingest Job to write into (see buildIngestScratchPVC) and, once it
-// succeeds, one PVC per partition for the publish Job to copy content
-// into (see partitionPVCName). ScratchStorageClassName and
+// The reconciler creates a fresh, per-Image scratch PVC for the ingest
+// Job to write into (see buildIngestScratchPVC) and, once it succeeds,
+// one PVC per partition for the publish Job to copy content into (see
+// partitionPVCName). ScratchStorageClassName and
 // PartitionStorageClassName pick the StorageClass each of those uses;
 // empty means the cluster/namespace default.
 type IngestConfig struct {
@@ -434,13 +430,9 @@ func (r *ImageReconciler) handleIngestJobSucceeded(ctx context.Context, image *k
 			UsedBytes: p.UsedBytes,
 			UUID:      p.UUID,
 			InfoHash:  p.InfoHash,
-			// TorrentInfo is deliberately left unset here: torrent.info
-			// no longer rides the ingest Job's termination message (see
-			// internal/ingest.ResultPartition), so this reconciler has
-			// no more torrent.info bytes to copy across. The publish Job
-			// now writes a ready-made .torrent alongside each
-			// partition's content in its own PVC instead (see
-			// image_publish.go).
+			// The publish Job writes each partition's .torrent directly
+			// into its own PVC (see image_publish.go); this reconciler
+			// never carries torrent bytes itself.
 		})
 	}
 	image.Status.Partitions = partitions

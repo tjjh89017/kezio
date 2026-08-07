@@ -109,14 +109,12 @@ type SeederDeploymentConfig struct {
 	// it to drive the grace-period countdown without sleeping.
 	Now func() time.Time
 
-	// TrackerURL is inserted as the "announce" field of every .torrent
-	// syncSeederDeploymentContent builds from an Image's own
-	// ImagePartitionStatus.TorrentInfo (no store volume is read here -
-	// a partition's content lives in its own PVC, mounted directly onto
-	// this Deployment's pod - see buildSeederDeployment). Left empty,
-	// Deployments are still created and torn down by their reference
-	// count (see contentEnabled) - only the content-adding half is
-	// skipped.
+	// TrackerURL is passed to the publish Job as TRACKER_URL, the
+	// "announce" field baked into each content partition's .torrent (see
+	// image_publish.go's buildPublishJob). Empty is valid: the publish
+	// step then copies content with no .torrent, and per-site
+	// Deployments are still created and torn down by reference count
+	// alone.
 	TrackerURL string
 	// EzioTuning carries the cluster-wide default AddTorrent tuning
 	// (MaxUploads/MaxConnections) applied to every content torrent
@@ -137,15 +135,12 @@ type SeederDeploymentConfig struct {
 	// address a Machine's leecher can reach directly - no ClusterIP
 	// Service or NAT on the content data path (see
 	// config/seeder/README.md's no-NAT rule). This is safe because
-	// nothing dials into the pod over the cluster network any more:
-	// content registration happens pod-locally (see
-	// buildSeederDeployment's seeder-register container), and the only
-	// inbound traffic this pod ever serves - the BitTorrent swarm and the
-	// per-partition .torrent HTTP endpoint agentserver's DeployPlan
-	// builder points a leecher at - both belong on the provisioning
-	// network, not the cluster one. Empty (the default for every existing
-	// deployment and the envtest suite) omits the annotation, leaving the
-	// pod on the ordinary cluster network.
+	// nothing dials into the pod over the cluster network: content
+	// registration happens pod-locally (buildSeederDeployment's
+	// seeder-register container), and the only inbound traffic this pod
+	// serves - the BitTorrent swarm and the per-partition .torrent HTTP
+	// endpoint - belongs on the provisioning network too. Empty omits
+	// the annotation, leaving the pod on the ordinary cluster network.
 	Network string
 }
 
@@ -419,25 +414,18 @@ func seederStatusEqual(a, b []keziov1alpha1.ImageSeederSiteStatus) bool {
 	return true
 }
 
-// Content registration deliberately has no counterpart here. A
-// partition's .torrent lives in that partition's PVC, and only the
-// seeder pod mounts it, so the pod registers its own content with the
-// ezio container beside it (cmd/seeder, wired as buildSeederDeployment's
-// seeder-register container). This reconciler owns which Deployments
-// exist, not what each one seeds.
-
 // buildSeederDeployment constructs the (not yet created) per-Image,
 // per-site seeder Deployment, owner-ref'd to image so it is garbage
 // collected the moment the Image itself is deleted (the whole
 // Deployment(Image, site) lifecycle's final step is ordinary garbage
-// collection, not code in this reconciler).
+// collection, not code in this reconciler). Content registration has no
+// counterpart here: a partition's .torrent lives in that partition's
+// PVC, and only the seeder pod mounts it, so the pod registers its own
+// content with the ezio container beside it (the seeder-register
+// container below) rather than this reconciler pushing it in.
 //
-// The pod template deliberately mirrors
-// config/seeder/ezio-seeder-deployment.yaml's shape (env, ports,
-// security context, the read-only store mount): this slice is lifecycle
-// only, replacing *how many* Deployments exist and *when*, not the
-// network attachment or storage model those pods use - both stay future
-// work.
+// The pod template mirrors config/seeder/ezio-seeder-deployment.yaml's
+// shape (env, ports, security context, the read-only store mount).
 func (r *ImageReconciler) buildSeederDeployment(image *keziov1alpha1.Image, site string) (*appsv1.Deployment, error) {
 	replicas := int32(1)
 	labels := map[string]string{
@@ -448,8 +436,7 @@ func (r *ImageReconciler) buildSeederDeployment(image *keziov1alpha1.Image, site
 
 	// One volume/mount per content partition, read-only: this
 	// Deployment's whole storage need is exactly the partitions its own
-	// Image owns, so it never mounts anything wider than that (compare
-	// the single shared store volume every seeder used to mount).
+	// Image owns, so it never mounts anything wider than that.
 	var volumes []corev1.Volume
 	var mounts []corev1.VolumeMount
 	for _, p := range image.Status.Partitions {
@@ -507,12 +494,9 @@ func (r *ImageReconciler) buildSeederDeployment(image *keziov1alpha1.Image, site
 						},
 						VolumeMounts: mounts,
 					}, {
-						// Registers this pod's own content with the ezio
-						// container beside it. It has to run here: a
-						// partition's .torrent lives in that partition's
-						// PVC, which only this pod mounts, so no reconciler
-						// outside the pod can read it. Same image as ezio
-						// (both ship in it), different command.
+						// Same image as ezio (both ship in it), different
+						// command; see buildSeederDeployment's doc comment
+						// for why registration runs here.
 						Name:    "seeder-register",
 						Image:   r.SeederDeployment.Image,
 						Command: []string{"/usr/local/bin/kezio-seeder-register"},

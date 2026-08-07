@@ -54,24 +54,17 @@ const (
 	reasonDeprovisionFailed = "DeprovisionFailed"
 )
 
-// inspectingStuckThreshold is how long a machine may sit in Inspecting,
-// waiting for kezio-agent to register, before reconcileInspecting gives up
-// and reports it as failed (see pollInspecting). It is comfortably longer
-// than agentInspectPollInterval's few-second poll cadence, so a machine
-// still legitimately booting the live environment over the network is
-// never mistaken for stuck.
+// inspectingStuckThreshold is how long a machine may sit in Inspecting
+// before reconcileInspecting reports it as failed (see pollInspecting).
+// It is comfortably longer than the poll cadence, so a machine still
+// legitimately net-booting is never mistaken for stuck.
 //
-// pollInspecting deliberately does not try to recover the machine itself
-// (for example, by forcing a BMC power-cycle) once this threshold trips:
-// nothing observable at this layer can tell "the live environment never
-// booted" apart from "kezio-agent is alive and working but has not
-// finished collecting inventory yet", so an automatic, unconditional power
-// action is as likely to interrupt real progress as to fix a genuinely
-// stuck machine - and can then repeat forever, since destroying the
-// machine's progress makes it no more likely to register the second time
-// than the first. Reporting the failure and stopping is the safer
-// default; a human who can see what is actually happening on the machine
-// decides whether a power-cycle is the right recovery.
+// No automatic recovery (for example a BMC power-cycle) is attempted
+// once this trips: nothing observable at this layer distinguishes "the
+// live environment never booted" from "kezio-agent is still working", so
+// an unconditional power action could interrupt real progress and repeat
+// forever. Reporting the failure and stopping is the safer default; a
+// human decides whether a power-cycle is the right recovery.
 const inspectingStuckThreshold = 10 * time.Minute
 
 // MachineReconciler reconciles a Machine object
@@ -167,22 +160,15 @@ func (r *MachineReconciler) reconcileEnrolling(ctx context.Context, machine *kez
 		return ctrl.Result{RequeueAfter: result.RequeueAfter}, nil
 	}
 
-	// The BMC-backed Register (internal/deployer/agent.go) fetches and
-	// writes the Machine's status through its own, separate Get/Update -
-	// clearing stale registration state before arming the BMC's one-time
-	// PXE boot - so the copy this reconcile started with is stale by the
-	// time Register returns success: its resourceVersion no longer
-	// matches what Register itself just wrote. Advancing straight from
-	// that stale copy would make advance's Status().Update conflict, and
-	// a conflict here is not a benign, safe-to-retry failure: the
-	// automatic requeue it triggers re-enters reconcileEnrolling (the
-	// Machine never left Enrolling) and calls Register again, re-arming
-	// the BMC's one-time PXE override and re-issuing its power command
-	// against a machine that is already mid-boot from the first call -
-	// exactly what let a single Enrolling pass re-arm PXE and reset a
-	// VM already netbooting from it. Re-fetching before advancing picks
-	// up Register's own write instead of racing it, so a successful
-	// Register is only ever acted on once per Machine generation.
+	// Register (internal/deployer/agent.go) writes Machine status itself,
+	// through a separate Get/Update, so this reconcile's copy is stale by
+	// the time Register returns: advancing from it would conflict on
+	// Status().Update, and the resulting requeue would re-enter
+	// reconcileEnrolling and call Register again, re-arming the BMC's
+	// one-time PXE boot against a machine already mid-boot from the
+	// first call. Re-fetching first avoids racing Register's own write,
+	// so a successful Register is only ever acted on once per Machine
+	// generation.
 	if err := r.Get(ctx, client.ObjectKeyFromObject(machine), machine); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -216,30 +202,18 @@ func (r *MachineReconciler) reconcileInspecting(ctx context.Context, machine *ke
 }
 
 // pollInspecting requeues an in-progress inspection after requeueAfter,
-// unless the machine has now spent longer than inspectingStuckThreshold
-// waiting for kezio-agent to register (status.inspectingSince, set when
-// the machine entered Inspecting - see reconcileEnrolling), in which case
-// it reports the failure through recordPhaseError instead of continuing to
-// wait silently. See inspectingStuckThreshold's doc comment for why this
-// deliberately takes no automatic recovery action (such as a BMC
-// power-cycle).
+// unless the machine has spent longer than inspectingStuckThreshold
+// waiting for kezio-agent to register (status.inspectingSince, set in
+// reconcileEnrolling), in which case it reports the failure through
+// recordPhaseError. See inspectingStuckThreshold's doc comment for why
+// no automatic recovery is attempted.
 //
-// Reporting the failure also restarts status.inspectingSince's clock (set
-// to now, in the same status update recordPhaseError persists): the
-// Error transition below triggers an immediate re-reconcile (the status
-// update itself is a change to a watched object), and reconcileError's
-// retry for reasonInspectFailed resumes straight back into
-// reconcileInspecting. Leaving inspectingSince at its already-elapsed
-// value would make that immediate retry - and every reconcile after it,
-// since nothing else ever advances inspectingSince - observe the same
-// stale timestamp and re-trip this branch instantly again, recording a
-// new error (and triggering the next immediate re-reconcile) on every
-// single reconcile instead of once per inspectingStuckThreshold window.
-// Restarting the clock here means the next report is at least one full
-// inspectingStuckThreshold away, while still surfacing the failure
-// repeatedly for as long as the machine genuinely never registers - the
-// operator (or reconcileError's retry) still sees exactly how long the
-// current stuck window has run.
+// Reporting the failure also restarts inspectingSince to now: the Error
+// transition triggers an immediate re-reconcile straight back into
+// reconcileInspecting (via reconcileError), and without resetting the
+// clock that retry - and every one after it - would see the same
+// already-elapsed timestamp and re-trip this branch on every single
+// reconcile instead of once per inspectingStuckThreshold window.
 func (r *MachineReconciler) pollInspecting(ctx context.Context, machine *keziov1alpha1.Machine, requeueAfter time.Duration) (ctrl.Result, error) {
 	since := machine.Status.InspectingSince
 	if since == nil || time.Since(since.Time) < inspectingStuckThreshold {
@@ -272,21 +246,17 @@ func (r *MachineReconciler) reconcileAvailable(ctx context.Context, machine *kez
 //
 // Reboot handoff: AfterDeploy only applies when the deployment carries no
 // OS image (see EffectiveAfterDeploy's doc comment) - a deployment that
-// does carry one always reboots into it, and that reboot is the agent's
-// own doing (a self-issued "systemctl reboot" once it finishes writing
-// content), never anything this method drives. For the no-OS-image case,
-// both AfterDeployReboot and AfterDeployPowerOff are handled here,
-// through dep.PowerCycle and dep.PowerOff respectively - the same
-// Deployer methods reconcilePower calls for steady-state power matching.
-// When the Machine has a BMC configured, each call is BMC-driven (a
-// forced reset for PowerCycle, a graceful shutdown for PowerOff, the BMC
-// equivalent of "systemctl reboot"/"systemctl poweroff"); without one
-// each is the documented no-op on agentDeployer, so AfterDeployReboot
-// falls back to the agent's own reboot (the pre-BMC behavior) and
-// AfterDeployPowerOff is deliberately left to an operator or a future
-// agent-driven poweroff rather than this method guessing at one. Either
-// way, this call never races the agent's own reboot: it only ever fires
-// for the no-OS-image path the agent's reboot does not touch.
+// does carry one always reboots into it via the agent's own
+// "systemctl reboot", never through this method. For the no-OS-image
+// case, AfterDeployReboot/AfterDeployPowerOff are handled here through
+// dep.PowerCycle/dep.PowerOff, the same Deployer methods reconcilePower
+// uses: BMC-driven (forced reset / graceful shutdown) when the Machine
+// has one configured, a documented no-op on agentDeployer otherwise - in
+// which case AfterDeployReboot falls back to the agent's own reboot and
+// AfterDeployPowerOff is left to an operator or a future agent-driven
+// poweroff rather than guessed at here. Either way this never races the
+// agent's own reboot, since it only fires for the no-OS-image path that
+// reboot never touches.
 func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *keziov1alpha1.Machine, dep deployer.Deployer) (ctrl.Result, error) {
 	if message, err := r.checkReferencedImagesFailed(ctx, machine); err != nil {
 		return ctrl.Result{}, err
@@ -456,21 +426,19 @@ func (r *MachineReconciler) reconcilePower(ctx context.Context, machine *keziov1
 		return ctrl.Result{}, err
 	}
 
-	// A BMC power command can succeed while the machine has not actually
-	// reached the desired state yet: PowerOff requests a graceful,
-	// orderly shutdown (see internal/bmc/redfish's PowerOff doc comment)
-	// that can take much longer than the read-back this same call just
-	// took, and PowerOn can equally race a BMC that has not yet reported
-	// the machine on. Recording that honest, still-mismatched observation
-	// (applyObservedPower above) is correct, but leaving it there without
-	// a retry is not: the next reconcile only runs on the next spec or
-	// status change, and status.poweredOn's mismatched value would then
-	// wrongly look like a *confirmed* state to compare a later spec.online
-	// flip against - exactly the trap that let a stale "still on" reading
-	// after a graceful PowerOff cause a subsequent PowerOn to be skipped
-	// as a no-op. Requeuing here instead keeps polling GetPowerState (via
-	// this same idempotent PowerOn/PowerOff call - see bmc.BMC's doc
-	// comment) until the observation actually agrees with desired.
+	// A BMC power command can succeed before the machine actually reaches
+	// the desired state: PowerOff requests a graceful, orderly shutdown
+	// (see internal/bmc/redfish's PowerOff doc comment) that can take
+	// much longer than this read-back, and PowerOn can equally race a
+	// BMC that has not yet reported the machine on. Recording that
+	// mismatched observation (applyObservedPower above) without a retry
+	// would let it sit as status.poweredOn until the next unrelated
+	// change, where it would wrongly look like a *confirmed* state to
+	// compare a later spec.online flip against - the trap that let a
+	// stale "still on" reading after a graceful PowerOff cause a
+	// subsequent PowerOn to be skipped as a no-op. Requeuing here instead
+	// keeps polling GetPowerState (via this same idempotent
+	// PowerOn/PowerOff call) until the observation agrees with desired.
 	if result.PoweredOn != nil && *result.PoweredOn != desired {
 		log.Info("BMC power command accepted but machine has not reached the desired state yet, retrying",
 			"machine", machine.Name, "desiredOnline", desired, "observedPoweredOn", *result.PoweredOn)
@@ -487,9 +455,7 @@ func (r *MachineReconciler) reconcilePower(ctx context.Context, machine *keziov1
 // actually read it back from the BMC (see deployer.Result.PoweredOn's
 // doc comment), or desired - the commanded state - when it did not. The
 // latter is the no-BMC fallback, where nothing observes the machine's
-// real state and the commanded state is the best available answer; it is
-// also what every caller of this function did before status.poweredOn
-// reflected an actual BMC observation.
+// real state and the commanded state is the best available answer.
 func applyObservedPower(machine *keziov1alpha1.Machine, result deployer.Result, desired bool) {
 	if result.PoweredOn != nil {
 		machine.Status.PoweredOn = result.PoweredOn
