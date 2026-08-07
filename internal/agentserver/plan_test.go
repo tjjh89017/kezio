@@ -17,10 +17,11 @@ limitations under the License.
 package agentserver
 
 import (
-	"bytes"
 	"context"
+	"fmt"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -29,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
+	"github.com/tjjh89017/kezio/internal/seederdeploy"
 	"github.com/tjjh89017/kezio/internal/store"
 )
 
@@ -53,12 +55,13 @@ func newPlanTestClient(t *testing.T, objs ...client.Object) client.Client {
 		Build()
 }
 
-// fixtureTorrentInfo builds a minimal, valid torrent.info and returns its
-// raw bytes alongside its info hash - the shape
-// ImagePartitionStatus.TorrentInfo carries inline in status now that a
-// partition's content lives in its own PVC rather than a shared store
-// this server would have to mount.
-func fixtureTorrentInfo(t *testing.T) (raw []byte, hash store.InfoHash) {
+// fixtureTorrentInfo mints a well-formed info hash the way a real
+// ingest would derive one from a partition's torrent.info, so tests get
+// a realistic InfoHash string without needing torrent.info bytes
+// themselves - a partition's content (and its .torrent) lives in its own
+// PVC now, never inline in status (see ImagePartitionStatus.InfoHash's
+// doc comment), so nothing here needs to produce or carry that file.
+func fixtureTorrentInfo(t *testing.T) store.InfoHash {
 	t.Helper()
 
 	info := &store.TorrentInfo{
@@ -71,12 +74,7 @@ func fixtureTorrentInfo(t *testing.T) (raw []byte, hash store.InfoHash) {
 	if err != nil {
 		t.Fatalf("ComputeInfoHash: %v", err)
 	}
-
-	var buf bytes.Buffer
-	if err := store.WriteTorrentInfo(&buf, info); err != nil {
-		t.Fatalf("WriteTorrentInfo: %v", err)
-	}
-	return buf.Bytes(), hash
+	return hash
 }
 
 // readyImage builds a Ready Image object named name, with a layout
@@ -106,15 +104,51 @@ func readyImage(name, sfdiskJSON string, partitions []keziov1alpha1.ImagePartiti
 	return image, cm
 }
 
+// testSeederPodIP is the fixture PodIP seederPodFixture's pod carries -
+// buildPlanPartition builds a content partition's TorrentURL straight
+// from this, so every test that expects a resolved URL checks against
+// it (see expectedTorrentURL).
+const testSeederPodIP = "10.0.0.5"
+
+// seederPodFixture builds the per-Image, per-site seeder Deployment and
+// one Ready pod behind it that buildPlanPartition needs to resolve a
+// content partition's TorrentURL: the Deployment named exactly as
+// internal/controller's own reconciler would name it
+// (seederdeploy.Name), carrying a pod selector, and a pod matching that
+// selector with PodIP set. site "" matches every fixture Machine's
+// default (empty) spec.networkSite unless a test overrides it.
+func seederPodFixture(ns, imageName, site string) (*appsv1.Deployment, *corev1.Pod) {
+	labels := map[string]string{"app": imageName + "-seeder"}
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: seederdeploy.Name(imageName, site), Namespace: ns},
+		Spec: appsv1.DeploymentSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: labels},
+			Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: labels}},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: imageName + "-seeder-pod", Namespace: ns, Labels: labels},
+		Status:     corev1.PodStatus{PodIP: testSeederPodIP},
+	}
+	return dep, pod
+}
+
+// expectedTorrentURL is the URL buildPlanPartition should resolve hash
+// to, given a seederPodFixture-shaped pod at testSeederPodIP.
+func expectedTorrentURL(hash string) string {
+	return fmt.Sprintf("http://%s:8080/torrents/%s", testSeederPodIP, hash)
+}
+
 func TestBuildDeployPlan_OSImageWithContentSwapAndBlankPartitions(t *testing.T) {
-	torrentInfoBytes, hash := fixtureTorrentInfo(t)
+	hash := fixtureTorrentInfo(t)
 
 	partitions := []keziov1alpha1.ImagePartitionStatus{
-		{Number: 1, Role: keziov1alpha1.PartitionRoleESP, FSType: "vfat", InfoHash: hash.String(), TorrentInfo: torrentInfoBytes},
+		{Number: 1, Role: keziov1alpha1.PartitionRoleESP, FSType: "vfat", InfoHash: hash.String()},
 		{Number: 2, Role: keziov1alpha1.PartitionRoleSwap, UUID: "11111111-1111-1111-1111-111111111111"},
 		{Number: 3, Role: keziov1alpha1.PartitionRoleData, FSType: "ext4"}, // blank: no infoHash, no uuid
 	}
 	image, cm := readyImage("os-image", `{"partitiontable":{"label":"gpt"}}`, partitions)
+	seederDep, seederPod := seederPodFixture("default", "os-image", "")
 
 	ezio := &keziov1alpha1.MachineEzioTuning{CacheSizeMB: int32Ptr(256)}
 	machine := &keziov1alpha1.Machine{
@@ -135,7 +169,7 @@ func TestBuildDeployPlan_OSImageWithContentSwapAndBlankPartitions(t *testing.T) 
 		},
 	}
 
-	c := newPlanTestClient(t, image, cm, machine)
+	c := newPlanTestClient(t, image, cm, machine, seederDep, seederPod)
 	cfg := Config{TrackerURL: testTrackerURL}
 
 	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
@@ -175,8 +209,8 @@ func TestBuildDeployPlan_OSImageWithContentSwapAndBlankPartitions(t *testing.T) 
 	if esp.InfoHash != hash.String() {
 		t.Errorf("esp.InfoHash = %q, want %q", esp.InfoHash, hash.String())
 	}
-	if len(esp.Torrent) == 0 {
-		t.Error("esp.Torrent is empty; want built .torrent bytes")
+	if want := expectedTorrentURL(hash.String()); esp.TorrentURL != want {
+		t.Errorf("esp.TorrentURL = %q, want %q", esp.TorrentURL, want)
 	}
 	if esp.SwapUUID != "" {
 		t.Errorf("esp.SwapUUID = %q, want empty for a content partition", esp.SwapUUID)
@@ -186,8 +220,8 @@ func TestBuildDeployPlan_OSImageWithContentSwapAndBlankPartitions(t *testing.T) 
 	if swap.SwapUUID != "11111111-1111-1111-1111-111111111111" {
 		t.Errorf("swap.SwapUUID = %q", swap.SwapUUID)
 	}
-	if swap.InfoHash != "" || len(swap.Torrent) != 0 {
-		t.Errorf("swap partition carries content fields: infoHash=%q torrent=%d bytes", swap.InfoHash, len(swap.Torrent))
+	if swap.InfoHash != "" || swap.TorrentURL != "" {
+		t.Errorf("swap partition carries content fields: infoHash=%q torrentURL=%q", swap.InfoHash, swap.TorrentURL)
 	}
 	if swap.Device != "/dev/nvme0n1p2" {
 		t.Errorf("swap.Device = %q, want /dev/nvme0n1p2", swap.Device)
@@ -410,14 +444,15 @@ func TestBuildDeployPlan_MissingLayoutConfigMapIsAnError(t *testing.T) {
 }
 
 func TestBuildDeployPlan_ImageRefResolvesToRefNamespaceNotMachineNamespace(t *testing.T) {
-	torrentInfoBytes, hash := fixtureTorrentInfo(t)
+	hash := fixtureTorrentInfo(t)
 
 	partitions := []keziov1alpha1.ImagePartitionStatus{
-		{Number: 1, Role: keziov1alpha1.PartitionRoleESP, FSType: "vfat", InfoHash: hash.String(), TorrentInfo: torrentInfoBytes},
+		{Number: 1, Role: keziov1alpha1.PartitionRoleESP, FSType: "vfat", InfoHash: hash.String()},
 	}
 	image, cm := readyImage("os-image", `{"partitiontable":{"label":"gpt"}}`, partitions)
 	image.Namespace = "images-ns"
 	cm.Namespace = "images-ns"
+	seederDep, seederPod := seederPodFixture("images-ns", "os-image", "")
 
 	machine := &keziov1alpha1.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-01", Namespace: "default"},
@@ -435,7 +470,7 @@ func TestBuildDeployPlan_ImageRefResolvesToRefNamespaceNotMachineNamespace(t *te
 		},
 	}
 
-	c := newPlanTestClient(t, image, cm, machine)
+	c := newPlanTestClient(t, image, cm, machine, seederDep, seederPod)
 	cfg := Config{TrackerURL: testTrackerURL}
 
 	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
@@ -456,12 +491,14 @@ func TestBuildDeployPlan_ImageRefResolvesToRefNamespaceNotMachineNamespace(t *te
 	}
 }
 
-func TestBuildDeployPlan_MissingStoreContentForRecordedInfoHashIsAnError(t *testing.T) {
-	// InfoHash is well-formed but TorrentInfo was never populated
-	// alongside it (a status write that dropped the field, or an older
-	// object predating this field), so buildPartitionTorrent's
-	// ParseTorrentInfoBytes call must fail on the empty input.
-	_, hash := fixtureTorrentInfo(t) // only used to mint a well-formed InfoHash
+// TestBuildDeployPlan_NoSeederDeploymentForInfoHashIsAnError checks that
+// a content partition fails plan building loudly when no per-Image
+// seeder Deployment exists yet for the Machine's site: buildPlanPartition
+// must never emit a content partition with an empty TorrentURL (see
+// agentapi.PlanPartition.TorrentURL's doc comment), since that would
+// classify as BLANK on the agent side and mkfs over real content.
+func TestBuildDeployPlan_NoSeederDeploymentForInfoHashIsAnError(t *testing.T) {
+	hash := fixtureTorrentInfo(t) // only used to mint a well-formed InfoHash
 
 	partitions := []keziov1alpha1.ImagePartitionStatus{
 		{Number: 1, Role: keziov1alpha1.PartitionRoleESP, FSType: "vfat", InfoHash: hash.String()},
@@ -482,12 +519,55 @@ func TestBuildDeployPlan_MissingStoreContentForRecordedInfoHashIsAnError(t *test
 		},
 	}
 
+	// Deliberately no seeder Deployment or pod seeded into the client:
+	// this is the "not ready yet" state a fresh Image, or a seeder
+	// Deployment still starting, leaves buildPlanPartition in.
 	c := newPlanTestClient(t, image, cm, machine)
 	cfg := Config{TrackerURL: testTrackerURL}
 
 	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
 	if err == nil {
-		t.Fatal("buildDeployPlan: want an error for a recorded InfoHash whose content was never written to the store")
+		t.Fatal("buildDeployPlan: want an error when no seeder deployment exists yet for this site")
+	}
+	if plan != nil {
+		t.Fatalf("plan = %+v, want nil alongside the error", plan)
+	}
+}
+
+// TestBuildDeployPlan_NoReadySeederPodForInfoHashIsAnError is the other
+// half of the same guard: a seeder Deployment exists for the site, but
+// none of its pods has reported a PodIP yet.
+func TestBuildDeployPlan_NoReadySeederPodForInfoHashIsAnError(t *testing.T) {
+	hash := fixtureTorrentInfo(t)
+
+	partitions := []keziov1alpha1.ImagePartitionStatus{
+		{Number: 1, Role: keziov1alpha1.PartitionRoleESP, FSType: "vfat", InfoHash: hash.String()},
+	}
+	image, cm := readyImage("os-image", `{"partitiontable":{"label":"gpt"}}`, partitions)
+
+	machine := &keziov1alpha1.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-01", Namespace: "default"},
+		Spec:       keziov1alpha1.MachineSpec{ImageRef: &keziov1alpha1.NameRef{Name: "os-image"}},
+		Status: keziov1alpha1.MachineStatus{
+			State: keziov1alpha1.MachineStateProvisioning,
+			Provisioning: &keziov1alpha1.MachineProvisioningStatus{
+				Image: &keziov1alpha1.MachineProvisionedImage{
+					ImageRef:   keziov1alpha1.NameRef{Name: "os-image"},
+					TargetDisk: "/dev/nvme0n1",
+				},
+			},
+		},
+	}
+
+	seederDep, seederPod := seederPodFixture("default", "os-image", "")
+	seederPod.Status.PodIP = "" // not Ready yet
+
+	c := newPlanTestClient(t, image, cm, machine, seederDep, seederPod)
+	cfg := Config{TrackerURL: testTrackerURL}
+
+	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
+	if err == nil {
+		t.Fatal("buildDeployPlan: want an error when the seeder deployment has no pod with a PodIP yet")
 	}
 	if plan != nil {
 		t.Fatalf("plan = %+v, want nil alongside the error", plan)

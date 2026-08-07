@@ -233,24 +233,18 @@ type ImagePartitionStatus struct {
 	// +optional
 	UUID string `json:"uuid,omitempty"`
 	// InfoHash is the BitTorrent v1 info hash of this partition's content,
-	// present once ingest has produced torrent metadata for it.
+	// present once ingest has produced torrent metadata for it. Its
+	// .torrent file lives alongside the content itself in this
+	// partition's own PVC (see internal/controller/image_publish.go),
+	// never in status: torrent.info scales with piece count, and status
+	// carrying it either inline or as the ingest Job's termination
+	// message (which is capped at 4KiB) silently failed to parse for an
+	// Image with enough partitions (see internal/ingest.ResultPartition).
+	// A deploy plan resolves this to a fetchable URL at plan-build time
+	// instead (see internal/agentserver's buildPlanPartition and
+	// agentapi.PlanPartition.TorrentURL).
 	// +optional
 	InfoHash string `json:"infoHash,omitempty"`
-	// TorrentInfo is the raw bytes of this partition's canonical
-	// "torrent.info" (see internal/store.TorrentInfo). Ingest no longer
-	// populates this: torrent.info used to ride the ingest Job's
-	// termination message, but that message is capped at 4KiB and
-	// torrent.info scales with piece count, so an Image with enough
-	// partitions silently failed to parse (see
-	// internal/ingest.ResultPartition). Content now carries its own
-	// ready-made .torrent alongside it in its per-partition PVC instead
-	// (see internal/controller/image_publish.go), so this field is kept
-	// only for existing consumers that read it directly from status
-	// (internal/agentserver's DeployPlan builder) until they are moved
-	// onto that same PVC-based path; a partition with a recorded
-	// InfoHash may still have this empty.
-	// +optional
-	TorrentInfo []byte `json:"torrentInfo,omitempty"`
 }
 
 // ImageSeederSiteStatus records how many Machines at Site currently hold

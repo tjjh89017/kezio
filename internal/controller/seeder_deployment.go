@@ -18,8 +18,6 @@ package controller
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"sort"
 	"strconv"
@@ -36,6 +34,7 @@ import (
 	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
 	"github.com/tjjh89017/kezio/internal/ingest"
 	"github.com/tjjh89017/kezio/internal/seeder"
+	"github.com/tjjh89017/kezio/internal/seederdeploy"
 )
 
 // seederBTPort is the fixed BitTorrent listen port every per-Image
@@ -46,26 +45,32 @@ import (
 // this is later wired to an announced address.
 const seederBTPort int32 = 16881
 
+// multusDefaultNetworkAnnotation is the Multus CNI pod annotation that
+// replaces a pod's default network attachment (as opposed to
+// k8s.v1.cni.cncf.io/networks, which only adds one) - see
+// SeederDeploymentConfig.Network's doc comment.
+const multusDefaultNetworkAnnotation = "v1.multus-cni.io/default-network"
+
 // defaultSeederGracePeriod is how long a per-Image, per-site seeder
 // Deployment is kept after its reference count reaches zero, in case a
 // sequential deploy queue drives the count straight back up. See
 // SeederDeploymentConfig.gracePeriod.
 const defaultSeederGracePeriod = 5 * time.Minute
 
-// seederDeploymentImageLabel names the Image (by name, within the
+// SeederDeploymentImageLabel names the Image (by name, within the
 // Deployment's own namespace) a per-Image seeder Deployment was created
 // for, so reconcileSeederDeployments can list every Deployment it owns
 // for a given Image with a single label selector.
-const seederDeploymentImageLabel = "kezio.kojuro.date/seeder-image"
+const SeederDeploymentImageLabel = "kezio.kojuro.date/seeder-image"
 
-// seederDeploymentSiteAnnotation records the site (Machine
+// SeederDeploymentSiteAnnotation records the site (Machine
 // spec.networkSite value) a per-Image seeder Deployment serves. This is
 // an annotation, not a label: networkSite is free-form operator text
 // with no guarantee of fitting Kubernetes' label-value syntax (unlike an
 // Image name, which is already a valid object name and therefore a
 // valid label value - see ingestJobLabel's use of it directly),
 // including the empty string itself being a valid, distinct site.
-const seederDeploymentSiteAnnotation = "kezio.kojuro.date/seeder-site"
+const SeederDeploymentSiteAnnotation = "kezio.kojuro.date/seeder-site"
 
 // seederDeploymentEmptySinceAnnotation records (RFC3339) when a per-Image
 // seeder Deployment's site last dropped out of the demand set. Its
@@ -76,18 +81,6 @@ const seederDeploymentSiteAnnotation = "kezio.kojuro.date/seeder-site"
 // Image status, so it needs no reconciliation of its own to stay
 // consistent - it lives and dies with the object it describes.
 const seederDeploymentEmptySinceAnnotation = "kezio.kojuro.date/seeder-empty-since"
-
-// maxSeederDeploymentNameLength is the Kubernetes Deployment name limit:
-// a ReplicaSet name adds a hash suffix and a Pod name adds a further
-// one on top of that, so (as with ingestJobName's Job name) the
-// Deployment name itself is kept well inside the 63-character DNS-1035
-// label limit those generated names must also satisfy.
-const maxSeederDeploymentNameLength = 63
-
-// seederDeploymentNamePrefix identifies a Deployment as a per-Image
-// seeder this controller manages, at a glance in `kubectl get
-// deployments`.
-const seederDeploymentNamePrefix = "kezio-seeder-"
 
 // SeederDeploymentConfig configures how the Image reconciler creates and
 // removes per-Image, per-site seeder Deployments. Its zero value (Image
@@ -123,6 +116,24 @@ type SeederDeploymentConfig struct {
 	// override it to hand back a fake, the same shape SeederConfig.Dial
 	// uses.
 	Dial func(target string) (SeederEZIOClient, error)
+	// Network, when non-empty, names a Multus NetworkAttachmentDefinition
+	// installed on the pod template as the multusDefaultNetworkAnnotation
+	// value, which *replaces* (not adds to) the seeder pod's default
+	// network attachment: the pod becomes single-homed on that
+	// provisioning network, so pod.Status.PodIP is, by construction, the
+	// address a Machine's leecher can reach directly - no ClusterIP
+	// Service or NAT on the content data path (see
+	// config/seeder/README.md's no-NAT rule). This is safe because
+	// nothing dials into the pod over the cluster network any more:
+	// content registration happens pod-locally (see
+	// buildSeederDeployment's seeder-register container), and the only
+	// inbound traffic this pod ever serves - the BitTorrent swarm and the
+	// per-partition .torrent HTTP endpoint agentserver's DeployPlan
+	// builder points a leecher at - both belong on the provisioning
+	// network, not the cluster one. Empty (the default for every existing
+	// deployment and the envtest suite) omits the annotation, leaving the
+	// pod on the ordinary cluster network.
+	Network string
 }
 
 // enabled reports whether per-Image seeder Deployments are configured.
@@ -232,14 +243,14 @@ func (r *ImageReconciler) reconcileSeederDeployments(ctx context.Context, image 
 	existing := &appsv1.DeploymentList{}
 	if err := r.List(ctx, existing,
 		client.InNamespace(image.Namespace),
-		client.MatchingLabels{seederDeploymentImageLabel: image.Name},
+		client.MatchingLabels{SeederDeploymentImageLabel: image.Name},
 	); err != nil {
 		return ctrl.Result{}, fmt.Errorf("list seeder deployments: %w", err)
 	}
 	existingBySite := make(map[string]*appsv1.Deployment, len(existing.Items))
 	for i := range existing.Items {
 		dep := &existing.Items[i]
-		existingBySite[dep.Annotations[seederDeploymentSiteAnnotation]] = dep
+		existingBySite[dep.Annotations[SeederDeploymentSiteAnnotation]] = dep
 	}
 
 	sites := make(map[string]int32, len(demand))
@@ -418,8 +429,8 @@ func (r *ImageReconciler) buildSeederDeployment(image *keziov1alpha1.Image, site
 	replicas := int32(1)
 	labels := map[string]string{
 		"app.kubernetes.io/name":   "kezio",
-		appComponentLabel:          "ezio-seeder",
-		seederDeploymentImageLabel: image.Name,
+		AppComponentLabel:          SeederComponentValue,
+		SeederDeploymentImageLabel: image.Name,
 	}
 
 	// One volume/mount per content partition, read-only: this
@@ -446,16 +457,16 @@ func (r *ImageReconciler) buildSeederDeployment(image *keziov1alpha1.Image, site
 	falseVal := false
 	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        seederDeploymentName(image.Name, site),
+			Name:        seederdeploy.Name(image.Name, site),
 			Namespace:   image.Namespace,
 			Labels:      labels,
-			Annotations: map[string]string{seederDeploymentSiteAnnotation: site},
+			Annotations: map[string]string{SeederDeploymentSiteAnnotation: site},
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: seederPodAnnotations(r.SeederDeployment.Network)},
 				Spec: corev1.PodSpec{
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: &trueVal,
@@ -498,6 +509,9 @@ func (r *ImageReconciler) buildSeederDeployment(image *keziov1alpha1.Image, site
 							{Name: "EZIO_MAX_UPLOADS", Value: strconv.Itoa(int(seeder.ResolveMaxUploads(r.SeederDeployment.EzioTuning)))},
 							{Name: "EZIO_MAX_CONNECTIONS", Value: strconv.Itoa(int(seeder.ResolveMaxConnections(r.SeederDeployment.EzioTuning)))},
 						},
+						Ports: []corev1.ContainerPort{
+							{Name: "torrent", ContainerPort: seederdeploy.TorrentHTTPPort, Protocol: corev1.ProtocolTCP},
+						},
 						SecurityContext: &corev1.SecurityContext{
 							AllowPrivilegeEscalation: &falseVal,
 							ReadOnlyRootFilesystem:   &trueVal,
@@ -519,20 +533,14 @@ func (r *ImageReconciler) buildSeederDeployment(image *keziov1alpha1.Image, site
 	return dep, nil
 }
 
-// seederDeploymentName returns the deterministic Deployment name for
-// imageName's seeder at site. Deterministic so reconcileSeederDeployments
-// stays idempotent, and always hash-suffixed (unlike ingestJobName,
-// which only adds one when truncation is needed) because two different
-// sites of the same Image must never collide on one name.
-func seederDeploymentName(imageName, site string) string {
-	sum := sha256.Sum256([]byte(imageName + "\x00" + site))
-	suffix := "-" + hex.EncodeToString(sum[:])[:8]
-
-	name := seederDeploymentNamePrefix + imageName + suffix
-	if len(name) <= maxSeederDeploymentNameLength {
-		return name
+// seederPodAnnotations returns the pod template annotations for a
+// per-Image seeder Deployment: the Multus default-network override when
+// network is set (see SeederDeploymentConfig.Network's doc comment), or
+// nil when it is empty - the same "no annotation" shape every existing
+// deployment and the envtest suite already exercise.
+func seederPodAnnotations(network string) map[string]string {
+	if network == "" {
+		return nil
 	}
-
-	maxBaseLen := maxSeederDeploymentNameLength - len(seederDeploymentNamePrefix) - len(suffix)
-	return seederDeploymentNamePrefix + imageName[:maxBaseLen] + suffix
+	return map[string]string{multusDefaultNetworkAnnotation: network}
 }

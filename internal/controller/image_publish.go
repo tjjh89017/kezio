@@ -155,7 +155,7 @@ func (r *ImageReconciler) buildPublishJob(image *keziov1alpha1.Image, jobName st
 		{Name: "TRACKER_URL", Value: r.SeederDeployment.TrackerURL},
 	}
 
-	labels := map[string]string{ingestJobLabel: image.Name, appComponentLabel: "ingest-publish"}
+	labels := map[string]string{ingestJobLabel: image.Name, AppComponentLabel: "ingest-publish"}
 
 	runAsUser := int64(65532)
 	trueVal := true

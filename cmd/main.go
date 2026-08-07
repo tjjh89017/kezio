@@ -499,7 +499,13 @@ func seederConfigFromEnv() (controller.SeederConfig, error) {
 // creates during publishing (see IngestConfig and partitionPVCName).
 // SEEDER_DEPLOYMENT_GRACE_PERIOD is optional (a Go duration string, for
 // example "5m"); left unset, the reconciler's own default applies (see
-// SeederDeploymentConfig.gracePeriod).
+// SeederDeploymentConfig.gracePeriod). SEEDER_DEPLOYMENT_NETWORK is
+// optional: it names a Multus NetworkAttachmentDefinition (see
+// controller.SeederDeploymentConfig.Network's doc comment) that makes
+// each seeder pod single-homed on the provisioning network instead of
+// the ordinary cluster network. Left unset, no pod annotation is added -
+// the behavior every existing deployment and the envtest suite already
+// exercise.
 //
 // seeder carries the tracker URL a per-Image Deployment's pod is
 // actually seeded through (SeederDeploymentConfig.TrackerURL), reused
@@ -520,6 +526,7 @@ func seederDeploymentConfigFromEnv(seeder controller.SeederConfig) (controller.S
 		Image:      image,
 		TrackerURL: seeder.TrackerURL,
 		EzioTuning: seeder.EzioTuning,
+		Network:    os.Getenv("SEEDER_DEPLOYMENT_NETWORK"),
 	}
 	if raw := os.Getenv("SEEDER_DEPLOYMENT_GRACE_PERIOD"); raw != "" {
 		gracePeriod, err := time.ParseDuration(raw)

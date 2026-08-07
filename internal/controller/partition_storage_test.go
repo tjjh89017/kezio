@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 
 	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
+	"github.com/tjjh89017/kezio/internal/seederdeploy"
 )
 
 // newPartitionStorageTestScheme builds a scheme with kezio's own types
@@ -197,4 +198,88 @@ func TestBuildSeederDeployment_MountsOnlyContentPartitions(t *testing.T) {
 			t.Errorf("Volume %q's PVC source is not read-only", v.Name)
 		}
 	}
+}
+
+// TestBuildSeederDeployment_NetworkAnnotation checks that
+// SeederDeploymentConfig.Network, when set, lands on the pod template as
+// the Multus default-network annotation - the mechanism that makes the
+// seeder pod single-homed on the provisioning network so its PodIP is
+// directly reachable (see resolveSeederTorrentURL in
+// internal/agentserver/plan.go) - and that leaving it empty (every
+// existing deployment and the envtest suite) omits the annotation
+// entirely rather than setting it to an empty string.
+func TestBuildSeederDeployment_NetworkAnnotation(t *testing.T) {
+	image := &keziov1alpha1.Image{
+		ObjectMeta: metav1.ObjectMeta{Name: "os-image", Namespace: "default"},
+		Status: keziov1alpha1.ImageStatus{
+			Partitions: []keziov1alpha1.ImagePartitionStatus{
+				{Number: 1, Role: keziov1alpha1.PartitionRoleESP, InfoHash: "hash-1"},
+			},
+		},
+	}
+
+	t.Run("network set", func(t *testing.T) {
+		r := &ImageReconciler{
+			Scheme:           newPartitionStorageTestScheme(t),
+			SeederDeployment: SeederDeploymentConfig{Image: "ezio-seeder:test", Network: "kezio-seeder-network"},
+		}
+		dep, err := r.buildSeederDeployment(image, "site-a")
+		if err != nil {
+			t.Fatalf("buildSeederDeployment: %v", err)
+		}
+		got := dep.Spec.Template.Annotations["v1.multus-cni.io/default-network"]
+		if got != "kezio-seeder-network" {
+			t.Errorf("pod template default-network annotation = %q, want %q", got, "kezio-seeder-network")
+		}
+	})
+
+	t.Run("network unset", func(t *testing.T) {
+		r := &ImageReconciler{
+			Scheme:           newPartitionStorageTestScheme(t),
+			SeederDeployment: SeederDeploymentConfig{Image: "ezio-seeder:test"},
+		}
+		dep, err := r.buildSeederDeployment(image, "site-a")
+		if err != nil {
+			t.Fatalf("buildSeederDeployment: %v", err)
+		}
+		if _, ok := dep.Spec.Template.Annotations["v1.multus-cni.io/default-network"]; ok {
+			t.Errorf("pod template carries a default-network annotation despite Network being unset: %+v", dep.Spec.Template.Annotations)
+		}
+	})
+}
+
+// TestBuildSeederDeployment_RegisterContainerExposesTorrentPort checks
+// that the seeder-register container (cmd/seeder, wired as
+// kezio-seeder-register) exposes seederdeploy.TorrentHTTPPort - the port
+// its own HTTP server listens on to serve .torrent files by info hash -
+// so agentserver's resolveSeederTorrentURL and this container's actual
+// listener never drift apart.
+func TestBuildSeederDeployment_RegisterContainerExposesTorrentPort(t *testing.T) {
+	image := &keziov1alpha1.Image{
+		ObjectMeta: metav1.ObjectMeta{Name: "os-image", Namespace: "default"},
+		Status: keziov1alpha1.ImageStatus{
+			Partitions: []keziov1alpha1.ImagePartitionStatus{
+				{Number: 1, Role: keziov1alpha1.PartitionRoleESP, InfoHash: "hash-1"},
+			},
+		},
+	}
+	r := &ImageReconciler{
+		Scheme:           newPartitionStorageTestScheme(t),
+		SeederDeployment: SeederDeploymentConfig{Image: "ezio-seeder:test"},
+	}
+	dep, err := r.buildSeederDeployment(image, "site-a")
+	if err != nil {
+		t.Fatalf("buildSeederDeployment: %v", err)
+	}
+
+	register := dep.Spec.Template.Spec.Containers[1]
+	if register.Name != "seeder-register" {
+		t.Fatalf("Containers[1].Name = %q, want seeder-register", register.Name)
+	}
+	for _, p := range register.Ports {
+		if p.ContainerPort == seederdeploy.TorrentHTTPPort {
+			return
+		}
+	}
+	t.Errorf("seeder-register container has no port %d: %+v", seederdeploy.TorrentHTTPPort, register.Ports)
 }

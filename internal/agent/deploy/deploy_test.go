@@ -207,6 +207,35 @@ func (f *fakeProgressReporter) steps() []string {
 	return steps
 }
 
+// sampleTorrentURL is the TorrentURL every fixture content partition in
+// this file uses; fakeFetcher resolves it to sampleTorrentBytes.
+const sampleTorrentURL = "http://seeder.example/torrents/deadbeef"
+
+// sampleTorrentBytes is what fakeFetcher.FetchTorrent returns for
+// sampleTorrentURL - deliberately not real bencoded torrent data, since
+// fakeEzioClient.AddTorrent only records whatever bytes it is handed
+// rather than parsing them.
+var sampleTorrentBytes = []byte("torrent-bytes")
+
+// fakeFetcher is a TorrentFetcher returning canned bytes for one known
+// URL and an error for anything else, so a test can assert AddTorrent
+// received exactly the bytes fetched rather than the URL itself.
+type fakeFetcher struct {
+	urls map[string][]byte
+}
+
+func newFakeFetcher(url string, content []byte) *fakeFetcher {
+	return &fakeFetcher{urls: map[string][]byte{url: content}}
+}
+
+func (f *fakeFetcher) FetchTorrent(_ context.Context, url string) ([]byte, error) {
+	content, ok := f.urls[url]
+	if !ok {
+		return nil, fmt.Errorf("fakeFetcher: no content registered for %s", url)
+	}
+	return content, nil
+}
+
 // samplePlan builds a one-disk plan with one ESP (blank/vfat), one swap
 // partition, and one content partition - exercising all three
 // PlanPartition classifications in one image plan.
@@ -218,7 +247,7 @@ func samplePlan(disk string) *agentapi.DeployPlan {
 			SfdiskJSON: fixtureSfdiskJSON,
 			Partitions: []agentapi.PlanPartition{
 				{Number: 1, Device: agentapi.DevicePartitionPath(disk, 1), Role: keziov1alpha1.PartitionRoleESP, FSType: "vfat"},
-				{Number: 2, Device: agentapi.DevicePartitionPath(disk, 2), Role: keziov1alpha1.PartitionRoleData, FSType: "ext4", InfoHash: "deadbeef", Torrent: []byte("torrent-bytes")},
+				{Number: 2, Device: agentapi.DevicePartitionPath(disk, 2), Role: keziov1alpha1.PartitionRoleData, FSType: "ext4", InfoHash: "deadbeef", TorrentURL: sampleTorrentURL},
 				{Number: 3, Device: agentapi.DevicePartitionPath(disk, 3), Role: keziov1alpha1.PartitionRoleSwap, SwapUUID: "11111111-1111-1111-1111-111111111111"},
 			},
 		},
@@ -235,7 +264,7 @@ func TestExecute_CommandSequenceForMixedPartitionTypes(t *testing.T) {
 	launcher := &fakeLauncher{client: ezio}
 	progress := &fakeProgressReporter{}
 
-	e := &Executor{Runner: runner, Ezio: launcher, Progress: progress, PollInterval: time.Millisecond}
+	e := &Executor{Runner: runner, Ezio: launcher, Fetcher: newFakeFetcher(sampleTorrentURL, sampleTorrentBytes), Progress: progress, PollInterval: time.Millisecond}
 	if err := e.Execute(context.Background(), samplePlan(disk)); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -305,7 +334,7 @@ func TestExecute_PlanEzioTuningReachesAddTorrent(t *testing.T) {
 		MaxConnections: ptr.To(int32(9)),
 	}
 
-	e := &Executor{Runner: runner, Ezio: launcher, PollInterval: time.Millisecond}
+	e := &Executor{Runner: runner, Ezio: launcher, Fetcher: newFakeFetcher(sampleTorrentURL, sampleTorrentBytes), PollInterval: time.Millisecond}
 	if err := e.Execute(context.Background(), plan); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -462,12 +491,12 @@ func TestExecute_StopPolicyPausesBeforeShutdown(t *testing.T) {
 			Disk:       disk,
 			SfdiskJSON: fixtureSfdiskJSON,
 			Partitions: []agentapi.PlanPartition{
-				{Number: 2, Device: agentapi.DevicePartitionPath(disk, 2), Role: keziov1alpha1.PartitionRoleData, InfoHash: "deadbeef", Torrent: []byte("t")},
+				{Number: 2, Device: agentapi.DevicePartitionPath(disk, 2), Role: keziov1alpha1.PartitionRoleData, InfoHash: "deadbeef", TorrentURL: sampleTorrentURL},
 			},
 		},
 	}
 
-	e := &Executor{Runner: runner, Ezio: launcher, PollInterval: time.Millisecond}
+	e := &Executor{Runner: runner, Ezio: launcher, Fetcher: newFakeFetcher(sampleTorrentURL, sampleTorrentBytes), PollInterval: time.Millisecond}
 	if err := e.Execute(context.Background(), plan); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}

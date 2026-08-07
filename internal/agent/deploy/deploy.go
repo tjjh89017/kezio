@@ -120,6 +120,16 @@ type EzioLauncher interface {
 	Launch(ctx context.Context, tuning *keziov1alpha1.MachineEzioTuning) (EzioHandle, error)
 }
 
+// TorrentFetcher fetches a content partition's .torrent file bytes from
+// a PlanPartition.TorrentURL. The per-Image seeder pod that serves it
+// may still be coming up when a deploy reaches this partition (it has
+// no ordering dependency on any Machine's deploy), so a production
+// implementation retries transiently rather than failing on the first
+// attempt; the HTTP-backed implementation lives in cmd/agent.
+type TorrentFetcher interface {
+	FetchTorrent(ctx context.Context, url string) ([]byte, error)
+}
+
 // ProgressReporter streams a deploy's progress - per-partition detail
 // plus the whole-plan step (agentapi.ProgressRequest.Step) - to the
 // controller. A failure to report is logged and otherwise ignored - a
@@ -138,6 +148,10 @@ type Executor struct {
 	// actually has a content partition; a plan with only blank and swap
 	// partitions never launches ezio at all.
 	Ezio EzioLauncher
+	// Fetcher fetches each content partition's .torrent file from its
+	// PlanPartition.TorrentURL. Only consulted for a content partition -
+	// the same condition that consults Ezio.
+	Fetcher TorrentFetcher
 	// Progress reports partition progress as the deploy proceeds. Nil
 	// means progress is not reported (tests only; production always
 	// wires one).
@@ -195,7 +209,7 @@ func classify(p agentapi.PlanPartition) partitionKind {
 	switch {
 	case p.Role == keziov1alpha1.PartitionRoleSwap && p.SwapUUID != "":
 		return kindSwap
-	case p.InfoHash != "" && len(p.Torrent) > 0:
+	case p.InfoHash != "" && p.TorrentURL != "":
 		return kindContent
 	default:
 		return kindBlank
@@ -354,6 +368,14 @@ func (e *Executor) validate(ctx context.Context, plans []agentapi.ImageDeployPla
 				return fmt.Errorf("image %s partition %d: device %q does not match the expected path %q for disk %q",
 					ip.ImageRef.Name, p.Number, p.Device, want, ip.Disk)
 			}
+			// InfoHash without a TorrentURL is never valid: classify
+			// would otherwise fall through to kindBlank and mkfs a
+			// partition the plan actually meant to restore content onto
+			// (see agentapi.PlanPartition.TorrentURL's doc comment).
+			if p.InfoHash != "" && p.TorrentURL == "" {
+				return fmt.Errorf("image %s partition %d: has an infoHash but no torrentURL to fetch it from",
+					ip.ImageRef.Name, p.Number)
+			}
 		}
 	}
 
@@ -444,10 +466,15 @@ func (e *Executor) applyPartition(ctx context.Context, ip agentapi.ImageDeployPl
 		progress.setPhase(ip.Disk, p.Number, agentapi.PartitionPhaseDone, 100)
 
 	case kindContent:
+		e.log("fetching torrent for %s (info hash %s) from %s", p.Device, p.InfoHash, p.TorrentURL)
+		torrentBytes, err := e.Fetcher.FetchTorrent(ctx, p.TorrentURL)
+		if err != nil {
+			return fmt.Errorf("image %s partition %d: fetching torrent from %s: %w", ip.ImageRef.Name, p.Number, p.TorrentURL, err)
+		}
 		e.log("adding torrent for %s (info hash %s)", p.Device, p.InfoHash)
 		maxUploads := seeder.ResolveMaxUploads(tuning)
 		maxConnections := seeder.ResolveMaxConnections(tuning)
-		if err := handle.Client.AddTorrent(ctx, p.Torrent, p.Device, false, maxUploads, maxConnections); err != nil {
+		if err := handle.Client.AddTorrent(ctx, torrentBytes, p.Device, false, maxUploads, maxConnections); err != nil {
 			return fmt.Errorf("image %s partition %d: AddTorrent %s: %w", ip.ImageRef.Name, p.Number, p.Device, err)
 		}
 		progress.setPhase(ip.Disk, p.Number, agentapi.PartitionPhaseSeeding, 0)

@@ -18,9 +18,11 @@ package agentserver
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"net"
+	"strconv"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -28,7 +30,7 @@ import (
 
 	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
 	"github.com/tjjh89017/kezio/internal/agentapi"
-	"github.com/tjjh89017/kezio/internal/store"
+	"github.com/tjjh89017/kezio/internal/seederdeploy"
 )
 
 // sfdiskJSONKey is the ConfigMap data key holding the verbatim sfdisk
@@ -70,7 +72,7 @@ func buildDeployPlan(ctx context.Context, c client.Client, cfg Config, machine *
 		if provisioning.Image == nil || provisioning.Image.TargetDisk == "" {
 			return nil, nil
 		}
-		osPlan, image, ready, err := buildImagePlan(ctx, c, cfg, machine.Namespace, provisioning.Image.ImageRef, provisioning.Image.TargetDisk)
+		osPlan, image, ready, err := buildImagePlan(ctx, c, machine.Namespace, provisioning.Image.ImageRef, provisioning.Image.TargetDisk, machine.Spec.NetworkSite)
 		if err != nil {
 			return nil, fmt.Errorf("building OS image plan: %w", err)
 		}
@@ -91,7 +93,7 @@ func buildDeployPlan(ctx context.Context, c client.Client, cfg Config, machine *
 		if rec.ImageRef != dataImage.ImageRef || rec.TargetDisk == "" {
 			return nil, nil
 		}
-		dataPlan, _, ready, err := buildImagePlan(ctx, c, cfg, machine.Namespace, rec.ImageRef, rec.TargetDisk)
+		dataPlan, _, ready, err := buildImagePlan(ctx, c, machine.Namespace, rec.ImageRef, rec.TargetDisk, machine.Spec.NetworkSite)
 		if err != nil {
 			return nil, fmt.Errorf("building dataImages[%d] plan: %w", i, err)
 		}
@@ -140,8 +142,12 @@ func buildDeployPlan(ctx context.Context, c client.Client, cfg Config, machine *
 // buildImagePlan also returns the fetched Image object itself (nil when
 // ready is false), so buildDeployPlan can read the OS image's own
 // spec.postHookRefs/spec.params for hook resolution without a second
-// fetch of the same object.
-func buildImagePlan(ctx context.Context, c client.Client, cfg Config, defaultNS string, imageRef keziov1alpha1.NameRef, targetDisk string) (*agentapi.ImageDeployPlan, *keziov1alpha1.Image, bool, error) {
+// fetch of the same object. site is the Machine's spec.networkSite,
+// needed to resolve each content partition's seeder URL (see
+// buildPlanPartition) - a Machine deploys against exactly one site, so
+// every partition across every image plan it builds resolves against
+// the same one.
+func buildImagePlan(ctx context.Context, c client.Client, defaultNS string, imageRef keziov1alpha1.NameRef, targetDisk, site string) (*agentapi.ImageDeployPlan, *keziov1alpha1.Image, bool, error) {
 	ns := keziov1alpha1.ResolveNamespace(imageRef, defaultNS)
 
 	image := &keziov1alpha1.Image{}
@@ -167,7 +173,7 @@ func buildImagePlan(ctx context.Context, c client.Client, cfg Config, defaultNS 
 
 	partitions := make([]agentapi.PlanPartition, 0, len(image.Status.Partitions))
 	for _, p := range image.Status.Partitions {
-		part, err := buildPlanPartition(cfg, ns, image.Name, targetDisk, p)
+		part, err := buildPlanPartition(ctx, c, ns, image.Name, site, targetDisk, p)
 		if err != nil {
 			return nil, nil, false, err
 		}
@@ -186,10 +192,10 @@ func buildImagePlan(ctx context.Context, c client.Client, cfg Config, defaultNS 
 // Image.status.partitions[] entry, classifying it exactly as
 // internal/store.ImageLayoutSlot.IsBlank documents for the store's own
 // per-slot records: a swap partition uses its UUID, a partition with a
-// recorded InfoHash gets its .torrent built on demand, and anything else
-// is a blank partition (mkfs FSType, or unformatted when FSType is also
-// empty).
-func buildPlanPartition(cfg Config, imageNS, imageName, targetDisk string, p keziov1alpha1.ImagePartitionStatus) (agentapi.PlanPartition, error) {
+// recorded InfoHash resolves to the seeder pod URL serving site, and
+// anything else is a blank partition (mkfs FSType, or unformatted when
+// FSType is also empty).
+func buildPlanPartition(ctx context.Context, c client.Client, imageNS, imageName, site, targetDisk string, p keziov1alpha1.ImagePartitionStatus) (agentapi.PlanPartition, error) {
 	part := agentapi.PlanPartition{
 		Number: p.Number,
 		Device: agentapi.DevicePartitionPath(targetDisk, p.Number),
@@ -201,39 +207,57 @@ func buildPlanPartition(cfg Config, imageNS, imageName, targetDisk string, p kez
 	case p.Role == keziov1alpha1.PartitionRoleSwap && p.UUID != "":
 		part.SwapUUID = p.UUID
 	case p.InfoHash != "":
-		torrentBytes, err := buildPartitionTorrent(cfg, p.TorrentInfo)
+		torrentURL, err := resolveSeederTorrentURL(ctx, c, imageNS, imageName, site, p.InfoHash)
 		if err != nil {
 			return agentapi.PlanPartition{}, fmt.Errorf("image %s/%s partition %d: %w", imageNS, imageName, p.Number, err)
 		}
 		part.InfoHash = p.InfoHash
-		part.Torrent = torrentBytes
+		part.TorrentURL = torrentURL
 	}
 
 	return part, nil
 }
 
-// buildPartitionTorrent bencodes a partition's torrent.info into a
-// complete .torrent file with cfg.TrackerURL as the announce URL.
-//
-// The bytes come from ImagePartitionStatus, which ingest no longer fills
-// in: content now carries its own .torrent inside its partition PVC (see
-// internal/ingest.publishPartition), and this server mounts no PVC. Until
-// the agent is moved onto that same file, an empty value is refused
-// rather than passed through - a plan partition with an InfoHash but no
-// torrent classifies as BLANK on the agent side
-// (internal/agent/deploy.classify), which would mkfs the partition
-// instead of restoring it.
-func buildPartitionTorrent(cfg Config, torrentInfoBytes []byte) ([]byte, error) {
-	if len(torrentInfoBytes) == 0 {
-		return nil, errors.New("no torrent.info recorded for this partition")
+// resolveSeederTorrentURL finds the per-Image, per-site seeder
+// Deployment by its deterministic name (seederdeploy.Name is the single
+// source of truth for that naming scheme, shared with
+// internal/controller's own reconciler, so this reuses it rather than
+// re-deriving it), then a ready
+// pod within it, and returns the URL that pod serves hash's .torrent
+// from (see cmd/seeder's HTTP server). Both lookups failing - no such
+// Deployment yet, or a Deployment with no pod that has reported a
+// PodIP - are reported as errors: buildDeployPlan surfaces them as a
+// plan-build failure, and the real, agent-driven Deployer that requested
+// this plan already retries plan builds, so failing loudly now is
+// strictly better than handing the agent a content partition with no
+// way to fetch its content (see agentapi.PlanPartition.TorrentURL's doc
+// comment).
+func resolveSeederTorrentURL(ctx context.Context, c client.Client, imageNS, imageName, site, hash string) (string, error) {
+	depName := seederdeploy.Name(imageName, site)
+	dep := &appsv1.Deployment{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: imageNS, Name: depName}, dep); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", fmt.Errorf("no seeder deployment for site %q yet", site)
+		}
+		return "", fmt.Errorf("get seeder deployment %s/%s: %w", imageNS, depName, err)
 	}
-	info, err := store.ParseTorrentInfoBytes(torrentInfoBytes)
-	if err != nil {
-		return nil, fmt.Errorf("parse torrent.info: %w", err)
+	if dep.Spec.Selector == nil {
+		return "", fmt.Errorf("seeder deployment %s/%s has no pod selector", imageNS, depName)
 	}
-	torrentBytes, err := store.BuildTorrentFile(info, cfg.TrackerURL)
-	if err != nil {
-		return nil, fmt.Errorf("build torrent file: %w", err)
+
+	pods := &corev1.PodList{}
+	if err := c.List(ctx, pods,
+		client.InNamespace(imageNS),
+		client.MatchingLabels(dep.Spec.Selector.MatchLabels),
+	); err != nil {
+		return "", fmt.Errorf("list pods for seeder deployment %s/%s: %w", imageNS, depName, err)
 	}
-	return torrentBytes, nil
+
+	for i := range pods.Items {
+		if ip := pods.Items[i].Status.PodIP; ip != "" {
+			host := net.JoinHostPort(ip, strconv.Itoa(int(seederdeploy.TorrentHTTPPort)))
+			return fmt.Sprintf("http://%s/torrents/%s", host, hash), nil
+		}
+	}
+	return "", fmt.Errorf("no ready seeder pod yet for site %q (deployment %s/%s)", site, imageNS, depName)
 }

@@ -235,7 +235,8 @@ type ImageDeployPlan struct {
 // per-slot records:
 //
 //   - SwapUUID set: run mkswap with this UUID (Role == "swap").
-//   - InfoHash and Torrent set: restore this content over BitTorrent.
+//   - InfoHash and TorrentURL set: restore this content over
+//     BitTorrent.
 //   - Neither set: a blank partition - mkfs with FSType, or leave
 //     unformatted when FSType is also empty (for example an msr
 //     partition with a blank content, though ingest itself never
@@ -260,11 +261,17 @@ type PlanPartition struct {
 	// InfoHash is the BitTorrent v1 info hash of this partition's
 	// content, present for a content partition.
 	InfoHash string `json:"infoHash,omitempty"`
-	// Torrent is the bencoded .torrent file bytes for InfoHash, built on
-	// demand from the store's torrent.info with the configured tracker
-	// URL (see internal/store.BuildTorrentFile). Present iff InfoHash
-	// is.
-	Torrent []byte `json:"torrent,omitempty"`
+	// TorrentURL is where the agent fetches this partition's .torrent
+	// file from: the per-Image seeder pod serving this Machine's site,
+	// resolved to its own PodIP (see internal/agentserver's
+	// buildPlanPartition) - never bytes carried inline in the plan
+	// itself, since the plan is small, cacheable JSON and a .torrent
+	// scales with piece count the same way torrent.info does. Present
+	// iff InfoHash is; a partition with InfoHash set but this empty is a
+	// plan-building error the controller refuses to hand out (see
+	// buildPlanPartition), never a value the agent should treat as
+	// blank.
+	TorrentURL string `json:"torrentURL,omitempty"`
 	// SwapUUID is the UUID to pass to mkswap, present for a swap
 	// partition (Role == "swap").
 	SwapUUID string `json:"swapUUID,omitempty"`

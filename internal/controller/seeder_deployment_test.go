@@ -137,21 +137,6 @@ func TestSeederDemandBySite(t *testing.T) {
 	}
 }
 
-// TestSeederDeploymentName checks that seederDeploymentName is
-// deterministic and distinguishes two sites of the same Image (which
-// would otherwise collide, since both derive from the same Image name).
-func TestSeederDeploymentName(t *testing.T) {
-	first := seederDeploymentName("os-image", "site-a")
-	second := seederDeploymentName("os-image", "site-b")
-	repeat := seederDeploymentName("os-image", "site-a")
-
-	if first == second {
-		t.Fatalf("seederDeploymentName() collided across sites: %q", first)
-	}
-	if first != repeat {
-		t.Fatalf("seederDeploymentName() not deterministic: %q != %q", first, repeat)
-	}
-	if len(first) > maxSeederDeploymentNameLength || len(second) > maxSeederDeploymentNameLength {
-		t.Fatalf("seederDeploymentName() exceeded %d chars: %q, %q", maxSeederDeploymentNameLength, first, second)
-	}
-}
+// seederDeploymentName's determinism and length bound moved with it to
+// internal/seederdeploy (see Name and TestName there) when it was
+// exported for internal/agentserver's use.

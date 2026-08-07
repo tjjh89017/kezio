@@ -113,12 +113,12 @@ func seederDeploymentsForImage(ctx context.Context, image *keziov1alpha1.Image) 
 	var deployments appsv1.DeploymentList
 	ExpectWithOffset(1, k8sClient.List(ctx, &deployments,
 		client.InNamespace(image.Namespace),
-		client.MatchingLabels{seederDeploymentImageLabel: image.Name},
+		client.MatchingLabels{SeederDeploymentImageLabel: image.Name},
 	)).To(Succeed())
 
 	bySite := make(map[string]appsv1.Deployment, len(deployments.Items))
 	for _, dep := range deployments.Items {
-		bySite[dep.Annotations[seederDeploymentSiteAnnotation]] = dep
+		bySite[dep.Annotations[SeederDeploymentSiteAnnotation]] = dep
 	}
 	return bySite
 }

@@ -76,6 +76,7 @@ func main() {
 		Executor: &deploy.Executor{
 			Runner:  execRunner{},
 			Ezio:    ezioLauncher{Logf: log.Printf},
+			Fetcher: httpTorrentFetcher{},
 			Logf:    log.Printf,
 			Console: console,
 		},

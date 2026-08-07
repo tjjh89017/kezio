@@ -32,10 +32,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -57,6 +59,11 @@ const defaultInterval = 30 * time.Second
 // dialTimeout bounds one reconcile pass's RPCs.
 const dialTimeout = 30 * time.Second
 
+// defaultHTTPAddr is where the per-partition .torrent HTTP server
+// listens, matching the seeder-register container's "torrent" port in
+// internal/controller's buildSeederDeployment.
+const defaultHTTPAddr = ":8080"
+
 func main() {
 	cfg, err := configFromEnv()
 	if err != nil {
@@ -69,10 +76,21 @@ func main() {
 	log.Printf("starting seeder registration {contentRoot:%s ezio:%s interval:%s}",
 		cfg.ContentRoot, cfg.EzioTarget, cfg.Interval)
 
+	idx := newTorrentIndex()
+	httpAddr := envOr("HTTP_ADDR", defaultHTTPAddr)
+	httpSrv := &http.Server{Addr: httpAddr, Handler: torrentMux(idx)}
+	go func() {
+		log.Printf("serving .torrent files on %s", httpAddr)
+		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("torrent http server: %v", err)
+		}
+	}()
+	defer func() { _ = httpSrv.Close() }()
+
 	ticker := time.NewTicker(cfg.Interval)
 	defer ticker.Stop()
 	for {
-		if err := reconcile(ctx, cfg); err != nil {
+		if err := reconcile(ctx, cfg, idx); err != nil {
 			// ezio not up yet, or a transient RPC failure: the next tick
 			// retries. Exiting would restart-loop the container without
 			// making progress ezio has not already made.
@@ -140,10 +158,56 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-// reconcile adds every mounted partition's content that ezio does not
-// already hold. Content already present is left alone: AddTorrent is not
-// idempotent in ezio, and re-adding a seeding torrent is not a no-op.
-func reconcile(ctx context.Context, cfg config) error {
+// contentEntry is one mounted partition directory's content identity: the
+// info hash it registers under and the path to its already-built
+// .torrent file (see store.ContentTorrentFileName). Computed once per
+// reconcile pass and shared between AddTorrent registration and the
+// torrentIndex the HTTP server reads from.
+type contentEntry struct {
+	dir         string
+	hash        string
+	torrentPath string
+}
+
+// loadContentEntries reads dirs' torrent.info files and returns one
+// contentEntry per directory that parses cleanly; a directory that fails
+// to load is reported as an error alongside the entries that did
+// succeed, rather than aborting the whole pass - a single damaged
+// directory should not stop every other partition's content from being
+// registered or served.
+func loadContentEntries(dirs []string) ([]contentEntry, []error) {
+	entries := make([]contentEntry, 0, len(dirs))
+	var errs []error
+	for _, dir := range dirs {
+		// The info hash comes from torrent.info rather than the .torrent
+		// so this agrees with the store's own content addressing by
+		// construction (see store.ComputeInfoHash) instead of
+		// re-deriving it from the bencoded file the publish step
+		// happened to write.
+		info, err := store.LoadContentDirTorrentInfo(dir)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: load torrent.info: %w", dir, err))
+			continue
+		}
+		hash, err := store.ComputeInfoHash(info)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: compute info hash: %w", dir, err))
+			continue
+		}
+		entries = append(entries, contentEntry{
+			dir:         dir,
+			hash:        hash.String(),
+			torrentPath: filepath.Join(dir, store.ContentTorrentFileName),
+		})
+	}
+	return entries, errs
+}
+
+// reconcile refreshes idx from every mounted partition directory, then
+// adds to ezio whichever content it does not already hold. Content
+// already present is left alone: AddTorrent is not idempotent in ezio,
+// and re-adding a seeding torrent is not a no-op.
+func reconcile(ctx context.Context, cfg config, idx *torrentIndex) error {
 	dirs, err := contentDirs(cfg.ContentRoot)
 	if err != nil {
 		return err
@@ -152,58 +216,49 @@ func reconcile(ctx context.Context, cfg config) error {
 		return nil
 	}
 
+	entries, errs := loadContentEntries(dirs)
+	idx.set(entries)
+
 	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
 
 	c, err := seeder.Dial(cfg.EzioTarget)
 	if err != nil {
-		return fmt.Errorf("dial ezio at %s: %w", cfg.EzioTarget, err)
+		errs = append(errs, fmt.Errorf("dial ezio at %s: %w", cfg.EzioTarget, err))
+		return errors.Join(errs...)
 	}
 	defer func() { _ = c.Close() }()
 
 	existing, err := c.GetTorrentStatus(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("get torrent status: %w", err)
+		errs = append(errs, fmt.Errorf("get torrent status: %w", err))
+		return errors.Join(errs...)
 	}
 
-	var errs []error
-	for _, dir := range dirs {
-		added, err := addContentDir(ctx, c, cfg, dir, existing)
+	for _, entry := range entries {
+		added, err := addContentDir(ctx, c, cfg, entry, existing)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", dir, err))
+			errs = append(errs, fmt.Errorf("%s: %w", entry.dir, err))
 			continue
 		}
 		if added {
-			log.Printf("added content from %s", dir)
+			log.Printf("added content from %s", entry.dir)
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// addContentDir registers dir's .torrent with ezio unless its info hash is
-// already known, reporting whether it added anything.
+// addContentDir registers entry's .torrent with ezio unless its info hash
+// is already known, reporting whether it added anything.
 func addContentDir(
-	ctx context.Context, c *seeder.Client, cfg config, dir string,
+	ctx context.Context, c *seeder.Client, cfg config, entry contentEntry,
 	existing map[string]seeder.Torrent,
 ) (bool, error) {
-	// The info hash comes from torrent.info rather than the .torrent so
-	// this agrees with the store's own content addressing by construction
-	// (see store.ComputeInfoHash) instead of re-deriving it from the
-	// bencoded file the publish step happened to write.
-	info, err := store.LoadContentDirTorrentInfo(dir)
-	if err != nil {
-		return false, fmt.Errorf("load torrent.info: %w", err)
-	}
-	hash, err := store.ComputeInfoHash(info)
-	if err != nil {
-		return false, fmt.Errorf("compute info hash: %w", err)
-	}
-	if _, ok := existing[hash.String()]; ok {
+	if _, ok := existing[entry.hash]; ok {
 		return false, nil
 	}
 
-	torrentPath := filepath.Join(dir, store.ContentTorrentFileName)
-	torrentBytes, err := os.ReadFile(torrentPath) //nolint:gosec // mount path this pod owns, not user input
+	torrentBytes, err := os.ReadFile(entry.torrentPath) //nolint:gosec // mount path this pod owns, not user input
 	if err != nil {
 		return false, fmt.Errorf("read %s: %w", store.ContentTorrentFileName, err)
 	}
@@ -211,10 +266,67 @@ func addContentDir(
 	// seedMode: the content was hash-verified when the publish step copied
 	// it into this PVC (see internal/ingest.publishPartition), so ezio
 	// re-hashing every piece on start would only repeat that work.
-	if err := c.AddTorrent(ctx, torrentBytes, dir, true, cfg.MaxUploads, cfg.MaxConnections); err != nil {
-		return false, fmt.Errorf("add torrent %s: %w", hash, err)
+	if err := c.AddTorrent(ctx, torrentBytes, entry.dir, true, cfg.MaxUploads, cfg.MaxConnections); err != nil {
+		return false, fmt.Errorf("add torrent %s: %w", entry.hash, err)
 	}
 	return true, nil
+}
+
+// torrentIndex maps a content's info hash to its .torrent file path, kept
+// current by reconcile on every pass and read by the HTTP handler below.
+// A separate type (rather than a bare map behind a mutex) so the
+// zero-downtime swap-the-whole-map-on-each-pass pattern - never mutating
+// the map a concurrent request might be reading - is enforced in one
+// place.
+type torrentIndex struct {
+	mu     sync.RWMutex
+	byHash map[string]string
+}
+
+func newTorrentIndex() *torrentIndex {
+	return &torrentIndex{byHash: map[string]string{}}
+}
+
+// set replaces the whole index from entries, keyed by hash.
+func (idx *torrentIndex) set(entries []contentEntry) {
+	byHash := make(map[string]string, len(entries))
+	for _, e := range entries {
+		byHash[e.hash] = e.torrentPath
+	}
+	idx.mu.Lock()
+	idx.byHash = byHash
+	idx.mu.Unlock()
+}
+
+// path returns the .torrent file path registered for hash, if any.
+func (idx *torrentIndex) path(hash string) (string, bool) {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	path, ok := idx.byHash[hash]
+	return path, ok
+}
+
+// torrentsPathPrefix is the URL path prefix the HTTP handler below
+// serves from; the info hash is everything after it.
+const torrentsPathPrefix = "/torrents/"
+
+// torrentMux builds the HTTP handler serving each indexed content's
+// .torrent file by info hash. It never joins request input into a
+// filesystem path or lists a directory: the only paths ever served are
+// ones idx itself already resolved from scanning cfg.ContentRoot, keyed
+// by an exact map lookup on the hash the request names.
+func torrentMux(idx *torrentIndex) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc(torrentsPathPrefix, func(w http.ResponseWriter, r *http.Request) {
+		hash := r.URL.Path[len(torrentsPathPrefix):]
+		path, ok := idx.path(hash)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		http.ServeFile(w, r, path)
+	})
+	return mux
 }
 
 // contentDirs lists the mounted partition directories under root that

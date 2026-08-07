@@ -37,12 +37,19 @@ import (
 // volume, at a glance in `kubectl get pvc`.
 const partitionPVCNamePrefix = "kezio-part-"
 
-// appComponentLabel is the app.kubernetes.io/component label key,
+// AppComponentLabel is the app.kubernetes.io/component label key,
 // shared across every kezio-managed workload this package builds
 // (ingest, publish, and per-Image seeder Deployment pods, and partition
 // PVCs) so it is declared once rather than repeated as a string
-// literal.
-const appComponentLabel = "app.kubernetes.io/component"
+// literal. Exported so internal/agentserver can select the same seeder
+// pods by the same labels when resolving a content partition's seeder
+// URL (see agentserver's buildPlanPartition).
+const AppComponentLabel = "app.kubernetes.io/component"
+
+// SeederComponentValue is AppComponentLabel's value on a per-Image
+// seeder Deployment's pods (see buildSeederDeployment). Exported for the
+// same reason AppComponentLabel is.
+const SeederComponentValue = "ezio-seeder"
 
 // dropAllCapabilities is the "ALL" Linux capability drop entry every
 // restricted-PodSecurity container this package builds sets.
@@ -150,7 +157,7 @@ func (r *ImageReconciler) buildPartitionPVC(image *keziov1alpha1.Image, p keziov
 			Namespace: image.Namespace,
 			Labels: map[string]string{
 				"app.kubernetes.io/name": "kezio",
-				appComponentLabel:        "partition-content",
+				AppComponentLabel:        "partition-content",
 			},
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
