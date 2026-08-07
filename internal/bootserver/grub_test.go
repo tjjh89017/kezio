@@ -16,7 +16,34 @@ limitations under the License.
 
 package bootserver
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+// TestBootLocalConfig_ChainloadsESPFallbackDirectly pins the fix for a
+// measured KubeVirt/OVMF boot loop: a plain "exit" here used to rely on
+// BDS falling through to the next boot entry on its own, but a real UEFI
+// boot never resumed BDS at the next BootOrder entry after GRUB ran - it
+// repeated the same PXE entry from scratch instead, so the machine's disk
+// was never reached. bootLocalConfig must instead chainload the disk's
+// UEFI removable-fallback loader directly, at the exact path
+// internal/agent/deploy's efiRemovableLoaderPath contract guarantees
+// every bootable Image carries, and must never call "exit" at all.
+func TestBootLocalConfig_ChainloadsESPFallbackDirectly(t *testing.T) {
+	if strings.Contains(bootLocalConfig, "exit") {
+		t.Fatalf("bootLocalConfig still calls exit, relying on unreliable BDS fallthrough: %q", bootLocalConfig)
+	}
+	for _, want := range []string{
+		"search --no-floppy --set=root --file /EFI/BOOT/BOOTX64.EFI",
+		"chainloader /EFI/BOOT/BOOTX64.EFI",
+		"boot",
+	} {
+		if !strings.Contains(bootLocalConfig, want) {
+			t.Fatalf("bootLocalConfig missing %q: %q", want, bootLocalConfig)
+		}
+	}
+}
 
 // TestGrubNetPath pins the one file-path syntax GRUB's network stack
 // resolves: "(http,host:port)/path". A bare URL is not it -
