@@ -45,6 +45,21 @@
   value:
     - name: fetch-boot-artifacts
       image: kezio-boot-artifacts:latest
+      # Explicit, not left to the API server's tag-based default: this
+      # container is always created with the "latest" placeholder above,
+      # then repointed at the real tag via `kubectl set image` (see
+      # deploy-boot-path-overlay's own comment on why that two-step
+      # sequence is required). Defaulting only runs once, at the moment
+      # this initContainer is first admitted with that "latest" tag, so
+      # an implicit default here bakes in imagePullPolicy: Always
+      # forever - `kubectl set image` only ever touches .image, so no
+      # later admission re-evaluates the policy against the real tag.
+      # Always then forces the kubelet to pull from the registry the
+      # real tag names on every rollout, ignoring an already-imported
+      # local image entirely (observed as the initContainer reaching
+      # ImagePullBackOff against "not found" even though `ctr images
+      # ls`/`images check` showed it complete in containerd's store).
+      imagePullPolicy: IfNotPresent
       command:
         - cp
         - -a

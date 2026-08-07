@@ -55,6 +55,16 @@
   value:
     - name: fetch-boot-artifacts
       image: kezio-boot-artifacts:latest
+      # See config/bootserver/boot-artifacts-init-patch.yaml's own
+      # comment (keep the two in sync): explicit, not left to the API
+      # server's tag-based default - this container is admitted with
+      # the "latest" placeholder above and later repointed at the real
+      # tag with `kubectl set image`, which never re-runs defaulting,
+      # so an implicit default here bakes in imagePullPolicy: Always
+      # forever and the initContainer ends up trying to pull the real
+      # tag from the network on every rollout, ignoring an
+      # already-imported local image.
+      imagePullPolicy: IfNotPresent
       command:
         - cp
         - -a
