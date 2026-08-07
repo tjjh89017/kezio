@@ -2,27 +2,30 @@ name: E2E BMC-Driven Deploy (KubeVirtBMC + KubeVirt VM)
 
 # Thin workflow_dispatch caller for the BMC-driven scenario in
 # e2e-kubevirt-reusable.yml (see that file's own header comment,
-# "Topology note" section, for what changes when bmc_mode is set and what
-# the job proves). This file exists so the trigger, gating, and
-# BMC-specific naming kezio's own maintainers use stay exactly what they
-# were before the scenario was folded into the reusable workflow - only
-# the job body moved, not this file's behavior.
+# "Topology note" section, for the full BMC-driven power/PXE flow and
+# what the job proves). This is kezio's production-representative
+# acceptance lane and the reusable workflow's only remaining caller
+# (kezio's own no-BMC lane, e2e-deploy-kubevirt.yml, is retired - issue
+# #17 - since kezio never ships without a BMC driver). This file exists
+# so the trigger, gating, and BMC-specific naming kezio's own maintainers
+# use stay exactly what they were before the scenario was folded into the
+# reusable workflow - only the job body moved, not this file's behavior.
 #
-# workflow_dispatch only, gated exactly like e2e-deploy-kubevirt.yml (see
-# that workflow's header for why: it cannot reach a live boot without a
-# published kezio-boot-artifacts image, unless build_boot_artifacts is
-# set), plus this workflow adds a second, independent gate: it needs a published
+# workflow_dispatch only: it cannot reach a live boot without a published
+# kezio-boot-artifacts image, unless build_boot_artifacts is set, plus
+# this workflow adds a second, independent gate: it needs a published
 # KubeVirtBMC release whose install manifest and image tags match
 # kubevirtbmc_version below. Both gates are pinned, not auto-discovered,
 # so a version bump on either side is a deliberate edit to this file.
 # Trigger it by hand after touching internal/bmc, internal/deployer's BMC
 # wiring, or when deliberately validating the BMC-driven power/PXE path
 # end to end. Expect early runs to need iteration: this is the heaviest
-# lane in the repository (every cost e2e-deploy-kubevirt.yml pays, plus
-# KubeVirtBMC's own control plane and webhook, plus the extra power
-# cycle), and it is exercising an integration (kezio's Redfish driver
-# against KubeVirtBMC's Redfish implementation) that has never run
-# end-to-end before this workflow existed.
+# lane in the repository (KVM setup, cluster+addon installs, a full live
+# PXE boot, a real partclone/BitTorrent deploy, KubeVirtBMC's own control
+# plane and webhook, plus the extra power cycle), and it is exercising an
+# integration (kezio's Redfish driver against KubeVirtBMC's Redfish
+# implementation) that has never run end-to-end before this workflow
+# existed.
 on:
   workflow_dispatch:
     inputs:
@@ -40,9 +43,26 @@ on:
           checkout instead of pulling boot_artifacts_image - the way to
           exercise an internal/agent or cmd/agent change under test.
           Slower; see e2e-kubevirt-reusable.yml's own input description.
+          A CI-grade run of this lane (validating a real internal/agent
+          or cmd/agent change, not just re-running the last published
+          artifact) should set this true; the in-lane build is the
+          reliable path since this lane must also be dispatchable
+          standalone, with no prior main.yaml run to borrow artifacts
+          from.
         required: false
         type: boolean
         default: false
+      dhcp_scenario:
+        description: >-
+          Which of kezio-bootd's DHCP scenarios this run drives - see
+          e2e-kubevirt-reusable.yml's own input description for the
+          full "why" of each.
+        required: false
+        type: choice
+        options:
+          - no-relay
+          - lease
+        default: no-relay
 
 jobs:
   bmc-kubevirt:
@@ -53,7 +73,7 @@ jobs:
     with:
       boot_artifacts_image: ${{ inputs.boot_artifacts_image }}
       build_boot_artifacts: ${{ inputs.build_boot_artifacts }}
-      bmc_mode: true
+      dhcp_scenario: ${{ inputs.dhcp_scenario }}
       manager_image: "example.com/kezio:e2e-bmc"
       bootd_image: "example.com/kezio-bootd:e2e-bmc"
       ingest_image: "example.com/kezio-ingest:e2e-bmc"

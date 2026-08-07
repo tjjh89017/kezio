@@ -2,24 +2,25 @@ name: E2E Full Deploy (KubeVirt VM) - reusable
 
 # The BT-transfer/full-deploy scenario, extracted from a single caller so
 # it can be invoked with `workflow_call` - by kezio's own
-# `e2e-deploy-kubevirt.yml` (a thin `workflow_dispatch` wrapper, same
-# gating as before), by kezio's own `e2e-bmc-kubevirt.yml` (a thin
-# `workflow_dispatch` wrapper that sets `bmc_mode: true`, same gating plus
-# a second KubeVirtBMC-release gate - see that file's own header), and by
-# the upstream ezio repository, which owns the BitTorrent engine this
-# scenario seeds and leeches through. ezio ships build-only CI and no test
-# suite of its own; calling this workflow gives it a real integration test
-# - UEFI boot, real partclone data, a real swarm (opentracker + ezio
-# seeder), and a boot check of the disk ezio helped write - for each ezio
-# change, by overriding `ezio_ref` with the revision under test.
+# `e2e-bmc-kubevirt.yml` (a thin `workflow_dispatch` wrapper, same gating
+# as before, plus a second KubeVirtBMC-release gate - see that file's own
+# header), and by the upstream ezio repository, which owns the BitTorrent
+# engine this scenario seeds and leeches through. ezio ships build-only CI
+# and no test suite of its own; calling this workflow gives it a real
+# integration test - UEFI boot, real partclone data, a real swarm
+# (opentracker + ezio seeder), and a boot check of the disk ezio helped
+# write - for each ezio change, by overriding `ezio_ref` with the
+# revision under test.
 #
 # What this job proves, end to end: KubeVirt + Multus stand up a target
 # VM and a provisioning network; a real Image is ingested (qemu-img +
-# sfdisk + partclone); an opentracker + ezio seeder swarm serves it; the
-# target VM net-boots into a live environment, kezio-agent leeches the
-# Image over BitTorrent and writes it to the VM's disk, the VM reboots,
-# and the deployed disk actually boots - proven by qemu-guest-agent
-# connecting and by reading a marker file back out of the guest.
+# sfdisk + partclone); an opentracker + ezio seeder swarm serves it;
+# kezio's own Redfish driver (internal/bmc/redfish) powers the target VM
+# on and PXE-boots it through a real KubeVirtBMC endpoint; the target VM
+# net-boots into a live environment, kezio-agent leeches the Image over
+# BitTorrent and writes it to the VM's disk, the VM reboots, and the
+# deployed disk actually boots - proven by qemu-guest-agent connecting
+# and by reading a marker file back out of the guest.
 #
 # Every hardcoded image reference the original single-file workflow
 # carried is now an `inputs.*` value below, defaulted to kezio's own
@@ -33,46 +34,29 @@ name: E2E Full Deploy (KubeVirt VM) - reusable
 # No secrets are required: every image built here is built from source
 # and loaded locally (never pushed), and the only external pulls
 # (the Ubuntu cloud image, the opentracker image, ezio's own git clone,
-# KubeVirtBMC's release manifest when bmc_mode is set) are all public. A
-# caller that needs private registry auth can add a `secrets:` block here
-# later; none exists today because nothing in this job needs one.
+# KubeVirtBMC's release manifest) are all public. A caller that needs
+# private registry auth can add a `secrets:` block here later; none
+# exists today because nothing in this job needs one.
 #
-# Topology note (KubeVirtBMC vs. VM-native power): `bmc_mode` (default
-# false) selects which of two ways this job gets the target VM powered on
-# and PXE-booted:
-#   - bmc_mode: false (kezio's own e2e-deploy-kubevirt.yml). kezio's own
-#     BMC driver is a later milestone for this path, so the job relies on
-#     the VM's own boot order (network first, local disk second) instead
-#     of KubeVirtBMC: the harness starts the VM itself (`running: true`),
-#     and kezio-agent finalizes a deployment by running `systemctl
-#     reboot` inside the live environment itself (see
-#     internal/agent/deploy/finalize.go's rebootOrPowerOff), which
-#     re-enters the *same* firmware boot order without KubeVirtBMC's
-#     help. The Machine no longer needing a net boot (state Provisioned)
-#     makes kezio-bootd answer the post-reboot PXE attempt with a fixed
-#     "exit" GRUB config (internal/bootserver's needsNetBoot/writeBootLocal)
-#     instead of the live kernel/initrd - GRUB's "exit" hands control
-#     straight back to firmware, which falls through to the next boot
-#     device: the disk kezio-agent just wrote. No boot-order flip, no
-#     virtctl restart, and no BMC call are needed to make the VM boot
-#     from disk - the net-boot-first order and the agent's own reboot are
-#     sufficient by design. This is the intended shape of the state
-#     machine, not a stand-in for KubeVirtBMC.
-#   - bmc_mode: true (kezio's own e2e-bmc-kubevirt.yml). The target VM is
-#     left powered off (`running: false`) and given a Redfish endpoint
-#     through KubeVirtBMC (https://github.com/kubevirtbmc/kubevirtbmc's
-#     VirtualMachineBMC CRD); the Machine names that endpoint in
-#     spec.bmc. kezio's own Redfish driver (internal/bmc/redfish) is what
-#     has to power it on: the deployer's Register step
-#     (internal/deployer/agent.go) calls SetOneTimePXEBoot then PowerOn
-#     against that endpoint, and the same driver answers a real server's
-#     BMC over the wire - this is the proof that code path actually
-#     drives a VM through KubeVirtBMC, not a mock. After Provisioned, the
-#     job also drives a second, independent BMC power cycle by flipping
-#     spec.online off then on (internal/controller/machine_controller.go's
-#     reconcilePower calls dep.PowerOff/dep.PowerOn, which go through the
-#     BMC exactly like Register does), proving the steady-state power
-#     path is BMC-driven too, not just the initial PXE boot.
+# Topology note (BMC-driven power): the target VM is left powered off
+# (`running: false`) and given a Redfish endpoint through KubeVirtBMC
+# (https://github.com/kubevirtbmc/kubevirtbmc's VirtualMachineBMC CRD);
+# the Machine names that endpoint in spec.bmc. kezio's own Redfish driver
+# (internal/bmc/redfish) is what has to power it on: the deployer's
+# Register step (internal/deployer/agent.go) calls SetOneTimePXEBoot then
+# PowerOn against that endpoint, and the same driver answers a real
+# server's BMC over the wire - this is the proof that code path actually
+# drives a VM through KubeVirtBMC, not a mock. After Provisioned, the job
+# also drives a second, independent BMC power cycle by flipping
+# spec.online off then on (internal/controller/machine_controller.go's
+# reconcilePower calls dep.PowerOff/dep.PowerOn, which go through the BMC
+# exactly like Register does), proving the steady-state power path is
+# BMC-driven too, not just the initial PXE boot. kezio's own BMC-less
+# boot order (net first, disk second, driven by the harness starting the
+# VM directly) was this scenario's original shape before KubeVirtBMC
+# integration; that no-BMC mode is retired (issue #17) since kezio never
+# ships without a BMC driver, so this workflow now only has the one,
+# BMC-driven shape.
 on:
   workflow_call:
     inputs:
@@ -156,27 +140,35 @@ on:
         required: false
         type: string
         default: "jpillora/dnsmasq:1.1@sha256:78a9c6711031a557d9c6a79a0b6e060c4ac09de3a8755c78d690acb55b4ccd15"
-      bmc_mode:
-        description: >-
-          When true, leave the target VM powered off and drive it through
-          a KubeVirtBMC VirtualMachineBMC/Redfish endpoint instead of the
-          harness starting it directly - see this workflow's own
-          "Topology note" above for the full behavior difference. kezio's
-          e2e-bmc-kubevirt.yml is the only caller that sets this.
-        required: false
-        type: boolean
-        default: false
       kubevirtbmc_version:
         description: >-
-          KubeVirtBMC release tag to install when bmc_mode is true (see
+          KubeVirtBMC release tag to install (see
           https://github.com/kubevirtbmc/kubevirtbmc's own tag.yml
-          release workflow for what "vX.Y.Z" publishes). Unused when
-          bmc_mode is false.
+          release workflow for what "vX.Y.Z" publishes).
         required: false
         type: string
         default: "v0.9.0"
+      dhcp_scenario:
+        description: >-
+          Which of kezio-bootd's DHCP scenarios this run drives through a
+          real PXE boot to agent registration (see
+          internal/bootd.Config's LeaseMode doc comment):
+            - no-relay (default): proxyDHCP beside the existing-dhcp
+              stand-in server (see existing_dhcp_image above), with no
+              relay leg at all - the stand-in answers the lease directly
+              on the wire and bootd answers only the PXE portion of the
+              exchange.
+            - lease: BOOTD_LEASE_MODE instead - no stand-in DHCP server
+              is deployed at all, and bootd's own dnsmasq is the
+              segment's sole DHCP lease authority.
+          The relay scenario (bootd relaying to a site's existing DHCP
+          server) is retired (issue #15); no-relay and lease are the two
+          scenarios kezio's own state machine still needs proven.
+        required: false
+        type: string
+        default: no-relay
       target_vm_name:
-        description: "Name shared by the target VirtualMachine, Machine, and (when bmc_mode is true) VirtualMachineBMC."
+        description: "Name shared by the target VirtualMachine, Machine, and VirtualMachineBMC."
         required: false
         type: string
         default: "e2e-deploy-vm"
@@ -201,10 +193,6 @@ on:
         type: string
         default: "kezio-e2e-deploy-token"
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 permissions:
   contents: read
 
@@ -221,7 +209,7 @@ env:
   # local-path explicitly, so this rancher/local-path-provisioner release
   # is installed and marked default below.
   LOCAL_PATH_PROVISIONER_VERSION: "v0.0.37"
-  # Only installed when bmc_mode is true; see inputs.kubevirtbmc_version.
+  # See inputs.kubevirtbmc_version.
   KUBEVIRTBMC_VERSION: ${{ inputs.kubevirtbmc_version }}
 
   # The provisioning L2 segment, same shape as e2e-boot-path-kubevirt.yml.
@@ -244,22 +232,22 @@ env:
   #     whether bootd is healthy (see that step's own comment).
   #   - PROVISIONING_BOOTD_NET1_IP: the static address the
   #     kezio-boot-network NetworkAttachmentDefinition assigns to
-  #     bootd's net1. It is dnsmasq's dhcp-range subnet anchor, the
-  #     relay giaddr, the TFTP next-server bootd advertises - so
-  #     firmware TFTPs straight into bootd's pod with no host-side
-  #     UDP/69 forward in the path - and, once bootd's reverse proxy is
-  #     configured below, the one address a net-booting machine (and the
-  #     kezio-agent it boots into) ever needs to reach for the whole
-  #     boot-to-registration flow (BOOT_SERVER_URL, BOOT_AGENT_SERVER_URL,
+  #     bootd's net1. It is dnsmasq's dhcp-range subnet anchor and the
+  #     TFTP next-server bootd advertises - so firmware TFTPs straight
+  #     into bootd's pod with no host-side UDP/69 forward in the path -
+  #     and, once bootd's reverse proxy is configured below, the one
+  #     address a net-booting machine (and the kezio-agent it boots
+  #     into) ever needs to reach for the whole boot-to-registration
+  #     flow (BOOT_SERVER_URL, BOOT_AGENT_SERVER_URL,
   #     BOOTD_BOOT_CONFIG_URL all resolve to it) - no socat forward and no
   #     bare ClusterIP URL anywhere in this lane.
   #   - PROVISIONING_EXISTING_DHCP_NET1_IP: the static address the
   #     existing-dhcp pod's own NAD assigns to its net1 (see
-  #     .github/actions/deploy-existing-dhcp). It is on the SAME /24 as
-  #     bootd's net1 - the Clonezilla precedent this lane follows keeps
-  #     the site's existing DHCP server on-segment, not behind a
-  #     gateway, so bootd's relay to it (BOOTD_DHCP_RELAY_SERVER) is a
-  #     plain on-link unicast with no host-side routing at all.
+  #     .github/actions/deploy-existing-dhcp), used in the no-relay
+  #     scenario only (see inputs.dhcp_scenario). It is on the SAME /24
+  #     as bootd's net1 - the Clonezilla precedent this lane follows
+  #     keeps the site's existing DHCP server on-segment, not behind a
+  #     gateway, answering leases directly beside bootd's own proxyDHCP.
   #   - PROVISIONING_TRACKER_NET1_IP / PROVISIONING_SEEDER_NET1_IP: the
   #     static addresses the kezio-tracker-network / kezio-seeder-network
   #     NetworkAttachmentDefinitions assign to the opentracker and ezio
@@ -279,15 +267,22 @@ env:
   PROVISIONING_SEEDER_NET1_IP: 192.0.2.5/24
   PROVISIONING_CIDR: 192.0.2.0/24
   PROVISIONING_DHCP_RANGE: "192.0.2.10,192.0.2.100,255.255.255.0,12h"
+  # Same pool the existing-dhcp stand-in's own PROVISIONING_DHCP_RANGE
+  # draws from - reused (not derived from it) so the "lease" scenario's
+  # BOOTD_LEASE_RANGE_START/END do not depend on parsing that string, and
+  # kept clear of PROVISIONING_HOST_IP/PROVISIONING_BOOTD_NET1_IP
+  # (.1/.2), which stay statically assigned regardless of scenario.
+  PROVISIONING_LEASE_RANGE_START: "192.0.2.10"
+  PROVISIONING_LEASE_RANGE_END: "192.0.2.100"
+  DHCP_SCENARIO: ${{ inputs.dhcp_scenario }}
   TARGET_VM_NAME: ${{ inputs.target_vm_name }}
   TARGET_VM_MAC: ${{ inputs.target_vm_mac }}
   TARGET_VM_DISK_SERIAL: ${{ inputs.target_vm_disk_serial }}
   # KubeVirtBMC names the Service it creates for a VirtualMachineBMC
   # "<virtualMachineRef.name>-virtbmc" (RedfishSvcPort 80, plain HTTP -
   # KubeVirtBMC does not terminate TLS on this port, hence
-  # "redfish+http" rather than "redfish" below). Only used when bmc_mode
-  # is true; the VirtualMachineBMC and the Machine live in kezio-system,
-  # alongside the VM.
+  # "redfish+http" rather than "redfish" below). The VirtualMachineBMC
+  # and the Machine live in kezio-system, alongside the VM.
   BMC_REDFISH_ADDRESS: "redfish+http://${{ inputs.target_vm_name }}-virtbmc.kezio-system.svc.cluster.local/redfish/v1/Systems/1"
   BMC_CREDS_SECRET: "${{ inputs.target_vm_name }}-bmc-creds"
 
@@ -334,24 +329,19 @@ env:
 
 jobs:
   deploy-kubevirt:
-    name: >-
-      ${{ inputs.bmc_mode
-        && 'Power and PXE-boot a KubeVirt VM through KubeVirtBMC, deploy through it, and verify'
-        || 'Deploy an Image onto a KubeVirt VM through the real agent chain and verify it booted' }}
+    name: Power and PXE-boot a KubeVirt VM through KubeVirtBMC, deploy through it, and verify
     runs-on: ubuntu-latest
-    # Honest budget: this job pays every cost e2e-boot-path-kubevirt.yml
-    # pays (KVM setup, cluster+addon installs, a full live PXE boot) plus
-    # every cost test-e2e.yml's image-path job pays (four extra image
-    # builds, a several-hundred-MiB cloud image download+convert+clone)
-    # plus the deploy-specific stages neither of those pays for on their
-    # own: a real partclone write of that content onto the VM's disk, a
-    # BitTorrent leech from the seeder to get it there, an in-guest
-    # reboot, a second PXE cycle that exits back to firmware, and the
-    # deployed OS booting far enough for qemu-guest-agent to connect.
-    # bmc_mode adds ten more minutes on top: KubeVirtBMC's own control
-    # plane and cert-manager-issued webhook certificate, plus a second
-    # BMC power cycle (PowerOff/PowerOn) and guest-agent reconnect wait.
-    timeout-minutes: ${{ inputs.build_boot_artifacts && (inputs.bmc_mode && 190 || 180) || (inputs.bmc_mode && 100 || 90) }}
+    # Honest budget: this job pays for KVM setup, cluster+addon installs
+    # (including KubeVirtBMC's own control plane and cert-manager-issued
+    # webhook certificate), a full live PXE boot driven through a real
+    # BMC power-on, four extra image builds, a several-hundred-MiB cloud
+    # image download+convert+clone, a real partclone write of that
+    # content onto the VM's disk, a BitTorrent leech from the seeder to
+    # get it there, an in-guest reboot, a second PXE cycle that exits
+    # back to firmware, the deployed OS booting far enough for
+    # qemu-guest-agent to connect, and a second BMC power cycle
+    # (PowerOff/PowerOn) with its own guest-agent reconnect wait.
+    timeout-minutes: ${{ inputs.build_boot_artifacts && 190 || 100 }}
     steps:
       - name: Clone the code
         uses: actions/checkout@v7
@@ -414,15 +404,14 @@ jobs:
           mem_mb="$(free -m | awk '/^Mem:/{print $2}')"
           disk_avail_gb="$(df -BG --output=avail / | tail -1 | tr -dc '0-9')"
 
-          # Union of e2e-boot-path-kubevirt.yml's floor (KubeVirt/CDI
-          # control plane + one live-booted VM) and test-e2e.yml's
-          # image-path floor (four extra image builds + a real cloud
-          # image), plus headroom for the VM actually running a full
-          # Ubuntu userspace after this job's deploy (not just the live
-          # environment, as in the boot-path lane). When bmc_mode is
-          # true, KubeVirtBMC's own control plane (controller + one
-          # virtbmc pod per managed VM) is small next to
-          # KubeVirt/CDI/cert-manager and already fits inside this floor.
+          # Union of a KubeVirt/CDI control plane + one live-booted VM
+          # and test-e2e.yml's image-path floor (four extra image builds
+          # + a real cloud image), plus headroom for the VM actually
+          # running a full Ubuntu userspace after this job's deploy (not
+          # just the live environment a plain net-boot needs).
+          # KubeVirtBMC's own control plane (controller + one virtbmc pod
+          # per managed VM) is small next to KubeVirt/CDI/cert-manager
+          # and already fits inside this floor.
           # RKE2's own control plane (etcd + a heavier apiserver/
           # controller-manager stack than k3s's, plus canal instead of
           # bare flannel) runs roughly 1 GiB heavier than k3s did, but
@@ -487,75 +476,13 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Warm the ingest/seeder/image-service image caches
-        # Same shape as test-e2e.yml's image-path job: builds (and loads
-        # locally, never pushes) the three images `make docker-build-*`
-        # build later, with GitHub Actions' layer cache under the same
-        # scope names publish.yml uses, so this job and a push to main
-        # share one warm cache instead of both paying the from-source
-        # debian:sid seeder build cost. The seeder build additionally
-        # takes EZIO_REF as a build-arg, so an ezio-repo caller's
-        # ezio_ref input actually selects which ezio revision gets built
-        # (see docker/seeder/Dockerfile's own EZIO_REF ARG comment).
-        run: |
-          set -euo pipefail
-          for spec in "ingest:docker/ingest/Dockerfile:${INGEST_IMG}" "seeder:docker/seeder/Dockerfile:${SEEDER_IMG}" "image-service:docker/image-service/Dockerfile:${IMAGE_SERVICE_IMG}"; do
-            IFS=: read -r scope dockerfile tag <<< "${spec}"
-            build_args=()
-            if [ "${scope}" = "seeder" ]; then
-              build_args+=(--build-arg "EZIO_REF=${EZIO_REF}")
-            fi
-            docker buildx build \
-              --file "${dockerfile}" \
-              --tag "${tag}" \
-              --cache-from "type=gha,scope=${scope}" \
-              --cache-to "type=gha,mode=max,scope=${scope}" \
-              "${build_args[@]}" \
-              --load \
-              .
-          done
-
-      - name: Build the manager image
-        # Import happens later, in its own "Import images into RKE2
-        # containerd" step, once RKE2 (which owns the containerd this
-        # needs to import into) is actually installed below.
-        run: |
-          set -euo pipefail
-          go mod tidy
-          make docker-build IMG="${MANAGER_IMG}"
-
-      - name: Build the bootd image
-        run: |
-          set -euo pipefail
-          make docker-build-bootd BOOTD_IMG="${BOOTD_IMG}"
-
-      - name: Build kezioctl
-        run: |
-          set -euo pipefail
-          make build-kezioctl
-
-      - name: Build the live boot image and kezio-boot-artifacts image
-        # The one path that boots a kezio-agent built from the commit
-        # under test, not build-live-image.yml's last published one -
-        # see build_boot_artifacts's own input description. Runs the
-        # exact same script build-live-image.yml budgets 90 minutes for
-        # on its own; this job's own timeout-minutes already carries
-        # that same order of extra headroom when this step is opted
-        # into, since running it does not shrink any other step's cost.
-        # AGENT_COMMIT ties the manifest.json this produces to the
-        # checked-out commit explicitly, rather than leaving
-        # hack/live-image/build.sh to `git rev-parse HEAD` a checkout
-        # actions/checkout@v7 leaves in detached-HEAD state (which
-        # resolves fine either way, but naming it here is one less thing
-        # to trust implicitly) - the "Assert the boot artifacts agent
-        # commit" step below reads this same value back out to prove it.
-        if: ${{ inputs.build_boot_artifacts }}
-        env:
-          AGENT_COMMIT: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          hack/live-image/build.sh
-          make docker-build-boot-artifacts BOOT_ARTIFACTS_IMG="${BOOT_ARTIFACTS_IMG}"
+      - name: Build the e2e lane's component images
+        # Extracted into its own composite action (shared shape available
+        # to any future KubeVirt lane) - see that action's own doc
+        # comment for the full "why" behind each build.
+        uses: ./.github/actions/build-e2e-images
+        with:
+          build-boot-artifacts: ${{ inputs.build_boot_artifacts }}
 
       - name: Install RKE2 with Multus enabled
         # Shared with e2e-boot-path-kubevirt.yml and
@@ -566,85 +493,10 @@ jobs:
         with:
           rke2-version: ${{ env.RKE2_VERSION }}
 
-      - name: Allow bridged traffic on the provisioning bridge (bypass canal's FORWARD filtering)
-        # RKE2's canal CNI loads br_netfilter
-        # (net.bridge.bridge-nf-call-iptables=1), which routes every
-        # bridged L2 frame - including this bridge's, even though it
-        # carries no cluster pod traffic - through the host's netfilter
-        # FORWARD chain. kube-proxy/canal leave that chain's default
-        # policy at DROP once the cluster is up
-        # (https://github.com/kubernetes/kubernetes/issues/39823,
-        # https://github.com/kubernetes/kubernetes/issues/91545), which
-        # silently eats the VM's PXE DHCP DISCOVER broadcast travelling
-        # between its Multus port and bootd's Multus port on this
-        # bridge. Run after the node is Ready (canal has had the chance
-        # to program its own FORWARD rules by then) and idempotently -
-        # -C before -I - in case a later canal reconciliation touches
-        # the chain again: add an ACCEPT scoped to this bridge's own
-        # port-to-port traffic only, so cluster filtering everywhere
-        # else is untouched.
-        run: |
-          set -euo pipefail
-          if command -v iptables >/dev/null 2>&1; then
-            sudo iptables -C FORWARD -i "${PROVISIONING_BRIDGE}" -o "${PROVISIONING_BRIDGE}" -j ACCEPT 2>/dev/null || \
-              sudo iptables -I FORWARD -i "${PROVISIONING_BRIDGE}" -o "${PROVISIONING_BRIDGE}" -j ACCEPT
-          fi
-          # RKE2/canal can also run with the kernel's nf_tables backend
-          # instead of legacy iptables; when the "inet filter" table
-          # exists, mirror the same exemption there so the bridge is
-          # covered regardless of which backend actually owns FORWARD.
-          if command -v nft >/dev/null 2>&1 && sudo nft list table inet filter >/dev/null 2>&1; then
-            sudo nft list chain inet filter FORWARD 2>/dev/null | grep -q "iifname \"${PROVISIONING_BRIDGE}\" oifname \"${PROVISIONING_BRIDGE}\" accept" || \
-              sudo nft insert rule inet filter FORWARD iifname "${PROVISIONING_BRIDGE}" oifname "${PROVISIONING_BRIDGE}" accept
-          fi
-
-          # No bridge<->pod-network accepts, on purpose: the target VM's
-          # whole world lives on this bridge. Every peer it talks to -
-          # bootd's net1 (DHCP/TFTP and, through its reverse proxy, the
-          # boot config and agent APIs too) and the opentracker and
-          # ezio-seeder pods' net1 (Multus-attached below with static
-          # bridge addresses) - is a port on this same bridge, so the
-          # port-to-port ACCEPT above covers all of it and the VM needs
-          # no route into the cluster's pod network at all.
-
-      - name: Fill UDP checksums for PXE DHCP crossing the provisioning bridge
-        # The target VM's virtio-net leaves UDP checksums to be filled in
-        # by "hardware" (CHECKSUM_PARTIAL) rather than computing them
-        # itself. That is fine as long as the frame stays on a path that
-        # keeps honouring the offload flag, but this frame's actual path -
-        # tap device -> this Linux bridge -> a Multus veth -> bootd's pod
-        # network namespace - crosses a device boundary that never
-        # performs the fill, so the DHCP DISCOVER/OFFER datagrams arrive
-        # at bootd's UDP socket with a checksum field the kernel considers
-        # invalid and silently drops before the socket ever sees them.
-        # This is the same failure libvirt's own virtual networks hit
-        # (DHCP packets sent to VMs have no checksum due to a longstanding
-        # bug when vhost-net is on the same host as the DHCP service) and
-        # the same fix: an iptables mangle CHECKSUM --checksum-fill rule,
-        # scoped to this bridge and to the two DHCP ports (67 server,
-        # 68 client) - libvirt's own generated rule is
-        # `-A POSTROUTING -o virbr0 -p udp -m udp --dport 68 -j CHECKSUM
-        # --checksum-fill` (see libvirt commit "Add iptables rule to fixup
-        # DHCP response checksum", libvir-list 2010-08); port 67 is added
-        # here too since this bridge carries the DISCOVER direction (VM ->
-        # bootd) as well, not only the reply. nft has no CHECKSUM target
-        # equivalent, so when nft is the active backend and iptables
-        # cannot be used, disabling tx checksum offload on the bridge
-        # itself (`ethtool -K ... tx off`) is the fallback - cruder
-        # (it stops the kernel from ever leaving a partial checksum on
-        # anything forwarded through the bridge, not just DHCP) but it
-        # covers the same failure mode. Idempotent (-C before -A) so a
-        # re-run or a later reconciliation never duplicates the rule.
-        run: |
-          set -euo pipefail
-          if command -v iptables >/dev/null 2>&1; then
-            for port in 67 68; do
-              sudo iptables -t mangle -C POSTROUTING -o "${PROVISIONING_BRIDGE}" -p udp --dport "${port}" -j CHECKSUM --checksum-fill 2>/dev/null || \
-                sudo iptables -t mangle -A POSTROUTING -o "${PROVISIONING_BRIDGE}" -p udp --dport "${port}" -j CHECKSUM --checksum-fill
-            done
-          else
-            sudo ethtool -K "${PROVISIONING_BRIDGE}" tx off || true
-          fi
+      - name: Harden the provisioning bridge for real PXE/DHCP traffic
+        # Extracted into its own composite action - see that action's
+        # own doc comment for the full "why" behind each fixup.
+        uses: ./.github/actions/harden-provisioning-bridge
 
       - name: Install local-path-provisioner and mark it the default StorageClass
         # RKE2 ships no default StorageClass (k3s bundled local-path by
@@ -694,7 +546,6 @@ jobs:
           cdi-version: ${{ env.CDI_VERSION }}
 
       - name: Install KubeVirtBMC
-        if: ${{ inputs.bmc_mode }}
         # One release asset, "kubevirtbmc-install.yaml" (CRD, RBAC,
         # cert-manager Certificate/Issuer, webhook, controller
         # Deployment), published by KubeVirtBMC's own tag.yml on every
@@ -717,162 +568,12 @@ jobs:
           kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
 
       - name: Create the provisioning NetworkAttachmentDefinitions
-        # FOUR NADs on the SAME bridge, split on purpose (a fifth,
+        # Extracted into its own composite action (a fifth NAD,
         # kezio-existing-dhcp-network, is created separately by the
-        # "Deploy the existing-dhcp pod" step above, through
-        # .github/actions/deploy-existing-dhcp - see that action's own
-        # comment for why its own address, tuning chain, and dhcp-range
-        # travel together with the pod they belong to instead of living
-        # here):
-        #
-        # kezio-boot-network (static ipam) is for the bootd pod ONLY.
-        # bootd's net1 must carry a fixed address
-        # (PROVISIONING_BOOTD_NET1_IP) on the provisioning subnet -
-        # dnsmasq binds its DHCP sockets to net1, uses this address as
-        # the dhcp-relay giaddr, and BOOTD_SERVER_IP advertises it as
-        # the TFTP next-server. Every other address on this bridge
-        # (the existing-dhcp pod's, the tracker's, the seeder's) is its
-        # own static Multus attachment, so none of them ever collide.
-        #
-        # kezio-tracker-network / kezio-seeder-network (static ipam) are
-        # for the opentracker and ezio-seeder pods, one each, so every
-        # swarm participant sits directly on this bridge with a fixed
-        # address (PROVISIONING_TRACKER_NET1_IP /
-        # PROVISIONING_SEEDER_NET1_IP) - the e2e realization of
-        # config/seeder/README.md's data-network requirement (the
-        # commented-out k8s.v1.cni.cncf.io/networks annotation both
-        # production Deployments carry; see
-        # networkattachmentdefinition.example.yaml). The seeder's
-        # announce then leaves its own net1 (the static /24 gives it the
-        # connected route) with its bridge address as the source, and the
-        # tracker registers it at an address that is on-link for the
-        # target VM - announce IP == reachable IP, no NAT anywhere (the
-        # no-NAT rule). One NAD per pod because the static ipam plugin
-        # hands every attaching pod the same address; a shared NAD would
-        # assign duplicates. No tuning chain either: unlike bootd's net1,
-        # these carry ordinary unicast within the /24, which the
-        # connected route already satisfies under any rp_filter setting.
-        #
-        # kezio-boot-network-vm ("ipam": {}) is for the target VM's
-        # provisioning NIC. The VM must NOT attach the static-ipam NAD:
-        # when a KubeVirt bridge-mode interface's network carries IPAM,
-        # virt-launcher starts its own in-pod DHCP server on that NIC
-        # to hand the pod's CNI-assigned address to the guest - and the
-        # static plugin hands EVERY attaching pod the same address, so
-        # that rogue server offers the guest bootd's own
-        # 192.0.2.2 (observed live: a 169.254.75.10 server answered
-        # every DISCOVER before bootd with Your-IP 192.0.2.2, the
-        # firmware took it and PXE died with PXE-E16). With empty ipam
-        # virt-launcher runs no DHCP there, and the guest firmware does
-        # real DHCP on the wire against bootd + the relayed lease
-        # server, which is exactly what this lane must exercise.
-        #
-        # Chains the "tuning" CNI plugin onto the plain bridge attachment
-        # to force net1's reverse-path filter loose (rp_filter=0) inside
-        # bootd's own network namespace, IFNAME substituted by the tuning
-        # plugin for whatever interface name the bridge plugin gave this
-        # attachment (net1 here). A DHCPDISCOVER arrives with source
-        # 0.0.0.0, destination 255.255.255.255 - a source address a
-        # strict/loose reverse-path check can still refuse to accept
-        # depending on kernel version and the namespace's inherited
-        # sysctl defaults, and unlike a host-wide sysctl this setting
-        # lives with the attachment itself (config/bootd's own
-        # NetworkAttachmentDefinition example carries the same plugin so
-        # a real deployment gets it too), reaching only bootd's net1
-        # rather than every interface on the node.
-        run: |
-          cat <<EOF | kubectl apply -f -
-          apiVersion: k8s.cni.cncf.io/v1
-          kind: NetworkAttachmentDefinition
-          metadata:
-            name: kezio-boot-network
-            namespace: kezio-system
-          spec:
-            config: |
-              {
-                "cniVersion": "0.3.1",
-                "name": "kezio-boot-network",
-                "plugins": [
-                  {
-                    "type": "bridge",
-                    "bridge": "${PROVISIONING_BRIDGE}",
-                    "ipam": {
-                      "type": "static",
-                      "addresses": [
-                        {"address": "${PROVISIONING_BOOTD_NET1_IP}"}
-                      ]
-                    }
-                  },
-                  {
-                    "type": "tuning",
-                    "sysctl": {
-                      "net.ipv4.conf.IFNAME.rp_filter": "0"
-                    }
-                  }
-                ]
-              }
-          EOF
-          # One static address per NAD is correct here: this lane runs a
-          # single central tracker and, at most, one seeder Deployment at
-          # a time (single-Image lane). A site where several Images can
-          # be deploying concurrently needs one address per concurrently
-          # active seeder Deployment instead - see
-          # config/seeder/networkattachmentdefinition-whereabouts.example.yaml
-          # and config/seeder/README.md's "Provisioning-segment address
-          # pool" section for that shape; do not convert this lane's NADs
-          # to it.
-          for nad_spec in "kezio-tracker-network:${PROVISIONING_TRACKER_NET1_IP}" "kezio-seeder-network:${PROVISIONING_SEEDER_NET1_IP}"; do
-            nad_name="${nad_spec%%:*}"
-            nad_addr="${nad_spec#*:}"
-            cat <<EOF | kubectl apply -f -
-          apiVersion: k8s.cni.cncf.io/v1
-          kind: NetworkAttachmentDefinition
-          metadata:
-            name: ${nad_name}
-            namespace: kezio-system
-          spec:
-            config: |
-              {
-                "cniVersion": "0.3.1",
-                "name": "${nad_name}",
-                "plugins": [
-                  {
-                    "type": "bridge",
-                    "bridge": "${PROVISIONING_BRIDGE}",
-                    "ipam": {
-                      "type": "static",
-                      "addresses": [
-                        {"address": "${nad_addr}"}
-                      ]
-                    }
-                  }
-                ]
-              }
-          EOF
-          done
-          # No tuning chain here: the VM's traffic is bridged at L2
-          # straight through virt-launcher's pod into the guest, so the
-          # pod netns's IP-layer reverse-path filter never sees it.
-          cat <<EOF | kubectl apply -f -
-          apiVersion: k8s.cni.cncf.io/v1
-          kind: NetworkAttachmentDefinition
-          metadata:
-            name: kezio-boot-network-vm
-            namespace: kezio-system
-          spec:
-            config: |
-              {
-                "cniVersion": "0.3.1",
-                "name": "kezio-boot-network-vm",
-                "plugins": [
-                  {
-                    "type": "bridge",
-                    "bridge": "${PROVISIONING_BRIDGE}",
-                    "ipam": {}
-                  }
-                ]
-              }
-          EOF
+        # "Deploy the existing-dhcp pod" step below, through
+        # .github/actions/deploy-existing-dhcp) - see that action's own
+        # doc comment for the full "why" behind each NAD's shape.
+        uses: ./.github/actions/create-provisioning-nads
 
       - name: Create the image-service bearer token Secret
         run: |
@@ -1052,6 +753,11 @@ jobs:
 
       - name: Deploy the existing-dhcp pod on the provisioning bridge
         id: existing-dhcp
+        # Skipped in the "lease" scenario: that scenario proves bootd's
+        # own dnsmasq is the segment's sole DHCP authority, which needs
+        # no other DHCP server present on the wire at all - see the
+        # dhcp_scenario input's own description.
+        if: ${{ inputs.dhcp_scenario != 'lease' }}
         uses: ./.github/actions/deploy-existing-dhcp
         with:
           namespace: kezio-system
@@ -1062,135 +768,10 @@ jobs:
           dhcp-range: ${{ env.PROVISIONING_DHCP_RANGE }}
 
       - name: Deploy kezio-bootd on the provisioning bridge
-        run: |
-          set -euo pipefail
-          cd config/bootd
-          ../../bin/kustomize edit set image bootd="${BOOTD_IMG}"
-          ../../bin/kustomize edit set image kezio-boot-artifacts="${BOOT_ARTIFACTS_IMG}"
-          cd ../..
-          kubectl apply -k config/bootd
-          # The site-specific values config/bootd/deployment.yaml leaves
-          # as placeholders/comments (BOOTD_DHCP_INTERFACE=net1 is
-          # already set there):
-          #   - BOOTD_SERVER_IP: bootd's OWN net1 static address (the
-          #     NAD's ipam above) - the PXE next-server, so firmware
-          #     TFTPs straight to the pod, and the dhcp-relay giaddr.
-          #   - BOOTD_PROVISIONING_CIDR: the segment's subnet, rendered
-          #     as dnsmasq's proxyDHCP dhcp-range.
-          #   - BOOTD_DHCP_RELAY_SERVER: the existing-dhcp pod's own
-          #     net1 address (see "Deploy the existing-dhcp pod" above) -
-          #     the stand-in for the site's existing DHCP server. On the
-          #     SAME /24 as bootd's own net1, so the relay is a plain
-          #     on-link unicast - no host-side routing is involved.
-          #   - BOOTD_BOOT_CONFIG_URL: bootd's OWN address (the same
-          #     value BOOT_SERVER_URL/BOOT_AGENT_SERVER_URL were set to
-          #     above) - bootd's own reverse proxy is what actually
-          #     answers /boot/grub.cfg-<mac> once BOOTD_BOOT_UPSTREAM_URL
-          #     below is set, forwarding it to kezio-boot-server. bootd
-          #     renders this URL into the grub/grub.cfg it serves over
-          #     TFTP, which is how the netboot GRUB image finds its
-          #     per-MAC config.
-          #   - BOOTD_AGENT_UPSTREAM_URL / BOOTD_BOOT_UPSTREAM_URL: the
-          #     in-cluster (ClusterIP) Services BOOT_AGENT_SERVER_URL and
-          #     BOOT_SERVER_URL used to name directly, before bootd grew
-          #     its own reverse proxy (see internal/bootd's ProxyServer
-          #     and config/bootd/README.md's "Reverse-proxying the agent
-          #     and boot config servers" section) - the target VM, which
-          #     lives on the raw kezio-prov0 bridge with no cluster DNS
-          #     and no route to a ClusterIP, can reach neither directly;
-          #     bootd, an ordinary cluster pod on its other (eth0)
-          #     interface, can. Setting these turns bootd's proxy on:
-          #     every /agent/... and /boot/... request the VM's firmware
-          #     or kezio-agent sends to bootd's own address above now
-          #     forwards to the real service - no socat, no
-          #     separately-exposed Service, and exactly one address
-          #     (bootd's) the VM ever needs to reach.
-          kubectl -n kezio-system set env deployment/kezio-bootd \
-            BOOTD_SERVER_IP="${PROVISIONING_BOOTD_NET1_IP%%/*}" \
-            BOOTD_PROVISIONING_CIDR="${PROVISIONING_CIDR}" \
-            BOOTD_DHCP_RELAY_SERVER="${PROVISIONING_EXISTING_DHCP_NET1_IP%%/*}" \
-            BOOTD_BOOT_CONFIG_URL="http://${PROVISIONING_BOOTD_NET1_IP%%/*}:80" \
-            BOOTD_AGENT_UPSTREAM_URL="http://kezio-agent-server.kezio-system.svc.cluster.local:8091" \
-            BOOTD_BOOT_UPSTREAM_URL="http://kezio-boot-server.kezio-system.svc.cluster.local:8090"
-          # Strategic-merge (kubectl patch's default type for a built-in
-          # object like Deployment), not --type=json: a JSON Patch "add"
-          # on .../metadata/annotations replaces the whole annotations
-          # map wholesale, so any later change to this same path (a
-          # rerun, a future patch adding a second annotation) would
-          # silently drop this one. A strategic-merge patch merges
-          # map[string]string fields (annotations included) by key
-          # instead, so this attachment survives regardless of what else
-          # ever touches the pod template's annotations.
-          kubectl -n kezio-system patch deployment/kezio-bootd --type=strategic -p='{
-            "spec":{"template":{"metadata":{"annotations":{"k8s.v1.cni.cncf.io/networks":"kezio-boot-network"}}}}
-          }'
-          kubectl rollout status deployment/kezio-bootd -n kezio-system --timeout=180s
-
-          # Same early-failure shape the old socat forward's curl check
-          # used to give, moved here (bootd itself, not a host-level
-          # forward, is what has to answer now): prove bootd's reverse
-          # proxy actually reaches through to the boot config server on
-          # bootd's own provisioning-network address, reached from the
-          # host's own port on the same bridge - the same L2 path the VM
-          # will use.
-          #
-          # Split into a connect step and a status check instead of a
-          # bare `curl -sf`: `-f` treats "could not open a TCP
-          # connection to bootd" and "connected fine but the upstream
-          # boot config server answered >= 400" as the exact same
-          # failure, which previously cost a full debugging cycle
-          # working out which of the two had actually happened (the
-          # runner host having no address on this segment at all, a
-          # routing problem with nothing to do with bootd's proxy). The
-          # http_code capture below fails on the former (curl itself
-          # errors, no code to report) and reports the code on the
-          # latter, so the two are distinguishable from the error text
-          # alone.
-          bootd_ip="${PROVISIONING_BOOTD_NET1_IP%%/*}"
-          http_code="$(curl -s -o /dev/null -w '%{http_code}' "http://${bootd_ip}:80/boot/artifacts/manifest.json")" || {
-            echo "::error::could not connect to bootd's reverse proxy at ${bootd_ip}:80 at all (no TCP connection - a network/routing failure, not an HTTP error from the boot config server)" >&2
-            exit 1
-          }
-          if [ "${http_code}" -lt 200 ] || [ "${http_code}" -ge 400 ]; then
-            echo "::error::bootd's reverse proxy at ${bootd_ip}:80 is reachable but answered HTTP ${http_code} for /boot/artifacts/manifest.json - the proxy itself is up, the boot config server behind it is not serving the artifact" >&2
-            exit 1
-          fi
-
-          # Fail fast here, not 20 minutes later at a PXE-E18 timeout on
-          # the VM console: confirm the live bootd pod actually has the
-          # Multus secondary interface Multus's own
-          # k8s.v1.cni.cncf.io/network-status annotation reports back
-          # (set by Multus after CNI ADD succeeds - the annotation this
-          # step just requested is only bootd's *request*, not proof the
-          # attachment happened), rather than only trusting the
-          # deployment's own template annotation.
-          # Exclude terminating pods: `rollout status` returning does not
-          # mean the OLD ReplicaSet's pod is already gone, and a
-          # terminating pod still reports phase=Running - so a bare
-          # .items[0] can race onto the pre-patch pod that legitimately
-          # lacks the attachment, failing this check spuriously.
-          bootd_pod="$(kubectl -n kezio-system get pods -l app.kubernetes.io/component=bootd -o json \
-            | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)][0].metadata.name')"
-          if [ -z "${bootd_pod}" ] || [ "${bootd_pod}" = "null" ]; then
-            echo "::error::no non-terminating bootd pod found" >&2
-            exit 1
-          fi
-          network_status="$(kubectl -n kezio-system get pod "${bootd_pod}" \
-            -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}')"
-          if ! grep -q 'kezio-boot-network' <<<"${network_status}"; then
-            echo "::error::bootd pod ${bootd_pod} has no kezio-boot-network attachment in its network-status; got: ${network_status}" >&2
-            exit 1
-          fi
-          echo "BOOTD_POD_NAME=${bootd_pod}" >> "$GITHUB_ENV"
-          # No host-side or in-pod route setup for the relay leg: the
-          # existing-dhcp pod's net1 (PROVISIONING_EXISTING_DHCP_NET1_IP)
-          # is on the SAME /24 as bootd's own net1, so the connected
-          # route bootd's static IPAM already installs delivers the
-          # relayed unicast directly - a plain on-link exchange, not a
-          # routed one (lab-verified against real dnsmasq processes on a
-          # shared bridge: bootd's own route to the relay target
-          # resolves to "dev net1 src <bootd's own address>" with no
-          # route entry ever added).
+        # Extracted into its own composite action - see that action's
+        # own doc comment for the full "why" behind each wired value and
+        # each fail-fast check.
+        uses: ./.github/actions/deploy-bootd
 
       - name: Assert the boot artifacts agent commit
         # The point of this step: a lane can never again go green while
@@ -1234,589 +815,18 @@ jobs:
         if: always()
         run: kill "${PF_PID}" 2>/dev/null || true
 
-      - name: Create the BMC credentials Secret
-        if: ${{ inputs.bmc_mode }}
-        # Shared by both sides of the BMC relationship: KubeVirtBMC's
-        # VirtualMachineBMC.spec.authSecretRef reads the same
-        # "username"/"password" keys kezio's
-        # Machine.spec.bmc.credentialsSecretRef does (KubeVirtBMC's
-        # bmcUserKey/bmcPasswordKey constants match
-        # internal/bmc/credentials.go's SecretKeyUsername/SecretKeyPassword
-        # exactly), so one Secret authenticates kezio's Redfish client
-        # against KubeVirtBMC's Redfish server.
-        run: |
-          set -euo pipefail
-          BMC_PASSWORD="$(openssl rand -hex 16)"
-          echo "::add-mask::${BMC_PASSWORD}"
-          kubectl -n kezio-system create secret generic "${BMC_CREDS_SECRET}" \
-            --type=kubernetes.io/basic-auth \
-            --from-literal=username=kezio-e2e \
-            --from-literal=password="${BMC_PASSWORD}" \
-            --dry-run=client -o yaml | kubectl apply -f -
-
-      - name: Create the Machine CR for the target VM
-        if: ${{ !inputs.bmc_mode }}
-        run: |
-          cat <<EOF | kubectl apply -f -
-          apiVersion: kezio.kojuro.date/v1alpha1
-          kind: Machine
-          metadata:
-            name: ${TARGET_VM_NAME}
-            namespace: kezio-system
-          spec:
-            bootMACAddress: "${TARGET_VM_MAC}"
-            online: true
-            targetDisk:
-              serialNumber: "${TARGET_VM_DISK_SERIAL}"
-            imageRef:
-              name: ${IMAGE_NAME}
-          EOF
-
-      - name: Create and start the target KubeVirt VirtualMachine
-        if: ${{ !inputs.bmc_mode }}
-        # Network boot first (bootOrder 1), the blank data disk second
-        # (bootOrder 2) - the same shape e2e-boot-path-kubevirt.yml uses,
-        # and the mechanism this workflow's header comment explains makes
-        # a real boot-from-disk happen after deploy with no boot-order
-        # flip and no BMC call: kezio-agent's own in-guest reboot re-nets
-        # PXE against the same order, and kezio-bootd's Provisioned-state
-        # "exit" GRUB response falls straight through to the disk.
-        # 3Gi memory / 4Gi disk (vs. the boot-path lane's 2Gi/2Gi): this
-        # VM actually boots a full Ubuntu userspace with
-        # qemu-guest-agent, not just the live environment, and its
-        # target disk must hold the whole converted Ubuntu minimal cloud
-        # image (virtual size a little over 2GiB) with headroom for the
-        # last partition's post-deploy filesystem grow (see
-        # internal/agent/deploy/finalize.go's fsResizeCommand).
-        run: |
-          cat <<EOF | kubectl apply -f -
-          apiVersion: kubevirt.io/v1
-          kind: VirtualMachine
-          metadata:
-            name: ${TARGET_VM_NAME}
-            namespace: kezio-system
-          spec:
-            running: true
-            template:
-              metadata:
-                labels:
-                  kubevirt.io/vm: ${TARGET_VM_NAME}
-              spec:
-                domain:
-                  cpu:
-                    cores: 2
-                  resources:
-                    requests:
-                      memory: 3Gi
-                  firmware:
-                    bootloader:
-                      efi:
-                        secureBoot: false
-                        # Real bare-metal firmware keeps its NVRAM across
-                        # power cycles, so the boot entry kezio-agent
-                        # writes with efibootmgr during finalize is still
-                        # there when the machine reboots into the
-                        # deployed disk. KubeVirt VMs get a fresh,
-                        # ephemeral EFI variable store on every boot
-                        # unless it is persisted, which threw away that
-                        # entry and left the rebooted firmware with
-                        # nothing but its PXE entry (observed as a PXE
-                        # loop ending in the UiApp setup screen).
-                        # persistent: true stores the variable store on
-                        # a small backend-storage PVC so the e2e models
-                        # real hardware. On KubeVirt v1.9.0 this needs
-                        # no feature gate (VMPersistentState is GA since
-                        # v1.6.0) and no vmStateStorageClass: the
-                        # backend PVC falls back to the cluster-default
-                        # StorageClass (local-path, RWO Filesystem -
-                        # exactly what it asks for when no
-                        # vmStateStorageClass is set).
-                        persistent: true
-                  devices:
-                    interfaces:
-                      - name: provisioning
-                        macAddress: "${TARGET_VM_MAC}"
-                        bridge: {}
-                        bootOrder: 1
-                    disks:
-                      - name: data
-                        serial: "${TARGET_VM_DISK_SERIAL}"
-                        bootOrder: 2
-                        disk:
-                          bus: virtio
-                      - name: cloudinitdisk
-                        disk:
-                          bus: virtio
-                networks:
-                  - name: provisioning
-                    multus:
-                      networkName: kezio-boot-network-vm
-                volumes:
-                  - name: data
-                    emptyDisk:
-                      capacity: 4Gi
-                  - name: cloudinitdisk
-                    cloudInitNoCloud:
-                      # run46 (commit f397696) proved the deployed disk
-                      # itself boots fine, but qemu-guest-agent.service
-                      # crash-looped inside the guest and hit systemd's
-                      # restart-burst limit before ever staying up long
-                      # enough to connect (console.log: five "Started
-                      # qemu-guest-agent.service" lines followed by
-                      # "Failed to start qemu-guest-agent.service", no
-                      # intervening "Starting" line - the classic
-                      # StartLimitBurst-exhausted signature). This
-                      # NoCloud seed is attached to the VM for its whole
-                      # lifetime, so it is still present across the
-                      # post-deploy in-guest reboot and is picked up the
-                      # first time the deployed Ubuntu image itself boots
-                      # (the live PXE environment has no cloud-init, so it
-                      # ignores this device). It removes the restart
-                      # burst limit and forces the unit enabled+running,
-                      # without needing to know why any single start
-                      # attempt failed - qemu-guest-agent is already
-                      # installed and systemd-started by the image, so
-                      # this is not a reinstall.
-                      userData: |
-                        #cloud-config
-                        write_files:
-                          - path: /etc/systemd/system/qemu-guest-agent.service.d/override.conf
-                            content: |
-                              [Unit]
-                              StartLimitIntervalSec=0
-                              [Service]
-                              Restart=always
-                              RestartSec=1
-                        runcmd:
-                          - systemctl daemon-reload
-                          - systemctl enable --now qemu-guest-agent.service
-          EOF
-          # Applying the VirtualMachine above only asks KubeVirt's VM
-          # controller to create a VirtualMachineInstance for it; that
-          # controller reconciles asynchronously, so the VMI object can
-          # still not exist yet at this point ("no matches" for `kubectl
-          # wait`, which errors out immediately on zero matches instead
-          # of polling for existence). Same exists-then-condition shape
-          # as the CRD waits above: poll for the VMI to exist first, then
-          # wait for it to actually report Ready.
-          deadline=$(( $(date +%s) + 60 ))
-          until kubectl get vmi/"${TARGET_VM_NAME}" -n kezio-system >/dev/null 2>&1; do
-            if [ "$(date +%s)" -ge "${deadline}" ]; then
-              echo "::error::VirtualMachineInstance ${TARGET_VM_NAME} did not appear within the timeout - the VM controller may not have reconciled it." >&2
-              exit 1
-            fi
-            sleep 2
-          done
-          kubectl wait vmi/"${TARGET_VM_NAME}" -n kezio-system --for=condition=Ready --timeout=180s
-
-      - name: Create the target VM's data disk PVC
-        if: ${{ inputs.bmc_mode }}
-        # bmc_mode's power-cycle step (below) recreates the VMI to
-        # consume KubeVirtBMC's one-shot PXE override, which is the BMC
-        # lane's stand-in for a real power-button press. An emptyDisk
-        # volume does not survive that: KubeVirt recreates it blank on
-        # every VMI, so a real power cycle after deploy wiped the
-        # deployed disk (partitioning, ezio-replicated image, and the
-        # efibootmgr Boot0006 entry finalize wrote all vanished, leaving
-        # the reboot with nothing bootable). Real bare-metal disks are
-        # not wiped by a power cycle, so this PVC - which does survive
-        # VMI recreation - is what makes the BMC lane model that.
-        # storageClassName local-path matches the cluster default these
-        # lanes already rely on (see the store/staging PVCs above).
-        # volumeMode Filesystem, not Block: local-path is a
-        # directory-backed provisioner with no raw block device to hand
-        # out, and KubeVirt presents a Filesystem-mode PVC's disk image
-        # to the guest as the same virtio block device emptyDisk did, so
-        # the guest-visible device (and kezio's serial-based disk
-        # matching) is unchanged.
-        run: |
-          cat <<EOF | kubectl apply -f -
-          apiVersion: v1
-          kind: PersistentVolumeClaim
-          metadata:
-            name: ${TARGET_VM_NAME}-data
-            namespace: kezio-system
-          spec:
-            accessModes:
-              - ReadWriteOnce
-            volumeMode: Filesystem
-            storageClassName: local-path
-            resources:
-              requests:
-                storage: 4Gi
-          EOF
-
-      - name: Create the target KubeVirt VirtualMachine, powered off
-        if: ${{ inputs.bmc_mode }}
-        # `running: false`: unlike the non-bmc_mode path, this VM is
-        # never started here. Unlike the non-bmc_mode VM above, neither
-        # device carries a permanent bootOrder: KubeVirtBMC's Register
-        # call (SetOneTimePXEBoot) patches its own interface-first order
-        # onto the VM spec for that one boot and backs up whatever was
-        # there before (nothing, here) so its bootorderrestore controller
-        # can put it back once the VMI that consumed the override is
-        # gone. A permanent bootOrder here would keep QEMU's "bootorder"
-        # fw_cfg file non-empty on every subsequent boot too, and OVMF's
-        # QemuBootOrderLib rewrites/filters the NVRAM BootOrder from that
-        # file whenever it is present and non-empty - discarding the
-        # persistent efibootmgr entry kezio-agent writes at finalize
-        # (which carries no bootindex) before the post-deploy reboot ever
-        # reaches it, and falling back to the PXE entry, then UiApp. With
-        # no static bootOrder, fw_cfg's "bootorder" file goes back to
-        # absent/empty after the one-shot is consumed and restored, so
-        # OVMF leaves NVRAM BootOrder untouched on the reboot into disk -
-        # the same behavior real firmware has with no BMC-issued boot
-        # override in effect.
-        run: |
-          cat <<EOF | kubectl apply -f -
-          apiVersion: kubevirt.io/v1
-          kind: VirtualMachine
-          metadata:
-            name: ${TARGET_VM_NAME}
-            namespace: kezio-system
-          spec:
-            running: false
-            template:
-              metadata:
-                labels:
-                  kubevirt.io/vm: ${TARGET_VM_NAME}
-              spec:
-                domain:
-                  cpu:
-                    cores: 2
-                  resources:
-                    requests:
-                      memory: 3Gi
-                  firmware:
-                    bootloader:
-                      efi:
-                        secureBoot: false
-                        # Persist the EFI variable store for the same
-                        # reason as the non-bmc_mode VM above: real
-                        # bare-metal NVRAM survives power cycles, so the
-                        # efibootmgr boot entry kezio-agent writes at
-                        # finalize must survive the reboot into disk.
-                        persistent: true
-                  devices:
-                    interfaces:
-                      - name: provisioning
-                        macAddress: "${TARGET_VM_MAC}"
-                        bridge: {}
-                    disks:
-                      - name: data
-                        serial: "${TARGET_VM_DISK_SERIAL}"
-                        disk:
-                          bus: virtio
-                      - name: cloudinitdisk
-                        disk:
-                          bus: virtio
-                networks:
-                  - name: provisioning
-                    multus:
-                      networkName: kezio-boot-network-vm
-                volumes:
-                  - name: data
-                    persistentVolumeClaim:
-                      claimName: ${TARGET_VM_NAME}-data
-                  - name: cloudinitdisk
-                    cloudInitNoCloud:
-                      # See the non-bmc_mode VM's cloudinitdisk comment
-                      # above: run46 (commit f397696) proved
-                      # qemu-guest-agent.service crash-loops in the
-                      # guest and permanently fails (systemd
-                      # StartLimitBurst exhausted) before ever staying up
-                      # long enough to connect, which is why AgentConnected
-                      # never appeared even though the deployed disk
-                      # itself booted. This VM persists across the BMC
-                      # power-cycle's VMI recreation, so the seed stays
-                      # attached and is picked up on every boot of the
-                      # deployed image, including after PowerOn.
-                      userData: |
-                        #cloud-config
-                        write_files:
-                          - path: /etc/systemd/system/qemu-guest-agent.service.d/override.conf
-                            content: |
-                              [Unit]
-                              StartLimitIntervalSec=0
-                              [Service]
-                              Restart=always
-                              RestartSec=1
-                        runcmd:
-                          - systemctl daemon-reload
-                          - systemctl enable --now qemu-guest-agent.service
-          EOF
-
-      - name: "Assert the VM is off before any Machine is created (the harness did not start it)"
-        if: ${{ inputs.bmc_mode }}
-        # Bounded wait, not a one-shot check: right after `kubectl apply`,
-        # KubeVirt's controller may not have populated status.printableStatus
-        # yet, so an empty status here is a populate-lag race, not a real
-        # power state problem. A Running status, though, is never lag - it
-        # means the VM actually came up, which must fail immediately.
-        # Re-validated against KubeVirt v1.9.0: the controller still
-        # populates this field asynchronously, so the bounded wait stays.
-        run: |
-          set -euo pipefail
-          deadline=$(( $(date +%s) + 120 ))
-          while true; do
-            status="$(kubectl get vm "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.status.printableStatus}' || true)"
-            echo "$(date -Is) VM printableStatus: ${status:-<none>}"
-            [ "${status}" = "Stopped" ] && break
-            if [ "${status}" = "Running" ]; then
-              echo "::error::VM ${TARGET_VM_NAME} printableStatus = Running, want Stopped - it must be off until kezio's controller powers it on through the BMC." >&2
-              exit 1
-            fi
-            if [ "$(date +%s)" -ge "${deadline}" ]; then
-              echo "::error::VM ${TARGET_VM_NAME} printableStatus = ${status:-<none>}, want Stopped - it must be off until kezio's controller powers it on through the BMC." >&2
-              exit 1
-            fi
-            sleep 5
-          done
-          if kubectl get vmi "${TARGET_VM_NAME}" -n kezio-system >/dev/null 2>&1; then
-            echo "::error::A VirtualMachineInstance already exists for ${TARGET_VM_NAME}; the VM must not be running yet." >&2
-            exit 1
-          fi
-
-      - name: Create the KubeVirtBMC VirtualMachineBMC for the target VM
-        if: ${{ inputs.bmc_mode }}
-        # Gives the VM a Redfish endpoint: KubeVirtBMC's
-        # VirtualMachineBMC controller creates a Pod running the
-        # "virtbmc" agent (talking to the Kubernetes API, translating
-        # Redfish calls into VirtualMachine Start/Stop/Restart and boot
-        # order patches) and a ClusterIP Service named
-        # "<virtualMachineRef.name>-virtbmc" in front of it, on port 80
-        # (plain HTTP - see BMC_REDFISH_ADDRESS's comment above). No IPMI
-        # simulator is enabled; this job only exercises the Redfish
-        # side, matching kezio's redfish:// driver.
-        run: |
-          cat <<EOF | kubectl apply -f -
-          apiVersion: bmc.kubevirt.io/v1beta1
-          kind: VirtualMachineBMC
-          metadata:
-            name: ${TARGET_VM_NAME}
-            namespace: kezio-system
-          spec:
-            virtualMachineRef:
-              name: ${TARGET_VM_NAME}
-            authSecretRef:
-              name: ${BMC_CREDS_SECRET}
-          EOF
-
-      - name: Wait for the VirtualMachineBMC to become Ready
-        if: ${{ inputs.bmc_mode }}
-        run: |
-          set -euo pipefail
-          deadline=$(( $(date +%s) + 180 ))
-          while true; do
-            ready="$(kubectl get virtualmachinebmc "${TARGET_VM_NAME}" -n kezio-system \
-              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' || true)"
-            clusterip="$(kubectl get virtualmachinebmc "${TARGET_VM_NAME}" -n kezio-system \
-              -o jsonpath='{.status.clusterIP}' || true)"
-            echo "$(date -Is) VirtualMachineBMC Ready=${ready:-<none>} clusterIP=${clusterip:-<none>}"
-            [ "${ready}" = "True" ] && [ -n "${clusterip}" ] && break
-            if [ "$(date +%s)" -ge "${deadline}" ]; then
-              echo "::error::VirtualMachineBMC ${TARGET_VM_NAME} did not become Ready within the timeout." >&2
-              kubectl get virtualmachinebmc "${TARGET_VM_NAME}" -n kezio-system -o yaml
-              exit 1
-            fi
-            sleep 5
-          done
-          kubectl get virtualmachinebmc "${TARGET_VM_NAME}" -n kezio-system -o yaml
-          kubectl -n kezio-system rollout status deployment 2>/dev/null || true
-          kubectl -n kezio-system get pods -l app=virtbmc 2>/dev/null || true
-
-      - name: Wait for the virtbmc pod to become Ready
-        if: ${{ inputs.bmc_mode }}
-        # The VirtualMachineBMC Ready condition just checked above only
-        # means KubeVirtBMC's Service got a ClusterIP (reason:
-        # ServiceReady) - it says nothing about whether the virtbmc pod
-        # behind that Service has passed its own readinessProbe on
-        # /redfish/v1 (initialDelaySeconds 2, periodSeconds 10) yet.
-        # Moving straight to the curl check on that signal alone can hit
-        # the Service while it still has zero ready endpoints, which
-        # surfaces as a plain connection refused. kubevirt.io/virtual
-        # machinebmc-name is the label KubeVirtBMC's own controller
-        # applies to this pod (its VirtualMachineBMCNameLabel constant).
-        # Re-validated at this version bump: kubevirtbmc_version stays
-        # v0.9.0 (already the latest release), so this wait and the
-        # curl-retry step below it are unchanged.
-        run: |
-          set -euo pipefail
-          kubectl -n kezio-system wait --for=condition=Ready pod \
-            -l "kubevirt.io/virtualmachinebmc-name=${TARGET_VM_NAME}" --timeout=180s
-
-      - name: "Verify the Redfish endpoint is reachable and reports the VM off"
-        if: ${{ inputs.bmc_mode }}
-        # Exercised from inside the cluster with a throwaway Pod (the
-        # Service is ClusterIP-only, same as kezio's other in-cluster
-        # services); the same call the controller's Register step is
-        # about to make, done here by hand first so a broken Redfish
-        # endpoint fails with a clear diagnostic instead of surfacing
-        # only as a Machine stuck in Error. The curl call itself is
-        # additionally retried a few times: the pod-Ready wait above
-        # closes the main race, but a belt-and-braces retry absorbs a
-        # first-connection blip on an endpoint that only just turned
-        # ready, without masking a real, persistent failure.
-        run: |
-          set -euo pipefail
-          BMC_USERNAME="$(kubectl get secret "${BMC_CREDS_SECRET}" -n kezio-system -o jsonpath='{.data.username}' | base64 -d)"
-          BMC_PASSWORD="$(kubectl get secret "${BMC_CREDS_SECRET}" -n kezio-system -o jsonpath='{.data.password}' | base64 -d)"
-          echo "::add-mask::${BMC_PASSWORD}"
-
-          # --overrides carries the whole container spec (image,
-          # command, stdin) because a restricted-PSA securityContext
-          # must be merged in via the generated pod's JSON - kubectl
-          # run has no flag for it. Explicit numeric runAsUser/runAsGroup
-          # because this image's own USER is the non-numeric "curl_user",
-          # which restricted PSA can't resolve to verify runAsNonRoot -
-          # the same reason config/bootd's now-retired curlimages/curl
-          # initContainer used to need the same override (see
-          # config/bootd/deployment.yaml's git history; that initContainer
-          # now uses a numeric-uid image instead). kezio-system now enforces
-          # privileged PSA (bootd's dnsmasq needs NET_ADMIN/NET_RAW -
-          # see the namespace label step above), so this override is no
-          # longer required for admission; it is kept so this throwaway
-          # pod stays as strict as every other pod in the lane.
-          redfish_overrides="$(jq -n \
-            --arg name "kezio-e2e-redfish-check" \
-            --arg image "curlimages/curl:8.21.0" \
-            --arg auth "${BMC_USERNAME}:${BMC_PASSWORD}" \
-            --arg url "http://${TARGET_VM_NAME}-virtbmc.kezio-system.svc.cluster.local/redfish/v1/Systems/1" \
-            '{
-              apiVersion: "v1",
-              kind: "Pod",
-              spec: {
-                securityContext: {
-                  runAsNonRoot: true,
-                  seccompProfile: {type: "RuntimeDefault"}
-                },
-                containers: [{
-                  name: $name,
-                  image: $image,
-                  stdin: true,
-                  command: ["curl", "-sf", "-u", $auth, $url],
-                  securityContext: {
-                    allowPrivilegeEscalation: false,
-                    runAsNonRoot: true,
-                    runAsUser: 100,
-                    runAsGroup: 101,
-                    capabilities: {drop: ["ALL"]},
-                    seccompProfile: {type: "RuntimeDefault"}
-                  }
-                }]
-              }
-            }')"
-
-          redfish_body=""
-          last_err=""
-          last_phase=""
-          for attempt in $(seq 1 5); do
-            # A fresh pod name per attempt: reusing one fixed name would
-            # race a leftover pod from a failed attempt instead of a
-            # clean retry.
-            #
-            # Output is read from `kubectl logs`, not from an attached
-            # stream: `kubectl run -i --rm --quiet` can exit 0 with empty
-            # captured stdout if the pod's curl finishes before the
-            # attach stream is established, which would otherwise be
-            # misread as a successful-but-empty response. Running
-            # detached (--attach=false) and waiting for the pod phase
-            # before reading its logs avoids that race entirely.
-            pod_name="kezio-e2e-redfish-check-${attempt}"
-            phase=""
-            body=""
-            if kubectl run "${pod_name}" -n kezio-system \
-              --attach=false --restart=Never --image=curlimages/curl:8.21.0 --quiet \
-              --overrides="${redfish_overrides}" 2>&1; then
-              if kubectl wait --for=jsonpath='{.status.phase}'=Succeeded \
-                "pod/${pod_name}" -n kezio-system --timeout=60s >/dev/null 2>&1; then
-                phase="Succeeded"
-              else
-                phase="$(kubectl get "pod/${pod_name}" -n kezio-system -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-              fi
-              body="$(kubectl logs "pod/${pod_name}" -n kezio-system 2>&1 || true)"
-              kubectl delete "pod/${pod_name}" -n kezio-system --ignore-not-found >/dev/null 2>&1
-            else
-              phase="PodCreateFailed"
-            fi
-            last_phase="${phase}"
-            if [ "${phase}" = "Succeeded" ] && [ -n "${body}" ]; then
-              redfish_body="${body}"
-              last_err=""
-              break
-            fi
-            last_err="${body}"
-            redfish_body=""
-            echo "attempt ${attempt}/5: curl against the Redfish endpoint failed (pod phase: ${phase}), retrying in 5s: ${last_err}"
-            sleep 5
-          done
-          if [ -z "${redfish_body}" ]; then
-            echo "::error::Redfish endpoint still unreachable after 5 attempts (last pod phase: ${last_phase}): ${last_err}" >&2
-            exit 1
-          fi
-          echo "Redfish ComputerSystem response: ${redfish_body}"
-
-          power_state="$(jq -r '.PowerState' <<<"${redfish_body}")"
-          if [ "${power_state}" != "Off" ]; then
-            echo "::error::Redfish reports PowerState=${power_state}, want Off before Register runs." >&2
-            exit 1
-          fi
-
-      - name: Create the Machine CR, with spec.bmc pointing at KubeVirtBMC's Redfish endpoint
-        if: ${{ inputs.bmc_mode }}
-        # No manual power-on, no manual boot-order flip: the controller's
-        # Register step (internal/deployer/agent.go) is what must call
-        # SetOneTimePXEBoot and PowerOn against BMC_REDFISH_ADDRESS to
-        # bring this Machine up.
-        run: |
-          cat <<EOF | kubectl apply -f -
-          apiVersion: kezio.kojuro.date/v1alpha1
-          kind: Machine
-          metadata:
-            name: ${TARGET_VM_NAME}
-            namespace: kezio-system
-          spec:
-            bmc:
-              address: ${BMC_REDFISH_ADDRESS}
-              credentialsSecretRef:
-                name: ${BMC_CREDS_SECRET}
-            bootMACAddress: "${TARGET_VM_MAC}"
-            online: true
-            targetDisk:
-              serialNumber: "${TARGET_VM_DISK_SERIAL}"
-            imageRef:
-              name: ${IMAGE_NAME}
-          EOF
-
-      - name: "Assert kezio powered the VM on through the BMC (not the harness)"
-        if: ${{ inputs.bmc_mode }}
-        # The only thing that has touched this VM since it was created
-        # `running: false` is the Machine CR just created above. If the
-        # VM comes up, it came up because agentDeployer.Register called
-        # the BMC.
-        run: |
-          set -euo pipefail
-          deadline=$(( $(date +%s) + 180 ))
-          while true; do
-            status="$(kubectl get vm "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.status.printableStatus}' || true)"
-            echo "$(date -Is) VM printableStatus: ${status:-<none>}"
-            case "${status}" in
-              Running) break ;;
-            esac
-            if [ "$(date +%s)" -ge "${deadline}" ]; then
-              echo "::error::VM ${TARGET_VM_NAME} never reached Running after the Machine was created - kezio's Register did not power it on through the BMC." >&2
-              kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o yaml
-              exit 1
-            fi
-            sleep 5
-          done
-          kubectl wait vmi/"${TARGET_VM_NAME}" -n kezio-system --for=condition=Ready --timeout=180s
+      - name: Provision the target VM through a real KubeVirtBMC/Redfish endpoint
+        # Extracted into its own composite action (BMC credentials
+        # Secret, data disk PVC, the VM created powered off, the
+        # VirtualMachineBMC, the Redfish reachability check, and the
+        # Machine CR that makes kezio's own Register step power it on) -
+        # see that action's own doc comment for the full "why" behind
+        # each piece.
+        uses: ./.github/actions/provision-target-vm-via-bmc
 
       - name: Start continuous VM console capture
-        # No `if:` guard - both the bmc_mode and non-bmc_mode branches
-        # above land here with the VMI already Ready, so this runs
-        # exactly once regardless of which power path this job used.
-        # bmc_mode's own later "power cycle to consume KubeVirtBMC's
+        # The VMI is already Ready by this point, powered on through the
+        # BMC above. The later "power cycle to consume KubeVirtBMC's
         # one-shot PXE override" step tears the VMI down and brings up a
         # new one (fresh virt-launcher pod, fresh console socket); the
         # action's reattach loop covers that VMI-recreation case, not
@@ -1952,48 +962,46 @@ jobs:
             exit 1
           fi
 
-      - name: "Verify the DHCP relay leg reached the existing-dhcp server"
-        # The target VM may legitimately receive two offers for a given
-        # DISCOVER - one direct from the existing-dhcp pod (same
-        # broadcast domain), one relayed via bootd - so this does NOT
-        # assert "a lease is obtainable only through the relay"; that
-        # would be asserting away the real Clonezilla-precedent shape
-        # this topology models. What it proves instead is that the relay
-        # leg itself fired at least once during provisioning (which just
-        # finished, by Layer 1 above, so the PXE handshake this checks
-        # already happened):
-        #
-        #   - bootd's own dnsmasq logs "DHCP relay at <giaddr> -> <target>"
-        #     at the moment it relays a request (lab-verified against
-        #     dnsmasq 2.91, the same version debian:stable-slim gives
-        #     bootd's own image) - giaddr is bootd's net1 address, target
-        #     is the existing-dhcp pod's net1 address, so this line only
-        #     ever appears when a real relayed unicast left bootd's pod.
-        #   - the existing-dhcp pod's own log then shows it actually
-        #     received and answered that request (DHCPDISCOVER/
-        #     DHCPOFFER), not just that bootd claims to have sent it.
+      - name: "Verify the no-relay proxyDHCP scenario answered leases directly"
+        # no-relay scenario only: proves bootd never relayed anything (no
+        # BOOTD_LEASE_MODE, no relay leg exists any more - see the
+        # dhcp_scenario input's own description) and the existing-dhcp
+        # pod deployed alongside it answered the DISCOVER/lease exchange
+        # on its own, which is what "Wait for the Machine to reach
+        # Provisioned" above depended on getting an address from.
+        if: ${{ inputs.dhcp_scenario == 'no-relay' }}
         run: |
           set -euo pipefail
-          bootd_ip="${PROVISIONING_BOOTD_NET1_IP%%/*}"
-          existing_dhcp_ip="${PROVISIONING_EXISTING_DHCP_NET1_IP%%/*}"
-          relay_line="DHCP relay at ${bootd_ip} -> ${existing_dhcp_ip}"
-
-          bootd_log="$(kubectl -n kezio-system logs deployment/kezio-bootd --all-containers --tail=-1)"
-          if ! grep -qF "${relay_line}" <<<"${bootd_log}"; then
-            echo "::error::bootd's dnsmasq log never shows '${relay_line}' - the relay leg to the existing-dhcp server never fired." >&2
-            echo "${bootd_log}"
-            exit 1
-          fi
-
           existing_dhcp_log="$(kubectl -n kezio-system logs deployment/kezio-existing-dhcp --all-containers --tail=-1)"
-          if ! grep -qF "DHCPDISCOVER" <<<"${existing_dhcp_log}" || ! grep -qF "DHCPOFFER" <<<"${existing_dhcp_log}"; then
-            echo "::error::existing-dhcp's own log shows no DHCPDISCOVER/DHCPOFFER exchange - it never actually answered the request bootd's log says it relayed." >&2
+          if ! grep -qF "DHCPDISCOVER" <<<"${existing_dhcp_log}" || ! grep -qF "DHCPACK" <<<"${existing_dhcp_log}"; then
+            echo "::error::existing-dhcp's own log shows no DHCPDISCOVER/DHCPACK exchange - it never answered a lease directly, which pure proxyDHCP beside it depends on." >&2
             echo "${existing_dhcp_log}"
             exit 1
           fi
 
+      - name: "Verify the lease scenario made bootd its own segment's lease authority"
+        # lease scenario only: no existing-dhcp pod was ever deployed
+        # (see the "Deploy the existing-dhcp pod..." step's own
+        # condition), so a lease can only have come from bootd's own
+        # dnsmasq (BOOTD_LEASE_MODE) - confirm both that absence and that
+        # bootd's log actually shows it issuing a lease (DHCPACK), not
+        # just answering the PXE portion of the exchange.
+        if: ${{ inputs.dhcp_scenario == 'lease' }}
+        run: |
+          set -euo pipefail
+          if kubectl -n kezio-system get deployment/kezio-existing-dhcp >/dev/null 2>&1; then
+            echo "::error::kezio-existing-dhcp exists in the lease scenario - the segment must carry no stand-in DHCP server at all so bootd is unambiguously the lease authority." >&2
+            exit 1
+          fi
+
+          bootd_log="$(kubectl -n kezio-system logs deployment/kezio-bootd --all-containers --tail=-1)"
+          if ! grep -qF "DHCPACK" <<<"${bootd_log}"; then
+            echo "::error::bootd's dnsmasq log shows no DHCPACK - it never issued a lease of its own under BOOTD_LEASE_MODE." >&2
+            echo "${bootd_log}"
+            exit 1
+          fi
+
       - name: "BMC power cycle to consume KubeVirtBMC's one-shot PXE override (VMI recreation)"
-        if: ${{ inputs.bmc_mode }}
         # KubeVirtBMC-only accommodation, not a kezio product concern.
         # agentDeployer.Register (internal/deployer/agent.go) arms a
         # one-shot PXE override on the BMC (SetOneTimePXEBoot) so the
@@ -2197,7 +1205,6 @@ jobs:
           echo "per-Image seeder Deployment ${SEEDER_DEPLOYMENT_NAME} was removed."
 
       - name: "BMC power cycle: PowerOff through the BMC (spec.online=false)"
-        if: ${{ inputs.bmc_mode }}
         # Independent of Register's one-time PXE power-on: once
         # Provisioned, internal/controller/machine_controller.go's
         # reconcilePower keeps the VM's power matched to spec.online
@@ -2225,7 +1232,6 @@ jobs:
           done
 
       - name: "BMC power cycle: PowerOn through the BMC (spec.online=true) and reconnect"
-        if: ${{ inputs.bmc_mode }}
         # This step's own tail already re-runs the layer 2 assertion (the
         # same AgentConnected poll loop as "Wait for layer 2 (boot)..."
         # above, 600s bound - proving the deployed disk survived the
@@ -2268,7 +1274,6 @@ jobs:
           done
 
       - name: "Verify layer 3 again after the BMC power cycle: read the marker file back through QGA and compare"
-        if: ${{ inputs.bmc_mode }}
         # Same QGA guest-file-open/read/close mechanism as "Verify layer 3
         # (content)..." above, re-run after the BMC-driven PowerOff/PowerOn
         # cycle: the previous check only proved the marker survived the
@@ -2314,155 +1319,9 @@ jobs:
           fi
 
       - name: Dump diagnostics on failure
-        if: failure()
-        run: |
-          set +e
-          # Tee the whole dump into a file too, on top of the usual job
-          # log output: this is one of the two files "Upload E2E
-          # diagnostics artifacts" below picks up, so this dump survives
-          # past the log retention/scroll-back a human would otherwise
-          # have to dig through.
-          exec > >(tee "${RUNNER_TEMP}/diagnostics-dump.log") 2>&1
-          echo "===== nodes ====="
-          kubectl get nodes -o wide
-          echo "===== kezio-system pods ====="
-          kubectl get pods -n kezio-system -o wide
-          echo "===== controller-manager logs ====="
-          kubectl -n kezio-system logs deployment/kezio-controller-manager --all-containers --tail=1000
-          echo "===== controller-manager fetch-boot-artifacts initContainer logs ====="
-          # kubectl logs --all-containers above does not include
-          # initContainers, so a fetch-boot-artifacts crash (for example,
-          # a permission error writing into its volume, or the release
-          # asset itself 404ing) would otherwise surface only as a
-          # Deployment rollout timeout with no error text. --previous
-          # first, since a CrashLoopBackOff pod's *current* attempt is
-          # usually still starting or already exited by the time this
-          # step runs - the failure output is in the previous attempt.
-          #
-          # `deployment/kezio-controller-manager` (a workload reference,
-          # not a pod name) resolves through whichever ReplicaSet
-          # kubectl's own logs-for-a-workload lookup picks - with a
-          # rollout in progress there are two live ReplicaSets, and it
-          # has been observed to pick the OLD one, which has no
-          # fetch-boot-artifacts container at all ("container
-          # fetch-boot-artifacts is not valid for pod ... out of:
-          # manager"). Loop over the actual pods instead, and dump each
-          # one's rendered securityContext so a future patch-application
-          # regression (fsGroup/runAsUser missing from the live spec) is
-          # visible here too, not just guessed at.
-          for p in $(kubectl -n kezio-system get pods -l control-plane=controller-manager -o name); do
-            echo "--- ${p} securityContext ---"
-            kubectl -n kezio-system get "${p}" \
-              -o jsonpath='{.spec.securityContext}{"\n"}{range .spec.initContainers[*]}{.name}{": "}{.securityContext}{"\n"}{end}'
-            echo "--- ${p} restart count ---"
-            kubectl -n kezio-system get "${p}" \
-              -o jsonpath='{range .status.containerStatuses[*]}{.name}{": restartCount="}{.restartCount}{" lastState="}{.lastState}{"\n"}{end}'
-            # manager --previous first: "controller-manager logs" above
-            # (kubectl logs deployment/... --all-containers) only ever
-            # returns the *current* attempt, so a manager crash mid-run
-            # (for example, one that breaks an in-flight boot-artifact
-            # fetch bootd was reverse-proxying through it - see
-            # ProxyServer.newReverseProxy's ErrorHandler) would otherwise
-            # leave no trace of why: the current attempt's log starts
-            # fresh at the restart, well after whatever caused it.
-            echo "--- ${p} manager logs (--previous) ---"
-            kubectl -n kezio-system logs "${p}" -c manager --previous --tail=500 || true
-            echo "--- ${p} fetch-boot-artifacts logs (--previous) ---"
-            kubectl -n kezio-system logs "${p}" -c fetch-boot-artifacts --previous --tail=200 || \
-              kubectl -n kezio-system logs "${p}" -c fetch-boot-artifacts --tail=200 || true
-          done
-          echo "===== bootd logs ====="
-          kubectl -n kezio-system logs deployment/kezio-bootd --all-containers --tail=1000
-          echo "===== bootd fetch-boot-artifacts initContainer logs ====="
-          for p in $(kubectl -n kezio-system get pods -l app.kubernetes.io/component=bootd -o name); do
-            echo "--- ${p} securityContext ---"
-            kubectl -n kezio-system get "${p}" \
-              -o jsonpath='{.spec.securityContext}{"\n"}{range .spec.initContainers[*]}{.name}{": "}{.securityContext}{"\n"}{end}'
-            # Multus attachment, dumped explicitly: the requested
-            # k8s.v1.cni.cncf.io/networks annotation only proves what was
-            # asked for, not what actually attached, and neither is
-            # visible in the plain pod logs above - a Multus CNI ADD
-            # failure (for example, the NetworkAttachmentDefinition
-            # missing, or the host bridge not existing yet) leaves bootd
-            # itself running normally on eth0 alone while every PXE
-            # request on the boot segment silently times out, with
-            # nothing in bootd's own logs to explain why.
-            echo "--- ${p} k8s.v1.cni.cncf.io/networks annotation (requested) ---"
-            kubectl -n kezio-system get "${p}" \
-              -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/networks}{"\n"}'
-            echo "--- ${p} k8s.v1.cni.cncf.io/network-status annotation (actual, set by Multus) ---"
-            kubectl -n kezio-system get "${p}" \
-              -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}{"\n"}'
-            # net1 lives only inside this pod's own network namespace, so
-            # its rp_filter setting and link state have to be read from
-            # there (via nsenter/crictl, the same way the pod-netns
-            # capture above reaches it), not from the host - a strict
-            # reverse-path filter on net1 is one of the candidates for a
-            # DISCOVER (source 0.0.0.0) that crosses the host bridge but
-            # never reaches bootd's UDP socket.
-            echo "--- ${p} net1 rp_filter and link state (inside the pod network namespace) ---"
-            pod_name="${p#pod/}"
-            # Same RKE2 endpoint crictl needs everywhere else in this
-            # workflow (see "Start capturing bootd's pod network
-            # namespace" above) - without -r, crictl's default endpoint
-            # probe finds nothing on an RKE2 node and this whole block
-            # silently produces no output.
-            crictl_endpoint="unix:///run/k3s/containerd/containerd.sock"
-            sandbox_id="$(sudo crictl -r "${crictl_endpoint}" pods --name "${pod_name}" -q | head -1)"
-            if [ -n "${sandbox_id}" ]; then
-              sandbox_pid="$(sudo crictl -r "${crictl_endpoint}" inspectp -o go-template --template '{{.info.pid}}' "${sandbox_id}")"
-              sudo nsenter -t "${sandbox_pid}" -n -- sh -c '
-                for f in all default net1; do
-                  echo "net.ipv4.conf.${f}.rp_filter = $(cat /proc/sys/net/ipv4/conf/${f}/rp_filter 2>/dev/null || echo "<no such interface>")"
-                done
-                ip -d link show net1 2>&1
-                ip addr show net1 2>&1
-              ' || true
-            fi
-            echo "--- ${p} restart count ---"
-            kubectl -n kezio-system get "${p}" \
-              -o jsonpath='{range .status.containerStatuses[*]}{.name}{": restartCount="}{.restartCount}{" lastState="}{.lastState}{"\n"}{end}'
-            echo "--- ${p} bootd logs (--previous) ---"
-            kubectl -n kezio-system logs "${p}" -c bootd --previous --tail=500 || true
-            echo "--- ${p} fetch-boot-artifacts logs (--previous) ---"
-            kubectl -n kezio-system logs "${p}" -c fetch-boot-artifacts --previous --tail=200 || \
-              kubectl -n kezio-system logs "${p}" -c fetch-boot-artifacts --tail=200 || true
-          done
-          echo "===== ingest Job(s) ====="
-          kubectl get jobs -n kezio-system -l kezio.kojuro.date/image -o wide
-          kubectl logs -n kezio-system -l kezio.kojuro.date/image --all-containers --tail=1000
-          echo "===== per-Image seeder Deployment logs ====="
-          if [ -n "${SEEDER_DEPLOYMENT_NAME:-}" ]; then
-            kubectl -n kezio-system get deployment "${SEEDER_DEPLOYMENT_NAME}" -o yaml
-            kubectl -n kezio-system logs deployment/"${SEEDER_DEPLOYMENT_NAME}" --tail=1000
-          else
-            echo "SEEDER_DEPLOYMENT_NAME is unset - the job failed before \"Attach the per-Image seeder Deployment...\" found one."
-          fi
-          echo "===== opentracker logs ====="
-          kubectl -n kezio-system logs deployment/kezio-opentracker --tail=1000
-          echo "===== existing-dhcp logs (the site's stand-in existing DHCP server) ====="
-          kubectl -n kezio-system logs deployment/kezio-existing-dhcp --all-containers --tail=1000
-          echo "===== image-service logs ====="
-          kubectl -n kezio-system logs deployment/kezio-image-service --tail=1000
-          echo "===== VirtualMachine / VMI ====="
-          kubectl get vm,vmi -n kezio-system -o yaml
-          echo "===== virt-launcher pod describe ====="
-          kubectl describe pod -n kezio-system -l "kubevirt.io/vm=${TARGET_VM_NAME}"
-          echo "===== VM console (last 20s, live attach only - see the uploaded console.log artifact for the full history from VM start) ====="
-          timeout 20 virtctl console "${TARGET_VM_NAME}" -n kezio-system || true
-          echo "===== Machine CR ====="
-          kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o yaml
-          echo "===== Image CR ====="
-          kubectl get image "${IMAGE_NAME}" -n kezio-system -o yaml
-          echo "===== events ====="
-          kubectl get events -n kezio-system --sort-by=.lastTimestamp
-          echo "===== host FORWARD chain (canal/br_netfilter can silently drop bridged traffic here) ====="
-          sudo iptables -L FORWARD -v --line-numbers || true
-          sysctl net.bridge.bridge-nf-call-iptables || true
-          echo "===== host mangle table CHECKSUM rules (fills UDP checksums the VM's virtio-net offloaded) ====="
-          sudo iptables -t mangle -L POSTROUTING -v --line-numbers || true
-          echo "===== ${PROVISIONING_BRIDGE} offload settings ====="
-          ethtool -k "${PROVISIONING_BRIDGE}" | head || true
+        # Extracted into its own composite action - see that action's
+        # own doc comment for the full "why" behind each dump.
+        uses: ./.github/actions/dump-e2e-diagnostics
 
       - name: Collect the always-on diagnostics bundle
         if: always()
@@ -2495,26 +1354,6 @@ jobs:
             image/${{ inputs.image_name }}:image.yaml
             vm/${{ inputs.target_vm_name }}:vm.yaml
             vmi/${{ inputs.target_vm_name }}:vmi.yaml
-
-      - name: Dump KubeVirtBMC diagnostics on failure
-        if: ${{ failure() && inputs.bmc_mode }}
-        run: |
-          set +e
-          # See "Dump diagnostics on failure" above for why this is
-          # teed into a file as well as the job log.
-          exec > >(tee "${RUNNER_TEMP}/diagnostics-kubevirtbmc-dump.log") 2>&1
-          echo "===== kubevirtbmc-system pods ====="
-          kubectl get pods -n kubevirtbmc-system -o wide
-          echo "===== KubeVirtBMC controller-manager logs ====="
-          kubectl -n kubevirtbmc-system logs deployment/kubevirtbmc-controller-manager --all-containers --tail=1000
-          echo "===== VirtualMachineBMC ====="
-          kubectl get virtualmachinebmc -n kezio-system -o yaml
-          echo "===== virtbmc pod logs (the per-VM Redfish/IPMI agent) ====="
-          kubectl -n kezio-system logs "${TARGET_VM_NAME}-virtbmc" --all-containers --tail=1000
-          echo "===== virtbmc Service ====="
-          kubectl get svc -n kezio-system -l app=virtbmc -o yaml
-          echo "===== events (kubevirtbmc-system) ====="
-          kubectl get events -n kubevirtbmc-system --sort-by=.lastTimestamp
 
       - name: Upload E2E diagnostics artifacts
         # Always, not just on failure: the continuous console capture and
