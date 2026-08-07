@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -466,7 +467,7 @@ func (r *ImageReconciler) buildSeederDeployment(image *keziov1alpha1.Image, site
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: seederPodAnnotations(r.SeederDeployment.Network)},
+				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: seederPodAnnotations(image.Namespace, r.SeederDeployment.Network)},
 				Spec: corev1.PodSpec{
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: &trueVal,
@@ -538,9 +539,19 @@ func (r *ImageReconciler) buildSeederDeployment(image *keziov1alpha1.Image, site
 // network is set (see SeederDeploymentConfig.Network's doc comment), or
 // nil when it is empty - the same "no annotation" shape every existing
 // deployment and the envtest suite already exercise.
-func seederPodAnnotations(network string) map[string]string {
+//
+// A bare NAD name is qualified with the Deployment's own namespace
+// before it is stamped: Multus resolves an unqualified default-network
+// value in its system namespace (kube-system), NOT in the pod's
+// namespace the way the ordinary networks annotation is resolved, so a
+// bare name silently points at a NAD that does not exist there. Probe
+// run 31162430687 caught exactly this.
+func seederPodAnnotations(namespace, network string) map[string]string {
 	if network == "" {
 		return nil
+	}
+	if !strings.Contains(network, "/") {
+		network = namespace + "/" + network
 	}
 	return map[string]string{multusDefaultNetworkAnnotation: network}
 }

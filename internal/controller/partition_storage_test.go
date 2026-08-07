@@ -218,7 +218,10 @@ func TestBuildSeederDeployment_NetworkAnnotation(t *testing.T) {
 		},
 	}
 
-	t.Run("network set", func(t *testing.T) {
+	t.Run("bare network name is namespace-qualified", func(t *testing.T) {
+		// Multus resolves an unqualified default-network value in its own
+		// system namespace (kube-system), not the pod's, so a bare name
+		// must be stamped as <image namespace>/<name>.
 		r := &ImageReconciler{
 			Scheme:           newPartitionStorageTestScheme(t),
 			SeederDeployment: SeederDeploymentConfig{Image: "ezio-seeder:test", Network: "kezio-seeder-network"},
@@ -228,8 +231,23 @@ func TestBuildSeederDeployment_NetworkAnnotation(t *testing.T) {
 			t.Fatalf("buildSeederDeployment: %v", err)
 		}
 		got := dep.Spec.Template.Annotations["v1.multus-cni.io/default-network"]
-		if got != "kezio-seeder-network" {
-			t.Errorf("pod template default-network annotation = %q, want %q", got, "kezio-seeder-network")
+		if got != "default/kezio-seeder-network" {
+			t.Errorf("pod template default-network annotation = %q, want %q", got, "default/kezio-seeder-network")
+		}
+	})
+
+	t.Run("qualified network name is kept verbatim", func(t *testing.T) {
+		r := &ImageReconciler{
+			Scheme:           newPartitionStorageTestScheme(t),
+			SeederDeployment: SeederDeploymentConfig{Image: "ezio-seeder:test", Network: "other-ns/shared-network"},
+		}
+		dep, err := r.buildSeederDeployment(image, "site-a")
+		if err != nil {
+			t.Fatalf("buildSeederDeployment: %v", err)
+		}
+		got := dep.Spec.Template.Annotations["v1.multus-cni.io/default-network"]
+		if got != "other-ns/shared-network" {
+			t.Errorf("pod template default-network annotation = %q, want %q", got, "other-ns/shared-network")
 		}
 	})
 

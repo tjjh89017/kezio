@@ -248,7 +248,12 @@ jobs:
             name: seeder-probe
             namespace: ${PROBE_NAMESPACE}
             annotations:
-              v1.multus-cni.io/default-network: ${PROBE_NAD}
+              # Namespace-qualified deliberately: Multus resolves a BARE
+              # default-network value in its system namespace
+              # (kube-system), not the pod's namespace - run 31162430687
+              # failed exactly there. The controller qualifies bare names
+              # the same way (seederPodAnnotations).
+              v1.multus-cni.io/default-network: ${PROBE_NAMESPACE}/${PROBE_NAD}
           spec:
             restartPolicy: Never
             securityContext:
