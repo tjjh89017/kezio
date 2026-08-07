@@ -33,6 +33,23 @@ name: Probe - boot-artifacts staging
 # and the wait, asserting the normal, fast, green path instead - the
 # mode a future CI restructure would dispatch as a preflight gate before
 # ever starting an expensive VM lane.
+#
+# The tightened thresholds are applied to a running kubelet, never baked
+# into the config RKE2 first boots with: two runs (31136998951,
+# 31137971368) measured that config.yaml starting life with
+# image-gc-high-threshold-percent=1/low=0 leaves "Install RKE2" hung
+# past its own timeout with no further log output at all, node never
+# Ready. image-gc thresholds only ever race against images with no
+# running container yet holding them, and during first boot RKE2's own
+# control-plane images (etcd, kube-apiserver, coredns, canal, ...) are
+# in exactly that unreferenced window between being pulled and their
+# containers actually starting - the same race this probe means to force
+# onto kezio-boot-artifacts, landing instead on RKE2's own control
+# plane. Booting with the untightened config first lets those images
+# finish being referenced by running containers, where image-gc leaves
+# them alone; only then does a config rewrite plus `rke2-server` restart
+# turn the threshold on, so it only ever gets a shot at the one image
+# this probe actually wants it to evict.
 on:
   workflow_dispatch:
     inputs:
@@ -73,9 +90,11 @@ jobs:
     runs-on: ubuntu-latest
     # This is meant to be fast: no `lb build`, no from-source seeder
     # compile, no KubeVirt/CDI. reproduce_known_failure adds a fixed wait
-    # past one kubelet image-gc period (see this workflow's own header
-    # comment); the timeout below covers that wait plus RKE2 install and
-    # two small `docker build`/`docker save` cycles with real headroom.
+    # past one kubelet image-gc period plus one rke2-server restart to
+    # apply the tightened thresholds (see this workflow's own header
+    # comment); the timeout below covers that wait, two RKE2
+    # start/restart cycles, and two small `docker build`/`docker save`
+    # cycles with real headroom.
     timeout-minutes: 15
     steps:
       - name: Clone the code
@@ -87,31 +106,17 @@ jobs:
           go-version-file: go.mod
 
       - name: Write the RKE2 config (must exist before the service starts)
-        env:
-          REPRODUCE_KNOWN_FAILURE: ${{ inputs.reproduce_known_failure }}
+        # Always the untightened config, regardless of
+        # reproduce_known_failure - see this workflow's header comment
+        # for why the tightened thresholds must never be what RKE2 first
+        # boots with.
         run: |
           set -euo pipefail
           sudo mkdir -p /etc/rancher/rke2
-          if [ "${REPRODUCE_KNOWN_FAILURE}" = "true" ]; then
-          # Tight enough that the very first periodic image-gc scan
-          # evicts any image no running container currently
-          # references - see this workflow's header comment for why
-          # that scan's own fixed ~5 minute period, not the threshold
-          # value itself, is what the "wait past one GC period" step
-          # below is really timed against.
-          cat <<'EOF' | sudo tee /etc/rancher/rke2/config.yaml
-          write-kubeconfig-mode: "0644"
-          cni: canal
-          kubelet-arg:
-            - "image-gc-high-threshold-percent=1"
-            - "image-gc-low-threshold-percent=0"
-          EOF
-          else
           cat <<'EOF' | sudo tee /etc/rancher/rke2/config.yaml
           write-kubeconfig-mode: "0644"
           cni: canal
           EOF
-          fi
 
       - name: Install RKE2
         run: |
@@ -125,6 +130,38 @@ jobs:
 
           echo "KUBECONFIG=/etc/rancher/rke2/rke2.yaml" >> "$GITHUB_ENV"
           export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+          for _ in $(seq 1 90); do
+            [ "$(kubectl get nodes --no-headers 2>/dev/null | wc -l)" -ge 1 ] && break
+            sleep 2
+          done
+          kubectl wait --for=condition=Ready node --all --timeout=300s
+          kubectl get nodes -o wide
+
+      - name: Tighten kubelet image-gc thresholds now that the control plane is healthy
+        if: ${{ inputs.reproduce_known_failure }}
+        # Rewriting config.yaml and restarting rke2-server here, instead
+        # of baking these thresholds into the config RKE2 first boots
+        # with, is the fix for the hang this workflow's header comment
+        # describes: by now every RKE2 control-plane image is already
+        # backing a running container, so image-gc's "unreferenced
+        # image" test protects all of them and only the not-yet-created
+        # kezio-boot-artifacts import (still several steps away) will
+        # ever be a candidate. Tight enough that the very first periodic
+        # image-gc scan after this restart evicts any image no running
+        # container currently references - see the header comment for
+        # why that scan's own fixed ~5 minute period, not the threshold
+        # value itself, is what the "wait past one GC period" step below
+        # is really timed against.
+        run: |
+          set -euo pipefail
+          cat <<'EOF' | sudo tee /etc/rancher/rke2/config.yaml
+          write-kubeconfig-mode: "0644"
+          cni: canal
+          kubelet-arg:
+            - "image-gc-high-threshold-percent=1"
+            - "image-gc-low-threshold-percent=0"
+          EOF
+          sudo systemctl restart rke2-server.service
           for _ in $(seq 1 90); do
             [ "$(kubectl get nodes --no-headers 2>/dev/null | wc -l)" -ge 1 ] && break
             sleep 2
