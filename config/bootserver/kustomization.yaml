@@ -1,27 +1,19 @@
-# Adds the boot config server's Service, and the containerPort it needs,
-# on top of config/default. It is deliberately not one of config/default's
-# own resources: the boot config server is off by default (BOOT_SERVER_ADDR
-# unset, see cmd/main.go's bootServerConfigFromEnv), and turning it on
-# needs cluster-specific inputs (an externally reachable BOOT_SERVER_URL, a
-# mounted BOOT_ARTIFACTS_DIR volume) config/default has no way to guess -
-# the same reasoning config/image-service and config/seeder already use.
-# Deploy it as an addition once config/default is applied:
+# Adds the boot config server's Service and containerPort on top of
+# config/default. Not one of config/default's own resources: the boot
+# config server is off by default (BOOT_SERVER_ADDR unset), and turning it
+# on needs cluster-specific inputs config/default can't guess. Deploy as an
+# addition once config/default is applied:
 #
 #   kustomize build config/bootserver | kubectl apply -f -
 #
-# Before applying, read README.md in this directory: the BOOT_* variables
-# to set on the controller-manager Deployment, and the artifacts volume it
-# needs mounted.
+# Read README.md first - the BOOT_* variables and artifacts volume it needs.
 resources:
   - ../default
   - service.yaml
 
-# The fetch-boot-artifacts initContainer boot-artifacts-init-patch.yaml
-# adds names this image; override with `kustomize edit set image
-# kezio-boot-artifacts=...` (or a further overlay) to pin a specific
-# published version instead of always pulling "latest" - see that
-# patch's own comment for what the image contains and why an OCI image
-# replaced what a fetch.sh + ConfigMap Component used to do here.
+# Named by boot-artifacts-init-patch.yaml's fetch-boot-artifacts
+# initContainer; override with `kustomize edit set image
+# kezio-boot-artifacts=...` to pin a version.
 images:
   - name: kezio-boot-artifacts
     newName: ghcr.io/tjjh89017/kezio-boot-artifacts

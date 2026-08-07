@@ -1,12 +1,8 @@
-# Declares the boot config server's containerPort on the manager
-# container, so service.yaml's targetPort: boot-http resolves to
-# something. The manager only actually listens on this port once
-# BOOT_SERVER_ADDR (and the other BOOT_* variables - see cmd/main.go's
-# bootServerConfigFromEnv) are set on the Deployment; setting them is
-# left to the cluster operator or an e2e overlay, the same as
-# INGEST_IMAGE and SEEDER_TRACKER_URL, since they need cluster-specific
-# values (an externally reachable BOOT_SERVER_URL, a mounted
-# BOOT_ARTIFACTS_DIR volume - see README.md) this base cannot guess.
+# Declares the boot config server's containerPort so service.yaml's
+# targetPort: boot-http resolves to something. The manager only listens on
+# it once BOOT_SERVER_ADDR and the other BOOT_* vars (cmd/main.go's
+# bootServerConfigFromEnv) are set - left to the cluster operator or an e2e
+# overlay, since they need cluster-specific values (see README.md).
 - op: add
   path: /spec/template/spec/containers/0/ports/-
   value:

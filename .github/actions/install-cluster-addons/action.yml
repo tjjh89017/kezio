@@ -26,51 +26,29 @@ runs:
   using: composite
   steps:
     - name: Install cert-manager
-      # Installed before KubeVirt, both for node-contention reasons and
-      # (for callers that go on to install KubeVirtBMC) because it is
-      # also a hard prerequisite for KubeVirtBMC's webhook certificate.
-      # Delegates to install-cert-manager, the single place the version
-      # pin lives, instead of carrying its own copy.
+      # Installed before KubeVirt: also a hard prerequisite for
+      # KubeVirtBMC's webhook certificate for callers that install it.
       uses: ./.github/actions/install-cert-manager
 
     - name: Install KubeVirt
-      # The KubevirtSeccompProfile feature gate plus seccompConfiguration
-      # patch below made virt-launcher pods admissible back when the
-      # caller's "Deploy CRDs and the controller-manager" step still
-      # enforced restricted PSA on kezio-system (that step now labels the
-      # namespace privileged - bootd's dnsmasq needs NET_ADMIN/NET_RAW -
-      # so the gate is no longer load-bearing for admission, but it is
-      # kept: an explicit seccompProfile on virt-launcher pods costs
-      # nothing and keeps every pod as strict as the namespace label
-      # allows). The original failure mode: without it, KubeVirt
-      # renders the compute/guest-console-log containers with no
-      # explicit securityContext.seccompProfile, which the "restricted"
-      # Pod Security Standard rejects outright (every virt-launcher pod
-      # creation then fails admission and the target VM never starts,
-      # observed as repeated "it needs a privileged namespace to run"
-      # FailedCreate events on the VirtualMachineInstance). Enabling the
-      # gate makes KubeVirt stamp its pods with an explicit
-      # seccompProfile, satisfying that requirement. Re-validated
-      # against KubeVirt v1.9.0: KubevirtSeccompProfile is still Beta
-      # (pkg/virt-config/featuregate/active.go), not default-on, so the
-      # gate and patch are both still required.
+      # The KubevirtSeccompProfile feature gate + seccompConfiguration
+      # patch below are no longer load-bearing for admission now that
+      # kezio-system is labeled privileged, but are kept: an explicit
+      # seccompProfile on virt-launcher pods costs nothing and keeps every
+      # pod as strict as the namespace label allows. Still required as of
+      # KubeVirt v1.9.0 (KubevirtSeccompProfile is Beta, not default-on).
       shell: bash
       env:
         KUBEVIRT_VERSION: ${{ inputs.kubevirt-version }}
       run: |
         set -euo pipefail
         kubectl apply -f "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-operator.yaml"
-        # kubevirt-operator.yaml's own apply is what registers the
-        # KubeVirt CRD; kubectl returns as soon as that apply is
-        # accepted, before the apiserver has actually established it.
-        # kubevirt-cr.yaml's very next apply is a KubeVirt custom
-        # resource, so it loses that race intermittently ("no matches
-        # for kind \"KubeVirt\" in version \"kubevirt.io/v1\""). Same
-        # exists-then-Established shape as the Multus NAD CRD wait
-        # below: `kubectl wait` itself errors out immediately if the
-        # CRD object does not exist yet, so a plain wait right after
-        # the operator apply is not safe either - poll for existence
-        # first, then wait for it to actually establish.
+        # kubectl returns once the CRD apply is accepted, before the
+        # apiserver establishes it, so the next kubevirt-cr.yaml apply can
+        # lose that race ("no matches for kind KubeVirt"). `kubectl wait`
+        # itself errors if the CRD does not exist yet, so poll for
+        # existence first, then wait for it to establish (same shape as
+        # the Multus NAD CRD wait below).
         deadline=$(( $(date +%s) + 120 ))
         until kubectl get crd kubevirts.kubevirt.io >/dev/null 2>&1; do
           if [ "$(date +%s)" -ge "${deadline}" ]; then
@@ -113,10 +91,7 @@ runs:
       run: |
         set -euo pipefail
         kubectl apply -f "https://github.com/kubevirt/containerized-data-importer/releases/download/${CDI_VERSION}/cdi-operator.yaml"
-        # Same operator-apply-registers-the-CRD race as the KubeVirt
-        # install above: cdi-cr.yaml applies a CDI custom resource right
-        # after, so it needs the same exists-then-Established wait
-        # before it can run safely.
+        # Same operator-apply-registers-the-CRD race as the KubeVirt install above.
         deadline=$(( $(date +%s) + 120 ))
         until kubectl get crd cdis.cdi.kubevirt.io >/dev/null 2>&1; do
           if [ "$(date +%s)" -ge "${deadline}" ]; then
@@ -130,22 +105,10 @@ runs:
         kubectl wait cdi cdi --for=condition=Available --timeout=300s
 
     - name: Wait for the Multus NetworkAttachmentDefinition CRD (RKE2's own rke2-multus HelmChart addon)
-      # RKE2 deploys Multus itself, as one of its own packaged HelmChart
-      # addons (triggered by cni: [multus, canal] in the config.yaml the
-      # install-rke2 action writes before RKE2 starts), the same way it
-      # deploys canal - no separate manifest apply and no host CNI
-      # directory surgery are needed here, unlike k3s's non-standard,
-      # multi-location CNI layout (config under
-      # /var/lib/rancher/k3s/agent/etc/cni/net.d, plugin binaries split
-      # across /var/lib/rancher/k3s/data/cni and a per-version
-      # /var/lib/rancher/k3s/data/<hash>/bin, neither of which is the
-      # stock /etc/cni/net.d /opt/cni/bin location
-      # multus-daemonset-thick.yml's hostPath mounts assumed) that caused
-      # two rounds of mirror-image plugin-not-found failures (run
-      # 31003551730: flannel not found; run 31005051325: multus-shim not
-      # found). The addon's own HelmChart install can still lag behind
-      # node-Ready, so wait for its NAD CRD to actually exist (and be
-      # Established) before the caller creates any
+      # RKE2 deploys Multus itself as a packaged HelmChart addon (triggered
+      # by cni: [multus, canal] in install-rke2's config.yaml); that addon
+      # install can still lag behind node-Ready, so wait for its NAD CRD
+      # to exist and be Established before creating any
       # NetworkAttachmentDefinition that depends on it.
       shell: bash
       run: |

@@ -1,28 +1,20 @@
-# Overlay used only by the e2e image-path stage (test/e2e's "Image ingest
-# and seeding" Context, gated by E2E_IMAGE_PATH=true - see that file and
-# .github/workflows/test-e2e.yml's "image-path" job). It aggregates the
-# base deployment plus config/image-service (normally left for a cluster
-# operator to opt into by hand) and config/ingest.
+# Overlay for the e2e image-path stage (test/e2e's "Image ingest and
+# seeding" Context, gated by E2E_IMAGE_PATH=true). Aggregates the base
+# deployment plus config/image-service (normally opt-in) and config/ingest.
 #
-# This stage runs no seeder: seeding is demand-driven by a Machine
-# deploying the Image (see internal/controller/seeder_deployment.go), and
-# this stage never creates a Machine - see test/e2e/e2e_image_path_test.go's
-# "creates no per-Image seeder Deployment or Pod" spec, which asserts
-# exactly that absence. config/e2e-deploy-path is where a real Machine
-# drives a real per-Image seeder Deployment end to end.
+# Runs no seeder: seeding is demand-driven by a Machine deploying the Image
+# (internal/controller/seeder_deployment.go), and this stage never creates a
+# Machine (see test/e2e/e2e_image_path_test.go's "creates no per-Image
+# seeder Deployment or Pod" spec). config/e2e-deploy-path drives a real
+# Machine through a real per-Image seeder Deployment end to end.
 #
-# This is not a template for a production deployment: it exists purely
-# so the e2e suite can exercise the real ingest+publish path on a
-# disposable single-node k3s/RKE2 cluster. In particular:
-#   - the staging PVC is patched to ReadWriteOnce with the "local-path"
-#     StorageClass, since a single-node cluster has no ReadWriteMany-
-#     capable provisioner by default and every consumer (ingest Job,
-#     image-service) runs on that same one node anyway;
-#   - INGEST_IMAGE on the controller-manager Deployment is NOT set here
-#     (it needs the locally built, per-run image tag, which kustomize's
-#     static YAML cannot express) - the e2e suite sets it with `kubectl
-#     set env` after applying this overlay; see the "Image ingest and
-#     seeding" Context's BeforeAll.
+# Not a production template - exists to exercise the real ingest+publish
+# path on a disposable single-node k3s/RKE2 cluster:
+#   - the staging PVC is patched to ReadWriteOnce/"local-path", since a
+#     single-node cluster has no ReadWriteMany provisioner by default;
+#   - INGEST_IMAGE on the controller-manager Deployment is NOT set here (it
+#     needs the locally built, per-run image tag) - the e2e suite sets it
+#     with `kubectl set env` after applying this overlay.
 resources:
   - ../default
   - ../image-service

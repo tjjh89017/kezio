@@ -1,52 +1,33 @@
-# Byte-identical copy of config/bootserver/boot-artifacts-init-patch.yaml
-# - see boot-server-service.yaml in this directory for why this overlay
-# keeps local copies instead of referencing the originals by relative
-# path (kustomize's LoadRestrictionsRootOnly forbids a `patches:` entry
-# naming a plain file outside this kustomization's own root). Keep the
-# two in sync if that file changes.
+# Byte-identical copy of config/bootserver/boot-artifacts-init-patch.yaml -
+# see boot-server-service.yaml in this directory for why this overlay keeps
+# local copies (kustomize's LoadRestrictionsRootOnly forbids a `patches:`
+# entry outside this kustomization's own root). Keep the two in sync.
 #
-# Deliberately NOT wired into this directory's kustomization.yaml
-# `patches:` list: config/e2e-boot-path is shared by test-e2e.yml's
-# always-on, hermetic "boot-path" job (which only simulates GRUB/agent
-# traffic with a plain HTTP client - see e2e-boot-path-kubevirt.yml's
-# own header comment - and never needs real artifact bytes) and
-# e2e-boot-path-kubevirt.yml's real KubeVirt boot. Wiring this
-# initContainer into the shared overlay would make every test-e2e.yml
-# run depend on an image pull existing, which is exactly the
-# "trustworthy, always-on signal" staying that way that
-# e2e-boot-path-kubevirt.yml's header argues for keeping separate. Only
-# e2e-boot-path-kubevirt.yml applies this file, with `kubectl patch
-# --type=json --patch-file`, after the base overlay is already up.
+# Deliberately NOT wired into this directory's kustomization.yaml `patches:`
+# list: config/e2e-boot-path is shared by test-e2e.yml's hermetic
+# "boot-path" job (simulates GRUB/agent traffic, never needs real artifact
+# bytes) and e2e-boot-path-kubevirt.yml's real KubeVirt boot. Wiring this
+# initContainer in would make every test-e2e.yml run depend on an image
+# pull. Only e2e-boot-path-kubevirt.yml applies this file (`kubectl patch
+# --type=json --patch-file`) after the base overlay is up.
 #
-# Unlike config/bootserver/boot-artifacts-init-patch.yaml, this copy has
-# no "add .../containers/0/env" op: by the time this file is applied,
-# e2e-boot-path-kubevirt.yml has already run `kubectl set env` with
-# BOOT_ARTIFACTS_DIR=/boot-artifacts (among the other BOOT_*/DEPLOYER
-# vars that command sets together), which populates containers[0].env as
-# a whole array - a JSON Patch "add" at that same path here would
-# replace, not extend, that array and silently drop every var `kubectl
-# set env` just set.
+# Unlike config/bootserver/boot-artifacts-init-patch.yaml, this copy has no
+# "add .../containers/0/env" op: e2e-boot-path-kubevirt.yml already ran
+# `kubectl set env` (BOOT_ARTIFACTS_DIR=/boot-artifacts, etc.), which
+# populates containers[0].env as a whole array - an "add" at that path here
+# would replace it and drop those vars.
 #
-# The initContainer's image IS the fetch: it is
-# docker/boot-artifacts/Dockerfile, built and pushed by
-# .github/workflows/build-live-image.yml, with vmlinuz/initrd.img/
+# The initContainer's image IS the fetch (docker/boot-artifacts/Dockerfile,
+# built by .github/workflows/build-live-image.yml, with vmlinuz/initrd.img/
 # filesystem.squashfs/shimx64.efi/grubx64.efi/manifest.json baked in at
-# /boot-artifacts - so populating the shared emptyDir is a plain `cp`
-# with no network access, no curl, and no runtime GitHub Release
-# dependency. e2e-boot-path-kubevirt.yml sets the actual image reference
-# (a locally-imported build, or the published ghcr tag) with `kubectl set
-# image` after this patch is applied - "kezio-boot-artifacts:latest"
-# below is only the placeholder JSON Patch value needs.
+# /boot-artifacts), so populating the shared emptyDir is a plain `cp` with
+# no network access. e2e-boot-path-kubevirt.yml repoints the image with
+# `kubectl set image` after this patch; "kezio-boot-artifacts:latest" below
+# is only the placeholder value the JSON Patch needs.
 #
-# fsGroup below matches this image's own numeric USER gid (65532, see
-# docker/boot-artifacts/Dockerfile) because the "boot-artifacts" emptyDir
-# added further down is otherwise created root:root mode 0755 - a fresh
-# emptyDir gets no group access for a non-root gid unless the pod's
-# fsGroup says so, the same reasoning config/image-service's
-# securityContext.fsGroup comment documents for its Secret volume.
-# Without this, the `cp` below fails with EACCES writing into /dest and
-# the initContainer CrashLoopBackOffs before the manager container ever
-# starts.
+# fsGroup matches this image's numeric USER gid (65532): the "boot-artifacts"
+# emptyDir is otherwise created root:root 0755, so without this the `cp`
+# below fails EACCES and the initContainer CrashLoopBackOffs.
 - op: add
   path: /spec/template/spec/securityContext/fsGroup
   value: 65532
@@ -55,15 +36,11 @@
   value:
     - name: fetch-boot-artifacts
       image: kezio-boot-artifacts:latest
-      # See config/bootserver/boot-artifacts-init-patch.yaml's own
-      # comment (keep the two in sync): explicit, not left to the API
-      # server's tag-based default - this container is admitted with
-      # the "latest" placeholder above and later repointed at the real
-      # tag with `kubectl set image`, which never re-runs defaulting,
-      # so an implicit default here bakes in imagePullPolicy: Always
-      # forever and the initContainer ends up trying to pull the real
-      # tag from the network on every rollout, ignoring an
-      # already-imported local image.
+      # Explicit, not left to the API server's tag-based default: this
+      # container is later repointed at the real tag with `kubectl set
+      # image`, which never re-runs defaulting, so an implicit default here
+      # would bake in imagePullPolicy: Always and ignore an already-imported
+      # local image. Keep in sync with config/bootserver's copy.
       imagePullPolicy: IfNotPresent
       command:
         - cp
@@ -79,11 +56,9 @@
       securityContext:
         allowPrivilegeEscalation: false
         readOnlyRootFilesystem: true
-        # A numeric image USER (docker/boot-artifacts/Dockerfile's
-        # USER 65532:65532) is exactly what restricted Pod Security
-        # Admission needs to verify runAsNonRoot on its own - unlike
-        # curlimages/curl's non-numeric "curl_user", which used to force
-        # an explicit runAsUser/runAsGroup override here.
+        # Numeric image USER (Dockerfile's USER 65532:65532) lets restricted
+        # Pod Security Admission verify runAsNonRoot without an explicit
+        # runAsUser/runAsGroup override here.
         runAsNonRoot: true
         capabilities:
           drop: ["ALL"]

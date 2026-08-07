@@ -1,21 +1,16 @@
-# Standalone kustomization for the seeding data plane's shared piece:
-# opentracker, the BitTorrent tracker every per-Image seeder Deployment
-# and every machine's leecher announces to. It is deliberately not one
-# of config/default's resources, the same reasoning as
-# config/image-service: it needs a cluster-specific data network
-# config/default has no way to guess. Deploy it as an addition once
-# config/default is applied:
+# Standalone kustomization for opentracker, the BitTorrent tracker every
+# per-Image seeder Deployment and leecher announces to. Deliberately not one
+# of config/default's resources (needs a cluster-specific data network).
+# Deploy as an addition once config/default is applied:
 #
 #   kustomize build config/seeder | kubectl apply -f -
 #
-# The seeder itself is not a standalone Deployment any more: the
-# operator creates and removes one per-Image, per-site seeder Deployment
-# on demand (internal/controller/seeder_deployment.go) - see README.md
-# for the current architecture.
+# The seeder itself is not a standalone Deployment: the operator creates and
+# removes one per-Image, per-site seeder Deployment on demand
+# (internal/controller/seeder_deployment.go) - see README.md.
 #
-# Before applying, read README.md in this directory - in particular the
-# no-NAT rule and the SEEDER_*/SEEDER_DEPLOYMENT_* wiring the operator
-# side needs, neither of which a kustomize apply alone can satisfy.
+# Read README.md first - the no-NAT rule and SEEDER_*/SEEDER_DEPLOYMENT_*
+# wiring the operator needs are not satisfied by a plain apply.
 namespace: kezio-system
 namePrefix: kezio-
 

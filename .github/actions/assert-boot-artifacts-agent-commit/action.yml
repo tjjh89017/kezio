@@ -51,9 +51,7 @@ runs:
         else
           result="STALE / PINNED - this run booted build-live-image.yml's last published kezio-agent, NOT the commit under test. Set build_boot_artifacts: true to exercise agent-side changes."
         fi
-        # Logged unconditionally (not just written to the job summary) so a
-        # log reader sees the FRESH/STALE/MISMATCH verdict without opening
-        # the summary tab.
+        # Also logged directly so a log reader sees the verdict without opening the job summary.
         echo "::notice::Boot artifacts agent commit result: ${result} (booted ${agent_commit}, expected ${EXPECTED_COMMIT})"
         {
           echo "## Boot artifacts agent commit"

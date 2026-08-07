@@ -27,11 +27,8 @@ runs:
       shell: bash
       run: |
         set +e
-        # Tee the whole dump into a file too, on top of the usual job
-        # log output: this is one of the two files "Upload E2E
-        # diagnostics artifacts" (in the calling workflow) picks up, so
-        # this dump survives past the log retention/scroll-back a human
-        # would otherwise have to dig through.
+        # Teed into a file too: one of the two files "Upload E2E
+        # diagnostics artifacts" (in the calling workflow) picks up.
         exec > >(tee "${RUNNER_TEMP}/diagnostics-dump.log") 2>&1
         echo "===== nodes ====="
         kubectl get nodes -o wide
@@ -41,25 +38,11 @@ runs:
         kubectl -n kezio-system logs deployment/kezio-controller-manager --all-containers --tail=1000
         echo "===== controller-manager fetch-boot-artifacts initContainer logs ====="
         # kubectl logs --all-containers above does not include
-        # initContainers, so a fetch-boot-artifacts crash (for example,
-        # a permission error writing into its volume, or the release
-        # asset itself 404ing) would otherwise surface only as a
-        # Deployment rollout timeout with no error text. --previous
-        # first, since a CrashLoopBackOff pod's *current* attempt is
-        # usually still starting or already exited by the time this
-        # step runs - the failure output is in the previous attempt.
-        #
-        # `deployment/kezio-controller-manager` (a workload reference,
-        # not a pod name) resolves through whichever ReplicaSet
-        # kubectl's own logs-for-a-workload lookup picks - with a
-        # rollout in progress there are two live ReplicaSets, and it
-        # has been observed to pick the OLD one, which has no
-        # fetch-boot-artifacts container at all ("container
-        # fetch-boot-artifacts is not valid for pod ... out of:
-        # manager"). Loop over the actual pods instead, and dump each
-        # one's rendered securityContext so a future patch-application
-        # regression (fsGroup/runAsUser missing from the live spec) is
-        # visible here too, not just guessed at.
+        # initContainers. `deployment/kezio-controller-manager` (a
+        # workload reference) can resolve to the OLD ReplicaSet's pod
+        # during a rollout, which has no fetch-boot-artifacts container at
+        # all - loop over the actual pods instead, and dump each one's
+        # rendered securityContext too.
         for p in $(kubectl -n kezio-system get pods -l control-plane=controller-manager -o name); do
           echo "--- ${p} securityContext ---"
           kubectl -n kezio-system get "${p}" \
@@ -67,14 +50,8 @@ runs:
           echo "--- ${p} restart count ---"
           kubectl -n kezio-system get "${p}" \
             -o jsonpath='{range .status.containerStatuses[*]}{.name}{": restartCount="}{.restartCount}{" lastState="}{.lastState}{"\n"}{end}'
-          # manager --previous first: "controller-manager logs" above
-          # (kubectl logs deployment/... --all-containers) only ever
-          # returns the *current* attempt, so a manager crash mid-run
-          # (for example, one that breaks an in-flight boot-artifact
-          # fetch bootd was reverse-proxying through it - see
-          # ProxyServer.newReverseProxy's ErrorHandler) would otherwise
-          # leave no trace of why: the current attempt's log starts
-          # fresh at the restart, well after whatever caused it.
+          # --previous first: the current attempt's log starts fresh at
+          # the restart, well after whatever caused a mid-run crash.
           echo "--- ${p} manager logs (--previous) ---"
           kubectl -n kezio-system logs "${p}" -c manager --previous --tail=500 || true
           echo "--- ${p} fetch-boot-artifacts logs (--previous) ---"
@@ -88,34 +65,22 @@ runs:
           echo "--- ${p} securityContext ---"
           kubectl -n kezio-system get "${p}" \
             -o jsonpath='{.spec.securityContext}{"\n"}{range .spec.initContainers[*]}{.name}{": "}{.securityContext}{"\n"}{end}'
-          # Multus attachment, dumped explicitly: the requested
-          # k8s.v1.cni.cncf.io/networks annotation only proves what was
-          # asked for, not what actually attached, and neither is
-          # visible in the plain pod logs above - a Multus CNI ADD
-          # failure (for example, the NetworkAttachmentDefinition
-          # missing, or the host bridge not existing yet) leaves bootd
-          # itself running normally on eth0 alone while every PXE
-          # request on the boot segment silently times out, with
-          # nothing in bootd's own logs to explain why.
+          # Multus attachment dumped explicitly: the requested annotation
+          # only proves what was asked for, not what attached, and a CNI
+          # ADD failure leaves bootd running normally on eth0 alone with
+          # every PXE request silently timing out and nothing in its logs.
           echo "--- ${p} k8s.v1.cni.cncf.io/networks annotation (requested) ---"
           kubectl -n kezio-system get "${p}" \
             -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/networks}{"\n"}'
           echo "--- ${p} k8s.v1.cni.cncf.io/network-status annotation (actual, set by Multus) ---"
           kubectl -n kezio-system get "${p}" \
             -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}{"\n"}'
-          # net1 lives only inside this pod's own network namespace, so
-          # its rp_filter setting and link state have to be read from
-          # there (via nsenter/crictl, the same way the pod-netns
-          # capture in the calling workflow reaches it), not from the
-          # host - a strict reverse-path filter on net1 is one of the
-          # candidates for a DISCOVER (source 0.0.0.0) that crosses the
-          # host bridge but never reaches bootd's UDP socket.
+          # net1 lives only inside this pod's own netns, so rp_filter and
+          # link state must be read from there via nsenter/crictl, not
+          # the host.
           echo "--- ${p} net1 rp_filter and link state (inside the pod network namespace) ---"
           pod_name="${p#pod/}"
-          # Same RKE2 endpoint crictl needs everywhere else in the
-          # calling workflow - without -r, crictl's default endpoint
-          # probe finds nothing on an RKE2 node and this whole block
-          # silently produces no output.
+          # Without -r, crictl's default endpoint probe finds nothing on an RKE2 node.
           crictl_endpoint="unix:///run/k3s/containerd/containerd.sock"
           sandbox_id="$(sudo crictl -r "${crictl_endpoint}" pods --name "${pod_name}" -q | head -1)"
           if [ -n "${sandbox_id}" ]; then
@@ -178,8 +143,7 @@ runs:
       shell: bash
       run: |
         set +e
-        # See "Dump diagnostics on failure" above for why this is teed
-        # into a file as well as the job log.
+        # Teed into a file too, same as "Dump diagnostics on failure" above.
         exec > >(tee "${RUNNER_TEMP}/diagnostics-kubevirtbmc-dump.log") 2>&1
         echo "===== kubevirtbmc-system pods ====="
         kubectl get pods -n kubevirtbmc-system -o wide

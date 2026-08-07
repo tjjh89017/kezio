@@ -1,27 +1,23 @@
 name: Probe - bootserver HTTP hop
 
-# Answers, directly, the one hop nothing currently observes: after GRUB
-# fetches its bootstrap grub.cfg over TFTP, it fetches the REAL config
-# plus kernel/initrd/squashfs over HTTP from the manager-side bootserver
+# Answers the one hop nothing currently observes: after GRUB fetches its
+# bootstrap grub.cfg over TFTP, it fetches the REAL config plus
+# kernel/initrd/squashfs over HTTP from the manager-side bootserver
 # (internal/bootserver). That package logs grub.cfg requests only on
 # anomaly paths, GET /boot/artifacts/... goes through http.ServeFile with
 # no logging at all, and every KubeVirt lane's tcpdump filter is "udp
 # port 67 or 68 or 69" - HTTP traffic on this hop is never captured
-# anywhere today. This probe curls the real bootserver directly instead
-# of inferring anything about it from YAML: it deploys the real manager
-# binary (not a stand-in) with FAKE staged artifacts (see
-# .github/actions/write-fake-boot-artifacts - the ~90 minute
-# hack/live-image/build.sh is not needed to prove the HTTP layer works),
-# then asserts real HTTP status codes and content lengths for both
-# GET /boot/artifacts/<file> and GET /boot/grub.cfg-<mac>.
+# anywhere today. This probe curls the real bootserver directly: it
+# deploys the real manager binary with FAKE staged artifacts (see
+# .github/actions/write-fake-boot-artifacts, avoiding the ~90 minute
+# hack/live-image/build.sh), then asserts real HTTP status codes and
+# content lengths for GET /boot/artifacts/<file> and
+# GET /boot/grub.cfg-<mac>.
 #
 # Also exercises .github/actions/assert-boot-artifacts-agent-commit - the
 # same commit-freshness check every real KubeVirt lane runs against
 # bootd - port-forwarded to this real bootserver instead of standing up
-# bootd itself (out of scope here; bootd is just a reverse proxy in
-# front of this same manifest.json route). What's real: the manager
-# binary, the HTTP route, the assertion script. What's faked: the boot
-# artifact bytes (write-fake-boot-artifacts) and, for the second
+# bootd itself. What's faked: the boot artifact bytes and, for the second
 # assertion call only, the expected commit (deliberately wrong, to prove
 # the FAIL path fires and is not a no-op that only ever passes).
 on:
@@ -44,8 +40,8 @@ jobs:
   bootserver-http:
     name: Curl the real bootserver's grub.cfg and artifact routes
     runs-on: ubuntu-latest
-    # No `lb build`, no KubeVirt/CDI, no VM boot: this is RKE2 + cert-manager
-    # + one small Go binary + a handful of curl calls.
+    # No `lb build`, no KubeVirt/CDI, no VM boot: RKE2 + cert-manager +
+    # one small Go binary + a handful of curl calls.
     timeout-minutes: 12
     steps:
       - name: Clone the code
@@ -120,20 +116,18 @@ jobs:
 
       - name: Start an in-cluster curl pod
         # A real curl client reaching kezio-boot-server's ClusterIP over
-        # cluster DNS, the same Service and port real lanes' reverse
-        # proxies (kezio-bootd) forward to - see
-        # config/e2e-boot-path/boot-server-service.yaml. Kept running
-        # (sleep) so later steps can exec multiple requests through it
-        # instead of paying a fresh `kubectl run` per request.
+        # cluster DNS, the same Service/port real lanes' reverse proxies
+        # (kezio-bootd) forward to. Kept running (sleep) so later steps
+        # can exec multiple requests through it instead of a fresh
+        # `kubectl run` per request.
         run: |
           set -euo pipefail
-          # deploy-boot-path-overlay labels this namespace enforce=restricted
-          # (its own restrict-psa default); kubectl run's generated pod spec
-          # carries no securityContext at all, so the API server rejects it
-          # outright under that PSA level. runAsUser must be numeric here -
-          # curlimages/curl's image sets USER curl_user (a name), and the
-          # kubelet cannot verify runAsNonRoot against a non-numeric user -
-          # 100 is that image's actual uid.
+          # deploy-boot-path-overlay labels this namespace enforce=restricted;
+          # kubectl run's generated pod spec carries no securityContext, so
+          # the API server rejects it outright under that PSA level.
+          # runAsUser must be numeric - curlimages/curl's image sets USER
+          # curl_user (a name), and the kubelet cannot verify runAsNonRoot
+          # against a non-numeric user - 100 is that image's actual uid.
           kubectl -n kezio-system run kezio-probe-curl \
             --image=curlimages/curl:8.11.1 \
             --restart=Never \
@@ -181,8 +175,7 @@ jobs:
       - name: Assert GET /boot/grub.cfg-<unknown-mac> returns the fixed boot-local config
         # No Machine is registered in this probe, so every MAC is
         # unknown - handleGrubConfig's fail-secure "boot local disk"
-        # branch (internal/bootserver/server.go) is the one real,
-        # deterministic response this probe can assert without also
+        # branch is the one deterministic response assertable without
         # standing up a Machine CR and a minted token.
         run: |
           set -euo pipefail
@@ -214,9 +207,8 @@ jobs:
           done
           curl -sf -o /dev/null http://127.0.0.1:18090/boot/artifacts/manifest.json
 
-      # The fake artifact's agentCommit is genuinely github.sha (written by
-      # write-fake-boot-artifacts above), so this is a real match, not a
-      # scripted one - proves the assertion's PASS path.
+      # agentCommit is genuinely github.sha (written by write-fake-boot-
+      # artifacts above), so this is a real match - proves the PASS path.
       - name: Assert the boot artifacts agent commit - matching commit must pass
         uses: ./.github/actions/assert-boot-artifacts-agent-commit
         with:

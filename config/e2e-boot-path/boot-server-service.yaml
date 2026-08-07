@@ -1,12 +1,7 @@
 # Byte-identical copy of config/bootserver/service.yaml. Kustomize's
-# default load restriction (LoadRestrictionsRootOnly) forbids a
-# `resources:` entry that names a plain YAML file (as opposed to a
-# sub-kustomization directory, which config/e2e-image-path's ../image-service
-# and ../seeder entries are) outside this kustomization's own root
-# directory - `kustomize build config/e2e-boot-path` fails accumulating
-# `../bootserver/service.yaml` for exactly this reason. A local copy is
-# the least-surprising fix; see config/bootserver/service.yaml for the
-# annotated original and keep the two in sync if that file changes.
+# LoadRestrictionsRootOnly forbids a `resources:` entry naming a plain YAML
+# file outside this kustomization's own root, so `../bootserver/service.yaml`
+# can't be referenced directly. Keep the two in sync.
 apiVersion: v1
 kind: Service
 metadata:

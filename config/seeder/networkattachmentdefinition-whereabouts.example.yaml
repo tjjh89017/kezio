@@ -1,74 +1,48 @@
-# EXAMPLE / PLACEHOLDER - not applied by this kustomization (note the
-# ".example.yaml" suffix; it is not listed in kustomization.yaml's
-# resources). RECOMMENDED shape for a real site: see
-# networkattachmentdefinition.example.yaml (the static-IPAM example) for
-# the single-Image/lab shape instead, and the "Provisioning-segment
-# address pool" section of README.md for the sizing rule this pool must
-# satisfy.
+# EXAMPLE / PLACEHOLDER - not applied by this kustomization. RECOMMENDED
+# shape for a real site: see networkattachmentdefinition.example.yaml (the
+# static-IPAM example) for the single-Image/lab shape, and README.md's
+# "Provisioning-segment address pool" for the sizing rule below.
 #
 # === Why a pool, not one static address ===
+# The operator creates one seeder Deployment per (Image, site) while a
+# Machine there is deploying that Image (SEEDER_DEPLOYMENT_NETWORK - see
+# README.md's "Wiring the operator side"). Each seeder pod is single-homed
+# on this network, so pod.Status.PodIP is what leechers reach directly - one
+# address per pod, not per site. A site with several Images deploying
+# concurrently needs one address per concurrently active (Image, site)
+# Deployment at once; a single static address only covers a site where at
+# most one Image ever deploys at a time.
 #
-# The operator creates one seeder Deployment per Image, per site, while
-# a Machine at that site is deploying that Image
-# (SEEDER_DEPLOYMENT_NETWORK - see README.md's "Wiring the operator
-# side"). Each seeder pod is single-homed on this network (the Multus
-# default-network annotation replaces its whole default attachment), so
-# pod.Status.PodIP is the address leechers reach directly - one address
-# per pod, not per site. A site with several Images concurrently
-# deploying needs one address per concurrently active (Image, site)
-# Deployment, all at once, not one address total. A single static
-# address (the other example) only covers a site where at most one
-# Image is ever deploying at a time.
-#
-# whereabouts (https://github.com/k8snetworkplumbingwg/whereabouts) is a
-# cluster-wide IPAM allocator: it hands out one address per pod from a
-# shared range, releasing it back to the pool when the pod using it is
-# deleted, without any per-pod NAD edits. That is exactly the churn
-# pattern per-Image seeder Deployments produce - short-lived pods
-# created and removed by Machine deploy activity, not a fixed pod count
-# known in advance.
+# whereabouts (https://github.com/k8snetworkplumbingwg/whereabouts) hands
+# out one address per pod from a shared range and releases it on pod
+# deletion, without per-pod NAD edits - matching the churn of short-lived
+# per-Image seeder pods.
 #
 # === Sizing the pool ===
-#
 # pool size >= (max concurrently active Images at this site) x replicas,
 # PLUS HEADROOM.
 #
-# "Concurrently active Images at this site" means the largest number of
-# distinct Images any Machine at this site is deploying (or retrying a
-# provisioning failure for - machineHoldsSeederReference) at the same
-# moment; "replicas" is each seeder Deployment's own replica count
-# (buildSeederDeployment sets 1 today). Headroom absorbs two effects a
-# bare minimum count does not:
-#
-#   - the grace period (SEEDER_DEPLOYMENT_GRACE_PERIOD, default 5m) that
-#     keeps a just-emptied Deployment's pod (and its address) alive
-#     after the last Machine referencing it stops deploying, in case
-#     another deploy against the same Image starts right back up; and
-#   - whereabouts' own allocation leaks on ungraceful pod deletion (see
-#     "The ip-reconciler CronJob is required" below) - a pool sized to
-#     the bare minimum has zero slack to absorb even one leaked address
-#     before a new seeder Deployment fails to get one at all.
-#
-# There is no fixed multiplier this repository can prescribe for
-# "headroom" - it depends on how many Images a site realistically
-# deploys at once and how tolerant the operator is of a seeder
-# Deployment briefly failing to start. Size generously; addresses in a
-# dedicated provisioning-segment pool are cheap relative to a starved
+# "Concurrently active Images" is the largest number of distinct Images any
+# Machine at this site is deploying (or retrying via
+# machineHoldsSeederReference) at once; "replicas" is each seeder
+# Deployment's replica count (buildSeederDeployment sets 1 today). Headroom
+# covers: the grace period (SEEDER_DEPLOYMENT_GRACE_PERIOD, default 5m) that
+# keeps a just-emptied Deployment's pod/address alive in case a deploy
+# against the same Image restarts, and whereabouts' own leaked allocations
+# (see ip-reconciler note below) - a bare-minimum pool has no slack for even
+# one leak. Size generously; addresses here are cheap relative to a starved
 # deploy.
 #
 # === The ip-reconciler CronJob is required, not optional ===
-#
-# whereabouts leaks allocations on ungraceful pod deletion (a node loss,
-# a kubelet restart mid-eviction, ...) - the allocation record survives
-# in whereabouts' own store even though the pod that held it is gone.
-# Per-Image seeder Deployments are a high-churn create/delete pattern by
-# design (see README.md's "Per-Image, on-demand seeding"): every deploy
-# start and grace-period expiry creates or deletes a pod, so this
-# leak path gets exercised constantly, not as a rare edge case. Deploy
-# whereabouts' own ip-reconciler CronJob
+# whereabouts leaks allocations on ungraceful pod deletion (node loss,
+# kubelet restart mid-eviction): the record survives even though the pod is
+# gone. Per-Image seeder Deployments create/delete pods constantly (see
+# README.md's "Per-Image, on-demand seeding"), so this leak path is
+# exercised constantly, not rarely. Deploy whereabouts' own ip-reconciler
+# CronJob
 # (https://github.com/k8snetworkplumbingwg/whereabouts/tree/master/doc#ip-reconciler)
-# alongside this NAD - without it, a leaked pool slowly starves new
-# seeder Deployments of addresses until nothing can start.
+# alongside this NAD, or a leaked pool slowly starves new seeder Deployments
+# of addresses.
 apiVersion: k8s.cni.cncf.io/v1
 kind: NetworkAttachmentDefinition
 metadata:
@@ -76,11 +50,9 @@ metadata:
   namespace: system
 spec:
   # SITE-SPECIFIC: replace this config with whatever CNI plugin this
-  # cluster's data network actually uses (macvlan, ipvlan, a Multus
-  # bridge onto a VLAN-tagged host interface, ...); this "bridge" example
-  # is illustrative only, not a recommendation. Keep the "routes" entry
-  # scoped to net1 only - see networkattachmentdefinition.example.yaml's
-  # "Routing" section for why (the reasoning is identical here).
+  # cluster's data network uses; this "bridge" example is illustrative only.
+  # Keep the "routes" entry scoped to net1 only - see
+  # networkattachmentdefinition.example.yaml's "Routing" section.
   config: |
     {
       "cniVersion": "0.3.1",

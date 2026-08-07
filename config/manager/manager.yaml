@@ -51,9 +51,7 @@ spec:
       #             values:
       #               - linux
       securityContext:
-        # Projects are configured by default to adhere to the "restricted" Pod Security Standards.
-        # This ensures that deployments meet the highest security requirements for Kubernetes.
-        # For more details, see: https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted
+        # Restricted Pod Security Standard: https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
@@ -83,13 +81,9 @@ spec:
             port: 8081
           initialDelaySeconds: 5
           periodSeconds: 10
-        # Sized for what this manager actually hosts: the controllers,
-        # the webhooks, the agent server, and the boot server that
-        # streams the multi-hundred-MB live boot artifacts to every
-        # netbooting machine. The scaffold's 128Mi limit OOM-killed the
-        # manager mid-netboot (exit 137), which broke every in-flight
-        # boot through bootd's reverse proxy. If 512Mi is ever hit,
-        # profile for a leak instead of raising this again.
+        # Sized for the multi-hundred-MB boot artifacts bootd streams through this
+        # manager; the scaffold's 128Mi limit OOM-killed it mid-netboot (exit 137).
+        # If 512Mi is ever hit, profile for a leak instead of raising this again.
         resources:
           limits:
             cpu: 500m

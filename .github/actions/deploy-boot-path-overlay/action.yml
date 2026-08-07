@@ -102,11 +102,9 @@ runs:
       run: |
         set -euo pipefail
         kubectl apply -k config/e2e-boot-path
-        # In-cluster ClusterIP DNS names are enough here: unlike the
-        # KubeVirt VM lanes, nothing calling this action needs the boot
-        # config server reachable from a raw L2 segment with no cluster
-        # DNS - a probe (or a future preflight job) curls it from inside
-        # the cluster.
+        # In-cluster ClusterIP DNS names suffice here: unlike the KubeVirt
+        # VM lanes, nothing calling this action needs the boot config
+        # server reachable from a raw L2 segment with no cluster DNS.
         kubectl -n "${NAMESPACE}" set env deployment/kezio-controller-manager \
           BOOT_SERVER_ADDR=:8090 \
           BOOT_ARTIFACTS_DIR=/boot-artifacts \
@@ -114,11 +112,9 @@ runs:
           AGENT_SERVER_ADDR=:8091 \
           BOOT_AGENT_SERVER_URL="http://kezio-agent-server.${NAMESPACE}.svc.cluster.local:8091" \
           DEPLOYER=agent
-        # See config/e2e-boot-path/boot-artifacts-init-patch.yaml's own
-        # comment for why this overlay does not wire the initContainer
-        # itself: this two-step (JSON Patch with a placeholder image,
-        # then `kubectl set image`) is the exact sequence every real
-        # KubeVirt lane runs.
+        # Two-step (JSON Patch with a placeholder image, then `kubectl set
+        # image`) mirrors the exact sequence every real KubeVirt lane runs -
+        # see config/e2e-boot-path/boot-artifacts-init-patch.yaml's own comment.
         kubectl -n "${NAMESPACE}" patch deployment/kezio-controller-manager --type=json \
           --patch-file=config/e2e-boot-path/boot-artifacts-init-patch.yaml
         kubectl -n "${NAMESPACE}" set image deployment/kezio-controller-manager \
@@ -148,11 +144,9 @@ runs:
           exit 0
         fi
 
-        # expect-ready=false: poll for the initContainer to actually
-        # reach an image-pull failure state, not just a non-Ready
-        # Deployment (which could just as easily mean "still pulling" a
-        # moment before success) - ImagePullBackOff/ErrImagePull is the
-        # exact state run 31134471424 hit.
+        # expect-ready=false: poll for the initContainer to actually reach
+        # an image-pull failure state, not just a non-Ready Deployment
+        # (which could just as easily mean "still pulling").
         deadline=$(( $(date +%s) + REPRODUCTION_POLL_SECONDS ))
         reproduced=""
         while [ "$(date +%s)" -lt "${deadline}" ]; do
@@ -190,16 +184,10 @@ runs:
         NAMESPACE: ${{ inputs.namespace }}
         POD_NAME: ${{ steps.resolve-pod.outputs.pod-name }}
       # `kubectl exec -c manager -- test` cannot be the checker: the
-      # manager image is distroless, so `test` doesn't exist in it and
-      # every exec fails with "executable file not found in $PATH" -
-      # indistinguishable, to a script that only checks the exit code,
-      # from the artifact itself being missing. Both callers of this
-      # action run their own single-node RKE2 on the runner that already
-      # executes this step, so the emptyDir kubelet mounted into the pod
-      # is a plain host path this step can stat directly with tools (sudo,
-      # test, find) guaranteed to exist here - no in-container tooling
-      # assumed, so a real absence and a broken checker cannot be
-      # confused.
+      # manager image is distroless, so every exec fails regardless of
+      # whether the artifact exists. Both callers run their own single-node
+      # RKE2 on this runner, so the emptyDir is a plain host path this step
+      # can stat directly instead.
       run: |
         set -euo pipefail
         pod_uid="$(kubectl -n "${NAMESPACE}" get pod "${POD_NAME}" -o jsonpath='{.metadata.uid}')"
@@ -212,12 +200,8 @@ runs:
           echo "::error::${artifacts_dir} does not exist on the node - the boot-artifacts emptyDir was never mounted, so artifact presence was NOT checked" >&2
           exit 1
         fi
-        # config/e2e-boot-path/boot-artifacts-init-patch.yaml's own
-        # fetch-boot-artifacts cp list - shimx64.efi/grubx64.efi are
-        # deliberately absent here, copied instead by bootd's own
-        # initContainer (config/bootd/deployment.yaml), so checking for
-        # them against the manager's emptyDir would report a permanent,
-        # by-design "missing" that has nothing to do with this probe.
+        # shimx64.efi/grubx64.efi are deliberately absent here - copied
+        # instead by bootd's own initContainer, not this manager's.
         for f in vmlinuz initrd.img filesystem.squashfs manifest.json; do
           if ! sudo test -s "${artifacts_dir}/${f}"; then
             echo "::error::${artifacts_dir}/${f} is missing or empty" >&2

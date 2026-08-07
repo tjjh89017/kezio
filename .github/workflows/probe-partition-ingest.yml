@@ -3,20 +3,18 @@ name: Probe - partition ingest timing
 # Times real ingest (qemu-img, sfdisk, partclone) through the
 # per-partition-PVC/publish path (internal/controller/partition_storage.go,
 # image_publish.go) against a disposable single-node RKE2 cluster, with no
-# KubeVirt VM involved and no seeder: only image-service and ingest are
-# built and deployed, exercising ingest's per-partition-PVC/publish
-# handling on its own.
+# KubeVirt VM and no seeder: only image-service and ingest are built and
+# deployed.
 #
 # Source disk images are synthesized directly on the runner with
 # parted/mkfs.ext4 over a loop device - real GPT partition tables and
-# real ext4 filesystems, just far smaller than a cloud image, so what is
-# under test is ingest's own partition/PVC/publish handling, not disk
-# download or filesystem-creation time. Three images (1, 2, and 4
-# partitions) are ingested in turn against the same cluster so a timing
-# difference reflects partition count, not cluster variance between runs.
-# The timing/assertion body lives in
-# .github/actions/time-partition-ingest so this workflow stays a thin,
-# dispatchable wrapper around cluster setup.
+# real ext4 filesystems, just far smaller than a cloud image, so timing
+# reflects ingest's own partition/PVC/publish handling, not disk download
+# or filesystem-creation time. Three images (1, 2, and 4 partitions) are
+# ingested in turn against the same cluster so a timing difference
+# reflects partition count, not cluster variance between runs. The
+# timing/assertion body lives in .github/actions/time-partition-ingest so
+# this workflow stays a thin, dispatchable wrapper around cluster setup.
 on:
   workflow_dispatch:
   workflow_call:
@@ -40,12 +38,11 @@ jobs:
   partition-ingest:
     name: Time real ingest through the per-partition-PVC/publish path
     runs-on: ubuntu-latest
-    # No cloud image download, no seeder (from-source ezio/libtorrent
-    # build), no KubeVirt/CDI - just RKE2, two small Go-binary images, and
-    # three small synthetic-disk ingests. Generous headroom kept anyway:
-    # this exists specifically to catch a hang, and a probe that itself
-    # times out at the same budget as what it is investigating would not
-    # tell stuck and slow apart.
+    # No cloud image download, no seeder, no KubeVirt/CDI - just RKE2, two
+    # small Go-binary images, and three synthetic-disk ingests. Generous
+    # headroom kept anyway: this exists to catch a hang, and a probe that
+    # itself times out at the same budget as what it investigates would
+    # not tell stuck and slow apart.
     timeout-minutes: 25
     steps:
       - name: Clone the code
@@ -104,9 +101,8 @@ jobs:
 
       - name: Install local-path-provisioner and mark it the default StorageClass
         # WaitForFirstConsumer is the exact mechanism the per-partition-PVC
-        # hang hypothesis rests on (see rancher/local-path-provisioner's
-        # bundled StorageClass) - this probe needs the real thing, not a
-        # stand-in binding mode.
+        # hang hypothesis rests on - this probe needs the real thing, not
+        # a stand-in binding mode.
         run: |
           set -euo pipefail
           kubectl apply -f "https://raw.githubusercontent.com/rancher/local-path-provisioner/${LOCAL_PATH_PROVISIONER_VERSION}/deploy/local-path-storage.yaml"
@@ -128,8 +124,7 @@ jobs:
         # left unset: local-path is this cluster's default StorageClass
         # (patched above), so an unset storageClassName on a PVC resolves
         # to the same thing. The per-partition-PVC/publish path is the
-        # only ingest path left (the legacy shared-store shape has been
-        # removed), so no env var is needed to select it.
+        # only ingest path left, so no env var is needed to select it.
         run: |
           set -euo pipefail
           make kustomize

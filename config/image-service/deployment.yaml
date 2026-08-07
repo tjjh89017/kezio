@@ -21,17 +21,11 @@ spec:
     spec:
       securityContext:
         runAsNonRoot: true
-        # The token Secret volume below is mounted 0440 (owner+group
-        # read only) and Secret files are owned root:root by default; a
-        # nonroot container (this image runs distroless, uid 65532, like
-        # every other kezio image) is neither the owner nor in the
-        # owning group, so it opens the mounted token file and gets EACCES
-        # ("permission denied") even though defaultMode already restricts
-        # it correctly. fsGroup makes kubelet chgrp the volume to this
-        # GID and apply the volume's own group-read bit for it, which
-        # 0440 already grants - so the container can read the file
-        # without loosening its mode further (0444 world-readable is not
-        # needed).
+        # The token Secret volume below is mounted 0440, owned root:root by
+        # default; this nonroot container (uid 65532) is neither owner nor
+        # group, so it gets EACCES without fsGroup. fsGroup chgrps the volume
+        # to this GID so the existing 0440 group-read bit applies, without
+        # loosening the mode to world-readable.
         fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
@@ -86,12 +80,9 @@ spec:
         - name: token
           secret:
             # The cluster operator creates this Secret out of band before
-            # deploying (for example: kubectl create secret generic
-            # kezio-image-service-token --from-literal=token=$(openssl
-            # rand -hex 32) -n kezio-system). It is intentionally not
-            # created by this kustomization: a bearer token has no safe
-            # placeholder value to ship in version control. The name
-            # matches this kustomization's namePrefix (kezio-) even
-            # though the Secret itself is not one of its resources.
+            # deploying (e.g. kubectl create secret generic
+            # kezio-image-service-token --from-literal=token=$(openssl rand
+            # -hex 32) -n kezio-system) - not by this kustomization, since a
+            # bearer token has no safe placeholder for version control.
             secretName: kezio-image-service-token
             defaultMode: 0o440

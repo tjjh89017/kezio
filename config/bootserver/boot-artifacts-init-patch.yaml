@@ -1,42 +1,24 @@
 # Adds an initContainer to controller-manager that populates an emptyDir
-# mounted at /boot-artifacts before the manager container starts, and
-# points BOOT_ARTIFACTS_DIR at that mount. This is the concrete answer to
-# what used to be README.md's "mounting a volume there is left to the
-# cluster operator" gap: the default now works with no further overlay,
-# and this kustomization's own `images:` entry for "kezio-boot-artifacts"
-# (see kustomization.yaml) is the one knob an operator overrides - with
-# `kustomize edit set image` or a further overlay - to pin a specific
-# published version instead of always pulling the tag it names.
+# mounted at /boot-artifacts before the manager container starts, and points
+# BOOT_ARTIFACTS_DIR at that mount. kustomization.yaml's `images:` entry for
+# "kezio-boot-artifacts" is the knob an operator overrides (`kustomize edit
+# set image` or a further overlay) to pin a specific published version.
 #
-# shimx64.efi/grubx64.efi are included here (not just vmlinuz/initrd.img/
-# filesystem.squashfs) because Config.EFIDir (internal/bootserver)
-# defaults to this same BOOT_ARTIFACTS_DIR: GET /boot/http/<name> (the
-# UEFI HTTP Boot route) needs them in this directory to serve out of the
-# box, with no separate volume or BOOT_EFI_DIR override required.
+# shimx64.efi/grubx64.efi are included (not just vmlinuz/initrd.img/
+# filesystem.squashfs) because Config.EFIDir (internal/bootserver) defaults
+# to this same BOOT_ARTIFACTS_DIR: GET /boot/http/<name> needs them here to
+# serve out of the box.
 #
-# The initContainer's image IS the fetch: it is
-# docker/boot-artifacts/Dockerfile, built and pushed by
-# .github/workflows/build-live-image.yml, with vmlinuz/initrd.img/
+# The initContainer's image IS the fetch (docker/boot-artifacts/Dockerfile,
+# built by .github/workflows/build-live-image.yml, with vmlinuz/initrd.img/
 # filesystem.squashfs/shimx64.efi/grubx64.efi/manifest.json baked in at
-# /boot-artifacts - so populating the shared emptyDir is a plain `cp`
-# with no network access, no curl, and no checksum step of its own (a
-# corrupted or truncated image would fail its own pull, the same way any
-# other container image does). This replaces what used to be a
-# curlimages/curl initContainer running config/boot-artifacts/fetch.sh
-# against a GitHub Release on every pod (re)start - see
-# .github/workflows/build-live-image.yml's own header comment for why an
-# OCI image is the runtime fetch target now, GitHub Release assets
-# staying for human download only.
+# /boot-artifacts), so populating the shared emptyDir is a plain `cp` with
+# no network access.
 #
-# fsGroup below matches this image's own numeric USER gid (65532, see
-# docker/boot-artifacts/Dockerfile) because the "boot-artifacts" emptyDir
-# added further down is otherwise created root:root mode 0755 - a fresh
-# emptyDir gets no group access for a non-root gid unless the pod's
-# fsGroup says so, the same reasoning config/image-service's
-# securityContext.fsGroup comment documents for its Secret volume.
-# Without this, the `cp` below fails with EACCES writing into
-# /dest and the initContainer CrashLoopBackOffs before the manager
-# container ever starts.
+# fsGroup matches this image's numeric USER gid (65532): the "boot-artifacts"
+# emptyDir is otherwise created root:root 0755, so without this the `cp`
+# below fails EACCES and the initContainer CrashLoopBackOffs before the
+# manager container starts.
 - op: add
   path: /spec/template/spec/securityContext/fsGroup
   value: 65532
@@ -46,19 +28,11 @@
     - name: fetch-boot-artifacts
       image: kezio-boot-artifacts:latest
       # Explicit, not left to the API server's tag-based default: this
-      # container is always created with the "latest" placeholder above,
-      # then repointed at the real tag via `kubectl set image` (see
-      # deploy-boot-path-overlay's own comment on why that two-step
-      # sequence is required). Defaulting only runs once, at the moment
-      # this initContainer is first admitted with that "latest" tag, so
-      # an implicit default here bakes in imagePullPolicy: Always
-      # forever - `kubectl set image` only ever touches .image, so no
-      # later admission re-evaluates the policy against the real tag.
-      # Always then forces the kubelet to pull from the registry the
-      # real tag names on every rollout, ignoring an already-imported
-      # local image entirely (observed as the initContainer reaching
-      # ImagePullBackOff against "not found" even though `ctr images
-      # ls`/`images check` showed it complete in containerd's store).
+      # container is created with the "latest" placeholder above, then
+      # repointed at the real tag via `kubectl set image`, which never
+      # re-runs defaulting - an implicit default here would bake in
+      # imagePullPolicy: Always forever and ignore an already-imported
+      # local image on every rollout.
       imagePullPolicy: IfNotPresent
       command:
         - cp
@@ -76,11 +50,9 @@
       securityContext:
         allowPrivilegeEscalation: false
         readOnlyRootFilesystem: true
-        # A numeric image USER (docker/boot-artifacts/Dockerfile's
-        # USER 65532:65532) is exactly what restricted Pod Security
-        # Admission needs to verify runAsNonRoot on its own - unlike
-        # curlimages/curl's non-numeric "curl_user", which used to force
-        # an explicit runAsUser/runAsGroup override here.
+        # Numeric image USER (Dockerfile's USER 65532:65532) lets restricted
+        # Pod Security Admission verify runAsNonRoot without an explicit
+        # runAsUser/runAsGroup override here.
         runAsNonRoot: true
         capabilities:
           drop: ["ALL"]

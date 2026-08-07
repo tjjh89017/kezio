@@ -1,5 +1,4 @@
-# These resources constitute the fully configured set of manifests
-# used to generate the 'manifests/' directory in a bundle.
+# Fully configured manifest set used to generate the bundle's 'manifests/' dir.
 resources:
 - bases/kezio.clusterserviceversion.yaml
 - ../default

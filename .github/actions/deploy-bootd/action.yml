@@ -27,55 +27,30 @@ runs:
         ../../bin/kustomize edit set image kezio-boot-artifacts="${BOOT_ARTIFACTS_IMG}"
         cd ../..
         kubectl apply -k config/bootd
-        # The site-specific values config/bootd/deployment.yaml leaves
-        # as placeholders/comments (BOOTD_DHCP_INTERFACE=net1 is already
-        # set there):
-        #   - BOOTD_SERVER_IP: bootd's OWN net1 static address (the
-        #     provisioning NAD's ipam) - the PXE next-server, so
-        #     firmware TFTPs straight to the pod.
-        #   - BOOTD_PROVISIONING_CIDR: the segment's subnet, rendered as
-        #     dnsmasq's proxyDHCP dhcp-range.
+        # Site-specific values config/bootd/deployment.yaml leaves as
+        # placeholders:
+        #   - BOOTD_SERVER_IP: bootd's own net1 static address, the PXE
+        #     next-server so firmware TFTPs straight to the pod.
+        #   - BOOTD_PROVISIONING_CIDR: rendered as dnsmasq's proxyDHCP dhcp-range.
         #   - BOOTD_LEASE_MODE / BOOTD_LEASE_RANGE_START/END (lease
-        #     scenario only): makes bootd's own dnsmasq the segment's
-        #     DHCP lease authority instead of a proxyDHCP front - see
-        #     internal/bootd.Config's LeaseMode doc comment. The range
-        #     is pinned to PROVISIONING_LEASE_RANGE_START/END rather
-        #     than left to auto-derive from BOOTD_PROVISIONING_CIDR:
-        #     auto-derivation would start at the subnet's first host
-        #     address, which collides with PROVISIONING_HOST_IP and
-        #     PROVISIONING_BOOTD_NET1_IP (.1/.2) - both still statically
-        #     assigned on this segment regardless of scenario. In the
-        #     no-relay scenario neither variable is set: bootd runs pure
-        #     proxyDHCP beside the existing-dhcp pod deployed earlier,
-        #     which answers the lease directly on the wire.
-        #   - BOOTD_BOOT_CONFIG_URL: bootd's OWN address (the same value
-        #     BOOT_SERVER_URL/BOOT_AGENT_SERVER_URL are set to) - bootd's
-        #     own reverse proxy is what actually answers
-        #     /boot/grub.cfg-<mac> once BOOTD_BOOT_UPSTREAM_URL below is
-        #     set, forwarding it to kezio-boot-server. bootd renders
-        #     this URL into the grub/grub.cfg it serves over TFTP, which
-        #     is how the netboot GRUB image finds its per-MAC config.
+        #     scenario only, see internal/bootd.Config's LeaseMode doc):
+        #     makes bootd's dnsmasq the DHCP lease authority. The range is
+        #     pinned rather than auto-derived from the CIDR, since
+        #     auto-derivation would collide with the statically assigned
+        #     PROVISIONING_HOST_IP/PROVISIONING_BOOTD_NET1_IP (.1/.2). In
+        #     no-relay, neither variable is set: bootd runs pure proxyDHCP
+        #     beside the existing-dhcp pod, which answers the lease directly.
+        #   - BOOTD_BOOT_CONFIG_URL: bootd's own address; its reverse proxy
+        #     answers /boot/grub.cfg-<mac>, forwarding to kezio-boot-server.
         #   - BOOTD_AGENT_UPSTREAM_URL / BOOTD_BOOT_UPSTREAM_URL: the
-        #     in-cluster (ClusterIP) Services BOOT_AGENT_SERVER_URL and
-        #     BOOT_SERVER_URL used to name directly, before bootd grew
-        #     its own reverse proxy (see internal/bootd's ProxyServer
-        #     and config/bootd/README.md's "Reverse-proxying the agent
-        #     and boot config servers" section) - the target VM, which
-        #     lives on the raw provisioning bridge with no cluster DNS
-        #     and no route to a ClusterIP, can reach neither directly;
-        #     bootd, an ordinary cluster pod on its other (eth0)
-        #     interface, can. Setting these turns bootd's proxy on:
-        #     every /agent/... and /boot/... request the VM's firmware
-        #     or kezio-agent sends to bootd's own address above now
-        #     forwards to the real service - no socat, no
-        #     separately-exposed Service, and exactly one address
-        #     (bootd's) the VM ever needs to reach.
+        #     in-cluster ClusterIP Services the target VM (raw bridge, no
+        #     cluster DNS, no ClusterIP route) cannot reach directly but
+        #     bootd can, via its other (eth0) interface - these turn on
+        #     bootd's reverse proxy so the VM only ever needs bootd's address.
         scenario_env=()
         case "${DHCP_SCENARIO}" in
           no-relay)
-            # Pure proxyDHCP: no BOOTD_LEASE_MODE, no relay - the
-            # existing-dhcp pod deployed earlier answers the lease
-            # directly.
+            # Pure proxyDHCP; the existing-dhcp pod answers the lease directly.
             ;;
           lease)
             scenario_env+=(
@@ -96,39 +71,19 @@ runs:
           BOOTD_AGENT_UPSTREAM_URL="http://kezio-agent-server.kezio-system.svc.cluster.local:8091" \
           BOOTD_BOOT_UPSTREAM_URL="http://kezio-boot-server.kezio-system.svc.cluster.local:8090" \
           "${scenario_env[@]}"
-        # Strategic-merge (kubectl patch's default type for a built-in
-        # object like Deployment), not --type=json: a JSON Patch "add"
-        # on .../metadata/annotations replaces the whole annotations map
-        # wholesale, so any later change to this same path (a rerun, a
-        # future patch adding a second annotation) would silently drop
-        # this one. A strategic-merge patch merges map[string]string
-        # fields (annotations included) by key instead, so this
-        # attachment survives regardless of what else ever touches the
-        # pod template's annotations.
+        # Strategic-merge, not --type=json: a JSON Patch "add" here would
+        # replace the whole annotations map wholesale on any later patch
+        # to this same path; strategic-merge merges by key instead.
         kubectl -n kezio-system patch deployment/kezio-bootd --type=strategic -p='{
           "spec":{"template":{"metadata":{"annotations":{"k8s.v1.cni.cncf.io/networks":"kezio-boot-network"}}}}
         }'
         kubectl rollout status deployment/kezio-bootd -n kezio-system --timeout=180s
 
-        # Same early-failure shape the old socat forward's curl check
-        # used to give, moved here (bootd itself, not a host-level
-        # forward, is what has to answer now): prove bootd's reverse
-        # proxy actually reaches through to the boot config server on
-        # bootd's own provisioning-network address, reached from the
-        # host's own port on the same bridge - the same L2 path the VM
-        # will use.
-        #
-        # Split into a connect step and a status check instead of a bare
-        # `curl -sf`: `-f` treats "could not open a TCP connection to
-        # bootd" and "connected fine but the upstream boot config server
-        # answered >= 400" as the exact same failure, which previously
-        # cost a full debugging cycle working out which of the two had
-        # actually happened (the runner host having no address on this
-        # segment at all, a routing problem with nothing to do with
-        # bootd's proxy). The http_code capture below fails on the
-        # former (curl itself errors, no code to report) and reports
-        # the code on the latter, so the two are distinguishable from
-        # the error text alone.
+        # Proves bootd's reverse proxy reaches the boot config server, over
+        # the same L2 path the VM will use. Split into a connect step and a
+        # status check instead of a bare `curl -sf`, since `-f` conflates
+        # "no TCP connection to bootd" with "connected fine but upstream
+        # answered >= 400" - the http_code capture below distinguishes them.
         bootd_ip="${PROVISIONING_BOOTD_NET1_IP%%/*}"
         http_code="$(curl -s -o /dev/null -w '%{http_code}' "http://${bootd_ip}:80/boot/artifacts/manifest.json")" || {
           echo "::error::could not connect to bootd's reverse proxy at ${bootd_ip}:80 at all (no TCP connection - a network/routing failure, not an HTTP error from the boot config server)" >&2
@@ -139,19 +94,13 @@ runs:
           exit 1
         fi
 
-        # Fail fast here, not 20 minutes later at a PXE-E18 timeout on
-        # the VM console: confirm the live bootd pod actually has the
-        # Multus secondary interface Multus's own
-        # k8s.v1.cni.cncf.io/network-status annotation reports back
-        # (set by Multus after CNI ADD succeeds - the annotation this
-        # step just requested is only bootd's *request*, not proof the
-        # attachment happened), rather than only trusting the
-        # deployment's own template annotation.
+        # Fail fast here, not 20 minutes later at a PXE-E18 timeout on the
+        # VM console: confirm the live bootd pod's network-status
+        # annotation (set by Multus after CNI ADD) actually reports the
+        # attachment, not just the deployment template's *request* for it.
         # Exclude terminating pods: `rollout status` returning does not
-        # mean the OLD ReplicaSet's pod is already gone, and a
-        # terminating pod still reports phase=Running - so a bare
-        # .items[0] can race onto the pre-patch pod that legitimately
-        # lacks the attachment, failing this check spuriously.
+        # mean the old ReplicaSet's pod is gone yet, and it still reports
+        # phase=Running, so a bare .items[0] can race onto it.
         bootd_pod="$(kubectl -n kezio-system get pods -l app.kubernetes.io/component=bootd -o json \
           | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)][0].metadata.name')"
         if [ -z "${bootd_pod}" ] || [ "${bootd_pod}" = "null" ]; then

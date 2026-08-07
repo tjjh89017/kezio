@@ -1,86 +1,52 @@
-# EXAMPLE / PLACEHOLDER - not applied by this kustomization (note the
-# ".example.yaml" suffix; it is not listed in kustomization.yaml's
-# resources). A real NetworkAttachmentDefinition depends on the cluster's
-# CNI, VLAN/subnet layout, and IPAM allocator, none of which this
-# repository can know in advance. Copy this file, strip the ".example"
-# suffix, fill in the site-specific values marked below, and add it to
-# kustomization.yaml's resources - then uncomment the
+# EXAMPLE / PLACEHOLDER - not applied by this kustomization. Copy this file,
+# strip the ".example" suffix, fill in the site-specific values below, add it
+# to kustomization.yaml's resources, then uncomment the
 # k8s.v1.cni.cncf.io/networks annotation on the seeder and opentracker
-# Deployments to actually attach it.
+# Deployments.
 #
-# THIS IS THE SINGLE-IMAGE/LAB SHAPE: one static address, good for a
-# site where at most one Image is ever being deployed at a time (a lab,
-# a small single-Image site). A site where several Images can be
-# deploying concurrently needs one address per concurrently active
-# (Image, site) seeder Deployment, not one address total - see
-# networkattachmentdefinition-whereabouts.example.yaml (the RECOMMENDED
-# shape for real, multi-Image sites) and README.md's
-# "Provisioning-segment address pool" section for the sizing rule.
+# THIS IS THE SINGLE-IMAGE/LAB SHAPE: one static address, for a site
+# deploying at most one Image at a time. A site with concurrent Image
+# deploys needs one address per concurrent (Image, site) seeder Deployment -
+# see networkattachmentdefinition-whereabouts.example.yaml (RECOMMENDED for
+# multi-Image sites) and README.md's "Provisioning-segment address pool".
 #
 # Requires the Multus CNI meta-plugin
 # (https://github.com/k8snetworkplumbingwg/multus-cni) and its
-# NetworkAttachmentDefinition CRD to already be installed cluster-wide;
-# neither is installed by this kustomization.
+# NetworkAttachmentDefinition CRD already installed cluster-wide.
 #
 # === Why this exists (the no-NAT rule) ===
-#
-# BitTorrent is not NAT-friendly: a peer connects directly to the IP:port
-# a torrent's tracker announce advertised. If a seeder's actual listening
-# IP:port differs from what it announces (because something between it
-# and the swarm rewrites the source address - a Service's ClusterIP DNAT,
-# a NAT gateway, ...), remote peers try to connect to an address that
-# either does not answer or answers as a different pod entirely. The
-# hard requirement this repository's design settled on is: announce
-# IP:port == reachable IP:port, with no NAT/SNAT anywhere on that path.
-#
-# A pod's default cluster-CNI interface (eth0) is exactly the kind of
-# address that requirement rules out for most cluster CNIs (Calico-style
-# overlays SNAT egress, ClusterIPs DNAT ingress). Hence: a second,
-# routable interface (net1, this attachment) dedicated to BitTorrent
-# traffic, while eth0 stays for cluster-internal traffic (kube-apiserver,
-# kubelet, and the operator's gRPC control connection to ezio).
+# BitTorrent is not NAT-friendly: peers connect directly to the IP:port a
+# torrent's tracker announce advertised. If anything between the seeder and
+# the swarm rewrites the source address (ClusterIP DNAT, a NAT gateway),
+# remote peers can't reach it. Hard requirement: announce IP:port ==
+# reachable IP:port, no NAT/SNAT anywhere on that path. A pod's default
+# eth0 fails that for most cluster CNIs, hence a second, routable interface
+# (net1, this attachment) dedicated to BitTorrent, while eth0 stays for
+# cluster-internal traffic (kube-apiserver, kubelet, the operator's gRPC
+# connection to ezio).
 #
 # === Routing: specific routes via net1, not a default-route flip ===
-#
-# Do not make net1 the pod's default route. Most cluster CNIs (Calico
-# included) rely on eth0 for the cluster's own pod/service CIDRs; flipping
-# the default route to net1 breaks the return path for that traffic
-# unless every cluster CIDR is *also* explicitly routed back over eth0,
-# which is fragile to get right and easy to regress.
-#
-# Instead, give net1 specific static routes scoped to the data network(s)
-# peers actually live on, via this NetworkAttachmentDefinition's own
-# config (the "routes" key in a CNI plugin config that supports it, or a
-# static-routes IPAM addon such as whereabouts' "routes" field). eth0
-# keeps the pod's default route and the cluster CIDRs; net1 only carries
-# what is explicitly routed to it. This is additive and does not touch
-# the CNI's own routing decisions on eth0 at all.
+# Do not make net1 the pod's default route - most cluster CNIs rely on eth0
+# for the cluster's own pod/service CIDRs, and flipping the default route
+# breaks their return path. Instead give net1 specific static routes scoped
+# to the data network(s) peers live on (this NAD's "routes" key, or an IPAM
+# addon's routes field, e.g. whereabouts). eth0 keeps the default route and
+# cluster CIDRs; net1 only carries what is explicitly routed to it.
 #
 # === IPAM: static or whereabouts, not DHCP ===
-#
-# The announce IP has to be stable for as long as a seeder is seeding
-# (BitTorrent peers cache it from the tracker response and keep
-# reconnecting to it) and known ahead of time is convenient but not
-# required. Two IPAM choices satisfy "stable for the pod's lifetime":
-#
-#   - type: static - the simplest option when the data-network address
-#     plan is managed by hand or by a separate system; set the address
-#     directly in this NAD's ipam block (or via
+# The announce IP must stay stable for as long as the seeder is seeding
+# (peers cache it from the tracker response). Two choices satisfy that:
+#   - type: static - simplest when the data-network address plan is
+#     managed by hand; set the address in this NAD's ipam block (or via
 #     k8s.v1.cni.cncf.io/networks' per-pod ips override).
 #   - type: whereabouts - a cluster-wide IPAM allocator
-#     (https://github.com/k8snetworkplumbingwg/whereabouts) when
-#     addresses should come from a shared pool instead of being hand
-#     assigned per pod; still stable for the pod's lifetime once
-#     allocated. See networkattachmentdefinition-whereabouts.example.yaml
-#     for that shape: it is the RECOMMENDED choice once a site can have
-#     more than one Image deploying at once, since each per-Image seeder
-#     Deployment (README.md's "Per-Image, on-demand seeding") needs its
-#     own address, not a single one shared across every Image at the
-#     site.
-#
-# DHCP IPAM is deliberately not recommended here: it works too, but pulls
-# in a cluster-wide DHCP daemon dependency (cni-dhcp) purely to solve a
-# problem static/whereabouts already solve without one.
+#     (https://github.com/k8snetworkplumbingwg/whereabouts) for addresses
+#     drawn from a shared pool. See
+#     networkattachmentdefinition-whereabouts.example.yaml; RECOMMENDED once
+#     a site can have more than one Image deploying at once, since each
+#     per-Image seeder Deployment needs its own address.
+# DHCP IPAM works too but pulls in a cluster-wide DHCP daemon dependency
+# (cni-dhcp) to solve what static/whereabouts already solve without one.
 apiVersion: k8s.cni.cncf.io/v1
 kind: NetworkAttachmentDefinition
 metadata:
@@ -88,9 +54,7 @@ metadata:
   namespace: system
 spec:
   # SITE-SPECIFIC: replace this config with whatever CNI plugin this
-  # cluster's data network actually uses (macvlan, ipvlan, a Multus
-  # bridge onto a VLAN-tagged host interface, ...); this "bridge" example
-  # is illustrative only, not a recommendation.
+  # cluster's data network uses; this "bridge" example is illustrative only.
   config: |
     {
       "cniVersion": "0.3.1",

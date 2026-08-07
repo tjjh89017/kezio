@@ -90,13 +90,10 @@ runs:
           --format raw
 
         # Polls Image.status.state and the Ready condition's reason every
-        # 2s, tagging each line with elapsed seconds since upload - the
-        # log this produces is what turns "N+ minutes" into "N seconds in
-        # each phase" after the fact. image_ingest.go's
-        # ImageStateIngesting/reasonPublishing pairing is the exact
-        # marker distinguishing the ingest sub-phase from the publish
-        # sub-phase (see that file's doc comments) - both keep
-        # status.state == "Ingesting", only the reason changes.
+        # 2s, tagging each line with elapsed seconds since upload. Both the
+        # ingest and publish sub-phases keep status.state == "Ingesting";
+        # only the Ready condition's reason (image_ingest.go's
+        # ImageStateIngesting/reasonPublishing) distinguishes them.
         t0="$(date +%s)"
         deadline=$(( t0 + DEADLINE_SECONDS ))
         while true; do

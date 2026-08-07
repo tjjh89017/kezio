@@ -1,7 +1,6 @@
-# Exposes the boot config server's port. Unlike image-service and
-# seeder, there is no separate Deployment here: the boot config server
-# runs embedded in the controller-manager process (see
-# internal/bootserver and cmd/main.go's BOOT_SERVER_ADDR gate), so this
+# Exposes the boot config server's port. Unlike image-service/seeder, there
+# is no separate Deployment: it runs embedded in controller-manager
+# (internal/bootserver, cmd/main.go's BOOT_SERVER_ADDR gate), so this
 # Service selects controller-manager's own pods.
 apiVersion: v1
 kind: Service
@@ -14,13 +13,10 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
 spec:
   # GRUB and the target machine's firmware reach this port directly from
-  # the boot network - a ClusterIP alone would not be reachable from
-  # there. As with image-service's Service, making that reachable
-  # (NodePort, a LoadBalancer, hostNetwork, or an Ingress/proxy on the
-  # boot network) is a cluster-operator choice made by patching this
-  # Service in a further overlay, not by this base manifest. Whatever
-  # address the operator settles on is what BOOT_SERVER_URL (see
-  # README.md) must name.
+  # the boot network - ClusterIP alone is not reachable there. Making it
+  # reachable (NodePort, LoadBalancer, hostNetwork, Ingress/proxy) is a
+  # cluster-operator choice via a further overlay; whatever address results
+  # is what BOOT_SERVER_URL (README.md) must name.
   type: ClusterIP
   selector:
     control-plane: controller-manager

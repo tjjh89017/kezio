@@ -1,9 +1,6 @@
-# Declares the agent registration server's containerPort on the manager
-# container, so service.yaml's targetPort: agent-http resolves to
-# something. The manager only actually listens on this port once
-# AGENT_SERVER_ADDR (see cmd/main.go's agentServerConfigFromEnv) is set
-# on the Deployment; setting it is left to the cluster operator or an
-# e2e overlay, the same as BOOT_SERVER_ADDR.
+# Declares the agent registration server's containerPort so service.yaml's
+# targetPort: agent-http resolves. The manager only listens on it once
+# AGENT_SERVER_ADDR is set - left to the cluster operator or an e2e overlay.
 - op: add
   path: /spec/template/spec/containers/0/ports/-
   value:

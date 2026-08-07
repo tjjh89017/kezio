@@ -8,96 +8,66 @@ name: E2E Scale (Multi-Site KubeVirt VMs)
 # through the same swarm - not one leecher at a time against the central
 # seeder alone.
 #
-# Builds on the same setup e2e-kubevirt-reusable.yml uses (KubeVirt +
-# CDI + Multus on RKE2, the same five locally-built images, the same
-# ingest-through-kezioctl path, the same three-layer verify), but the
-# topology diverges enough that this is a dedicated workflow rather than
-# a `workflow_call` of that file:
-#   - two boot L2 segments (two Multus bridges, two kezio-bootd
-#     Deployments) instead of one - a single reusable-workflow "boot
-#     network" input covers one segment, not a set of them;
-#   - two site-local ezio-seeder replicas added as extra endpoints of
-#     the existing Service, cloned by patching the reusable workflow's
-#     own generated manifest with `jq` (see the "Deploy the two
-#     site-local ezio-seeder replicas" step) - there is no `workflow_call`
-#     input shape that expresses "N seeders" without turning the
-#     reusable workflow itself into a loop, which would complicate its
-#     single-leecher callers (including the ezio repository's own use of
-#     it) for a topology only this lane needs;
-#   - two target VMs/Machines polled concurrently instead of one, and a
-#     swarm-wide peer-count sample gathered while both are leeching.
-# Every step below that has no site-specific content (image builds, RKE2
-# install, KubeVirt/CDI/Multus install, ingest) is copied from
-# e2e-kubevirt-reusable.yml verbatim in spirit - keep the two in sync by
-# hand if that workflow's own setup steps change; the alternative (making
-# the reusable workflow itself site-count-parametric) was rejected above.
+# Builds on the same setup e2e-kubevirt-reusable.yml uses, but the
+# topology diverges enough to need a dedicated workflow rather than a
+# `workflow_call` of that file: two boot L2 segments instead of one (no
+# single "boot network" input covers a set of segments); two site-local
+# ezio-seeder replicas cloned by patching the reusable workflow's
+# generated manifest with `jq` (there is no `workflow_call` input shape
+# for "N seeders" without turning that workflow into a loop, which would
+# complicate its single-leecher callers); and two target VMs/Machines
+# polled concurrently with a swarm-wide peer-count sample gathered while
+# both are leeching. Site-agnostic steps (image builds, RKE2 install,
+# KubeVirt/CDI/Multus install, ingest) mirror e2e-kubevirt-reusable.yml -
+# keep the two in sync by hand if that workflow's setup steps change.
 #
 # === Honest scope: what a single GitHub-hosted runner can and cannot
 # simulate ===
 #
 # A single runner has one flat pod network - every seeder, the tracker,
-# and both leecher VMs' data traffic all cross the same loopback/veth
-# fabric with no real inter-site latency, bandwidth cap, or routing hop
-# between them. This lane genuinely CANNOT show that "the WAN carries
-# close to one copy of the image" - that claim needs real per-network
-# traffic accounting or genuinely separate network segments with
-# different cost, neither of which exists here, and this workflow does
-# not claim it anywhere below.
+# and both leecher VMs' data traffic cross the same loopback/veth fabric
+# with no real inter-site latency, bandwidth cap, or routing hop. This
+# lane CANNOT show that "the WAN carries close to one copy of the
+# image" - that needs real per-network traffic accounting or genuinely
+# separate network segments, neither of which exists here.
 #
 # What two Multus bridges + two kezio-bootd Deployments genuinely DO
-# simulate, for real: two separate L2 broadcast domains for PXE/DHCP.
-# Each site's target VM only ever sees its own site's bootd on its own
-# bridge - that part is not faked, it is two real, disjoint Linux
-# bridges with independent proxyDHCP responders, the same mechanism a
-# physically separate site's L2 segment would need locally in
-# production (see config/bootd's own "one replica per boot L2 segment"
-# comment).
+# simulate: two separate, real, disjoint L2 broadcast domains for
+# PXE/DHCP, each with its own independent proxyDHCP responder - the same
+# mechanism a physically separate site's L2 segment needs in production.
 #
 # What this lane actually asserts (see the "Verify" steps near the
-# bottom of the job): both site leechers independently complete a real
-# BitTorrent-transfer deploy - ingest, seed, PXE boot, leech, write,
-# reboot, boot-from-disk, content check - concurrently, against a swarm
-# that has more than one seeder endpoint (the central "pre-warm" seeder
-# plus each site's own seeder replica), not serially against one seeder.
-# It additionally samples each seeder endpoint's live peer count
-# (ezio's own GetTorrentStatus RPC) while both leeches are in flight and
-# reports the observed maximum - explicitly labeled informational, not a
-# pass/fail gate and not a locality proof: a peer count above 1 shows
-# more than one peer was in the swarm at once, which is necessary but
-# not sufficient evidence of the same-site piece exchange BitTorrent
-# does in a real, network-partitioned deployment.
+# bottom): both site leechers independently complete a real
+# BitTorrent-transfer deploy concurrently, against a swarm with more than
+# one seeder endpoint, not serially against one seeder. It additionally
+# samples each seeder endpoint's live peer count while both leeches are
+# in flight and reports the observed maximum - informational only, not a
+# pass/fail gate: a peer count above 1 is necessary but not sufficient
+# evidence of same-site piece exchange in a real, network-partitioned
+# deployment.
 #
 # === The central seeder as the "pre-warm" peer ===
 #
-# kezio's Option A storage design (see config/seeder's own
-# README.md) means the central `ezio-seeder` Deployment already holds
-# the full image directly - it mounts the ingested store PVC read-only
-# rather than leeching content over BitTorrent first. There is therefore
-# no separate BT-leech "pre-warm" step to perform for the central
-# site: the central seeder already is the full-copy peer from the
-# moment the Image reaches Ready, which is exactly the role a pre-warm
-# leecher-then-seeder plays in config/seeder/README.md's "Per-site
-# seeders" section for a site that has no route to the central storage
-# backend. This lane's two site-local seeder replicas are NOT that
-# storage-isolated pattern either - they mount the very same PVC the
-# central seeder does, because every pod here runs on one RKE2 node with
+# kezio's Option A storage design means the central `ezio-seeder`
+# Deployment already holds the full image directly (mounts the ingested
+# store PVC read-only) rather than leeching over BitTorrent first - it is
+# already the full-copy "pre-warm" peer from the moment the Image reaches
+# Ready. This lane's two site-local seeder replicas are NOT the
+# storage-isolated pre-warm pattern either: they mount the same PVC the
+# central seeder does, since every pod here runs on one RKE2 node with
 # one storage backend. Proving the storage-isolated leecher-then-seeder
-# pre-warm pattern needs a site with a genuinely separate store, which a
-# single-runner cluster cannot provide; this lane proves the
+# pattern needs a genuinely separate per-site store, which a
+# single-runner cluster cannot provide; this lane instead proves the
 # multi-endpoint seeder wiring (`SeederReconciler` syncing content to
-# every Ready endpoint of one Service - see
-# `internal/controller/seeder_controller.go`) instead, which is the part
-# that IS exercised honestly here.
+# every Ready endpoint of one Service).
 #
-# workflow_dispatch only, release-gated exactly like
-# e2e-deploy-kubevirt.yml and e2e-boot-path-kubevirt.yml (see those
-# files' own headers for the full "why not on every push" reasoning:
-# PXE over a Multus bridge inside nested KubeVirt is a real risk surface,
-# and a flaky job gating every PR trains reviewers to ignore red checks).
-# This lane adds a second reason on top: it is the heaviest lane in this
+# workflow_dispatch only, release-gated like e2e-deploy-kubevirt.yml and
+# e2e-boot-path-kubevirt.yml (PXE over a Multus bridge inside nested
+# KubeVirt is a real risk surface, and a flaky job gating every PR trains
+# reviewers to ignore red checks). This is also the heaviest lane in the
 # repository (two full boot+deploy chains sharing one runner's CPU/RAM
-# budget at once), so it is explicitly for pre-release validation of the
-# per-site seeder feature, not routine CI signal.
+# budget at once), so it is for pre-release validation, not routine CI
+# signal.
 on:
   workflow_dispatch:
     inputs:
@@ -158,8 +128,7 @@ permissions:
   contents: read
 
 env:
-  # Pinned the same way e2e-kubevirt-reusable.yml pins them - bump
-  # deliberately, not as a side effect of an unrelated change.
+  # Bump deliberately, not as a side effect of an unrelated change.
   RKE2_VERSION: "v1.36.2+rke2r1"
   KUBEVIRT_VERSION: "v1.9.0"
   CDI_VERSION: "v1.65.0"
@@ -171,23 +140,17 @@ env:
 
   # Two boot L2 segments, one per simulated site - see the header
   # comment's "Honest scope" section for what these genuinely simulate.
-  # Each is a flat L2 with no gateway and no host address at all - see
-  # e2e-kubevirt-reusable.yml's env block for the full reasoning behind
-  # that shape.
+  # Each is a flat L2 with no gateway and no host address.
   SITE_A_BRIDGE: kezio-site-a0
   SITE_B_BRIDGE: kezio-site-b0
-  # Distinct addresses per site segment, kept apart deliberately (see
-  # e2e-kubevirt-reusable.yml's env block for the full "why"):
+  # Distinct addresses per site segment, kept apart deliberately:
   #   - SITE_*_BOOTD_NET1_IP: the static address that site's
-  #     kezio-boot-network-<site> NetworkAttachmentDefinition assigns
-  #     to that site's bootd net1 - its dhcp-range subnet anchor and
-  #     the TFTP next-server it advertises.
-  #   - SITE_*_EXISTING_DHCP_NET1_IP: the static address that site's
-  #     own existing-dhcp pod's NAD assigns to its net1 (see
-  #     .github/actions/deploy-existing-dhcp, one deployed per site) -
-  #     on the SAME /24 as that site's bootd net1, so that site's relay
-  #     (BOOTD_DHCP_RELAY_SERVER) is a plain on-link unicast with no
-  #     host-side routing at all.
+  #     kezio-boot-network-<site> NAD assigns to that site's bootd
+  #     net1 - its dhcp-range subnet anchor and TFTP next-server.
+  #   - SITE_*_EXISTING_DHCP_NET1_IP: the static address that site's own
+  #     existing-dhcp pod's NAD assigns to its net1 (one deployed per
+  #     site) - on the SAME /24 as that site's bootd net1, so that
+  #     site's relay is a plain on-link unicast.
   #   - SITE_*_CIDR: that site's whole segment, handed to that site's
   #     bootd as BOOTD_PROVISIONING_CIDR.
   SITE_A_BOOTD_NET1_IP: 192.0.2.2/24
@@ -204,14 +167,11 @@ env:
   SITE_B_VM_DISK_SERIAL: "KEZIOE2ESCALESITEBDISK1"
   EXISTING_DHCP_IMG: ${{ inputs.existing_dhcp_image }}
 
-  # Same source test-e2e.yml's image-path job and e2e-kubevirt-reusable.yml
-  # use - see either's own comment for why "minimal".
   UBUNTU_CLOUD_IMAGE_URL: "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img"
 
-  # Fixed at kezio's own current values (unlike e2e-kubevirt-reusable.yml,
-  # this lane is not called by the ezio repository, so it has no
-  # ezio_ref/image-tag inputs to plumb through - it always builds this
-  # repository's own images at the revision under test).
+  # Fixed at kezio's own current values: unlike e2e-kubevirt-reusable.yml,
+  # this lane is not called by the ezio repository, so it always builds
+  # this repository's own images at the revision under test.
   EZIO_REF: "v2.0.29"
   MANAGER_IMG: "example.com/kezio:e2e-scale"
   BOOTD_IMG: "example.com/kezio-bootd:e2e-scale"
@@ -230,10 +190,9 @@ jobs:
   scale-multisite-kubevirt:
     name: Deploy an Image to two simulated sites concurrently over the shared swarm
     runs-on: ${{ inputs.runs_on }}
-    # Two full boot+deploy chains sharing one runner's budget - see
-    # e2e-kubevirt-reusable.yml's own timeout comment for the
-    # single-leecher cost baseline; this doubles the VM-boot/deploy
-    # portion of it on top of the same fixed setup cost.
+    # Two full boot+deploy chains sharing one runner's budget - roughly
+    # doubles e2e-kubevirt-reusable.yml's VM-boot/deploy cost on top of
+    # the same fixed setup cost.
     timeout-minutes: ${{ inputs.build_boot_artifacts && 210 || 120 }}
     steps:
       - name: Clone the code
@@ -258,10 +217,9 @@ jobs:
           ls -l /dev/kvm
 
       - name: Fail fast unless the boot-artifacts image exists
-        # Mirrors e2e-kubevirt-reusable.yml's own step of the same name -
-        # see that file's comment for the full reasoning. Skipped when
-        # build_boot_artifacts is set: that mode builds and locally
-        # imports its own tag, which exists in no registry to check.
+        # Mirrors e2e-kubevirt-reusable.yml's step of the same name.
+        # Skipped when build_boot_artifacts is set: that mode builds and
+        # locally imports its own tag, which exists in no registry.
         if: ${{ !inputs.build_boot_artifacts }}
         run: |
           set -euo pipefail
@@ -277,11 +235,9 @@ jobs:
 
       - name: Resource check (fail fast if the runner is under-resourced)
         # Same floor e2e-kubevirt-reusable.yml uses. This lane is
-        # genuinely heavier (see the header comment's runs_on
-        # description) but the floor stays at what the default hosted
-        # runner actually has, on purpose - a maintainer who needs more
-        # headroom should point runs_on at a bigger runner, not have
-        # this check fail unconditionally on the default one.
+        # genuinely heavier, but the floor stays at what the default
+        # hosted runner actually has - point runs_on at a bigger runner
+        # instead of raising this floor unconditionally.
         run: |
           set -euo pipefail
           echo "===== CPU ====="
@@ -334,12 +290,8 @@ jobs:
           curl -sfL -o "${{ runner.temp }}/ubuntu-cloud.img" "${UBUNTU_CLOUD_IMAGE_URL}"
 
       - name: Customize the Ubuntu cloud image with a marker file and qemu-guest-agent
-        # One Image, ingested once, deployed to both sites concurrently -
-        # see the header comment's "pre-warm" section for why the
-        # central seeder needs no separate warm-up. Full reasoning for the
-        # technique itself (offline virt-customize, dynamic dependency
-        # closure resolution, LIBGUESTFS_BACKEND=direct, why appliance
-        # networking was abandoned) lives in
+        # One Image, ingested once, deployed to both sites concurrently.
+        # Full reasoning for the technique itself lives in
         # .github/actions/customize-cloud-image/action.yml, shared with
         # e2e-kubevirt-reusable.yml.
         uses: ./.github/actions/customize-cloud-image
@@ -388,8 +340,8 @@ jobs:
           make build-kezioctl
 
       - name: Build the live boot image and kezio-boot-artifacts image
-        # See build_boot_artifacts's own input description. Runs the same
-        # script build-live-image.yml budgets 90 minutes for on its own.
+        # Runs the same script build-live-image.yml budgets 90 minutes
+        # for on its own.
         if: ${{ inputs.build_boot_artifacts }}
         env:
           AGENT_COMMIT: ${{ github.sha }}
@@ -406,30 +358,24 @@ jobs:
 
       - name: Install RKE2 with Multus enabled
         # Shared with e2e-kubevirt-reusable.yml and
-        # e2e-boot-path-kubevirt.yml - see this action's own doc comment
-        # for why it was extracted (the three lanes' RKE2 setup was
-        # byte-identical).
+        # e2e-boot-path-kubevirt.yml - the three lanes' RKE2 setup was
+        # byte-identical.
         uses: ./.github/actions/install-rke2
         with:
           rke2-version: ${{ env.RKE2_VERSION }}
 
       - name: Allow bridged traffic on the two boot bridges (bypass canal's FORWARD filtering)
-        # RKE2's canal CNI loads br_netfilter
-        # (net.bridge.bridge-nf-call-iptables=1), which routes every
-        # bridged L2 frame - including these bridges', even though they
-        # carry no cluster pod traffic - through the host's netfilter
-        # FORWARD chain. kube-proxy/canal leave that chain's default
-        # policy at DROP once the cluster is up
-        # (https://github.com/kubernetes/kubernetes/issues/39823,
-        # https://github.com/kubernetes/kubernetes/issues/91545), which
-        # silently eats each site VM's PXE DHCP DISCOVER broadcast
-        # travelling between its Multus port and that site's bootd
-        # Multus port on the same bridge. Run after the node is Ready
-        # (canal has had the chance to program its own FORWARD rules by
-        # then) and idempotently - -C before -I - in case a later canal
-        # reconciliation touches the chain again: add an ACCEPT scoped
-        # to each bridge's own port-to-port traffic only, so cluster
-        # filtering everywhere else is untouched.
+        # RKE2's canal CNI loads br_netfilter, routing every bridged L2
+        # frame - including these bridges', though they carry no cluster
+        # pod traffic - through the host's netfilter FORWARD chain, whose
+        # default policy is DROP once the cluster is up
+        # (kubernetes/kubernetes#39823, #91545). That silently eats each
+        # site VM's PXE DHCP DISCOVER broadcast between its Multus port
+        # and that site's bootd port. Run after the node is Ready (canal
+        # has programmed its own rules by then) and idempotently (-C
+        # before -I): add an ACCEPT scoped to each bridge's own
+        # port-to-port traffic only, leaving cluster filtering elsewhere
+        # untouched.
         run: |
           set -euo pipefail
           for bridge in "${SITE_A_BRIDGE}" "${SITE_B_BRIDGE}"; do
@@ -437,10 +383,8 @@ jobs:
               sudo iptables -C FORWARD -i "${bridge}" -o "${bridge}" -j ACCEPT 2>/dev/null || \
                 sudo iptables -I FORWARD -i "${bridge}" -o "${bridge}" -j ACCEPT
             fi
-            # RKE2/canal can also run with the kernel's nf_tables backend
-            # instead of legacy iptables; when the "inet filter" table
-            # exists, mirror the same exemption there so each bridge is
-            # covered regardless of which backend actually owns FORWARD.
+            # RKE2/canal can also run on nf_tables instead of legacy
+            # iptables; mirror the same exemption there when it applies.
             if command -v nft >/dev/null 2>&1 && sudo nft list table inet filter >/dev/null 2>&1; then
               sudo nft list chain inet filter FORWARD 2>/dev/null | grep -q "iifname \"${bridge}\" oifname \"${bridge}\" accept" || \
                 sudo nft insert rule inet filter FORWARD iifname "${bridge}" oifname "${bridge}" accept
@@ -448,22 +392,15 @@ jobs:
           done
 
       - name: Fill UDP checksums for PXE DHCP crossing the two boot bridges
-        # See e2e-kubevirt-reusable.yml's step of the same name for the
-        # full "why": each site VM's virtio-net leaves UDP checksums to
-        # "hardware" (CHECKSUM_PARTIAL), and the tap -> bridge -> Multus
-        # veth -> bootd pod netns path this DHCP traffic actually takes
-        # never performs that fill, so that site's bootd drops the
-        # datagram as checksum-invalid before its UDP socket ever sees
-        # it. Same fix libvirt's own virtual networks use for this exact
-        # failure: an iptables mangle CHECKSUM --checksum-fill rule
-        # scoped to each bridge and to both DHCP ports (67 server, 68
-        # client) - libvirt's own rule is `-A POSTROUTING -o virbr0 -p
-        # udp -m udp --dport 68 -j CHECKSUM --checksum-fill` (libvirt
-        # commit "Add iptables rule to fixup DHCP response checksum",
-        # libvir-list 2010-08). nft has no CHECKSUM target equivalent, so
-        # disabling tx checksum offload on the bridge itself is the
-        # fallback when iptables is unavailable. Idempotent (-C before
-        # -A).
+        # Each site VM's virtio-net leaves UDP checksums to "hardware"
+        # (CHECKSUM_PARTIAL), and the tap -> bridge -> Multus veth ->
+        # bootd pod netns path never performs that fill, so bootd drops
+        # the datagram as checksum-invalid. Same fix libvirt uses for
+        # this: an iptables mangle CHECKSUM --checksum-fill rule scoped
+        # to each bridge and both DHCP ports (67, 68). nft has no
+        # CHECKSUM target equivalent, so disabling tx checksum offload on
+        # the bridge is the fallback when iptables is unavailable.
+        # Idempotent (-C before -A).
         run: |
           set -euo pipefail
           for bridge in "${SITE_A_BRIDGE}" "${SITE_B_BRIDGE}"; do
@@ -479,10 +416,9 @@ jobs:
 
       - name: Start capturing the two boot bridges (tcpdump)
         # Definitive instrumentation regardless of whether the checksum
-        # fix above is the actual/only cause - see e2e-kubevirt-reusable.
-        # yml's step of the same name. One capture per site bridge,
-        # backgrounded so both run from before either target VM exists
-        # through however this job ends.
+        # fix above is the actual/only cause. One capture per site
+        # bridge, backgrounded so both run from before either target VM
+        # exists through however this job ends.
         run: |
           set -euo pipefail
           sudo apt-get install -y --no-install-recommends tcpdump || true
@@ -494,12 +430,11 @@ jobs:
             >/tmp/tcpdump-bridge-site-b.log 2>&1 &"
 
       - name: Install local-path-provisioner and mark it the default StorageClass
-        # RKE2 ships no default StorageClass (k3s bundled local-path by
-        # default; RKE2 deliberately does not). config/e2e-deploy-path's
+        # RKE2 ships no default StorageClass. config/e2e-deploy-path's
         # store/staging PVCs request storageClassName local-path
-        # explicitly, so that name must exist and be default is a
-        # reasonable fallback for anything else (e.g. CDI's own scratch
-        # space) that resolves a StorageClass by cluster default instead.
+        # explicitly, so that name must exist; being default is also a
+        # reasonable fallback for anything else (e.g. CDI's scratch
+        # space) that resolves a StorageClass by cluster default.
         run: |
           set -euo pipefail
           kubectl apply -f "https://raw.githubusercontent.com/rancher/local-path-provisioner/${LOCAL_PATH_PROVISIONER_VERSION}/deploy/local-path-storage.yaml"
@@ -508,11 +443,8 @@ jobs:
 
       - name: Import images into RKE2 containerd
         # RKE2's containerd socket is still under /run/k3s/containerd (a
-        # genuine leftover of RKE2's k3s lineage - the socket path itself,
-        # not the cluster, is k3s-named), and the plain "ctr" binary needs
-        # both -a (socket) and -n k8s.io (the namespace the kubelet reads
-        # from) spelled out explicitly - unlike k3s's own "k3s ctr"
-        # wrapper, which defaulted both on its own.
+        # leftover of RKE2's k3s lineage); plain "ctr" needs both -a and
+        # -n spelled out explicitly.
         run: |
           set -euo pipefail
           images=("${MANAGER_IMG}" "${BOOTD_IMG}" "${INGEST_IMG}" "${SEEDER_IMG}" "${IMAGE_SERVICE_IMG}")
@@ -529,26 +461,14 @@ jobs:
 
       - name: Install cert-manager, KubeVirt, virtctl, and CDI
         # Shared with e2e-kubevirt-reusable.yml and
-        # e2e-boot-path-kubevirt.yml - see this action's own doc comment
-        # (and its own header on the KubeVirt CRD race and the
-        # KubevirtSeccompProfile gate) for the full "why". Also waits for
-        # RKE2's own rke2-multus HelmChart addon to publish the Multus
-        # NetworkAttachmentDefinition CRD, which the "Create the boot
-        # NetworkAttachmentDefinitions" step below needs. See
-        # e2e-kubevirt-reusable.yml's step of the same name for the
-        # full "why" behind that wait: RKE2 deploys Multus itself as a
-        # packaged HelmChart addon (triggered by cni: [multus, canal] in
-        # the config.yaml the install-rke2 action wrote before RKE2
-        # started), eliminating k3s's non-standard, multi-location CNI
-        # directory layout entirely - that layout mismatch (not the
-        # Multus version) is what actually broke workflow runs
-        # 30999047426 and 31001958670, and a follow-up symlink fix for it
-        # produced its own, mirror-image failures (run 31003551730:
-        # flannel not found; run 31005051325: multus-shim not found). The
-        # addon's own HelmChart install can still lag behind node-Ready,
-        # so the action polls for its NAD CRD to actually exist (and be
-        # Established) before the "Create the two boot
-        # NetworkAttachmentDefinitions" step below tries to use it.
+        # e2e-boot-path-kubevirt.yml. Also waits for RKE2's own
+        # rke2-multus HelmChart addon to publish the Multus
+        # NetworkAttachmentDefinition CRD, needed by the "Create the boot
+        # NetworkAttachmentDefinitions" step below: RKE2 deploys Multus as
+        # a packaged HelmChart addon whose install can lag node-Ready, so
+        # the action polls for its NAD CRD to exist (and be Established)
+        # first - a past layout mismatch here (not a Multus version
+        # issue) broke several early runs.
         uses: ./.github/actions/install-cluster-addons
         with:
           kubevirt-version: ${{ env.KUBEVIRT_VERSION }}
@@ -564,33 +484,25 @@ jobs:
           kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
 
       - name: Create the boot NetworkAttachmentDefinitions
-        # Two NADs per site on that site's bridge, split on purpose (see
-        # e2e-kubevirt-reusable.yml's own step of this name for the same
-        # topology):
+        # Two NADs per site on that site's bridge, split on purpose:
         #
         # kezio-boot-network-${site} (static ipam) is for that site's
-        # bootd pod ONLY. Each site's bootd net1 must carry a fixed
-        # address (that site's BOOTD_NET1_IP) on that site's subnet -
-        # dnsmasq binds its DHCP sockets to net1 and BOOTD_SERVER_IP
-        # advertises it as the TFTP next-server. Each site's
-        # existing-dhcp pod (deployed separately below) keeps its own
-        # static address on the same bridge, so the two never collide.
+        # bootd pod ONLY - bootd net1 needs a fixed address on that
+        # site's subnet (dnsmasq binds DHCP sockets to it; BOOTD_SERVER_IP
+        # advertises it as the TFTP next-server). Each site's
+        # existing-dhcp pod keeps its own static address on the same
+        # bridge, so the two never collide.
         #
         # kezio-boot-network-vm-${site} ("ipam": {}) is for that site's
         # target VM's provisioning NIC. The VM must NOT attach the
-        # static-ipam NAD: when a KubeVirt bridge-mode interface's
-        # network carries IPAM, virt-launcher starts its own in-pod DHCP
-        # server on that NIC to hand the pod's CNI-assigned address to
-        # the guest - and the static plugin hands every attaching pod
-        # the same address, so that rogue server offers the guest
-        # bootd's own address before either bootd or the existing-dhcp
-        # pod ever gets a chance to answer on the wire (the same
-        # interference e2e-boot-path-kubevirt.yml observed live - see
-        # that workflow's own NAD step for the pcap evidence). With
-        # empty ipam virt-launcher runs no DHCP server on this NIC, and
-        # the guest firmware does real DHCP on the wire against that
-        # site's bootd + relayed lease server, which is exactly what
-        # this lane must exercise.
+        # static-ipam NAD: a KubeVirt bridge-mode interface whose network
+        # carries IPAM makes virt-launcher start its own in-pod DHCP
+        # server, and the static plugin hands every attaching pod the
+        # same address - so that rogue server would offer the guest
+        # bootd's own address before either bootd or existing-dhcp gets a
+        # chance to answer on the wire. Empty ipam means virt-launcher
+        # runs no DHCP server on this NIC, and the guest firmware does
+        # real DHCP on the wire, which is exactly what this lane exercises.
         run: |
           set -euo pipefail
           for site in site-a site-b; do
@@ -643,11 +555,9 @@ jobs:
             --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Deploy image-service+seeder+store+boot/agent servers, wire real ingest/seeding/deploy
-        # Identical shape to e2e-kubevirt-reusable.yml's own step of this
-        # name - see that workflow for the full reasoning behind
-        # config/e2e-deploy-path and the env wiring below. This applies
-        # the ONE central seeder (this lane's "pre-warm" peer - see the
-        # header comment) and the ONE central opentracker; the two
+        # Identical shape to e2e-kubevirt-reusable.yml's step of this
+        # name. This applies the ONE central seeder (this lane's
+        # "pre-warm" peer) and the ONE central opentracker; the two
         # site-local seeder replicas are added afterward, as extra
         # endpoints of the same Service, in their own step below.
         run: |
@@ -662,26 +572,17 @@ jobs:
           cd ../..
           bin/kustomize build config/e2e-deploy-path | kubectl apply -f -
 
-          # BOOT_SERVER_URL / BOOT_AGENT_SERVER_URL: internal/bootserver
-          # is one instance, embedded in this one controller-manager
-          # process, shared across every site - there is no per-site
-          # copy of it to point at a genuinely per-site address (see
-          # config/bootd/README.md's "Per-site addressing" section: a
-          # real multi-site deployment gets this for free because every
-          # site's bootd reverse-proxies to the SAME cluster-wide
-          # Services, and each site's machines only ever talk to their
-          # own bootd). This lane's own header comment already documents
-          # that only PXE/DHCP is genuinely per-site-isolated here (the
-          # swarm data plane is not either); consistent with that, both
-          # sites are pointed at site-a's bootd address for the boot
-          # config/agent registration HTTP surface - not a bare
-          # ClusterIP, and not a socat forward, but an honestly-labeled
-          # simplification of the "one bootd per segment" production
-          # model this single runner cannot fully reproduce with two
-          # disjoint L2s and one shared boot server (see the "Deploy the
-          # two site-local kezio-bootd instances" step below for the
-          # pre-existing DHCP-lease gap this simplification does not
-          # attempt to close either).
+          # BOOT_SERVER_URL / BOOT_AGENT_SERVER_URL: internal/bootserver is
+          # one instance, embedded in this one controller-manager process,
+          # shared across every site - there is no per-site copy to point
+          # at a genuinely per-site address (a real deployment gets this
+          # for free because every site's bootd reverse-proxies to the
+          # SAME cluster-wide Services). Consistent with the header
+          # comment's honest scope, both sites are pointed at site-a's
+          # bootd address for this HTTP surface - not a bare ClusterIP or
+          # socat forward, but an honestly-labeled simplification this
+          # single runner cannot fully avoid with two disjoint L2s and one
+          # shared boot server.
           kubectl -n kezio-system set env deployment/kezio-controller-manager \
             INGEST_IMAGE="${INGEST_IMG}" \
             INGEST_STORE_PVC=kezio-store \
@@ -708,27 +609,20 @@ jobs:
           done
 
       - name: Deploy the two site-local ezio-seeder replicas
-        # Clones config/seeder's own ezio-seeder Deployment (already
-        # applied above, as the central "pre-warm" seeder) into two more
-        # replicas, one per site, following exactly the model
-        # ezio-seeder-site.example.yaml documents: same pod template
-        # labels the Service already selects on
-        # (app.kubernetes.io/component: ezio-seeder), plus one extra
+        # Clones config/seeder's ezio-seeder Deployment (already applied
+        # above as the central "pre-warm" seeder) into two more, one per
+        # site, following ezio-seeder-site.example.yaml's model: same pod
+        # template labels the Service already selects on, plus one extra
         # kezio.kojuro.date/network-site label this Deployment's own
-        # selector also carries, so the two clones' selectors do not
-        # collide with each other or with the central Deployment's.
-        # `jq`, not `yq`: every other patch step in this repository's
-        # workflows already uses `jq` against `kubectl ... -o json`
-        # (see e2e-kubevirt-reusable.yml's Machine/VMI verify steps) - no
-        # workflow here uses `yq`, so this stays consistent rather than
-        # adding a second YAML-editing tool for one step.
+        # selector also carries, so the clones' selectors don't collide.
+        # `jq`, not `yq`: no workflow here uses `yq`, so this stays
+        # consistent rather than adding a second YAML-editing tool.
         #
-        # Honest limitation restated from the header comment: both
-        # clones mount the identical store PVC the central seeder does
-        # (there is only one storage backend on this single-node
-        # cluster), so this proves the multi-endpoint reconciler wiring
-        # (SeederReconciler syncing content to every Ready endpoint),
-        # not per-site storage isolation or network locality.
+        # Honest limitation: both clones mount the identical store PVC
+        # the central seeder does (one storage backend on this
+        # single-node cluster), so this proves the multi-endpoint
+        # reconciler wiring, not per-site storage isolation or network
+        # locality.
         run: |
           set -euo pipefail
           seeder_base_json="$(kubectl get deployment/kezio-ezio-seeder -n kezio-system -o json)"
@@ -769,13 +663,9 @@ jobs:
       - name: Deploy the two site-local kezio-bootd instances
         # Same cloning technique as the seeder step above, applied to
         # config/bootd's Deployment - one instance per boot L2 segment
-        # (see config/bootd/deployment.yaml's own "one replica per boot
-        # segment" comment for why this is two Deployments, not two
-        # replicas of one). RBAC (ServiceAccount/Role/RoleBinding) is
-        # shared - both instances run under the same "kezio-bootd"
-        # ServiceAccount, applied once via the plain `kubectl apply -k`
-        # below, exactly like the single-leecher lane's one bootd
-        # instance already does; only the Deployment itself needs a
+        # (two Deployments, not two replicas of one). RBAC is shared:
+        # both instances run under the same "kezio-bootd" ServiceAccount,
+        # applied once below; only the Deployment itself needs a
         # per-site clone.
         run: |
           set -euo pipefail
@@ -797,28 +687,21 @@ jobs:
               site-a) bootd_ip="${SITE_A_BOOTD_NET1_IP%%/*}"; cidr="${SITE_A_CIDR}"; relay_ip="${SITE_A_EXISTING_DHCP_NET1_IP%%/*}" ;;
               site-b) bootd_ip="${SITE_B_BOOTD_NET1_IP%%/*}"; cidr="${SITE_B_CIDR}"; relay_ip="${SITE_B_EXISTING_DHCP_NET1_IP%%/*}" ;;
             esac
-            # BOOTD_SERVER_IP: that site's bootd net1 static address
-            # (the NAD's static ipam above). BOOTD_PROVISIONING_CIDR:
-            # that site's segment subnet, rendered as dnsmasq's
-            # proxyDHCP dhcp-range. BOOTD_DHCP_RELAY_SERVER: that site's
-            # OWN existing-dhcp pod (deployed just above), on the same
-            # /24 as that site's bootd net1 - a plain on-link relay, no
-            # cross-site sharing and no host-side routing. All three are
-            # site-specific, so all three get patched per clone the same
-            # way.
+            # BOOTD_SERVER_IP: that site's bootd net1 static address.
+            # BOOTD_PROVISIONING_CIDR: that site's segment subnet, as
+            # dnsmasq's proxyDHCP dhcp-range. BOOTD_DHCP_RELAY_SERVER:
+            # that site's OWN existing-dhcp pod, on the same /24 as that
+            # site's bootd net1 - a plain on-link relay, no cross-site
+            # sharing. All three are site-specific, patched per clone.
             #
-            # BOOTD_BOOT_CONFIG_URL is also per-site, deliberately: it is
-            # each bootd's OWN address (self-referencing), since each
-            # site's bootd serves grub/grub.cfg to its OWN segment only -
-            # the "per-site bootd, per-site URL" half of this lane's
-            # coverage. BOOTD_AGENT_UPSTREAM_URL / BOOTD_BOOT_UPSTREAM_URL
-            # are the same cluster-wide Services for every site (there is
-            # only one internal/agentserver and one internal/bootserver
-            # for the whole cluster - see config/bootd/README.md's
-            # "Per-site addressing" section), appended rather than
-            # patched onto an existing entry since the base
-            # config/bootd/deployment.yaml leaves them commented out by
-            # default.
+            # BOOTD_BOOT_CONFIG_URL is also per-site (each bootd's OWN
+            # address), since each site's bootd serves grub/grub.cfg to
+            # its OWN segment only. BOOTD_AGENT_UPSTREAM_URL /
+            # BOOTD_BOOT_UPSTREAM_URL are the same cluster-wide Services
+            # for every site (one internal/agentserver, one
+            # internal/bootserver for the whole cluster), appended rather
+            # than patched since the base deployment.yaml leaves them
+            # commented out by default.
             echo "${deployment_base_json}" | jq \
               --arg site "${site}" --arg ip "${bootd_ip}" --arg cidr "${cidr}" --arg relay "${relay_ip}" --arg net "kezio-boot-network-${site}" '
               .metadata.name = "kezio-bootd-\($site)"
@@ -839,7 +722,6 @@ jobs:
           done
 
       - name: Assert the boot artifacts agent commit
-        # Mirrors e2e-kubevirt-reusable.yml's own step of the same name.
         # Both sites share the same kezio-boot-artifacts image, so
         # checking site-a's bootd is representative of both.
         uses: ./.github/actions/assert-boot-artifacts-agent-commit
@@ -850,9 +732,8 @@ jobs:
 
       - name: Ingest the marker-customized Ubuntu image through kezioctl
         # One Image, ingested once - both sites' Machines reference it
-        # below. This is the "pre-warm" content: from the moment this
-        # Image reaches Ready, the central seeder already serves it in
-        # full (see the header comment).
+        # below. This is the "pre-warm" content: from the moment it
+        # reaches Ready, the central seeder already serves it in full.
         run: |
           set -euo pipefail
           kubectl -n kezio-system port-forward svc/kezio-image-service 18080:8080 &
@@ -880,14 +761,12 @@ jobs:
         run: kill "${PF_PID}" 2>/dev/null || true
 
       - name: Create the Machine CRs for both sites' target VMs
-        # spec.networkSite is set to each site's name for documentation
-        # purposes (it is the field a Machine already carries to select
-        # its kezio-bootd zone by design - see api/v1alpha1/machine_types.go's
-        # doc comment); nothing in the boot/deploy path reads it today
-        # (the field is a recorded future-use allowance), so it plays no
-        # part in which bootd instance actually answers a given VM's PXE
-        # request - that is decided entirely by which bridge the VM's
-        # own NIC is attached to (see the VirtualMachine step below).
+        # spec.networkSite is set for documentation purposes; nothing in
+        # the boot/deploy path reads it today (a recorded future-use
+        # allowance), so it plays no part in which bootd instance
+        # actually answers a given VM's PXE request - that is decided
+        # entirely by which bridge the VM's own NIC is attached to (see
+        # the VirtualMachine step below).
         run: |
           for site in site-a site-b; do
             case "${site}" in
@@ -912,12 +791,10 @@ jobs:
           done
 
       - name: Create and start both sites' target KubeVirt VirtualMachines
-        # Same shape as e2e-kubevirt-reusable.yml's single VM (see that
-        # workflow's own step of this name for the boot-order/reboot
-        # reasoning), created twice - each VM's provisioning interface
-        # attaches to its own site's boot NetworkAttachmentDefinition, so
-        # each VM's PXE broadcast only ever reaches its own site's
-        # kezio-bootd instance.
+        # Same shape as e2e-kubevirt-reusable.yml's single VM, created
+        # twice - each VM's provisioning interface attaches to its own
+        # site's boot NetworkAttachmentDefinition, so each VM's PXE
+        # broadcast only ever reaches its own site's kezio-bootd instance.
         run: |
           for site in site-a site-b; do
             case "${site}" in
@@ -997,14 +874,11 @@ jobs:
                           - systemctl enable --now qemu-guest-agent.service
           EOF
           done
-          # Applying each VirtualMachine above only asks KubeVirt's VM
-          # controller to create its VirtualMachineInstance; that
-          # controller reconciles asynchronously, so a VMI object can
-          # still not exist yet at this point ("no matches" for `kubectl
-          # wait`, which errors out immediately on zero matches instead
-          # of polling for existence). Same exists-then-condition shape
-          # as the CRD waits above: poll for each VMI to exist first,
-          # then wait for it to actually report Ready.
+          # Applying each VirtualMachine only asks KubeVirt to create its
+          # VirtualMachineInstance asynchronously, so a VMI object may
+          # not exist yet ("no matches" errors `kubectl wait` immediately
+          # instead of polling). Poll for each VMI to exist first, then
+          # wait for it to report Ready.
           for vmi in e2e-scale-site-a e2e-scale-site-b; do
             deadline=$(( $(date +%s) + 60 ))
             until kubectl get vmi/"${vmi}" -n kezio-system >/dev/null 2>&1; do
@@ -1032,15 +906,11 @@ jobs:
 
       - name: Wait for both Machines to reach Provisioned, sampling swarm peer counts meanwhile
         # The main gating wait: both site Machines must independently
-        # reach Provisioned - i.e. both leech the same Image over the
-        # real BitTorrent swarm concurrently, each through its own
-        # site's boot chain. Alongside that gating check, this step also
-        # port-forwards to all three seeder endpoints (central, site-a,
-        # site-b) and samples ezio's own GetTorrentStatus RPC every
-        # iteration, purely as informational evidence that more than one
-        # peer was in the swarm while both leeches were in flight - see
-        # the header comment's "Honest scope" section for exactly what
-        # this sample does and does not prove. It never affects pass/fail.
+        # reach Provisioned, each through its own site's boot chain.
+        # Alongside that, this step port-forwards to all three seeder
+        # endpoints and samples ezio's GetTorrentStatus RPC every
+        # iteration, purely as informational evidence (see header
+        # comment's "Honest scope") that never affects pass/fail.
         run: |
           set -euo pipefail
 
@@ -1146,14 +1016,12 @@ jobs:
           done
 
       - name: "Verify each site's DHCP relay leg reached its own existing-dhcp server"
-        # See e2e-kubevirt-reusable.yml's step of the same name for the
-        # full reasoning - this does NOT assert "a lease is obtainable
-        # only through the relay" (either site's VM may legitimately take
-        # its own existing-dhcp pod's direct offer or its own bootd's
-        # relayed copy). It proves each site's relay leg fired
-        # independently, using that site's own bootd/existing-dhcp pair -
-        # never the other site's, confirming the two segments stayed
-        # disjoint.
+        # Does NOT assert "a lease is obtainable only through the relay"
+        # (either site's VM may legitimately take its own existing-dhcp
+        # pod's direct offer or its own bootd's relayed copy). It proves
+        # each site's relay leg fired independently, using that site's
+        # own bootd/existing-dhcp pair - never the other site's,
+        # confirming the two segments stayed disjoint.
         run: |
           set -euo pipefail
           for site in site-a site-b; do
@@ -1312,8 +1180,7 @@ jobs:
 
       - name: Stop the bridge captures and flush them to the artifact
         if: always()
-        # Runs unconditionally, not just on failure - see
-        # e2e-kubevirt-reusable.yml's step of the same name for why.
+        # Runs unconditionally, not just on failure.
         run: |
           set +e
           sudo pkill -TERM -f "tcpdump -i ${SITE_A_BRIDGE}"
@@ -1328,10 +1195,8 @@ jobs:
 
       - name: Flush each site's bootd and existing-dhcp logs to the artifact
         if: always()
-        # Unconditional, like the pcap flush above - each site's bootd
-        # and existing-dhcp pod logs carry log-dhcp decision lines (see
-        # internal/bootd's forwardLines for bootd's own), useful on a
-        # passing run too, not only a failing one.
+        # Unconditional, like the pcap flush above: these logs carry
+        # log-dhcp decision lines, useful on a passing run too.
         run: |
           set +e
           for site in site-a site-b; do
@@ -1345,11 +1210,10 @@ jobs:
       - name: Collect the always-on diagnostics bundle
         if: always()
         # Unconditional, like the pcap/per-site log flushes above:
-        # controller-manager's log is where the boot server's own
-        # per-request lines land (see internal/bootserver's logRequests),
-        # and the rest is the same Machine/Image/events picture the
-        # failure-only dump above prints inline - useful on a passing run
-        # too, not only a failing one.
+        # controller-manager's log is where the boot server's per-request
+        # lines land, and the rest is the same Machine/Image/events
+        # picture the failure-only dump prints inline - useful on a
+        # passing run too.
         uses: ./.github/actions/collect-e2e-diagnostics-bundle
         with:
           output-dir: ${{ runner.temp }}
@@ -1372,11 +1236,8 @@ jobs:
             vmi/e2e-scale-site-b:vmi-site-b.yaml
 
       - name: Upload E2E diagnostics artifacts
-        # Always, not just on failure - this lane had no artifact upload
-        # at all before; the bridge captures are worth having on a
-        # passing run too (to confirm a fix actually restored DHCP/TFTP
-        # activity instead of only ever validating this path when it is
-        # hardest to also diagnose).
+        # Always, not just on failure - the bridge captures are worth
+        # having on a passing run too.
         if: always()
         uses: actions/upload-artifact@v7
         with:

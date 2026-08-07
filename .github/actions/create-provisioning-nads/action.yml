@@ -20,64 +20,26 @@ runs:
   using: composite
   steps:
     - name: Create the provisioning NetworkAttachmentDefinitions
-      # FOUR NADs on the SAME bridge, split on purpose:
-      #
-      # kezio-boot-network (static ipam) is for the bootd pod ONLY.
-      # bootd's net1 must carry a fixed address
-      # (PROVISIONING_BOOTD_NET1_IP) on the provisioning subnet -
-      # dnsmasq binds its DHCP sockets to net1, and BOOTD_SERVER_IP
-      # advertises it as the TFTP next-server. Every other address on
-      # this bridge (the existing-dhcp pod's, the tracker's, the
-      # seeder's) is its own static Multus attachment, so none of them
-      # ever collide.
-      #
-      # kezio-tracker-network / kezio-seeder-network (static ipam) are
-      # for the opentracker and ezio-seeder pods, one each, so every
-      # swarm participant sits directly on this bridge with a fixed
-      # address (PROVISIONING_TRACKER_NET1_IP /
-      # PROVISIONING_SEEDER_NET1_IP) - the e2e realization of
-      # config/seeder/README.md's data-network requirement (the
-      # commented-out k8s.v1.cni.cncf.io/networks annotation both
-      # production Deployments carry; see
-      # networkattachmentdefinition.example.yaml). The seeder's announce
-      # then leaves its own net1 (the static /24 gives it the connected
-      # route) with its bridge address as the source, and the tracker
-      # registers it at an address that is on-link for the target VM -
-      # announce IP == reachable IP, no NAT anywhere (the no-NAT rule).
-      # One NAD per pod because the static ipam plugin hands every
-      # attaching pod the same address; a shared NAD would assign
-      # duplicates. No tuning chain either: unlike bootd's net1, these
-      # carry ordinary unicast within the /24, which the connected route
-      # already satisfies under any rp_filter setting.
-      #
-      # kezio-boot-network-vm ("ipam": {}) is for the target VM's
-      # provisioning NIC. The VM must NOT attach the static-ipam NAD:
-      # when a KubeVirt bridge-mode interface's network carries IPAM,
-      # virt-launcher starts its own in-pod DHCP server on that NIC to
-      # hand the pod's CNI-assigned address to the guest - and the
-      # static plugin hands EVERY attaching pod the same address, so
-      # that rogue server offers the guest bootd's own 192.0.2.2
-      # (observed live: a 169.254.75.10 server answered every DISCOVER
-      # before bootd with Your-IP 192.0.2.2, the firmware took it and
-      # PXE died with PXE-E16). With empty ipam virt-launcher runs no
-      # DHCP there, and the guest firmware does real DHCP on the wire
-      # against bootd and the existing-dhcp stand-in server (dhcp_
-      # scenario permitting), which is exactly what this lane must
-      # exercise.
-      #
-      # Chains the "tuning" CNI plugin onto the plain bridge attachment
-      # to force net1's reverse-path filter loose (rp_filter=0) inside
-      # bootd's own network namespace, IFNAME substituted by the tuning
-      # plugin for whatever interface name the bridge plugin gave this
-      # attachment (net1 here). A DHCPDISCOVER arrives with source
-      # 0.0.0.0, destination 255.255.255.255 - a source address a
-      # strict/loose reverse-path check can still refuse to accept
-      # depending on kernel version and the namespace's inherited
-      # sysctl defaults, and unlike a host-wide sysctl this setting
-      # lives with the attachment itself (config/bootd's own
-      # NetworkAttachmentDefinition example carries the same plugin so
-      # a real deployment gets it too), reaching only bootd's net1
-      # rather than every interface on the node.
+      # Four NADs on the SAME bridge, split on purpose:
+      # - kezio-boot-network (static ipam): bootd only, fixed address
+      #   (dnsmasq binds to net1, BOOTD_SERVER_IP advertises it as TFTP
+      #   next-server).
+      # - kezio-tracker-network / kezio-seeder-network (static ipam, one
+      #   NAD per pod since the static plugin hands every attaching pod
+      #   the same address): fixed addresses for opentracker/ezio-seeder,
+      #   matching config/seeder/README.md's data-network convention, so
+      #   the seeder announces its bridge address directly with no NAT.
+      # - kezio-boot-network-vm ("ipam": {}): the target VM's NIC must NOT
+      #   get an IPAM'd network - a KubeVirt bridge-mode interface with
+      #   IPAM makes virt-launcher run its own in-pod DHCP server that
+      #   hands the guest the pod's (static, duplicate-hazard) address,
+      #   hijacking real PXE DHCP (observed: a rogue in-pod server
+      #   answered DISCOVER before bootd and PXE died with PXE-E16).
+      #   Empty ipam lets the guest do real DHCP on the wire instead.
+      # The "tuning" plugin on bootd's attachment forces net1's rp_filter
+      # to 0: a DHCPDISCOVER's source 0.0.0.0/dest 255.255.255.255 can
+      # otherwise be rejected by a strict/loose reverse-path check
+      # depending on kernel version and inherited sysctl defaults.
       shell: bash
       run: |
         cat <<EOF | kubectl apply -f -
@@ -111,15 +73,10 @@ runs:
               ]
             }
         EOF
-        # One static address per NAD is correct here: this lane runs a
-        # single central tracker and, at most, one seeder Deployment at
-        # a time (single-Image lane). A site where several Images can
-        # be deploying concurrently needs one address per concurrently
-        # active seeder Deployment instead - see
-        # config/seeder/networkattachmentdefinition-whereabouts.example.yaml
-        # and config/seeder/README.md's "Provisioning-segment address
-        # pool" section for that shape; do not convert this lane's NADs
-        # to it.
+        # One static address per NAD is correct for this single-Image lane;
+        # a site with concurrent Image deploys needs one address per
+        # concurrently active seeder Deployment instead - see
+        # config/seeder/networkattachmentdefinition-whereabouts.example.yaml.
         for nad_spec in "kezio-tracker-network:${PROVISIONING_TRACKER_NET1_IP}" "kezio-seeder-network:${PROVISIONING_SEEDER_NET1_IP}"; do
           nad_name="${nad_spec%%:*}"
           nad_addr="${nad_spec#*:}"
@@ -149,9 +106,8 @@ runs:
             }
         EOF
         done
-        # No tuning chain here: the VM's traffic is bridged at L2
-        # straight through virt-launcher's pod into the guest, so the
-        # pod netns's IP-layer reverse-path filter never sees it.
+        # No tuning chain here: the VM's traffic is bridged at L2 straight
+        # through, so the pod netns's IP-layer rp_filter never sees it.
         cat <<EOF | kubectl apply -f -
         apiVersion: k8s.cni.cncf.io/v1
         kind: NetworkAttachmentDefinition

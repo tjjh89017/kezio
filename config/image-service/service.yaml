@@ -8,14 +8,10 @@ metadata:
     app.kubernetes.io/component: image-service
     app.kubernetes.io/managed-by: kustomize
 spec:
-  # ClusterIP is the safe default: it exposes the upload port
-  # (containerPort 8080, see deployment.yaml) only inside the cluster
-  # network. Reaching it from kezioctl running outside the cluster (or
-  # from another site, where kezio keeps boot infrastructure per-site/local
-  # while image/data storage is shared/global) is the cluster operator's
-  # choice — port-forward, an Ingress, a
-  # LoadBalancer type, or a NodePort — made by patching this Service in
-  # an overlay, not by this base manifest.
+  # ClusterIP is the safe default: exposes the upload port only inside the
+  # cluster. Reaching it from outside (kezioctl, another site) is the
+  # cluster operator's choice - port-forward, Ingress, LoadBalancer, or
+  # NodePort - made by patching this Service in an overlay.
   type: ClusterIP
   selector:
     app.kubernetes.io/name: kezio

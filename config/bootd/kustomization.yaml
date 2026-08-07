@@ -1,19 +1,13 @@
-# Standalone kustomization for kezio-bootd: the proxyDHCP and TFTP
-# services a UEFI firmware talks to before grub or the boot config
-# server (config/bootserver) ever come into the picture. It is
-# deliberately not one of config/default's resources, and not composed
-# with config/default the way config/bootserver is - bootd is not part
-# of the controller-manager process at all (see internal/bootd's
-# package doc comment), runs one replica per boot L2 segment rather than
-# once per cluster, and needs its own Multus attachment onto that
-# segment. Deploy it as an addition once config/default is applied:
+# Standalone kustomization for kezio-bootd (proxyDHCP + TFTP), deliberately
+# not composed into config/default: bootd is not part of the
+# controller-manager process, runs one replica per boot L2 segment, and
+# needs its own Multus attachment. Deploy as an addition once config/default
+# is applied:
 #
 #   kustomize build config/bootd | kubectl apply -f -
 #
-# Before applying, read README.md in this directory - in particular the
-# BOOTD_SERVER_IP placeholder, the TFTP artifacts volume, and the Multus
-# boot-network attachment, none of which a kustomize apply alone can
-# satisfy.
+# Read README.md first - the BOOTD_SERVER_IP placeholder, TFTP artifacts
+# volume, and Multus attachment all need manual setup a plain apply can't do.
 namespace: kezio-system
 namePrefix: kezio-
 
@@ -32,11 +26,8 @@ images:
   - name: bootd
     newName: ghcr.io/tjjh89017/kezio-bootd
     newTag: latest
-  # deployment.yaml's fetch-boot-artifacts initContainer names this
-  # image; override with `kustomize edit set image
-  # kezio-boot-artifacts=...` (or a further overlay) to pin a specific
-  # published version instead of always pulling "latest" - see that
-  # initContainer's own comment for what the image contains.
+  # Named by deployment.yaml's fetch-boot-artifacts initContainer; override
+  # with `kustomize edit set image kezio-boot-artifacts=...` to pin a version.
   - name: kezio-boot-artifacts
     newName: ghcr.io/tjjh89017/kezio-boot-artifacts
     newTag: latest

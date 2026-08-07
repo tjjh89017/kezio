@@ -8,15 +8,12 @@ metadata:
   name: ingest-role
   namespace: system
 rules:
-  # The ingest Job writes its own ImageLayout directly (see
-  # internal/ingest.WriteImageLayout) instead of relaying the sfdisk
-  # dump back through the Image controller's 4KiB-capped termination
-  # message. It never needs to read an Image itself: the owner reference
-  # it sets comes from env vars the controller already put on the Job
-  # (see internal/controller's buildIngestJob). Scoped to imagelayouts
-  # only: Kubernetes RBAC resourceNames cannot restrict create, so a
-  # ConfigMap-shaped grant here would let this ServiceAccount create or
-  # update any ConfigMap in the namespace.
+  # The ingest Job writes its own ImageLayout directly
+  # (internal/ingest.WriteImageLayout); it never needs to read an Image, its
+  # owner reference comes from env vars buildIngestJob already set. Scoped
+  # to imagelayouts only: RBAC resourceNames can't restrict create, so a
+  # ConfigMap-shaped grant would let this ServiceAccount touch any
+  # ConfigMap in the namespace.
   - apiGroups:
       - kezio.kojuro.date
     resources:

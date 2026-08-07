@@ -1,81 +1,52 @@
-# EXAMPLE / PLACEHOLDER - not applied by this kustomization (note the
-# ".example.yaml" suffix; it is not listed in kustomization.yaml's
-# resources). A real NetworkAttachmentDefinition depends on the site's
-# physical boot L2 segment and IPAM allocator, neither of which this
-# repository can know in advance. Copy this file, strip the ".example"
-# suffix, fill in the site-specific values marked below, and add it to
-# kustomization.yaml's resources - then uncomment the
-# k8s.v1.cni.cncf.io/networks annotation on deployment.yaml's pod
-# template to actually attach it.
+# EXAMPLE / PLACEHOLDER - not applied by this kustomization. Copy this file,
+# strip the ".example" suffix, fill in the site-specific values below, add it
+# to kustomization.yaml's resources, then uncomment the
+# k8s.v1.cni.cncf.io/networks annotation on deployment.yaml's pod template.
 #
 # Requires the Multus CNI meta-plugin
 # (https://github.com/k8snetworkplumbingwg/multus-cni) and its
-# NetworkAttachmentDefinition CRD to already be installed cluster-wide;
-# neither is installed by this kustomization. See
+# NetworkAttachmentDefinition CRD already installed cluster-wide. See
 # config/seeder/networkattachmentdefinition.example.yaml for the same
-# pattern applied to the BitTorrent data network - the reasoning below
-# is specific to bootd's proxyDHCP/TFTP traffic, not a repeat of that
-# file's no-NAT rule (which does not apply here).
+# pattern on the BitTorrent data network; that file's no-NAT rule does not
+# apply here.
 #
 # === Why Multus, not hostNetwork ===
-#
-# bootd needs to see the exact broadcast domain a booting machine's NIC
-# is on, and needs its unrelayed proxyDHCP replies (broadcast to
-# 255.255.255.255:68 - see internal/bootd's destinationFor) to reach
-# only that segment. hostNetwork would work for that, but ties the pod
-# to a specific node's physical NIC and fights over ports 67/69/4011
-# with anything else on that host - a dedicated Multus secondary
-# interface (net1) gets the same L2 visibility without either problem,
-# and keeps the pod's primary interface (eth0) free for the Kubernetes
-# API access bootd's MAC cache depends on (internal/bootd.MACCache).
+# bootd must see the exact broadcast domain a booting machine's NIC is on
+# and broadcast unrelayed proxyDHCP replies (255.255.255.255:68 - see
+# internal/bootd's destinationFor) onto only that segment. hostNetwork would
+# work but ties the pod to one node's NIC and fights over ports 67/69/4011;
+# a Multus secondary interface (net1) gets the same L2 visibility without
+# either problem, keeping eth0 free for the Kubernetes API access
+# internal/bootd.MACCache depends on.
 #
 # === Routing ===
-#
-# Unlike config/seeder's data network, bootd's boot-network attachment
-# does not need routes onto other subnets - proxyDHCP and TFTP traffic
-# on this segment is all directly-connected L2 traffic (broadcast
-# replies, or unicast back to whatever source address a request arrived
-# from - see internal/bootd's package doc comment on relay awareness for
-# the one exception: a DHCP relay agent's giaddr, reached over whatever
-# route already gets a pod to that relay's IP, ordinarily via the
-# cluster's normal eth0 routing, not net1).
+# Unlike config/seeder's data network, this attachment needs no routes onto
+# other subnets: proxyDHCP/TFTP traffic here is directly-connected L2
+# traffic, except a DHCP relay agent's giaddr, which is reached via the
+# cluster's normal eth0 routing, not net1 (see internal/bootd's package doc
+# comment on relay awareness).
 #
 # === IPAM ===
-#
-# BOOTD_SERVER_IP (deployment.yaml) must match whatever address this
-# NAD assigns net1 - static or a cluster-wide allocator such as
-# whereabouts both work; see config/seeder's own NAD example for the
-# tradeoffs between them, which apply here unchanged.
+# BOOTD_SERVER_IP (deployment.yaml) must match whatever address this NAD
+# assigns net1 - static or a cluster-wide allocator such as whereabouts both
+# work; see config/seeder's NAD example for the tradeoffs.
 #
 # === Reverse-path filtering ===
-#
-# A DHCPDISCOVER arrives on net1 with source address 0.0.0.0 (the
-# booting machine has no address yet) and destination 255.255.255.255 -
-# a source/destination pair a reverse-path filter can still refuse to
-# accept depending on kernel version and whatever sysctl defaults this
-# net1 namespace inherited, silently dropping the DISCOVER before
-# bootd's own UDP socket ever sees it (no line in bootd's log explains
-# this, since the packet never reaches the socket to be logged at all).
-# The chained "tuning" plugin below forces net1's own rp_filter loose
-# (0) for this attachment only, leaving every other interface on the
-# node untouched - a host-wide sysctl would reach far more than this
-# one pod's boot-network leg and still not apply where it matters,
-# since a fresh network namespace does not inherit the host's runtime
-# sysctl values in the first place.
+# A DHCPDISCOVER arrives on net1 from 0.0.0.0 to 255.255.255.255 - a pair
+# some kernels' reverse-path filter silently drops before bootd's socket
+# ever sees it. The chained "tuning" plugin below forces net1's own
+# rp_filter to 0 for this attachment only (a fresh network namespace does
+# not inherit the host's sysctl values, so a host-wide sysctl would not help).
 apiVersion: k8s.cni.cncf.io/v1
 kind: NetworkAttachmentDefinition
 metadata:
   name: kezio-boot-network
   namespace: system
 spec:
-  # SITE-SPECIFIC: replace the first ("macvlan") plugin entry with
-  # whatever CNI plugin this cluster's boot L2 segment actually uses
-  # (macvlan, ipvlan, a Multus bridge onto a VLAN-tagged host
-  # interface, ...); this "macvlan" example is illustrative only, not a
-  # recommendation. Keep the chained "tuning" plugin entry as-is (or
-  # drop it only if this cluster's CNI plugin bundle has no "tuning"
-  # binary) - see the "Reverse-path filtering" note above for why it is
-  # here.
+  # SITE-SPECIFIC: replace the "macvlan" plugin entry with whatever CNI
+  # plugin this cluster's boot L2 segment uses; it is illustrative only.
+  # Keep the "tuning" plugin entry (see "Reverse-path filtering" above)
+  # unless this cluster's CNI bundle lacks the "tuning" binary.
   config: |
     {
       "cniVersion": "0.3.1",

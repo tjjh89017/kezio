@@ -7,12 +7,10 @@ metadata:
     app.kubernetes.io/name: kezio
     app.kubernetes.io/component: bootd
 ---
-# ClusterRole, not a namespaced Role: bootd's MAC cache
-# (internal/bootd.MACCache) watches every Machine in the cluster, not
-# only ones in its own namespace - a site's bootd has no reliable way to
-# know in advance which namespace(s) the Machines it should net-boot
-# live in. Narrow this to a namespaced Role + RoleBinding in an overlay
-# if a deployment's Machines are known to live in a single namespace.
+# ClusterRole, not namespaced: bootd's MAC cache (internal/bootd.MACCache)
+# watches every Machine in the cluster, since it can't know in advance which
+# namespace(s) hold the Machines it should net-boot. Narrow to a namespaced
+# Role + RoleBinding in an overlay if that's known.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

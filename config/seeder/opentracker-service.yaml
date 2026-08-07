@@ -8,14 +8,11 @@ metadata:
     app.kubernetes.io/component: opentracker
     app.kubernetes.io/managed-by: kustomize
 spec:
-  # ClusterIP only: this Service exists for cluster-internal reachability
-  # (for example a leecher Pod running in the same cluster). Cross-site
-  # BitTorrent announce traffic reaches the tracker over the pod's own
-  # data-network IP (the Multus secondary interface, see
-  # opentracker-deployment.yaml's commented annotation), never through
-  # this Service - a Service's ClusterIP is DNAT'd, which would make the
-  # tracker's advertised reachability inconsistent with where announce
-  # traffic actually lands. See README.md's "No-NAT rule" section.
+  # ClusterIP only: for cluster-internal reachability. Cross-site BitTorrent
+  # announce traffic reaches the tracker over its data-network IP (the Multus
+  # secondary interface), never through this Service - ClusterIP is DNAT'd,
+  # which would break announce/reachability consistency. See README.md's
+  # "No-NAT rule".
   type: ClusterIP
   selector:
     app.kubernetes.io/name: kezio

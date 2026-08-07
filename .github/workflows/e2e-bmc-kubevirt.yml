@@ -2,30 +2,21 @@ name: E2E BMC-Driven Deploy (KubeVirtBMC + KubeVirt VM)
 
 # Thin workflow_dispatch caller for the BMC-driven scenario in
 # e2e-kubevirt-reusable.yml (see that file's own header comment,
-# "Topology note" section, for the full BMC-driven power/PXE flow and
-# what the job proves). This is kezio's production-representative
-# acceptance lane and the reusable workflow's only remaining caller
-# (kezio's own no-BMC lane, e2e-deploy-kubevirt.yml, is retired - issue
-# #17 - since kezio never ships without a BMC driver). This file exists
-# so the trigger, gating, and BMC-specific naming kezio's own maintainers
-# use stay exactly what they were before the scenario was folded into the
-# reusable workflow - only the job body moved, not this file's behavior.
+# "Topology note" section, for the full BMC-driven power/PXE flow). This
+# is kezio's production-representative acceptance lane and the reusable
+# workflow's only remaining caller (kezio never ships without a BMC
+# driver).
 #
-# workflow_dispatch only: it cannot reach a live boot without a published
-# kezio-boot-artifacts image, unless build_boot_artifacts is set, plus
-# this workflow adds a second, independent gate: it needs a published
-# KubeVirtBMC release whose install manifest and image tags match
-# kubevirtbmc_version below. Both gates are pinned, not auto-discovered,
-# so a version bump on either side is a deliberate edit to this file.
-# Trigger it by hand after touching internal/bmc, internal/deployer's BMC
-# wiring, or when deliberately validating the BMC-driven power/PXE path
-# end to end. Expect early runs to need iteration: this is the heaviest
-# lane in the repository (KVM setup, cluster+addon installs, a full live
-# PXE boot, a real partclone/BitTorrent deploy, KubeVirtBMC's own control
-# plane and webhook, plus the extra power cycle), and it is exercising an
-# integration (kezio's Redfish driver against KubeVirtBMC's Redfish
-# implementation) that has never run end-to-end before this workflow
-# existed.
+# workflow_dispatch only: needs a published kezio-boot-artifacts image
+# (unless build_boot_artifacts is set) plus a second, independent gate -
+# a published KubeVirtBMC release whose install manifest and image tags
+# match kubevirtbmc_version below. Both gates are pinned, not
+# auto-discovered, so a version bump on either side is a deliberate edit
+# to this file. This is the heaviest lane in the repository (KVM setup,
+# cluster+addon installs, a full live PXE boot, a real
+# partclone/BitTorrent deploy, KubeVirtBMC's own control plane and
+# webhook, plus an extra power cycle); expect early runs to need
+# iteration.
 on:
   workflow_dispatch:
     inputs:

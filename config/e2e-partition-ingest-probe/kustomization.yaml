@@ -1,16 +1,12 @@
 # Overlay for probe-partition-ingest.yml: config/default plus
 # config/image-service and a staging PVC patch, with no seeder/opentracker
-# (this probe never seeds or leeches - it only times ingest through the
-# per-partition-PVC/publish path, see internal/controller/image_publish.go).
-# Deliberately does not add a store PVC or a store mount on the manager:
+# (this probe only times ingest through the per-partition-PVC/publish path,
+# internal/controller/image_publish.go). Deliberately no store PVC/mount:
 # both are specific to the legacy shared-store path
-# (IngestConfig.LegacySharedStoreVolume), which this probe's whole point is
-# to bypass - see the probe workflow, which never sets INGEST_STORE_PVC.
+# (IngestConfig.LegacySharedStoreVolume), which this probe bypasses.
 #
 # staging-pvc-patch.yaml is a local copy of config/e2e-image-path's own
-# patch, not a relative-path reference to it, for the same
-# LoadRestrictionsRootOnly reason config/e2e-deploy-path's header comment
-# explains.
+# patch (LoadRestrictionsRootOnly forbids a relative-path reference).
 resources:
   - ../default
   - ../image-service

@@ -15,21 +15,14 @@ runs:
   using: composite
   steps:
     - name: Allow bridged traffic on the provisioning bridge (bypass canal's FORWARD filtering)
-      # RKE2's canal CNI loads br_netfilter
-      # (net.bridge.bridge-nf-call-iptables=1), which routes every
-      # bridged L2 frame - including this bridge's, even though it
-      # carries no cluster pod traffic - through the host's netfilter
-      # FORWARD chain. kube-proxy/canal leave that chain's default
-      # policy at DROP once the cluster is up
-      # (https://github.com/kubernetes/kubernetes/issues/39823,
-      # https://github.com/kubernetes/kubernetes/issues/91545), which
-      # silently eats the VM's PXE DHCP DISCOVER broadcast travelling
-      # between its Multus port and bootd's Multus port on this bridge.
-      # Run after the node is Ready (canal has had the chance to program
-      # its own FORWARD rules by then) and idempotently - -C before -I -
-      # in case a later canal reconciliation touches the chain again:
-      # add an ACCEPT scoped to this bridge's own port-to-port traffic
-      # only, so cluster filtering everywhere else is untouched.
+      # canal's br_netfilter routes every bridged L2 frame - including
+      # this bridge's, though it carries no cluster pod traffic - through
+      # the host's FORWARD chain, whose default policy is DROP once the
+      # cluster is up (kubernetes/kubernetes#39823, #91545), silently
+      # eating the VM's PXE DHCP DISCOVER broadcast. Add an ACCEPT scoped
+      # to this bridge's own port-to-port traffic only, idempotently
+      # (-C before -I) in case a later canal reconciliation touches the
+      # chain again.
       shell: bash
       run: |
         set -euo pipefail
@@ -37,52 +30,30 @@ runs:
           sudo iptables -C FORWARD -i "${PROVISIONING_BRIDGE}" -o "${PROVISIONING_BRIDGE}" -j ACCEPT 2>/dev/null || \
             sudo iptables -I FORWARD -i "${PROVISIONING_BRIDGE}" -o "${PROVISIONING_BRIDGE}" -j ACCEPT
         fi
-        # RKE2/canal can also run with the kernel's nf_tables backend
-        # instead of legacy iptables; when the "inet filter" table
-        # exists, mirror the same exemption there so the bridge is
-        # covered regardless of which backend actually owns FORWARD.
+        # RKE2/canal may run nf_tables instead of legacy iptables; mirror
+        # the same exemption there when the "inet filter" table exists.
         if command -v nft >/dev/null 2>&1 && sudo nft list table inet filter >/dev/null 2>&1; then
           sudo nft list chain inet filter FORWARD 2>/dev/null | grep -q "iifname \"${PROVISIONING_BRIDGE}\" oifname \"${PROVISIONING_BRIDGE}\" accept" || \
             sudo nft insert rule inet filter FORWARD iifname "${PROVISIONING_BRIDGE}" oifname "${PROVISIONING_BRIDGE}" accept
         fi
 
-        # No bridge<->pod-network accepts, on purpose: the target VM's
-        # whole world lives on this bridge. Every peer it talks to -
-        # bootd's net1 (DHCP/TFTP and, through its reverse proxy, the
-        # boot config and agent APIs too) and the opentracker and
-        # ezio-seeder pods' net1 (Multus-attached later with static
-        # bridge addresses) - is a port on this same bridge, so the
-        # port-to-port ACCEPT above covers all of it and the VM needs no
-        # route into the cluster's pod network at all.
+        # No bridge<->pod-network accepts, on purpose: every peer the VM
+        # talks to (bootd's net1, the tracker/seeder pods' net1) is a port
+        # on this same bridge, so the port-to-port ACCEPT above covers it
+        # all and the VM needs no route into the cluster's pod network.
 
     - name: Fill UDP checksums for PXE DHCP crossing the provisioning bridge
-      # The target VM's virtio-net leaves UDP checksums to be filled in
-      # by "hardware" (CHECKSUM_PARTIAL) rather than computing them
-      # itself. That is fine as long as the frame stays on a path that
-      # keeps honouring the offload flag, but this frame's actual path -
-      # tap device -> this Linux bridge -> a Multus veth -> bootd's pod
-      # network namespace - crosses a device boundary that never
-      # performs the fill, so the DHCP DISCOVER/OFFER datagrams arrive
-      # at bootd's UDP socket with a checksum field the kernel considers
-      # invalid and silently drops before the socket ever sees them.
-      # This is the same failure libvirt's own virtual networks hit
-      # (DHCP packets sent to VMs have no checksum due to a longstanding
-      # bug when vhost-net is on the same host as the DHCP service) and
-      # the same fix: an iptables mangle CHECKSUM --checksum-fill rule,
-      # scoped to this bridge and to the two DHCP ports (67 server, 68
-      # client) - libvirt's own generated rule is `-A POSTROUTING -o
-      # virbr0 -p udp -m udp --dport 68 -j CHECKSUM --checksum-fill` (see
-      # libvirt commit "Add iptables rule to fixup DHCP response
-      # checksum", libvir-list 2010-08); port 67 is added here too since
-      # this bridge carries the DISCOVER direction (VM -> bootd) as well,
-      # not only the reply. nft has no CHECKSUM target equivalent, so
-      # when nft is the active backend and iptables cannot be used,
-      # disabling tx checksum offload on the bridge itself (`ethtool -K
-      # ... tx off`) is the fallback - cruder (it stops the kernel from
-      # ever leaving a partial checksum on anything forwarded through the
-      # bridge, not just DHCP) but it covers the same failure mode.
-      # Idempotent (-C before -A) so a re-run or a later reconciliation
-      # never duplicates the rule.
+      # The VM's virtio-net leaves UDP checksums to hardware
+      # (CHECKSUM_PARTIAL); crossing tap -> bridge -> Multus veth -> bootd's
+      # netns never performs that fill, so DHCP datagrams arrive with a
+      # checksum the kernel considers invalid and drops silently. Same
+      # failure libvirt's virtual networks hit, same fix: an iptables
+      # mangle CHECKSUM --checksum-fill rule on this bridge for both DHCP
+      # ports (67 server, 68 client - this bridge carries the DISCOVER
+      # direction too, not only the reply). nft has no CHECKSUM target, so
+      # when nft is the active backend, disabling tx checksum offload on
+      # the bridge (`ethtool -K ... tx off`) is the cruder fallback.
+      # Idempotent (-C before -A).
       shell: bash
       run: |
         set -euo pipefail

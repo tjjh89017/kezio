@@ -21,13 +21,8 @@ runs:
   using: composite
   steps:
     - name: Write the RKE2 config (must exist before the service starts)
-      # cni: [multus, canal] is RKE2's own native way to run Multus
-      # alongside a default CNI (https://docs.rke2.io/networking/multus_sriov)
-      # - multus must be first in the list, canal is the actual pod
-      # network. RKE2 deploys both as its own HelmChart addons at
-      # startup; nothing further needs installing for Multus itself (see
-      # the "Wait for the Multus NetworkAttachmentDefinition CRD" step in
-      # the install-cluster-addons action, once the cluster is up).
+      # cni: [multus, canal] must list multus first; canal is the actual
+      # pod network. RKE2 deploys both as HelmChart addons at startup.
       shell: bash
       run: |
         set -euo pipefail
@@ -49,18 +44,15 @@ runs:
         sudo systemctl enable --now rke2-server.service
 
         # kubectl/ctr/crictl ship under /var/lib/rancher/rke2/bin, not on
-        # PATH by default - symlink them into /usr/local/bin (inside
-        # sudo's secure_path) the same way the k3s installer always put
-        # its own "k3s" binary there.
+        # PATH by default - symlink into /usr/local/bin (inside sudo's secure_path).
         sudo ln -sf /var/lib/rancher/rke2/bin/kubectl /usr/local/bin/kubectl
         sudo ln -sf /var/lib/rancher/rke2/bin/ctr /usr/local/bin/ctr
         sudo ln -sf /var/lib/rancher/rke2/bin/crictl /usr/local/bin/crictl
 
         echo "KUBECONFIG=/etc/rancher/rke2/rke2.yaml" >> "$GITHUB_ENV"
         export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-        # RKE2's control plane (etcd + canal + multus HelmChart addons)
-        # takes longer to reach node-Ready than k3s's bare flannel did,
-        # hence the more generous timeout below versus the old 120s.
+        # RKE2's control plane (etcd + canal + multus HelmChart addons) takes
+        # longer to reach node-Ready than a bare flannel CNI would.
         for _ in $(seq 1 90); do
           [ "$(kubectl get nodes --no-headers 2>/dev/null | wc -l)" -ge 1 ] && break
           sleep 2

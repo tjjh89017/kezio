@@ -1,11 +1,7 @@
 # Adds namespace to all resources.
 namespace: kezio-system
 
-# Value of this field is prepended to the
-# names of all resources, e.g. a deployment named
-# "wordpress" becomes "alices-wordpress".
-# Note that it should also match with the prefix (text before '-') of the namespace
-# field above.
+# Prepended to all resource names. Must match the namespace prefix above.
 namePrefix: kezio-
 
 # Labels to add to all resources and selectors.
@@ -27,10 +23,8 @@ resources:
 #- ../prometheus
 # [METRICS] Expose the controller manager metrics service.
 - metrics_service.yaml
-# [NETWORK POLICY] Protect the /metrics endpoint and Webhook Server with NetworkPolicy.
-# Only Pod(s) running a namespace labeled with 'metrics: enabled' will be able to gather the metrics.
-# Only CR(s) which requires webhooks and are applied on namespaces labeled with 'webhooks: enabled' will
-# be able to communicate with the Webhook Server.
+# [NETWORK POLICY] Restricts /metrics and the webhook server to namespaces labeled
+# 'metrics: enabled' / 'webhooks: enabled'.
 #- ../network-policy
 
 # Uncomment the patches line if you enable Metrics
@@ -121,7 +115,7 @@ replacements:
     kind: Service
     version: v1
     name: webhook-service
-    fieldPath: .metadata.name # Name of the service
+    fieldPath: .metadata.name
   targets:
     - select:
         kind: Certificate
@@ -139,7 +133,7 @@ replacements:
     kind: Service
     version: v1
     name: webhook-service
-    fieldPath: .metadata.namespace # Namespace of the service
+    fieldPath: .metadata.namespace
   targets:
     - select:
         kind: Certificate
@@ -159,7 +153,7 @@ replacements:
     group: cert-manager.io
     version: v1
     name: serving-cert # This name should match the one in certificate.yaml
-    fieldPath: .metadata.namespace # Namespace of the certificate CR
+    fieldPath: .metadata.namespace
   targets:
     - select:
         kind: ValidatingWebhookConfiguration
@@ -190,7 +184,7 @@ replacements:
     group: cert-manager.io
     version: v1
     name: serving-cert
-    fieldPath: .metadata.namespace # Namespace of the certificate CR
+    fieldPath: .metadata.namespace
   targets:
     - select:
         kind: MutatingWebhookConfiguration
@@ -221,7 +215,7 @@ replacements:
 #     group: cert-manager.io
 #     version: v1
 #     name: serving-cert
-#     fieldPath: .metadata.namespace # Namespace of the certificate CR
+#     fieldPath: .metadata.namespace
 #   targets: # Do not remove or uncomment the following scaffold marker; required to generate code for target CRD.
 # +kubebuilder:scaffold:crdkustomizecainjectionns
 # - source:

@@ -3,28 +3,21 @@ name: Probe - boot-artifacts staging
 # Answers, in minutes instead of the 30-90 the real KubeVirt lanes take,
 # whether the fetch-boot-artifacts plumbing itself works: the Dockerfile,
 # the numeric-UID/restricted-PSA contract, `cp -a` into the shared
-# emptyDir, the containerd import, and `kubectl set image` - every layer
-# a stale or missing kezio-boot-artifacts image could be blamed on. It
-# uses FAKE artifacts (see .github/actions/write-fake-boot-artifacts) so
-# it never pays hack/live-image/build.sh's ~90 minute cost; what is under
-# test here is the plumbing around the artifacts, not their content.
+# emptyDir, the containerd import, and `kubectl set image`. Uses FAKE
+# artifacts (see .github/actions/write-fake-boot-artifacts) so it never
+# pays hack/live-image/build.sh's ~90 minute cost; what is under test is
+# the plumbing around the artifacts, not their content.
 #
-# Root cause of the fetch-boot-artifacts ImagePullBackOff this probe was
-# built to chase: config/*/boot-artifacts-init-patch.yaml's JSON Patch
-# admits the initContainer with the placeholder tag
-# "kezio-boot-artifacts:latest", and Kubernetes defaults
-# imagePullPolicy from the image tag exactly once, at that admission -
-# "latest" defaults to Always. The later `kubectl set image` this
-# workflow (and every real KubeVirt lane) uses to repoint the container
-# at the real, per-run tag only ever touches .image, never
-# re-triggering that default, so the container keeps polling Always
-# forever against a tag the registry "example.com" was never going to
-# serve, even with the image already imported into containerd (measured
-# directly: `ctr images ls`/`images check` showed it complete in the
-# content store while the kubelet event stream still logged "not
-# found" pull attempts). Fixed by setting imagePullPolicy: IfNotPresent
-# explicitly in both patch files instead of leaving it to that
-# one-shot default.
+# Root cause this probe was built to chase: Kubernetes defaults
+# imagePullPolicy from the image tag exactly once, at admission -
+# config/*/boot-artifacts-init-patch.yaml's placeholder tag
+# "kezio-boot-artifacts:latest" defaults to Always there, and the later
+# `kubectl set image` that repoints the container at the real per-run tag
+# only touches .image, never re-triggering that default - so the
+# container keeps polling Always against a tag "example.com" was never
+# going to serve, even once the image is already imported into
+# containerd. Fixed by setting imagePullPolicy: IfNotPresent explicitly
+# in both patch files instead of leaving it to that one-shot default.
 on:
   workflow_dispatch:
   workflow_call:
@@ -37,9 +30,8 @@ permissions:
   contents: read
 
 env:
-  # Same pin as test-e2e.yml's always-on lanes - this probe must measure
-  # the plumbing against the same RKE2 this project already trusts, not
-  # a different version that happens to behave differently.
+  # Same pin as test-e2e.yml's always-on lanes - measure against the same
+  # RKE2 this project already trusts.
   RKE2_VERSION: "v1.36.2+rke2r1"
   MANAGER_IMG: "example.com/kezio:probe-boot-artifacts"
   BOOT_ARTIFACTS_IMG: "example.com/kezio-boot-artifacts:probe-boot-artifacts"
@@ -48,9 +40,9 @@ jobs:
   boot-artifacts-staging:
     name: Stage fake boot artifacts and verify the fetch-boot-artifacts initContainer
     runs-on: ubuntu-latest
-    # This is meant to be fast: no `lb build`, no from-source seeder
-    # compile, no KubeVirt/CDI - just one RKE2 boot, cert-manager, and
-    # two small `docker build`/`docker save` cycles.
+    # Fast on purpose: no `lb build`, no from-source seeder compile, no
+    # KubeVirt/CDI - just one RKE2 boot, cert-manager, and two small
+    # `docker build`/`docker save` cycles.
     timeout-minutes: 15
     steps:
       - name: Clone the code
@@ -90,10 +82,9 @@ jobs:
           kubectl get nodes -o wide
 
       - name: Install cert-manager
-        # Shared with the KubeVirt lanes via install-cert-manager rather
-        # than a locally-pinned version - too heavy to also pull in
-        # install-cluster-addons' KubeVirt/CDI here (this probe stays
-        # deliberately KubeVirt/CDI-free, see the job comment above).
+        # Shared with the KubeVirt lanes via install-cert-manager; too
+        # heavy to also pull in install-cluster-addons' KubeVirt/CDI here
+        # (this probe stays deliberately KubeVirt/CDI-free).
         uses: ./.github/actions/install-cert-manager
 
       - name: Write fake boot artifacts
@@ -109,10 +100,9 @@ jobs:
           make docker-build-boot-artifacts BOOT_ARTIFACTS_IMG="${BOOT_ARTIFACTS_IMG}"
 
       - name: Import images into RKE2 containerd
-        # Exactly the command real lanes use (see e2e-boot-path-kubevirt.yml's
-        # "Build and import the ... image" steps): RKE2's containerd
-        # socket is still under /run/k3s/containerd (a leftover of RKE2's
-        # k3s lineage), and plain "ctr" needs both -a and -n spelled out.
+        # RKE2's containerd socket is still under /run/k3s/containerd (a
+        # leftover of RKE2's k3s lineage); plain "ctr" needs both -a and
+        # -n spelled out.
         run: |
           set -euo pipefail
           for img in "${MANAGER_IMG}" "${BOOT_ARTIFACTS_IMG}"; do
@@ -123,13 +113,11 @@ jobs:
           echo "::endgroup::"
 
       - name: Inspect both imported images side by side
-        # Confirms the images actually land in containerd's content
-        # store, in the same complete, single-platform OCI manifest
-        # form, before any Deployment ever asks for either - crictl
-        # needs RKE2's own socket spelled out explicitly, the same as
-        # ctr above, or it falls back to the standalone
-        # /run/containerd/containerd.sock Docker's own engine owns,
-        # which has no CRI image service registered.
+        # Confirms the images land in containerd's content store before
+        # any Deployment asks for either. crictl needs RKE2's own socket
+        # spelled out explicitly, same as ctr above, or it falls back to
+        # the standalone /run/containerd/containerd.sock Docker's engine
+        # owns, which has no CRI image service registered.
         run: |
           set +e
           echo "===== ctr images check (manifest completeness), manager and boot-artifacts ====="

@@ -8,12 +8,11 @@ metadata:
     app.kubernetes.io/component: bootd
     app.kubernetes.io/managed-by: kustomize
 spec:
-  # One replica per boot segment: two bootd pods answering the same
-  # broadcast domain would both reply to every DHCPDISCOVER, and a
-  # firmware client has no way to prefer one proxyDHCP answer over the
-  # other. Scale out by deploying this kustomization once per site
-  # (each with its own Multus attachment below), not by raising
-  # replicas here.
+  # One replica per broadcast domain: two bootd pods on the same segment
+  # would both answer every DHCPDISCOVER, and firmware can't prefer one
+  # proxyDHCP reply over the other. Scale by deploying this kustomization
+  # once per site (each with its own Multus attachment below), not by
+  # raising replicas.
   replicas: 1
   selector:
     matchLabels:
@@ -25,61 +24,36 @@ spec:
         app.kubernetes.io/name: kezio
         app.kubernetes.io/component: bootd
       annotations:
-        # Attaches the site's boot L2 segment as a Multus secondary NIC
-        # (net1), alongside the cluster's own eth0. This is required,
-        # not optional: bootd's proxyDHCP responder must see the same
-        # broadcast domain the booting firmware's NIC is on (see
-        # RequiredHERE.md's "Why Multus, not hostNetwork" section), and
-        # must be able to send an unrelayed reply as a broadcast
-        # (255.255.255.255:68) that only reaches that L2 segment, not
-        # every network the node's own eth0 happens to touch (see
-        # README.md's "Why Multus, not hostNetwork" section).
+        # Attaches the site's boot L2 segment as a Multus secondary NIC (net1).
+        # Required, not optional: bootd's proxyDHCP responder must see the same
+        # broadcast domain the booting firmware is on, and must broadcast its
+        # reply (255.255.255.255:68) only onto that segment, not every network
+        # eth0 touches (see README.md's "Why Multus, not hostNetwork").
         #
-        # "kezio-boot-network" below is a placeholder name - see
-        # networkattachmentdefinition.example.yaml in this directory for
-        # the real NAD this depends on (not applied by this
-        # kustomization; it is site-specific). Create the real NAD
-        # first, then uncomment this and point it at that NAD's name.
+        # "kezio-boot-network" is a placeholder - see
+        # networkattachmentdefinition.example.yaml for the real, site-specific
+        # NAD. Create it first, then uncomment and point this at its name.
         # k8s.v1.cni.cncf.io/networks: kezio-boot-network
     spec:
       serviceAccountName: bootd
       securityContext:
-        # No pod-level runAsNonRoot: the two containers disagree on it,
-        # so each states its own - the fetch-boot-artifacts
-        # initContainer runs non-root as before, while the bootd
-        # container must run as uid 0 (see its securityContext below
-        # for the capability mechanics that force this).
+        # No pod-level runAsNonRoot: the containers disagree, so each states
+        # its own - fetch-boot-artifacts runs non-root, bootd must run as
+        # uid 0 (see its securityContext below).
         seccompProfile:
           type: RuntimeDefault
-        # Matches docker/boot-artifacts/Dockerfile's own numeric USER gid
-        # (65532, see the fetch-boot-artifacts initContainer's own
-        # securityContext comment below): the "tftp" emptyDir this
-        # initContainer writes into is otherwise created root:root mode
-        # 0755, and a fresh emptyDir grants no group access for a
-        # non-root gid unless the pod's fsGroup says so - the same
-        # reasoning config/image-service's securityContext.fsGroup
-        # comment documents for its Secret volume. Without this, the
-        # `cp` below fails with EACCES writing into /dest and the
-        # initContainer CrashLoopBackOffs before bootd's own container
-        # ever starts. (The "run" emptyDir below needs no such help:
-        # bootd's container runs as root and writes it directly.)
+        # Matches docker/boot-artifacts/Dockerfile's USER gid (65532). The
+        # "tftp" emptyDir is otherwise created root:root 0755, so without this
+        # the initContainer's `cp` fails EACCES and CrashLoopBackOffs before
+        # bootd starts. ("run" needs no such help: bootd writes it as root.)
         fsGroup: 65532
-      # Copies shimx64.efi/grubx64.efi out of the kezio-boot-artifacts
-      # image (docker/boot-artifacts/Dockerfile, built and pushed by
-      # .github/workflows/build-live-image.yml alongside the live
-      # kernel/initrd/squashfs) into the "tftp" emptyDir below before
-      # bootd starts - the concrete answer to what this Deployment's own
-      # comment on the "tftp" volume used to call a gap this
-      # kustomization does not fill. This replaces what used to be a
-      # curlimages/curl initContainer running config/boot-artifacts/
-      # fetch.sh against a GitHub Release on every pod (re)start: the
-      # initContainer's image now IS the fetch, so populating the volume
-      # is a plain `cp` with no network access of its own.
+      # Copies shimx64.efi/grubx64.efi out of the kezio-boot-artifacts image
+      # (docker/boot-artifacts/Dockerfile) into the "tftp" emptyDir below
+      # before bootd starts; a plain `cp` with no network access needed.
       #
       # kustomization.yaml's `images:` entry for "kezio-boot-artifacts"
       # defaults to "latest" - override with `kustomize edit set image
-      # kezio-boot-artifacts=...` (or a further overlay) to pin a
-      # specific published version instead.
+      # kezio-boot-artifacts=...` to pin a specific version.
       initContainers:
         - name: fetch-boot-artifacts
           image: kezio-boot-artifacts:latest
@@ -90,11 +64,9 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
-            # A numeric image USER (docker/boot-artifacts/Dockerfile's
-            # USER 65532:65532) is exactly what restricted Pod Security
-            # Admission needs to verify runAsNonRoot on its own - unlike
-            # curlimages/curl's non-numeric "curl_user", which used to
-            # force an explicit runAsUser/runAsGroup override here.
+            # Numeric image USER (Dockerfile's USER 65532:65532) lets restricted
+            # Pod Security Admission verify runAsNonRoot without an explicit
+            # runAsUser/runAsGroup override here.
             runAsNonRoot: true
             capabilities:
               drop:
@@ -103,74 +75,48 @@ spec:
         - name: bootd
           image: bootd:latest
           env:
-            # BOOTD_SERVER_IP: SITE-SPECIFIC, must be set to this pod's
-            # actual reachable IP on the boot L2 segment (the Multus
-            # net1 address above) - there is no meaningful default for
-            # an address that names this host. Firmware reads this back
-            # as the PXE boot server and (unless BOOTD_NEXT_SERVER_IP
-            # overrides it) the TFTP next-server.
+            # SITE-SPECIFIC: this pod's reachable IP on the boot L2 segment
+            # (the Multus net1 address above). Firmware reads it back as the
+            # PXE boot server and (unless BOOTD_NEXT_SERVER_IP overrides it)
+            # the TFTP next-server.
             - name: BOOTD_SERVER_IP
               value: "REPLACE_WITH_BOOTD_BOOT_NETWORK_IP"
-            # BOOTD_PROVISIONING_CIDR: SITE-SPECIFIC, the boot L2
-            # segment's IPv4 subnet - dnsmasq only answers proxyDHCP
-            # for subnets it has a matching dhcp-range for.
+            # SITE-SPECIFIC: the boot L2 segment's IPv4 subnet - dnsmasq only
+            # answers proxyDHCP for subnets it has a matching dhcp-range for.
             - name: BOOTD_PROVISIONING_CIDR
               value: "REPLACE_WITH_BOOT_NETWORK_CIDR"
-            # BOOTD_DHCP_INTERFACE: the pod interface on the boot L2
-            # segment. "net1" matches the first (and only) Multus
-            # attachment above; dnsmasq binds its DHCP sockets to this
-            # interface exclusively, so replies always leave on the
-            # boot segment rather than the cluster's default interface.
+            # Pod interface on the boot L2 segment; must match the Multus
+            # attachment above. dnsmasq binds its DHCP sockets exclusively
+            # to this interface.
             - name: BOOTD_DHCP_INTERFACE
               value: net1
-            # BOOTD_DHCP_RELAY_SERVER (optional): IPv4 address of the
-            # site's existing DHCP server. Set it to have bootd's
-            # dnsmasq also relay lease traffic from the boot segment to
-            # that server (dhcp-relay); leave unset for proxyDHCP only.
+            # Optional: site's existing DHCP server IPv4 address. Set it to
+            # have dnsmasq also relay lease traffic (dhcp-relay); leave unset
+            # for proxyDHCP only.
             # - name: BOOTD_DHCP_RELAY_SERVER
             #   value: "REPLACE_WITH_SITE_DHCP_SERVER_IP"
-            # BOOTD_BOOT_CONFIG_URL: SITE-SPECIFIC, the URL a netbooting
-            # machine fetches its per-MAC GRUB config from. With the
-            # BOOTD_*_UPSTREAM_URL proxy enabled below, this is bootd's
-            # OWN address on the boot segment (BOOTD_SERVER_IP plus
-            # BOOTD_PROXY_ADDR's port, e.g. "http://192.0.2.1:80") -
-            # bootd's own reverse proxy is what actually answers
-            # /boot/grub.cfg-<mac>, forwarding it to the boot config
-            # server (config/bootserver) named by BOOTD_BOOT_UPSTREAM_URL
-            # below. With it set, bootd serves the GRUB bootstrap config
-            # at grub/grub.cfg over TFTP, which is what hands the netboot
-            # GRUB image (see hack/live-image/build.sh) off to that
-            # per-MAC config; without it, a netbooting machine loads GRUB
-            # and then stops at the grub> prompt.
+            # SITE-SPECIFIC: URL a netbooting machine fetches its per-MAC GRUB
+            # config from. With the reverse proxy enabled below, this is
+            # bootd's own address (BOOTD_SERVER_IP + BOOTD_PROXY_ADDR's port),
+            # since bootd's proxy answers /boot/grub.cfg-<mac> by forwarding
+            # to config/bootserver. Without it set, a netbooting machine loads
+            # GRUB and stops at the grub> prompt.
             # - name: BOOTD_BOOT_CONFIG_URL
             #   value: "REPLACE_WITH_BOOTD_OWN_URL"
-            # BOOTD_AGENT_UPSTREAM_URL / BOOTD_BOOT_UPSTREAM_URL
-            # (optional, SITE-SPECIFIC once set): the in-cluster base
-            # URLs of internal/agentserver and internal/bootserver (see
-            # config/agentserver's and config/bootserver's own Services),
-            # for example
-            # "http://kezio-agent-server.kezio-system.svc.cluster.local:8091"
-            # and
-            # "http://kezio-boot-server.kezio-system.svc.cluster.local:8090".
-            # Setting either turns on bootd's reverse proxy
-            # (BOOTD_PROXY_ADDR below): every /agent/... request bootd
-            # receives forwards to the first, every /boot/... request to
-            # the second - so a live-booted kezio-agent and a netbooting
-            # machine both reach the whole HTTP surface through this one
-            # bootd address instead of each service needing its own
-            # separate reachability path on the boot segment. Leave both
-            # unset (the default) to keep bootd exactly as before this
-            # proxy existed - it proxies nothing, and something else
-            # (a further overlay) is responsible for making those two
-            # Services reachable from the boot segment.
+            # Optional, SITE-SPECIFIC once set: in-cluster base URLs of
+            # internal/agentserver and internal/bootserver. Setting either
+            # turns on bootd's reverse proxy (BOOTD_PROXY_ADDR below): every
+            # /agent/... request forwards to the first, every /boot/...
+            # request to the second, so both a live-booted kezio-agent and a
+            # netbooting machine reach the whole HTTP surface through this one
+            # bootd address. Leave both unset to keep bootd proxying nothing.
             # - name: BOOTD_AGENT_UPSTREAM_URL
             #   value: "http://kezio-agent-server.kezio-system.svc.cluster.local:8091"
             # - name: BOOTD_BOOT_UPSTREAM_URL
             #   value: "http://kezio-boot-server.kezio-system.svc.cluster.local:8090"
-            # BOOTD_PROXY_ADDR (optional): the address the reverse proxy
-            # above listens on, once enabled. Defaults to
-            # BOOTD_SERVER_IP with port 80; override only if that default
-            # collides with something else on the boot segment.
+            # Optional: address the reverse proxy above listens on once
+            # enabled. Defaults to BOOTD_SERVER_IP:80; override only on
+            # collision.
             # - name: BOOTD_PROXY_ADDR
             #   value: "REPLACE_WITH_BOOTD_BOOT_NETWORK_IP:80"
             - name: BOOTD_TFTP_DIR
@@ -182,11 +128,8 @@ spec:
             - name: pxe
               containerPort: 4011
               protocol: UDP
-            # proxy-http: only actually listened on once
-            # BOOTD_AGENT_UPSTREAM_URL or BOOTD_BOOT_UPSTREAM_URL above
-            # is set; harmless to declare unconditionally, the same way
-            # the tftp port below is declared regardless of whether
-            # BOOTD_BOOT_CONFIG_URL is set.
+            # Only actually listened on once BOOTD_*_UPSTREAM_URL is set;
+            # harmless to declare unconditionally.
             - name: proxy-http
               containerPort: 80
               protocol: TCP
@@ -194,20 +137,15 @@ spec:
               containerPort: 69
               protocol: UDP
           securityContext:
-            # Root, unlike every other kezio container, and not by
-            # preference: Kubernetes grants the added capabilities
-            # below to permitted/effective only for uid 0. For a
-            # non-root uid they land in the bounding set alone, execve
-            # of /bootd (no file capabilities) clears permitted, and
-            # allowPrivilegeEscalation=false (no_new_privs) forbids
-            # regaining them via file capabilities - so a non-root
-            # bootd holds nothing to pass its dnsmasq child, which
-            # then dies at startup missing NET_ADMIN (observed
-            # in-cluster and lab-verified; see internal/bootd/caps.go).
-            # Confinement comes from everything else on this context:
-            # all capabilities dropped except the three below, no
-            # privilege escalation, read-only root filesystem, seccomp
-            # RuntimeDefault, no privileged: true, no hostNetwork.
+            # Root, unlike every other kezio container, not by preference:
+            # Kubernetes grants added capabilities to permitted/effective only
+            # for uid 0. A non-root bootd's execve clears permitted (no file
+            # capabilities) and allowPrivilegeEscalation=false blocks regaining
+            # them, so its dnsmasq child dies missing NET_ADMIN (see
+            # internal/bootd/caps.go). Confinement instead comes from: all
+            # capabilities dropped except the three below, no privilege
+            # escalation, read-only root filesystem, seccomp RuntimeDefault,
+            # no privileged: true, no hostNetwork.
             runAsUser: 0
             runAsGroup: 0
             runAsNonRoot: false
@@ -216,29 +154,18 @@ spec:
             capabilities:
               drop:
                 - "ALL"
-              # The dnsmasq child bootd supervises (see internal/bootd's
-              # Dnsmasq) requires all three capabilities to serve DHCP:
-              # NET_BIND_SERVICE for the privileged ports (67, 4011,
-              # and bootd's own 69), and NET_ADMIN + NET_RAW, which
-              # dnsmasq checks for explicitly at startup and refuses to
-              # run without. Deliberately absent: SETUID/SETGID - which
-              # is why bootd runs dnsmasq with --user=root instead of
-              # letting it drop to "nobody" (a setuid it would have no
-              # capability to perform; see internal/bootd/dnsmasq.go's
-              # runChild).
+              # dnsmasq (internal/bootd's Dnsmasq) requires all three to serve
+              # DHCP: NET_BIND_SERVICE for ports 67/4011/69, NET_ADMIN + NET_RAW
+              # which dnsmasq checks for explicitly and refuses to start
+              # without. Deliberately absent: SETUID/SETGID - bootd runs
+              # dnsmasq with --user=root instead of dropping to "nobody"
+              # (see internal/bootd/dnsmasq.go's runChild).
               #
-              # Pod Security Admission consequence, stated precisely:
-              # NET_ADMIN is not in the allowed capability list of the
-              # "restricted" OR "baseline" profiles (NET_RAW is allowed
-              # by baseline but not restricted; NET_BIND_SERVICE by
-              # both) - see
-              # https://kubernetes.io/docs/concepts/security/pod-security-standards/.
-              # This pod therefore cannot be admitted into a namespace
-              # enforcing restricted or baseline PSA: the namespace
-              # bootd deploys into must set
-              # pod-security.kubernetes.io/enforce=privileged. That
-              # label relaxes admission-time enforcement only - the pod
-              # itself grants nothing beyond these three capabilities.
+              # NET_ADMIN is outside the "restricted" and "baseline" PSA
+              # profiles, so the namespace bootd deploys into must set
+              # pod-security.kubernetes.io/enforce=privileged. That relaxes
+              # admission only - the pod itself grants nothing beyond these
+              # three capabilities.
               add:
                 - NET_BIND_SERVICE
                 - NET_ADMIN
@@ -247,11 +174,9 @@ spec:
             - name: tftp
               mountPath: /tftp
               readOnly: true
-            # Writable working directory for the rendered dnsmasq
-            # config, the dhcp-hostsfile the Machine informer rewrites,
-            # and dnsmasq's leasefile (internal/bootd.DefaultRunDir) -
-            # required because the container's root filesystem is
-            # read-only.
+            # Writable dir for rendered dnsmasq config, the Machine informer's
+            # dhcp-hostsfile, and dnsmasq's leasefile (internal/bootd.DefaultRunDir);
+            # required since the root filesystem is read-only.
             - name: run
               mountPath: /run/bootd
           resources:
@@ -261,26 +186,17 @@ spec:
             requests:
               cpu: 100m
               memory: 64Mi
-          # No livenessProbe: bootd's protocols (proxyDHCP, PXE, TFTP)
-          # are all UDP with no lightweight synchronous check to
-          # piggyback one on, and the dnsmasq child bootd supervises
-          # already restarts itself with backoff on crash
-          # (internal/bootd.Dnsmasq.Start) - a liveness probe killing
-          # the whole pod over the same transient failure would fight
-          # that supervisor rather than help it.
+          # No livenessProbe: bootd's protocols (proxyDHCP, PXE, TFTP) are all
+          # UDP with no lightweight check to piggyback on, and the dnsmasq
+          # child already restarts itself with backoff on crash
+          # (internal/bootd.Dnsmasq.Start); a liveness probe would fight that
+          # supervisor.
           #
-          # readinessProbe DOES exist, and is load-bearing once
-          # BOOTD_AGENT_UPSTREAM_URL/BOOTD_BOOT_UPSTREAM_URL turn on
-          # bootd's reverse proxy (internal/bootd.ProxyServer): before
-          # this probe existed, the pod reported Ready the instant its
-          # process started, regardless of whether that proxy had
-          # bound its listener - so a caller's `kubectl rollout status`
-          # (config/e2e's deploy step is exactly that caller) could
-          # return success and immediately hit a port nothing was
-          # listening on yet, or ever, with no probe failure to say so.
-          # cmd/bootd wires /readyz to ProxyServer.Ready when the proxy
-          # is enabled, and to a trivial always-ok check otherwise, so
-          # this probe is safe to leave unconditional here.
+          # readinessProbe matters once the reverse proxy is enabled
+          # (internal/bootd.ProxyServer): without it, `kubectl rollout status`
+          # could report success before the proxy's listener was bound.
+          # cmd/bootd wires /readyz to ProxyServer.Ready when enabled, and to
+          # an always-ok check otherwise.
           readinessProbe:
             httpGet:
               path: /readyz
@@ -288,15 +204,10 @@ spec:
             initialDelaySeconds: 1
             periodSeconds: 5
       volumes:
-        # Populated by the fetch-boot-artifacts initContainer above
-        # before bootd's own container starts; an emptyDir is enough
-        # since the fetch is cheap (two small EFI binaries) and repeats
-        # on every pod (re)start rather than needing to persist across
-        # one. If internal/bootd's TFTPServer ever finds this volume
-        # empty regardless (for example, the initContainer failed and
-        # the Deployment tolerated it, which it does not by default -
-        # see internal/bootd's package doc comment), it serves a clean
-        # per-file error, not a startup crash.
+        # Populated by the fetch-boot-artifacts initContainer above; an
+        # emptyDir is enough since the fetch is cheap and repeats on every
+        # pod (re)start. If found empty anyway, internal/bootd's TFTPServer
+        # serves a per-file error, not a startup crash.
         - name: tftp
           emptyDir: {}
         - name: run

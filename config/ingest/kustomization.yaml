@@ -1,18 +1,14 @@
 # Standalone kustomization for the ingest Job's own RBAC: a ServiceAccount
-# plus the Role/RoleBinding letting it create/get/update ImageLayouts in
-# its own namespace (see internal/ingest.WriteImageLayout). It is
-# deliberately not one of config/default's resources, the same reasoning
-# as config/image-service and config/seeder: real ingest is opt-in, gated
-# by IngestConfig.enabled() (INGEST_IMAGE unset means no ingest Jobs ever
-# run, so this RBAC would sit unused). Deploy alongside config/default
-# whenever real ingest is wired up:
+# plus the Role/RoleBinding to create/get/update ImageLayouts in its
+# namespace. Not one of config/default's resources: real ingest is opt-in,
+# gated by IngestConfig.enabled() (INGEST_IMAGE unset means no ingest Jobs
+# run). Deploy alongside config/default whenever ingest is wired up:
 #
 #   kustomize build config/ingest | kubectl apply -f -
 #
 # and set INGEST_SERVICE_ACCOUNT=kezio-ingest on the controller-manager
-# Deployment (see IngestConfig.ServiceAccountName) so the ingest Job's pod
-# actually runs as this ServiceAccount instead of the namespace default,
-# which has no ImageLayout RBAC at all.
+# Deployment so the ingest Job's pod runs as this ServiceAccount instead of
+# the namespace default, which has no ImageLayout RBAC.
 namespace: kezio-system
 namePrefix: kezio-
 
