@@ -18,6 +18,7 @@ package agentserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
@@ -211,14 +212,21 @@ func buildPlanPartition(cfg Config, imageNS, imageName, targetDisk string, p kez
 	return part, nil
 }
 
-// buildPartitionTorrent bencodes a partition's torrent.info (carried
-// inline in ImagePartitionStatus - this partition's content lives in its
-// own PVC, which only the per-Image seeder Deployment mounts, so this
-// server never touches a store volume at all) into a complete .torrent
-// file with cfg.TrackerURL as the announce URL, the same construction
-// internal/controller's per-Image seeder content sync uses to hand ezio
-// the same content's .torrent bytes.
+// buildPartitionTorrent bencodes a partition's torrent.info into a
+// complete .torrent file with cfg.TrackerURL as the announce URL.
+//
+// The bytes come from ImagePartitionStatus, which ingest no longer fills
+// in: content now carries its own .torrent inside its partition PVC (see
+// internal/ingest.publishPartition), and this server mounts no PVC. Until
+// the agent is moved onto that same file, an empty value is refused
+// rather than passed through - a plan partition with an InfoHash but no
+// torrent classifies as BLANK on the agent side
+// (internal/agent/deploy.classify), which would mkfs the partition
+// instead of restoring it.
 func buildPartitionTorrent(cfg Config, torrentInfoBytes []byte) ([]byte, error) {
+	if len(torrentInfoBytes) == 0 {
+		return nil, errors.New("no torrent.info recorded for this partition")
+	}
 	info, err := store.ParseTorrentInfoBytes(torrentInfoBytes)
 	if err != nil {
 		return nil, fmt.Errorf("parse torrent.info: %w", err)
