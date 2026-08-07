@@ -237,20 +237,18 @@ type ImagePartitionStatus struct {
 	// +optional
 	InfoHash string `json:"infoHash,omitempty"`
 	// TorrentInfo is the raw bytes of this partition's canonical
-	// "torrent.info" (see internal/store.TorrentInfo), present once
-	// ingest has produced torrent metadata for it. Carried inline in
-	// status rather than left on a filesystem the manager would have to
-	// mount: this partition's content lives in its own PVC (see
-	// internal/controller's partitionPVCName), so nothing but the
-	// per-Image seeder Deployment - which mounts that PVC directly -
-	// ever needs the content bytes; every other consumer (the per-Image
-	// seeder content sync, an agent's DeployPlan) only needs this small
-	// metadata blob to build a .torrent, and can do so straight from
-	// status with no store mount at all. A torrent.info this large would
-	// itself be a very large partition (its size scales with piece
-	// count, not partition size, at roughly 20 bytes per 16MiB piece -
-	// see internal/store.PieceSize), so this is not expected to strain
-	// the status object in practice.
+	// "torrent.info" (see internal/store.TorrentInfo). Ingest no longer
+	// populates this: torrent.info used to ride the ingest Job's
+	// termination message, but that message is capped at 4KiB and
+	// torrent.info scales with piece count, so an Image with enough
+	// partitions silently failed to parse (see
+	// internal/ingest.ResultPartition). Content now carries its own
+	// ready-made .torrent alongside it in its per-partition PVC instead
+	// (see internal/controller/image_publish.go), so this field is kept
+	// only for existing consumers that read it directly from status
+	// (internal/agentserver's DeployPlan builder) until they are moved
+	// onto that same PVC-based path; a partition with a recorded
+	// InfoHash may still have this empty.
 	// +optional
 	TorrentInfo []byte `json:"torrentInfo,omitempty"`
 }

@@ -1,0 +1,135 @@
+name: Time a partition-count ingest
+
+description: >-
+  Synthesizes a real GPT+ext4 raw disk with a given number of partitions,
+  uploads it through image-service, and polls Image.status until it
+  reaches Ready or a deadline passes, printing a "t+Ns" timeline and a
+  final "RESULT <name> ready_in_seconds=<n>" line. Used by
+  probe-partition-ingest.yml to time the per-partition-PVC/publish path
+  at several partition counts against the same cluster, so a timing
+  difference reflects partition count, not cluster variance between runs.
+
+inputs:
+  image-name:
+    description: Name to give the uploaded Image.
+    required: true
+  partition-count:
+    description: Number of ext4 partitions to create on the synthetic disk.
+    required: true
+  partition-size-mib:
+    description: Size in MiB of each partition.
+    required: false
+    default: "8"
+  namespace:
+    description: Namespace the Image is created in.
+    required: false
+    default: kezio-system
+  image-service-url:
+    description: image-service base URL (a port-forward this action does not manage).
+    required: false
+    default: http://127.0.0.1:18080
+  image-service-token:
+    description: Bearer token image-service was deployed with.
+    required: true
+  deadline-seconds:
+    description: How long to wait for the Image to reach Ready before failing.
+    required: false
+    default: "300"
+
+outputs:
+  ready-in-seconds:
+    description: Seconds from upload to the Image reaching Ready.
+    value: ${{ steps.time.outputs.ready_in_seconds }}
+
+runs:
+  using: composite
+  steps:
+    - name: Build a ${{ inputs.partition-count }}-partition disk and time its ingest
+      id: time
+      shell: bash
+      env:
+        IMAGE_NAME: ${{ inputs.image-name }}
+        PART_COUNT: ${{ inputs.partition-count }}
+        PART_MIB: ${{ inputs.partition-size-mib }}
+        NAMESPACE: ${{ inputs.namespace }}
+        IMAGE_SERVICE_URL: ${{ inputs.image-service-url }}
+        IMAGE_SERVICE_TOKEN: ${{ inputs.image-service-token }}
+        DEADLINE_SECONDS: ${{ inputs.deadline-seconds }}
+      run: |
+        set -euo pipefail
+
+        disk="${RUNNER_TEMP}/${IMAGE_NAME}.img"
+        total_mib=$(( PART_COUNT * PART_MIB + 4 ))
+        qemu-img create -f raw "${disk}" "${total_mib}M"
+        loop="$(sudo losetup --find --show "${disk}")"
+        sudo parted -s "${loop}" mklabel gpt
+        start=1
+        for i in $(seq 1 "${PART_COUNT}"); do
+          end=$(( start + PART_MIB ))
+          sudo parted -s "${loop}" mkpart "part${i}" ext4 "${start}MiB" "${end}MiB"
+          start=${end}
+        done
+        sudo partprobe "${loop}"
+        sleep 1
+        for i in $(seq 1 "${PART_COUNT}"); do
+          sudo mkfs.ext4 -F -q "${loop}p${i}"
+          mnt="$(mktemp -d)"
+          sudo mount "${loop}p${i}" "${mnt}"
+          sudo dd if=/dev/urandom of="${mnt}/content-${i}.bin" bs=1M count=2 status=none
+          sudo umount "${mnt}"
+          rmdir "${mnt}"
+        done
+        sudo losetup -d "${loop}"
+        sudo chmod 0644 "${disk}"
+
+        bin/kezioctl image upload "${disk}" \
+          --name "${IMAGE_NAME}" \
+          --namespace "${NAMESPACE}" \
+          --server "${IMAGE_SERVICE_URL}" \
+          --token "${IMAGE_SERVICE_TOKEN}" \
+          --format raw
+
+        # Polls Image.status.state and the Ready condition's reason every
+        # 2s, tagging each line with elapsed seconds since upload - the
+        # log this produces is what turns "N+ minutes" into "N seconds in
+        # each phase" after the fact. image_ingest.go's
+        # ImageStateIngesting/reasonPublishing pairing is the exact
+        # marker distinguishing the ingest sub-phase from the publish
+        # sub-phase (see that file's doc comments) - both keep
+        # status.state == "Ingesting", only the reason changes.
+        t0="$(date +%s)"
+        deadline=$(( t0 + DEADLINE_SECONDS ))
+        while true; do
+          now="$(date +%s)"
+          elapsed=$(( now - t0 ))
+          state="$(kubectl get image "${IMAGE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || true)"
+          reason="$(kubectl get image "${IMAGE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)"
+          echo "t+${elapsed}s image=${IMAGE_NAME} state=${state:-<none>} reason=${reason:-<none>}"
+          if [ "${state}" = "Ready" ]; then
+            echo "RESULT ${IMAGE_NAME} ready_in_seconds=${elapsed}"
+            echo "ready_in_seconds=${elapsed}" >>"${GITHUB_OUTPUT}"
+            break
+          fi
+          if [ "${state}" = "Failed" ]; then
+            echo "::error::Image ${IMAGE_NAME} reached Failed" >&2
+            kubectl get image "${IMAGE_NAME}" -n "${NAMESPACE}" -o yaml >&2
+            exit 1
+          fi
+          if [ "${now}" -ge "${deadline}" ]; then
+            echo "::error::Image ${IMAGE_NAME} did not reach Ready within ${DEADLINE_SECONDS}s" >&2
+            echo "::group::Image ${IMAGE_NAME}"
+            kubectl get image "${IMAGE_NAME}" -n "${NAMESPACE}" -o yaml || true
+            echo "::endgroup::"
+            echo "::group::Jobs labelled kezio.kojuro.date/image=${IMAGE_NAME}"
+            kubectl get jobs -n "${NAMESPACE}" -l "kezio.kojuro.date/image=${IMAGE_NAME}" -o wide || true
+            kubectl describe jobs -n "${NAMESPACE}" -l "kezio.kojuro.date/image=${IMAGE_NAME}" || true
+            kubectl logs -n "${NAMESPACE}" -l "kezio.kojuro.date/image=${IMAGE_NAME}" --all-containers --tail=1000 || true
+            echo "::endgroup::"
+            echo "::group::PersistentVolumeClaims"
+            kubectl get pvc -n "${NAMESPACE}" -o wide || true
+            kubectl describe pvc -n "${NAMESPACE}" || true
+            echo "::endgroup::"
+            exit 1
+          fi
+          sleep 2
+        done

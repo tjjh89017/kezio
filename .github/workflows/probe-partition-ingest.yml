@@ -16,6 +16,9 @@ name: Probe - partition ingest timing
 # download or filesystem-creation time. Three images (1, 2, and 4
 # partitions) are ingested in turn against the same cluster so a timing
 # difference reflects partition count, not cluster variance between runs.
+# The timing/assertion body lives in
+# .github/actions/time-partition-ingest so this workflow stays a thin,
+# dispatchable wrapper around cluster setup.
 on:
   workflow_dispatch:
   workflow_call:
@@ -33,6 +36,7 @@ env:
   MANAGER_IMG: "example.com/kezio:probe-partition-ingest"
   INGEST_IMG: "example.com/kezio-ingest:probe-partition-ingest"
   IMAGE_SERVICE_IMG: "example.com/kezio-image-service:probe-partition-ingest"
+  IMAGE_SERVICE_TOKEN: "probe-partition-ingest-token"
 
 jobs:
   partition-ingest:
@@ -139,7 +143,7 @@ jobs:
           bin/kustomize build config/e2e-partition-ingest-probe | kubectl apply -f -
 
           kubectl -n kezio-system create secret generic kezio-image-service-token \
-            --from-literal=token=probe-partition-ingest-token \
+            --from-literal=token="${IMAGE_SERVICE_TOKEN}" \
             --dry-run=client -o yaml | kubectl apply -f -
 
           kubectl -n kezio-system set env deployment/kezio-controller-manager \
@@ -149,132 +153,53 @@ jobs:
           kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
           kubectl rollout status deployment/kezio-image-service -n kezio-system --timeout=180s
 
-      - name: Time ingest for 1, 2, and 4 partitions
-        id: measure
+      - name: Port-forward image-service
         run: |
           set -euo pipefail
-
-          # Builds a raw disk with $2 ext4 partitions, each $3 MiB, a
-          # small file of real content written into every partition so
-          # UsedBytes is nonzero. Real GPT+ext4 (sfdisk/partclone both
-          # read the actual on-disk structures), just small.
-          build_disk() {
-            local path="$1" count="$2" part_mib="${3:-8}"
-            local total_mib=$(( count * part_mib + 4 ))
-            qemu-img create -f raw "${path}" "${total_mib}M"
-            local loop
-            loop="$(sudo losetup --find --show "${path}")"
-            sudo parted -s "${loop}" mklabel gpt
-            local start=1 end i
-            for i in $(seq 1 "${count}"); do
-              end=$(( start + part_mib ))
-              sudo parted -s "${loop}" mkpart "part${i}" ext4 "${start}MiB" "${end}MiB"
-              start=${end}
-            done
-            sudo partprobe "${loop}"
-            sleep 1
-            for i in $(seq 1 "${count}"); do
-              sudo mkfs.ext4 -F -q "${loop}p${i}"
-              local mnt
-              mnt="$(mktemp -d)"
-              sudo mount "${loop}p${i}" "${mnt}"
-              sudo dd if=/dev/urandom of="${mnt}/content-${i}.bin" bs=1M count=2 status=none
-              sudo umount "${mnt}"
-              rmdir "${mnt}"
-            done
-            sudo losetup -d "${loop}"
-            sudo chmod 0644 "${path}"
-          }
-
-          # Polls Image.status.state and the Ready condition's reason
-          # every 2s, tagging each line with elapsed seconds since this
-          # function started - the log this produces is what turns
-          # "6+ minutes" into "N seconds in each phase" after the fact.
-          # image_ingest.go's ImageStateIngesting/reasonPublishing pairing
-          # is the exact marker distinguishing the ingest sub-phase from
-          # the publish sub-phase (see that file's doc comments) - both
-          # keep status.state == "Ingesting", only the reason changes.
-          time_ingest() {
-            local name="$1" deadline_s="$2"
-            local t0 now elapsed state reason
-            t0="$(date +%s)"
-            local deadline=$(( t0 + deadline_s ))
-            while true; do
-              now="$(date +%s)"
-              elapsed=$(( now - t0 ))
-              state="$(kubectl get image "${name}" -n kezio-system -o jsonpath='{.status.state}' 2>/dev/null || true)"
-              reason="$(kubectl get image "${name}" -n kezio-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)"
-              echo "t+${elapsed}s image=${name} state=${state:-<none>} reason=${reason:-<none>}"
-              if [ "${state}" = "Ready" ]; then
-                echo "RESULT ${name} ready_in_seconds=${elapsed}"
-                return 0
-              fi
-              if [ "${state}" = "Failed" ]; then
-                echo "::error::Image ${name} reached Failed" >&2
-                kubectl get image "${name}" -n kezio-system -o yaml >&2
-                return 1
-              fi
-              if [ "${now}" -ge "${deadline}" ]; then
-                echo "::error::Image ${name} did not reach Ready within ${deadline_s}s" >&2
-                echo "::group::Image ${name}"
-                kubectl get image "${name}" -n kezio-system -o yaml || true
-                echo "::endgroup::"
-                echo "::group::Jobs labelled kezio.kojuro.date/image=${name}"
-                kubectl get jobs -n kezio-system -l "kezio.kojuro.date/image=${name}" -o wide || true
-                kubectl describe jobs -n kezio-system -l "kezio.kojuro.date/image=${name}" || true
-                kubectl logs -n kezio-system -l "kezio.kojuro.date/image=${name}" --all-containers --tail=1000 || true
-                echo "::endgroup::"
-                echo "::group::PersistentVolumeClaims"
-                kubectl get pvc -n kezio-system -o wide || true
-                kubectl describe pvc -n kezio-system || true
-                echo "::endgroup::"
-                return 1
-              fi
-              sleep 2
-            done
-          }
-
-          upload_and_time() {
-            local name="$1" disk="$2" deadline_s="$3"
-            bin/kezioctl image upload "${disk}" \
-              --name "${name}" \
-              --namespace kezio-system \
-              --server http://127.0.0.1:18080 \
-              --token probe-partition-ingest-token \
-              --format raw
-            time_ingest "${name}" "${deadline_s}"
-          }
-
           kubectl -n kezio-system port-forward svc/kezio-image-service 18080:8080 &
-          PF_PID=$!
+          echo "$!" >"${RUNNER_TEMP}/port-forward.pid"
           for _ in $(seq 1 30); do
-            curl -sf -o /dev/null "http://127.0.0.1:18080/healthz" && break
+            curl -sf -o /dev/null "http://127.0.0.1:18080/healthz" && exit 0
             sleep 1
           done
+          echo "::error::image-service never became reachable through the port-forward" >&2
+          exit 1
 
-          overall_rc=0
-          for spec in "1:probe-part-1" "2:probe-part-2" "4:probe-part-4"; do
-            IFS=: read -r count name <<<"${spec}"
-            disk="${RUNNER_TEMP}/${name}.img"
-            echo "::group::Building a ${count}-partition disk (${name})"
-            build_disk "${disk}" "${count}"
-            echo "::endgroup::"
-            echo "::group::Ingesting ${name} (${count} partitions)"
-            if ! upload_and_time "${name}" "${disk}" 300; then
-              overall_rc=1
-            fi
-            echo "::endgroup::"
-          done
+      - name: Time ingest with 1 partition
+        uses: ./.github/actions/time-partition-ingest
+        with:
+          image-name: probe-part-1
+          partition-count: "1"
+          image-service-token: ${{ env.IMAGE_SERVICE_TOKEN }}
+          deadline-seconds: "300"
 
-          kill "${PF_PID}" 2>/dev/null || true
-          exit "${overall_rc}"
+      - name: Time ingest with 2 partitions
+        uses: ./.github/actions/time-partition-ingest
+        with:
+          image-name: probe-part-2
+          partition-count: "2"
+          image-service-token: ${{ env.IMAGE_SERVICE_TOKEN }}
+          deadline-seconds: "300"
+
+      - name: Time ingest with 4 partitions
+        uses: ./.github/actions/time-partition-ingest
+        with:
+          image-name: probe-part-4
+          partition-count: "4"
+          image-service-token: ${{ env.IMAGE_SERVICE_TOKEN }}
+          deadline-seconds: "300"
+
+      - name: Stop the port-forward
+        if: always()
+        run: |
+          kill "$(cat "${RUNNER_TEMP}/port-forward.pid")" 2>/dev/null || true
 
       - name: Record the result
         if: always()
         run: |
           {
             echo "## Partition ingest timing probe"
-            echo "See the \"Time ingest for 1, 2, and 4 partitions\" step log for the per-image ready_in_seconds breakdown and the state/reason timeline behind it."
+            echo "See each \"Time ingest with N partitions\" step log for the per-image ready_in_seconds breakdown and the state/reason timeline behind it."
           } >>"${GITHUB_STEP_SUMMARY}"
 
       - name: Dump diagnostics on failure

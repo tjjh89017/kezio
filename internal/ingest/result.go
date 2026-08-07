@@ -75,15 +75,6 @@ type ResultPartition struct {
 	UsedBytes int64  `json:"usedBytes,omitempty"`
 	UUID      string `json:"uuid,omitempty"`
 	InfoHash  string `json:"infoHash,omitempty"`
-	// TorrentInfo is the raw bytes of this partition's torrent.info,
-	// copied verbatim into ImagePartitionStatus.TorrentInfo (json
-	// marshals a []byte as base64, so this rides the same termination
-	// message channel as every other field here). Its size scales with
-	// piece count, not partition size (see internal/store.PieceSize), so
-	// it stays well clear of the 4KiB cap in the realistic case; an
-	// image with an extraordinarily large partition could overflow it,
-	// the same accepted limit this handoff already has for SfdiskJSON.
-	TorrentInfo []byte `json:"torrentInfo,omitempty"`
 }
 
 // MarshalResult serializes r as compact JSON, suitable for writing to a

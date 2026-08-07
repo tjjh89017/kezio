@@ -41,6 +41,12 @@ type PublishConfig struct {
 	ScratchRoot string
 	// Partitions lists which content to copy where.
 	Partitions []PublishPartition
+	// TrackerURL, when set, is baked as the announce URL of a .torrent
+	// this run builds and writes alongside each partition's copied
+	// content (see publishPartition). Left empty, no .torrent is
+	// written - a deployment with no tracker configured yet still gets
+	// working per-partition PVCs, just nothing that can seed from them.
+	TrackerURL string
 }
 
 // PublishPartition names one partition's content (by info hash, as
@@ -52,13 +58,18 @@ type PublishPartition struct {
 	DestDir  string
 }
 
+// ContentRoot is the parent directory every partition content volume is
+// mounted under. cmd/seeder scans it to find what this pod holds, so it
+// is named here rather than spelled out at each use.
+const ContentRoot = "/content"
+
 // PartitionMountPath returns the deterministic in-pod mount path for one
 // partition's content volume. cmd/ingest (this publish step's writer)
 // and internal/controller (the per-Image seeder Deployment's reader -
 // see its own partitionMountPath, which delegates here) both use this
 // one function, so the convention cannot drift between them.
 func PartitionMountPath(number int32) string {
-	return fmt.Sprintf("/content/%d", number)
+	return fmt.Sprintf("%s/%d", ContentRoot, number)
 }
 
 // RunPublish copies every partition in cfg.Partitions from the ingest
@@ -76,7 +87,7 @@ func RunPublish(cfg PublishConfig) Result {
 
 func runPublish(cfg PublishConfig) error {
 	for _, p := range cfg.Partitions {
-		if err := publishPartition(cfg.ScratchRoot, p); err != nil {
+		if err := publishPartition(cfg.ScratchRoot, cfg.TrackerURL, p); err != nil {
 			return fmt.Errorf("partition %d: %w", p.Number, err)
 		}
 	}
@@ -87,8 +98,13 @@ func runPublish(cfg PublishConfig) error {
 // root's content-addressed store into destDir, then validates the copy
 // against the torrent.info it just copied alongside it - so a truncated
 // or otherwise corrupted copy is caught here rather than surfacing later
-// as a leecher's hash-check failure.
-func publishPartition(scratchRoot string, p PublishPartition) error {
+// as a leecher's hash-check failure. When trackerURL is set, it also
+// bencodes a complete .torrent for this content and writes it into
+// destDir alongside torrent.info: the per-Image seeder Deployment mounts
+// this same PVC read-only and needs a ready-made .torrent to hand ezio,
+// with no store volume of its own to build one from (see
+// internal/controller/seeder_deployment.go).
+func publishPartition(scratchRoot, trackerURL string, p PublishPartition) error {
 	hash, err := store.ParseInfoHash(p.InfoHash)
 	if err != nil {
 		return fmt.Errorf("parse info hash: %w", err)
@@ -106,6 +122,18 @@ func publishPartition(scratchRoot string, p PublishPartition) error {
 
 	if err := store.ValidateContentDir(p.DestDir, info); err != nil {
 		return fmt.Errorf("validate published content: %w", err)
+	}
+
+	if trackerURL == "" {
+		return nil
+	}
+	torrentBytes, err := store.BuildTorrentFile(info, trackerURL)
+	if err != nil {
+		return fmt.Errorf("build torrent file: %w", err)
+	}
+	torrentPath := filepath.Join(p.DestDir, store.ContentTorrentFileName)
+	if err := os.WriteFile(torrentPath, torrentBytes, 0o644); err != nil { //nolint:gosec // .torrent is not sensitive; same-perm convention as the copied content
+		return fmt.Errorf("write torrent file: %w", err)
 	}
 	return nil
 }

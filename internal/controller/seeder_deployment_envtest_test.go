@@ -17,7 +17,6 @@ limitations under the License.
 package controller
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"time"
@@ -33,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
+	"github.com/tjjh89017/kezio/internal/ingest"
 	"github.com/tjjh89017/kezio/internal/store"
 )
 
@@ -382,26 +382,6 @@ func mustFixtureHash() store.InfoHash {
 	return h
 }
 
-// mustFixtureTorrentInfo builds a minimal, valid torrent.info and
-// returns its info hash alongside its raw bytes - the shape
-// ImagePartitionStatus.TorrentInfo carries inline in status, needed by
-// tests that exercise syncSeederDeploymentContent's actual
-// AddTorrent call rather than only the Deployment lifecycle.
-func mustFixtureTorrentInfo() (store.InfoHash, []byte) {
-	info := &store.TorrentInfo{
-		BlockSize:   4096,
-		BlocksTotal: 100,
-		Extents:     []store.Extent{{Offset: 0, Length: store.PieceSize}},
-		PieceHashes: []store.PieceHash{{1, 2, 3, 4, 5}},
-	}
-	hash, err := store.ComputeInfoHash(info)
-	Expect(err).NotTo(HaveOccurred())
-
-	var buf bytes.Buffer
-	Expect(store.WriteTorrentInfo(&buf, info)).To(Succeed())
-	return hash, buf.Bytes()
-}
-
 // createSeederDeploymentPod creates a ReplicaSet owned by dep and a Pod
 // owned by that ReplicaSet, with status.podIP already set to podIP -
 // standing in for what a real Deployment controller and kubelet would
@@ -457,11 +437,8 @@ var _ = Describe("Seeder Deployment content", func() {
 	// gRPC port every per-Image seeder container listens on.
 	const seederDeploymentContentPodIP = "10.9.9.9"
 
-	It("adds every Ready-Image content partition to the pod behind a newly created per-Image Deployment", func() {
-		hash, torrentInfoBytes := mustFixtureTorrentInfo()
-		image := createReadyImage(ctx, hash)
-		image.Status.Partitions[0].TorrentInfo = torrentInfoBytes
-		Expect(k8sClient.Status().Update(ctx, image)).To(Succeed())
+	It("gives the Deployment a register container pointed at every partition mount, and never dials the pod itself", func() {
+		image := createReadyImage(ctx, mustFixtureHash())
 		registry := newFakeSeederRegistry()
 
 		r := &ImageReconciler{
@@ -483,48 +460,29 @@ var _ = Describe("Seeder Deployment content", func() {
 		dep := seederDeploymentsForImage(ctx, image)["site-a"]
 
 		createSeederDeploymentPod(ctx, &dep, seederDeploymentContentPodIP)
-
-		// The pod did not exist during the reconcile above (its
-		// Deployment had just been created), so a second pass is what
-		// actually finds it and syncs content - the same "requeue and
-		// pick it up next time" shape the rest of this reconciler uses.
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 		Expect(err).NotTo(HaveOccurred())
 
-		target := fmt.Sprintf("%s:%d", seederDeploymentContentPodIP, seederDeploymentGRPCPort)
-		daemon := registry.daemons[target]
-		Expect(daemon).NotTo(BeNil(), "expected a dial to the per-Image seeder pod's own address")
-		Expect(daemon.addCount).To(Equal(1), "expected exactly one AddTorrent call, for the Image's one content partition")
-		// fakeSeederClient.AddTorrent keys its recorded torrent by
-		// save_path's leaf directory name (see that fixture's own
-		// comment); a per-Image seeder Deployment's save_path is its
-		// partition's own mount path (partitionMountPath), whose leaf is
-		// the partition number - "0" here, since createReadyImage leaves
-		// Number at its zero value - not the content hash a shared-fleet
-		// save_path (store.ContentDir) would leaf into.
-		Expect(daemon.torrents).To(HaveKey("0"))
-	})
+		// The bytes a .torrent is built from live in the partition PVC,
+		// which only this pod mounts, so registration belongs to the pod
+		// and this reconciler must stay out of it entirely.
+		Expect(registry.daemons).To(BeEmpty(), "the reconciler must not dial the seeder pod to add content")
 
-	It("does not dial any pod when SeederDeployment carries no tracker/store configuration", func() {
-		image := createReadyImage(ctx, mustFixtureHash())
-		r, _ := newSeederDeploymentReconciler()
-		dialed := false
-		r.SeederDeployment.Dial = func(string) (SeederEZIOClient, error) {
-			dialed = true
-			return nil, fmt.Errorf("dial should not have been called")
+		var register *corev1.Container
+		for i := range dep.Spec.Template.Spec.Containers {
+			if dep.Spec.Template.Spec.Containers[i].Name == "seeder-register" {
+				register = &dep.Spec.Template.Spec.Containers[i]
+			}
 		}
-		key := types.NamespacedName{Name: image.Name, Namespace: image.Namespace}
+		Expect(register).NotTo(BeNil(), "expected a seeder-register container alongside ezio")
+		Expect(register.Command).To(Equal([]string{"/usr/local/bin/kezio-seeder-register"}))
+		Expect(register.Env).To(ContainElement(corev1.EnvVar{Name: "CONTENT_ROOT", Value: ingest.ContentRoot}))
 
-		machine := createSeederTestMachine(ctx, image.Namespace, image.Name, "site-a", keziov1alpha1.MachineStateProvisioning)
-		DeferCleanup(func() { cleanupSeederTest(ctx, r, image, machine) })
-
-		_, err := reconcileImage(ctx, r, key)
-		Expect(err).NotTo(HaveOccurred())
-		dep := seederDeploymentsForImage(ctx, image)["site-a"]
-		createSeederDeploymentPod(ctx, &dep, seederDeploymentContentPodIP)
-
-		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(dialed).To(BeFalse(), "contentEnabled() is false (no TrackerURL) - nothing should have dialed the pod")
+		// It scans the mounts rather than being told what to add, so it
+		// must see exactly the same volumes ezio does - otherwise a
+		// partition is mounted for seeding that nothing ever registers.
+		ezio := dep.Spec.Template.Spec.Containers[0]
+		Expect(ezio.Name).To(Equal("ezio-seeder"))
+		Expect(register.VolumeMounts).To(Equal(ezio.VolumeMounts))
 	})
 })

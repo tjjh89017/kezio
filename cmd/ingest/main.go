@@ -139,7 +139,11 @@ func publishConfigFromEnv() (ingest.PublishConfig, error) {
 		})
 	}
 
-	return ingest.PublishConfig{ScratchRoot: scratchRoot, Partitions: partitions}, nil
+	return ingest.PublishConfig{
+		ScratchRoot: scratchRoot,
+		Partitions:  partitions,
+		TrackerURL:  os.Getenv("TRACKER_URL"),
+	}, nil
 }
 
 // buildFromEnv reads the environment variables the Image controller sets

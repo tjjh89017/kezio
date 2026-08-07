@@ -145,6 +145,14 @@ func (r *ImageReconciler) buildPublishJob(image *keziov1alpha1.Image, jobName st
 		{Name: "INGEST_MODE", Value: "publish"},
 		{Name: "STORE_ROOT", Value: scratchMountPath},
 		{Name: "PUBLISH_PARTITIONS", Value: strings.Join(parts, ",")},
+		// TRACKER_URL reuses SeederDeploymentConfig's tracker (the same
+		// one the per-Image seeder Deployment is seeded through) rather
+		// than introducing a second, parallel setting: whichever .torrent
+		// this Job bakes into a partition's PVC is exactly what that
+		// Deployment needs to hand ezio later. Empty is valid - the
+		// publish step then just copies content with no .torrent, the
+		// same as before this field existed.
+		{Name: "TRACKER_URL", Value: r.SeederDeployment.TrackerURL},
 	}
 
 	labels := map[string]string{ingestJobLabel: image.Name, appComponentLabel: "ingest-publish"}

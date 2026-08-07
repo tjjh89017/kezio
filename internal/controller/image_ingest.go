@@ -445,13 +445,19 @@ func (r *ImageReconciler) handleIngestJobSucceeded(ctx context.Context, image *k
 	partitions := make([]keziov1alpha1.ImagePartitionStatus, 0, len(result.Disk.Partitions))
 	for _, p := range result.Disk.Partitions {
 		partitions = append(partitions, keziov1alpha1.ImagePartitionStatus{
-			Number:      p.Number,
-			Role:        p.Role,
-			FSType:      p.FSType,
-			UsedBytes:   p.UsedBytes,
-			UUID:        p.UUID,
-			InfoHash:    p.InfoHash,
-			TorrentInfo: p.TorrentInfo,
+			Number:    p.Number,
+			Role:      p.Role,
+			FSType:    p.FSType,
+			UsedBytes: p.UsedBytes,
+			UUID:      p.UUID,
+			InfoHash:  p.InfoHash,
+			// TorrentInfo is deliberately left unset here: torrent.info
+			// no longer rides the ingest Job's termination message (see
+			// internal/ingest.ResultPartition), so this reconciler has
+			// no more torrent.info bytes to copy across. The publish Job
+			// now writes a ready-made .torrent alongside each
+			// partition's content in its own PVC instead (see
+			// image_publish.go).
 		})
 	}
 	image.Status.Partitions = partitions

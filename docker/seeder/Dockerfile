@@ -3,10 +3,16 @@
 #     docker build --build-arg EZIO_REF=master -f docker/seeder/Dockerfile .
 ARG EZIO_REF=v2.0.29
 
-# Ships upstream ezio plus a minimal, decision-free entrypoint; no kezio Go
-# binary. The operator drives a running seeder entirely through ezio's own
-# gRPC API (internal/seeder, proto/ezio.proto) so this container stays
-# "dumb" by design.
+# Ships upstream ezio, a minimal decision-free entrypoint, and
+# kezio-seeder-register.
+#
+# ezio itself stays driven entirely through its own gRPC API
+# (internal/seeder, proto/ezio.proto), and the entrypoint still makes no
+# decisions. The register binary is a SEPARATE container in the same pod
+# (the Image reconciler overrides the command - see buildSeederDeployment),
+# not part of ezio's process: a partition's .torrent lives in that
+# partition's PVC, which only this pod mounts, so nothing outside the pod
+# can read it and hand it to ezio.
 #
 # Adapted from ezio's own Dockerfile: that one does `COPY . /usr/src/ezio`
 # from its own checkout; this one clones upstream instead, since kezio's
@@ -63,6 +69,23 @@ RUN mkdir -p /out && \
         [ "$r" = "$d" ] || cp --parents "$r" /out; \
     done
 
+# Cross-compiled the same way as every other kezio Go image; kept in its
+# own stage so the C++ build above is untouched by it.
+FROM --platform=$BUILDPLATFORM golang:1.26 AS go-builder
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /workspace
+COPY go.mod go.mod
+COPY go.sum go.sum
+RUN go mod download
+
+COPY cmd/seeder/ cmd/seeder/
+COPY api/ api/
+COPY internal/ internal/
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o kezio-seeder-register ./cmd/seeder
+
 FROM debian:sid
 
 # No apt-get here: every shared library ezio needs is copied from the
@@ -70,6 +93,7 @@ FROM debian:sid
 # actually linked against.
 COPY --from=builder /out/ /
 COPY --from=builder /usr/local/sbin/ezio /app/ezio
+COPY --from=go-builder /workspace/kezio-seeder-register /usr/local/bin/kezio-seeder-register
 COPY docker/seeder/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 

@@ -269,12 +269,6 @@ func processPartition(ctx context.Context, cfg Config, deps Dependencies, rawPat
 	resultPart.InfoHash = hash.String()
 	resultPart.UsedBytes = usedBytes
 
-	torrentInfoBytes, err := os.ReadFile(store.ContentTorrentInfoPath(cfg.StoreRoot, hash)) //nolint:gosec // store-controlled path, not user input
-	if err != nil {
-		return store.ImageLayoutSlot{}, ResultPartition{}, fmt.Errorf("read published torrent.info: %w", err)
-	}
-	resultPart.TorrentInfo = torrentInfoBytes
-
 	return slot, resultPart, nil
 }
 

@@ -153,6 +153,49 @@ func TestRunPublish_MultiplePartitions(t *testing.T) {
 	}
 }
 
+func TestRunPublish_WritesTorrentFileWhenTrackerURLSet(t *testing.T) {
+	scratchRoot := t.TempDir()
+	hash := writeScratchContent(t, scratchRoot)
+	destDir := filepath.Join(t.TempDir(), "content-dest")
+
+	result := RunPublish(PublishConfig{
+		ScratchRoot: scratchRoot,
+		TrackerURL:  "http://tracker.example.com:6969/announce",
+		Partitions:  []PublishPartition{{Number: 1, InfoHash: hash.String(), DestDir: destDir}},
+	})
+	if !result.Success {
+		t.Fatalf("RunPublish: Success=false, Error=%q", result.Error)
+	}
+
+	torrentPath := filepath.Join(destDir, store.ContentTorrentFileName)
+	data, err := os.ReadFile(torrentPath) //nolint:gosec // test-controlled path
+	if err != nil {
+		t.Fatalf("read %s: %v", torrentPath, err)
+	}
+	if len(data) == 0 {
+		t.Error("written .torrent file is empty")
+	}
+}
+
+func TestRunPublish_NoTorrentFileWhenTrackerURLUnset(t *testing.T) {
+	scratchRoot := t.TempDir()
+	hash := writeScratchContent(t, scratchRoot)
+	destDir := filepath.Join(t.TempDir(), "content-dest")
+
+	result := RunPublish(PublishConfig{
+		ScratchRoot: scratchRoot,
+		Partitions:  []PublishPartition{{Number: 1, InfoHash: hash.String(), DestDir: destDir}},
+	})
+	if !result.Success {
+		t.Fatalf("RunPublish: Success=false, Error=%q", result.Error)
+	}
+
+	torrentPath := filepath.Join(destDir, store.ContentTorrentFileName)
+	if _, err := os.Stat(torrentPath); !os.IsNotExist(err) {
+		t.Errorf("expected no .torrent file when TrackerURL is unset, stat err = %v", err)
+	}
+}
+
 func TestRunPublish_MissingSourceContentIsAFailure(t *testing.T) {
 	scratchRoot := t.TempDir()
 	// A well-formed hash for content that was never written to
