@@ -144,6 +144,17 @@ func registerWithRetry(ctx context.Context, client *Client, cfg Config, hardware
 // never re-applied; a failed execution does not latch, so a transient
 // failure (a disk not yet settled, a momentary ezio hiccup) gets retried
 // on the next poll.
+//
+// Before executing, a received plan's SchemaVersion is checked against
+// agentapi.PlanSchemaVersion: internal/agentserver's own compatibility
+// gate (this agent already advertised its version in the Next call
+// above) should make a mismatch here unreachable in practice, but a
+// received plan is untrusted input regardless of which side is supposed
+// to have already refused it, so this is the second, independent check -
+// see agentapi's package doc comment. A mismatch is refused the same way
+// a validation failure inside Executor.Execute is: logged, reported as a
+// deploy-step failure, and never handed to Execute, so no disk is ever
+// touched.
 func pollLoop(ctx context.Context, client *Client, cfg Config, reg RegisterResult, pollInterval time.Duration) error {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
@@ -166,6 +177,12 @@ func pollLoop(ctx context.Context, client *Client, cfg Config, reg RegisterResul
 			if executor == nil || deployed || resp.Action != agentapi.ActionDeploy || resp.Plan == nil {
 				continue
 			}
+			if resp.Plan.SchemaVersion != agentapi.PlanSchemaVersion {
+				cfg.log("refusing deploy plan: schema version %d unsupported (this agent supports %d); no disk touched",
+					resp.Plan.SchemaVersion, agentapi.PlanSchemaVersion)
+				reportSchemaMismatch(ctx, cfg, client, reg, resp.Plan.SchemaVersion)
+				continue
+			}
 			if err := executor.Execute(ctx, resp.Plan); err != nil {
 				cfg.log("executing deploy plan failed: %v", err)
 				continue
@@ -173,6 +190,25 @@ func pollLoop(ctx context.Context, client *Client, cfg Config, reg RegisterResul
 			cfg.log("deploy plan executed: every partition written or made, local ezio daemon shut down")
 			deployed = true
 		}
+	}
+}
+
+// reportSchemaMismatch tells the controller this agent refused a
+// DeployPlan whose SchemaVersion it does not support, using the same
+// DeployStepFailed shape internal/agent/deploy.Executor.Execute reports
+// on any other refusal - so the controller's real, agent-driven Deployer
+// recognizes the deploy failed instead of polling forever, and an
+// operator reading MachineConditionProvisioningProgress sees exactly
+// why. Best-effort, like every other progress report: a delivery
+// failure is logged, not escalated.
+func reportSchemaMismatch(ctx context.Context, cfg Config, client *Client, reg RegisterResult, gotVersion int) {
+	req := agentapi.ProgressRequest{
+		Step: agentapi.DeployStepFailed,
+		StepMessage: fmt.Sprintf("refusing deploy plan: server sent schema version %d, this agent only supports %d",
+			gotVersion, agentapi.PlanSchemaVersion),
+	}
+	if err := client.ReportProgress(ctx, reg.MachineName, reg.SessionToken, req); err != nil {
+		cfg.log("reporting schema-version refusal failed: %v", err)
 	}
 }
 

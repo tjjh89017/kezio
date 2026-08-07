@@ -58,8 +58,9 @@ func buildDeployPlan(ctx context.Context, c client.Client, cfg Config, machine *
 	}
 
 	plan := &agentapi.DeployPlan{
-		AfterDeploy: machine.Spec.EffectiveAfterDeploy(),
-		MachineName: machine.Name,
+		SchemaVersion: agentapi.PlanSchemaVersion,
+		AfterDeploy:   machine.Spec.EffectiveAfterDeploy(),
+		MachineName:   machine.Name,
 	}
 	plan.Ezio = keziov1alpha1.MergeEzioTuning(cfg.EzioDefaults, machine.Spec.Ezio)
 

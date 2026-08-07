@@ -324,6 +324,22 @@ const MachineConditionAgentRegistered = "AgentRegistered"
 // and Reason anyway).
 const MachineConditionProvisioningProgress = "ProvisioningProgress"
 
+// MachineConditionAgentCompatible reports whether the kezio-agent
+// currently polling GET /agent/machines/<name>/next (internal/agentserver)
+// advertises a plan schema version (agentapi.AgentSchemaVersionHeader)
+// matching the server's own agentapi.PlanSchemaVersion. Status=False
+// (reason "AgentIncompatible") means the server is withholding a
+// DeployPlan from an agent whose advertised version is absent (every
+// agent built before this header existed) or does not match - the
+// Message names both versions - so the Machine holds instead of handing
+// a plan to an agent that would misread it; this is the guard against
+// the exact silent-data-destruction failure a wire-shape change without
+// a version bump caused once (an old agent decoded a new plan, found no
+// legacy inline torrent bytes, and mkfs'd every content partition).
+// Status=True means the current poller's version matches and plan
+// handout proceeds normally. Absent means no agent has polled yet.
+const MachineConditionAgentCompatible = "AgentCompatible"
+
 // Machine state enum values for MachineStatus.State. These are the
 // top-level states only; provisioning sub-steps (powering on, net
 // booting, writing the image, and so on) are reported through a

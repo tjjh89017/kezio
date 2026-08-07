@@ -20,8 +20,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -244,7 +246,11 @@ func setAgentRegisteredCondition(machine *keziov1alpha1.Machine, status metav1.C
 // the boot token: "Authorization: Bearer <token>") and answers with a
 // DeployPlan once the named Machine is Provisioning with every target
 // disk resolved and every referenced Image Ready; otherwise it answers
-// ActionWait.
+// ActionWait. Before ever building a plan, it also gates on the polling
+// agent's advertised schema version (see ensureAgentCompatible): an
+// absent or mismatched version holds the Machine at ActionWait
+// regardless of readiness, so an agent that would misread a plan is
+// never handed one.
 //
 // Every rejection path - missing header, malformed header, no Machine
 // named <name>, no live session, a wrong or expired session token -
@@ -281,6 +287,15 @@ func (s *Server) handleNext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	compatible, err := s.ensureAgentCompatible(ctx, machine, r)
+	if err != nil {
+		log.Error(err, "persisting agent compatibility condition failed", "machine", machine.Name)
+	}
+	if !compatible {
+		writeJSON(w, http.StatusOK, agentapi.NextResponse{Action: agentapi.ActionWait})
+		return
+	}
+
 	plan, err := buildDeployPlan(ctx, s.Client, s.Config, machine)
 	if err != nil {
 		log.Error(err, "building deploy plan failed; answering wait", "machine", machine.Name)
@@ -290,6 +305,76 @@ func (s *Server) handleNext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, agentapi.NextResponse{Action: agentapi.ActionDeploy, Plan: plan})
+}
+
+// reasonAgentCompatible and reasonAgentIncompatible are the
+// MachineConditionAgentCompatible condition's Reason values ensureAgentCompatible
+// sets.
+const (
+	reasonAgentCompatible   = "Compatible"
+	reasonAgentIncompatible = "AgentIncompatible"
+)
+
+// agentSchemaVersion parses r's AgentSchemaVersionHeader. ok is false for
+// a missing header or a value that does not parse as an integer - both
+// treated as "no version advertised", the same as any agent built before
+// this header existed.
+func agentSchemaVersion(r *http.Request) (version int, ok bool) {
+	raw := r.Header.Get(agentapi.AgentSchemaVersionHeader)
+	if raw == "" {
+		return 0, false
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
+}
+
+// ensureAgentCompatible reports whether the agent behind r's advertised
+// schema version matches s.Config's PlanSchemaVersion, persisting the
+// MachineConditionAgentCompatible condition on machine either way so an
+// operator watching `kubectl get machine` sees exactly why deployment is
+// (or is not) holding. The write is skipped when the condition already
+// reflects the same Status/Reason/Message, so a compatible agent's
+// steady poll loop does not churn the Machine's status on every tick.
+func (s *Server) ensureAgentCompatible(ctx context.Context, machine *keziov1alpha1.Machine, r *http.Request) (bool, error) {
+	version, ok := agentSchemaVersion(r)
+	compatible := ok && version == agentapi.PlanSchemaVersion
+
+	status := metav1.ConditionFalse
+	reason := reasonAgentIncompatible
+	message := fmt.Sprintf("agent advertised no schema version (a build predating the compatibility gate); server requires %d", agentapi.PlanSchemaVersion)
+	switch {
+	case compatible:
+		status = metav1.ConditionTrue
+		reason = reasonAgentCompatible
+		message = fmt.Sprintf("agent schema version %d matches the server's %d", version, agentapi.PlanSchemaVersion)
+	case ok:
+		message = fmt.Sprintf("agent advertised schema version %d, server requires %d", version, agentapi.PlanSchemaVersion)
+	}
+
+	key := client.ObjectKeyFromObject(machine)
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		current := &keziov1alpha1.Machine{}
+		if err := s.Client.Get(ctx, key, current); err != nil {
+			return err
+		}
+		existing := apimeta.FindStatusCondition(current.Status.Conditions, keziov1alpha1.MachineConditionAgentCompatible)
+		if existing != nil && existing.Status == status && existing.Reason == reason && existing.Message == message {
+			return nil
+		}
+		apimeta.SetStatusCondition(&current.Status.Conditions, metav1.Condition{
+			Type:               keziov1alpha1.MachineConditionAgentCompatible,
+			Status:             status,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: current.Generation,
+			LastTransitionTime: metav1.NewTime(s.now()),
+		})
+		return s.Client.Status().Update(ctx, current)
+	})
+	return compatible, err
 }
 
 // maxProgressBodyBytes bounds the progress request body: a snapshot of

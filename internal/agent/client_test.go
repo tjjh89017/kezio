@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
@@ -106,6 +107,27 @@ func TestClient_Next_SendsSessionTokenAndParsesDeployPlan(t *testing.T) {
 	}
 	if len(resp.Plan.OS.Partitions) != 1 {
 		t.Fatalf("len(Plan.OS.Partitions) = %d, want 1", len(resp.Plan.OS.Partitions))
+	}
+}
+
+// TestClient_Next_AdvertisesSchemaVersion guards the server-side
+// compatibility gate's other half: internal/agentserver.handleNext can
+// only withhold a plan from a version-mismatched agent if this client
+// actually sends its supported version on every poll.
+func TestClient_Next_AdvertisesSchemaVersion(t *testing.T) {
+	var gotVersion string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotVersion = r.Header.Get(agentapi.AgentSchemaVersionHeader)
+		_ = json.NewEncoder(w).Encode(agentapi.NextResponse{Action: agentapi.ActionWait})
+	}))
+	defer server.Close()
+
+	c := NewClient(server.URL)
+	if _, err := c.Next(context.Background(), "node-01", "sess-token"); err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if want := strconv.Itoa(agentapi.PlanSchemaVersion); gotVersion != want {
+		t.Errorf("%s header = %q, want %q", agentapi.AgentSchemaVersionHeader, gotVersion, want)
 	}
 }
 

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -108,7 +109,11 @@ func (c *Client) Register(ctx context.Context, token string, hardware *keziov1al
 // Next polls the controller for this machine's next action,
 // authenticating with the session token Register returned. It returns
 // the decoded NextResponse: Action is agentapi.ActionWait or
-// agentapi.ActionDeploy, with Plan populated in the latter case.
+// agentapi.ActionDeploy, with Plan populated in the latter case. Every
+// call advertises this agent's supported plan schema version
+// (agentapi.AgentSchemaVersionHeader, agentapi.PlanSchemaVersion) so the
+// controller can withhold a plan this build would misread - see
+// agentapi's package doc comment for the full versioning rule.
 func (c *Client) Next(ctx context.Context, machineName, sessionToken string) (agentapi.NextResponse, error) {
 	path := agentapi.NextPathPrefix + machineName + agentapi.NextPathSuffix
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url(path), nil)
@@ -116,6 +121,7 @@ func (c *Client) Next(ctx context.Context, machineName, sessionToken string) (ag
 		return agentapi.NextResponse{}, fmt.Errorf("building poll request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	req.Header.Set(agentapi.AgentSchemaVersionHeader, strconv.Itoa(agentapi.PlanSchemaVersion))
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {

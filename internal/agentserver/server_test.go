@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -307,10 +308,26 @@ func newTestMachineWithSession(now time.Time) *keziov1alpha1.Machine {
 	}
 }
 
+// doNext issues a GET .../next request advertising the current
+// agentapi.PlanSchemaVersion, the same as a real, up-to-date agent -
+// every test in this file that is not specifically exercising the
+// compatibility gate wants that default. doNextWithSchemaVersion covers
+// the gate's own tests (an absent or mismatched version).
 func doNext(handler http.Handler, name, token string) *httptest.ResponseRecorder {
+	return doNextWithSchemaVersion(handler, name, token, strconv.Itoa(agentapi.PlanSchemaVersion))
+}
+
+// doNextWithSchemaVersion issues a GET .../next request advertising
+// schemaVersion verbatim in agentapi.AgentSchemaVersionHeader; an empty
+// string omits the header entirely, simulating an agent built before it
+// existed.
+func doNextWithSchemaVersion(handler http.Handler, name, token, schemaVersion string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, agentapi.NextPathPrefix+name+agentapi.NextPathSuffix, nil)
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if schemaVersion != "" {
+		req.Header.Set(agentapi.AgentSchemaVersionHeader, schemaVersion)
 	}
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -381,6 +398,142 @@ func TestHandleNext_ProvisioningReadyReturnsDeployPlan(t *testing.T) {
 	}
 	if len(resp.Plan.OS.Partitions) != 1 {
 		t.Fatalf("len(Plan.OS.Partitions) = %d, want 1", len(resp.Plan.OS.Partitions))
+	}
+	if resp.Plan.SchemaVersion != agentapi.PlanSchemaVersion {
+		t.Fatalf("Plan.SchemaVersion = %d, want %d", resp.Plan.SchemaVersion, agentapi.PlanSchemaVersion)
+	}
+
+	var stored keziov1alpha1.Machine
+	if err := c.Get(context.Background(), types.NamespacedName{Name: testMachineName}, &stored); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	cond := apimeta.FindStatusCondition(stored.Status.Conditions, keziov1alpha1.MachineConditionAgentCompatible)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Fatalf("AgentCompatible condition = %+v, want True for a matching schema version", cond)
+	}
+}
+
+// provisioningReadyMachineAndClient builds the same ready-to-deploy
+// Machine/Image/ImageLayout fixture TestHandleNext_ProvisioningReadyReturnsDeployPlan
+// uses, factored out so the compatibility-gate tests below can reuse it
+// without duplicating the setup.
+func provisioningReadyMachineAndClient(t *testing.T, now time.Time) (client.Client, *Server) {
+	t.Helper()
+	imageRef := keziov1alpha1.NameRef{Namespace: "default", Name: "os-image"}
+	machine := newTestMachineWithSession(now)
+	machine.Spec.ImageRef = &imageRef
+	machine.Status.State = keziov1alpha1.MachineStateProvisioning
+	machine.Status.Provisioning = &keziov1alpha1.MachineProvisioningStatus{
+		Image: &keziov1alpha1.MachineProvisionedImage{
+			ImageRef:   imageRef,
+			TargetDisk: "/dev/nvme0n1",
+		},
+	}
+	image, cm := readyImage("os-image", "{}", []keziov1alpha1.ImagePartitionStatus{
+		{Number: 1, Role: keziov1alpha1.PartitionRoleData, FSType: "ext4"},
+	})
+	c := newPlanTestClient(t, machine, image, cm)
+	s := New(c, Config{TrackerURL: testTrackerURL})
+	s.Now = func() time.Time { return now }
+	return c, s
+}
+
+// TestHandleNext_AbsentSchemaVersionHoldsAtWaitAndSetsIncompatibleCondition
+// exercises the exact regression this gate exists for: an agent built
+// before AgentSchemaVersionHeader existed sends no version at all. Even
+// with every other readiness condition met (the fixture this test shares
+// with TestHandleNext_ProvisioningReadyReturnsDeployPlan would otherwise
+// hand out a plan), the server must answer ActionWait and record why.
+func TestHandleNext_AbsentSchemaVersionHoldsAtWaitAndSetsIncompatibleCondition(t *testing.T) {
+	now := time.Now()
+	c, s := provisioningReadyMachineAndClient(t, now)
+
+	rec := doNextWithSchemaVersion(s.Handler(), testMachineName, testSessionToken, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", rec.Code, rec.Body.String())
+	}
+	var resp agentapi.NextResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if resp.Action != agentapi.ActionWait || resp.Plan != nil {
+		t.Fatalf("Action/Plan = %q/%+v, want %q/nil despite the deploy otherwise being ready", resp.Action, resp.Plan, agentapi.ActionWait)
+	}
+
+	var stored keziov1alpha1.Machine
+	if err := c.Get(context.Background(), types.NamespacedName{Name: testMachineName}, &stored); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	cond := apimeta.FindStatusCondition(stored.Status.Conditions, keziov1alpha1.MachineConditionAgentCompatible)
+	if cond == nil || cond.Status != metav1.ConditionFalse {
+		t.Fatalf("AgentCompatible condition = %+v, want False for an agent advertising no schema version", cond)
+	}
+	if cond.Reason != "AgentIncompatible" {
+		t.Fatalf("Reason = %q, want AgentIncompatible", cond.Reason)
+	}
+	if !strings.Contains(cond.Message, strconv.Itoa(agentapi.PlanSchemaVersion)) {
+		t.Fatalf("Message = %q, want it to name the server's required schema version %d", cond.Message, agentapi.PlanSchemaVersion)
+	}
+}
+
+// TestHandleNext_MismatchedSchemaVersionHoldsAtWait covers the other
+// incompatible case: the agent advertises a version, but not the one the
+// server requires.
+func TestHandleNext_MismatchedSchemaVersionHoldsAtWait(t *testing.T) {
+	now := time.Now()
+	_, s := provisioningReadyMachineAndClient(t, now)
+
+	rec := doNextWithSchemaVersion(s.Handler(), testMachineName, testSessionToken, strconv.Itoa(agentapi.PlanSchemaVersion+1))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", rec.Code, rec.Body.String())
+	}
+	var resp agentapi.NextResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if resp.Action != agentapi.ActionWait || resp.Plan != nil {
+		t.Fatalf("Action/Plan = %q/%+v, want %q/nil for a mismatched schema version", resp.Action, resp.Plan, agentapi.ActionWait)
+	}
+}
+
+// TestHandleNext_CompatibleAgentClearsPriorIncompatibleCondition proves
+// the condition lifecycle's other direction: once a compatible agent
+// polls, a previously recorded incompatible condition flips back to
+// True rather than being stuck False forever.
+func TestHandleNext_CompatibleAgentClearsPriorIncompatibleCondition(t *testing.T) {
+	now := time.Now()
+	c, s := provisioningReadyMachineAndClient(t, now)
+
+	// First poll: an old agent with no version, recording the
+	// incompatible condition.
+	doNextWithSchemaVersion(s.Handler(), testMachineName, testSessionToken, "")
+
+	var midway keziov1alpha1.Machine
+	if err := c.Get(context.Background(), types.NamespacedName{Name: testMachineName}, &midway); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if cond := apimeta.FindStatusCondition(midway.Status.Conditions, keziov1alpha1.MachineConditionAgentCompatible); cond == nil || cond.Status != metav1.ConditionFalse {
+		t.Fatalf("AgentCompatible condition after the incompatible poll = %+v, want False", cond)
+	}
+
+	// Second poll: a compatible agent (a fresh live boot, or a reflashed
+	// image) - the condition must flip to True and the plan must flow.
+	rec := doNext(s.Handler(), testMachineName, testSessionToken)
+	var resp agentapi.NextResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if resp.Action != agentapi.ActionDeploy || resp.Plan == nil {
+		t.Fatalf("Action/Plan = %q/%+v, want %q with a plan once a compatible agent polls", resp.Action, resp.Plan, agentapi.ActionDeploy)
+	}
+
+	var stored keziov1alpha1.Machine
+	if err := c.Get(context.Background(), types.NamespacedName{Name: testMachineName}, &stored); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	cond := apimeta.FindStatusCondition(stored.Status.Conditions, keziov1alpha1.MachineConditionAgentCompatible)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Fatalf("AgentCompatible condition after the compatible poll = %+v, want True", cond)
 	}
 }
 

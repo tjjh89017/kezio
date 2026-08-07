@@ -51,6 +51,7 @@ func newPlanTestClient(t *testing.T, objs ...client.Object) client.Client {
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithIndex(&keziov1alpha1.Machine{}, MachineNameIndexField, IndexMachineName).
+		WithStatusSubresource(&keziov1alpha1.Machine{}).
 		WithObjects(objs...).
 		Build()
 }

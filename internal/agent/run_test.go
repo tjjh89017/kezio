@@ -104,6 +104,7 @@ func (r *countingRunner) Run(context.Context, []byte, string, ...string) ([]byte
 func noContentPlan() *agentapi.DeployPlan {
 	const fixtureSfdiskJSON = `{"partitiontable":{"label":"gpt","sectorsize":512,"partitions":[{"node":"/dev/loop0p1","start":2048,"size":2048,"type":"0FC63DAF-8483-4772-8E79-3D69D8477DE4"}]}}`
 	return &agentapi.DeployPlan{
+		SchemaVersion: agentapi.PlanSchemaVersion,
 		OS: &agentapi.ImageDeployPlan{
 			ImageRef:   keziov1alpha1.NameRef{Name: "os-image"},
 			Disk:       "/dev/nvme0n1",
@@ -168,6 +169,75 @@ func TestPollLoop_ExecutesDeployPlanOnceAndReportsProgress(t *testing.T) {
 	}
 	if progressCalls.Load() == 0 {
 		t.Fatal("no progress was ever reported to the controller")
+	}
+}
+
+// TestPollLoop_RefusesPlanWithUnsupportedSchemaVersion exercises the
+// agent's own half of the double-ended compatibility check: even though
+// internal/agentserver's own gate should make this unreachable in
+// practice (this test's stub controller predates that gate), a received
+// plan is untrusted input, so a SchemaVersion mismatch must be refused
+// without ever calling Executor.Execute - no disk touched - and reported
+// as a deploy-step failure so the controller's Deployer does not poll
+// forever.
+func TestPollLoop_RefusesPlanWithUnsupportedSchemaVersion(t *testing.T) {
+	var progressReqs []agentapi.ProgressRequest
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/next"):
+			plan := noContentPlan()
+			plan.SchemaVersion = agentapi.PlanSchemaVersion + 1
+			_ = json.NewEncoder(w).Encode(agentapi.NextResponse{Action: agentapi.ActionDeploy, Plan: plan})
+		case strings.HasSuffix(r.URL.Path, "/progress"):
+			var req agentapi.ProgressRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			progressReqs = append(progressReqs, req)
+			_ = json.NewEncoder(w).Encode(agentapi.ProgressResponse{})
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	client := NewClient(server.URL)
+	runner := &countingRunner{}
+	executor := &deploy.Executor{Runner: runner, PollInterval: time.Millisecond}
+	cfg, lines := collectLogs()
+	cfg.Executor = executor
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+
+	if err := pollLoop(ctx, client, cfg, RegisterResult{MachineName: "node-01", SessionToken: "sess"}, 20*time.Millisecond); err != nil {
+		t.Fatalf("pollLoop returned %v, want nil", err)
+	}
+
+	if got := runner.calls.Load(); got != 0 {
+		t.Fatalf("Runner was called %d times, want 0 (a version-mismatched plan must never be executed)", got)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(progressReqs) == 0 {
+		t.Fatal("no progress report was sent for the refused plan")
+	}
+	last := progressReqs[len(progressReqs)-1]
+	if last.Step != agentapi.DeployStepFailed {
+		t.Fatalf("last progress Step = %q, want %q", last.Step, agentapi.DeployStepFailed)
+	}
+	if !strings.Contains(last.StepMessage, "schema version") {
+		t.Fatalf("StepMessage = %q, want it to mention the schema version mismatch", last.StepMessage)
+	}
+
+	sawRefusal := false
+	for _, l := range *lines {
+		if strings.Contains(l, "refusing deploy plan") {
+			sawRefusal = true
+		}
+	}
+	if !sawRefusal {
+		t.Errorf("logs = %v, want a log line about refusing the plan", *lines)
 	}
 }
 

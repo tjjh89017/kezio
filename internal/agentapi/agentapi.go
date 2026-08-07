@@ -22,6 +22,21 @@ limitations under the License.
 // stays free of everything the manager process needs (client-go,
 // controller-runtime, and their transitive weight) that a binary running
 // in a minimal live environment has no use for.
+//
+// Versioning: DeployPlan.SchemaVersion carries PlanSchemaVersion, bumped
+// whenever a change to DeployPlan's shape would make an older agent
+// misread a plan a newer one built (for example, PlanPartition.Torrent
+// []byte being replaced by TorrentURL string - a live image built before
+// that change decoded the new plan without error, found no torrent
+// bytes, and mkfs'd every content partition instead of restoring it).
+// The agent advertises the version it supports on every GET .../next poll
+// (AgentSchemaVersionHeader); internal/agentserver refuses to hand out a
+// plan - answering ActionWait instead, with a loud MachineConditionAgent
+// Compatible condition - to any agent whose advertised version is absent
+// or does not match, and internal/agent's own poll loop refuses to
+// execute a plan whose SchemaVersion it does not support even if one
+// somehow arrives, so a version mismatch never lands as a data-destroying
+// misread on either end.
 package agentapi
 
 import (
@@ -43,6 +58,25 @@ const (
 	// way NextPathSuffix does: "/agent/machines/node-01/progress".
 	ProgressPathSuffix = "/progress"
 )
+
+// PlanSchemaVersion is the current DeployPlan wire shape's version - see
+// the package doc comment's "Versioning" section. Version 1 is
+// retroactively the inline-torrent era (PlanPartition.Torrent []byte);
+// this is 2, the TorrentURL-based shape every field in this file
+// currently describes. Bump it, and update the package doc comment's
+// versioning paragraph, on the next breaking change to any type in this
+// file.
+const PlanSchemaVersion = 2
+
+// AgentSchemaVersionHeader is the HTTP header kezio-agent sets on every
+// GET .../next poll (internal/agent.Client.Next) carrying the
+// PlanSchemaVersion value it supports, as a decimal integer.
+// internal/agentserver's handleNext reads it before ever building a
+// plan: a missing header (every agent built before this header existed)
+// or a value that does not equal the server's own PlanSchemaVersion
+// means the plan is withheld - see MachineConditionAgentCompatible's use
+// in internal/agentserver.
+const AgentSchemaVersionHeader = "X-Kezio-Agent-Schema-Version"
 
 // RegisterRequest is the POST /agent/register request body: the full
 // hardware inventory the agent collected from the live OS. It reuses
@@ -105,6 +139,13 @@ type ErrorResponse struct {
 // (status.provisioning.{image,dataImages[]}.targetDisk) and every
 // referenced Image Ready.
 type DeployPlan struct {
+	// SchemaVersion is PlanSchemaVersion at the time internal/agentserver
+	// built this plan. It is always set - never left at its zero value -
+	// so an agent decoding a plan built before this field existed reads
+	// 0, which never equals a real PlanSchemaVersion and so is refused
+	// the same as any other unsupported version (see the package doc
+	// comment's "Versioning" section).
+	SchemaVersion int `json:"schemaVersion"`
 	// OS is the OS image's plan, present when the Machine has an
 	// imageRef.
 	OS *ImageDeployPlan `json:"os,omitempty"`
