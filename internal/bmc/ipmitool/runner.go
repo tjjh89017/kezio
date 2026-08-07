@@ -32,12 +32,9 @@ import (
 var errIpmitoolNotFound = errors.New("ipmitool not found in PATH")
 
 // runner executes one ipmitool invocation and returns its stdout. driver
-// calls ipmitool through this narrow interface instead of calling os/exec
-// directly, so PowerOn/PowerOff/PowerCycle/GetPowerState/SetOneTimePXEBoot
-// are unit-testable against a fake runner that records the exact argv
-// each method issued, without a real BMC or the ipmitool binary present -
-// the same split internal/agent/deploy.Runner uses for the commands it
-// shells out to.
+// calls ipmitool through this narrow interface instead of os/exec
+// directly, so its methods are unit-testable against a fake runner with
+// no real BMC or ipmitool binary present.
 type runner interface {
 	// Run executes ipmitool with args and returns its stdout. A non-nil
 	// error means ipmitool failed to start or exited non-zero; the error
@@ -62,15 +59,8 @@ func (r execRunner) Run(ctx context.Context, args ...string) (string, error) {
 	if path == "" {
 		resolved, err := exec.LookPath("ipmitool")
 		if err != nil {
-			// The default manager image does not carry ipmitool - only the
-			// opt-in ipmitool-enabled image (docker/manager-ipmi/Dockerfile)
-			// does. Surface that as an actionable error instead of the raw
-			// "executable file not found in $PATH" LookPath gives, so an
-			// operator who hits this knows what to do next rather than
-			// having to guess: switch this Machine to ipmi:// (the pure-Go
-			// driver, works in the default image), or to redfish://, or
-			// deploy the ipmitool-enabled manager image if ipmitool://
-			// itself is genuinely needed.
+			// The default manager image doesn't carry ipmitool; surface an
+			// actionable error instead of LookPath's raw "not found" one.
 			return "", fmt.Errorf("ipmitool: %w: the default manager image does not carry ipmitool; use ipmi:// (pure-Go) or redfish://, or deploy the ipmitool-enabled manager image (see docker/manager-ipmi/Dockerfile): %w", errIpmitoolNotFound, err)
 		}
 		path = resolved
@@ -82,11 +72,9 @@ func (r execRunner) Run(ctx context.Context, args ...string) (string, error) {
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		// args holds -U/-P with plaintext BMC credentials; redactArgs
-		// strips them before they can end up in this (or any caller's)
-		// error message. stderr is ipmitool's/the BMC's own output and
-		// is included verbatim - ipmitool does not echo back the
-		// password it was given, so this is not a second leak path.
+		// args holds -U/-P plaintext credentials; redactArgs strips them
+		// before use in an error. stderr is included verbatim - ipmitool
+		// does not echo back the password, so this isn't a second leak path.
 		return "", fmt.Errorf("running %s %s: %s: %w",
 			path, strings.Join(redactArgs(args), " "), strings.TrimSpace(stderr.String()), err)
 	}

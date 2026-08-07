@@ -46,22 +46,15 @@ const DefaultDnsmasqPath = "/usr/sbin/dnsmasq"
 const DefaultRunDir = "/run/bootd"
 
 // Dnsmasq renders a dnsmasq configuration (see RenderDnsmasqConf) and
-// supervises a dnsmasq child process running it: start as a
-// foreground child, forward its log lines into bootd's own logger,
-// restart it with backoff if it crashes, and propagate a fatal error
-// (stopping the whole manager) when it cannot stay up at all.
+// supervises a dnsmasq child process running it, restarting with backoff
+// on crash and propagating a fatal error if it cannot stay up.
 //
-// It also implements MACSink: SetAllowedMACs rewrites the
-// dhcp-hostsfile and SIGHUPs the child, which is how the Machine
-// informer's MAC gate reaches dnsmasq at runtime - dnsmasq re-reads
-// hostsfiles on SIGHUP but not its main config, so the hostsfile is
-// the single dynamic input and everything else stays fixed until the
-// process restarts.
+// It also implements MACSink: SetAllowedMACs rewrites the dhcp-hostsfile
+// and SIGHUPs the child - dnsmasq re-reads hostsfiles on SIGHUP but not
+// its main config, so the hostsfile is the only dynamic input.
 //
-// The zero-value hostsfile written at startup is empty: until the
-// Machine informer syncs and pushes a snapshot (see MACCache.Start),
-// no MAC receives boot info - the same fail-secure default the
-// in-process DHCP responder had.
+// The hostsfile written at startup is empty: until the Machine informer
+// syncs and pushes a snapshot (MACCache.Start), no MAC boots - fail-secure.
 type Dnsmasq struct {
 	// Config is the dnsmasq configuration to render. Required fields
 	// per RenderDnsmasqConf.
@@ -169,12 +162,10 @@ func (d *Dnsmasq) Start(ctx context.Context) error {
 		return fmt.Errorf("writing initial dhcp-hostsfile: %w", err)
 	}
 
-	// The dnsmasq child needs the same capabilities bootd's own
-	// container was granted (see caps.go for which and why). bootd
-	// runs as uid 0 in the pod, so execve alone re-grants them to the
-	// child from the bounding set; the ambient raise is best-effort
-	// belt-and-braces for any non-root environment (see
-	// raiseAmbientCaps).
+	// The dnsmasq child needs bootd's own capabilities (see caps.go).
+	// bootd runs as uid 0, so execve alone re-grants them from the
+	// bounding set; raiseAmbientCaps is best-effort belt-and-braces
+	// for non-root environments.
 	raiseAmbientCaps(log)
 
 	go d.hostsfileLoop(ctx, log, runDir, initial)
@@ -219,20 +210,15 @@ func (d *Dnsmasq) Start(ctx context.Context) error {
 // ctx cancellation the child is SIGTERMed and awaited before
 // returning.
 func (d *Dnsmasq) runChild(ctx context.Context, log logr.Logger, binary, confPath string) (exitErr error, fatal error) {
-	// --no-daemon rather than --keep-in-foreground: stay a direct
-	// child (supervision and SIGHUP need the pid), log to stderr, and
-	// skip the pidfile dance entirely.
+	// --no-daemon: stay a direct child (supervision/SIGHUP need the
+	// pid), log to stderr, skip the pidfile.
 	//
-	// --user=root: started as root, dnsmasq would otherwise drop to
-	// "nobody" after startup - a setuid/setgid that needs
-	// CAP_SETUID/CAP_SETGID, which the pod deliberately does not grant
-	// (its capability set is exactly the three network capabilities in
-	// caps.go, everything else dropped). Without this flag dnsmasq dies
-	// at startup on that failed drop. Keeping the child at uid 0 with
-	// only those three capabilities in its bounding set is the tighter
-	// posture; the same flag kube-dns ran its dnsmasq with, for the
-	// same reason. Started as non-root (the lab's setpriv path),
-	// dnsmasq never attempts a drop and the flag is inert.
+	// --user=root: started as root, dnsmasq otherwise drops to "nobody"
+	// via setuid/setgid, which needs CAP_SETUID/CAP_SETGID - capabilities
+	// the pod deliberately doesn't grant (only the three in caps.go).
+	// Without this flag dnsmasq dies at startup on the failed drop; same
+	// flag kube-dns uses, for the same reason. Inert when already
+	// non-root (the lab's setpriv path).
 	cmd := exec.Command(binary, "--conf-file="+confPath, "--no-daemon", "--user=root")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -275,12 +261,9 @@ func (d *Dnsmasq) runChild(ctx context.Context, log logr.Logger, binary, confPat
 	return exitErr, nil
 }
 
-// hostsfileLoop applies allowlist changes for the lifetime of ctx:
-// wait for a dirty signal, debounce briefly so a burst of informer
-// events becomes one rewrite, then atomically rewrite the hostsfile
-// and SIGHUP the child so dnsmasq re-reads it. A rewrite that renders
-// byte-identical content (duplicate push) skips the SIGHUP. If no
-// child is running at signal time (mid-restart), the rewrite still
+// hostsfileLoop debounces a burst of dirty signals into one atomic
+// hostsfile rewrite + SIGHUP. Byte-identical content skips the SIGHUP.
+// If no child is running at signal time (mid-restart), the rewrite still
 // happens and the next child reads the fresh file at startup.
 func (d *Dnsmasq) hostsfileLoop(ctx context.Context, log logr.Logger, runDir, lastWritten string) {
 	path := HostsfilePath(runDir)
@@ -325,13 +308,9 @@ func (d *Dnsmasq) hostsfileLoop(ctx context.Context, log logr.Logger, runDir, la
 	}
 }
 
-// forwardLines copies each line of r into log, so dnsmasq's own
-// output (including its per-request log-dhcp decision lines) lands in
-// bootd's log stream with everything else. A read error other than
-// EOF (bufio.Scanner.Err() returns nil on EOF) ends forwarding early
-// and is itself logged, rather than silently dropped - that pipe is
-// the only channel dnsmasq's own diagnostics reach the operator
-// through, so its own failure must not go unremarked.
+// forwardLines copies each line of r into log. A read error other than
+// EOF ends forwarding early and is itself logged - that pipe is the
+// only channel dnsmasq's diagnostics reach the operator through.
 func forwardLines(log logr.Logger, r io.Reader) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {

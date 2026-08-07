@@ -60,45 +60,29 @@ type Config struct {
 	// client. Empty means DefaultBootFilename.
 	BootFilename string
 
-	// RelayServerIP optionally enables DHCP relaying: every DHCP
-	// request heard on the provisioning network is also relayed
-	// (dhcp-relay) to this existing site DHCP server, which then owns
-	// IP lease assignment for the segment. Empty (the default) means
-	// proxyDHCP only - bootd never touches lease traffic and the
-	// site's DHCP server must be reachable on the segment by other
-	// means (its own presence or an external relay).
+	// RelayServerIP optionally relays every DHCP request heard on the
+	// provisioning network (dhcp-relay) to this existing site DHCP
+	// server, which owns lease assignment. Empty (default) means
+	// proxyDHCP only - bootd never touches lease traffic.
 	RelayServerIP net.IP
 
 	// TFTPDir is the local filesystem directory the in-process TFTP
 	// server (see tftp.go) serves shimx64.efi and grubx64.efi from.
 	TFTPDir string
 
-	// AnswerAll disables the MAC gate: the rendered pxe-service (or, in
-	// LeaseMode, dhcp-boot) drops its tag:kezio guard and the
-	// dhcp-ignore line is omitted, so every PXE client on the segment
-	// is answered regardless of whether its MAC matches an enrolled
-	// Machine. This is off by default; turning it on trades the
-	// fail-secure default for answering unconditionally, appropriate
-	// only for a site that deliberately wants bootd to net-boot every
-	// unknown machine on the segment (for example, an inventory-only
-	// lab).
+	// AnswerAll disables the MAC gate (dhcp-ignore is omitted, tag:kezio
+	// guard dropped), answering every PXE client regardless of
+	// enrollment. Off by default; trades the fail-secure default for a
+	// site that deliberately wants to net-boot every unknown machine
+	// (e.g. an inventory-only lab).
 	AnswerAll bool
 
-	// LeaseMode switches the rendered dnsmasq instance from proxyDHCP
-	// to serving full DHCP leases: the segment's own DHCP authority,
-	// for a provisioning segment that has no other DHCP server at all.
-	// Off by default, matching the assumption everywhere else in this
-	// package that lease assignment belongs to a site's existing DHCP
-	// server, reached either directly or via RelayServerIP.
-	//
-	// The MAC gate does not change: dhcp-hostsfile/dhcp-ignore still
-	// answer only enrolled MACs, exactly as in proxy mode. A site that
-	// also needs to hand out addresses to unenrolled devices on the
-	// same segment runs its own DHCP server for them and points bootd
-	// at it with RelayServerIP instead - kezio never becomes the
-	// segment's general-purpose DHCP authority. Mutually exclusive
-	// with RelayServerIP: relaying to an existing lease server makes
-	// no sense once bootd's own dnsmasq is the lease server.
+	// LeaseMode switches dnsmasq from proxyDHCP to full DHCP leases -
+	// the segment's own DHCP authority, for a segment with no other
+	// DHCP server. Off by default, since lease assignment normally
+	// belongs to a site's existing server (directly or via
+	// RelayServerIP). The MAC gate is unchanged (still enrolled-MAC
+	// only). Mutually exclusive with RelayServerIP.
 	LeaseMode bool
 
 	// LeaseRangeStart and LeaseRangeEnd optionally bound the dhcp-range

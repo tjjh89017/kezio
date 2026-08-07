@@ -180,10 +180,9 @@ func TestRenderDnsmasqConf_LeaseModeExplicitRange(t *testing.T) {
 	}
 }
 
-// TestRenderDnsmasqConf_LeaseModeMACGateUnchanged pins the user
-// decision that lease mode is one knob, not two: the same
-// dhcp-hostsfile/dhcp-ignore pair gates lease mode exactly as it gates
-// proxy mode, and AnswerAll drops it the same way in both.
+// TestRenderDnsmasqConf_LeaseModeMACGateUnchanged: the same
+// dhcp-hostsfile/dhcp-ignore pair gates lease mode exactly as proxy mode,
+// and AnswerAll drops it the same way in both.
 func TestRenderDnsmasqConf_LeaseModeMACGateUnchanged(t *testing.T) {
 	cfg := testConfig()
 	cfg.LeaseMode = true
@@ -279,12 +278,9 @@ func TestRenderHostsfile(t *testing.T) {
 	}
 }
 
-// TestRenderGrubConfig pins the exact bootstrap config TFTPServer hands
-// the netboot GRUB image at GrubConfigPath: one configfile line in
-// GRUB's network file syntax (bare URLs are unopenable by GRUB - see
-// bootserver.GrubNetPath), pointing at the boot config server's per-MAC
-// route with ${net_default_mac} left for the client to expand. No boot
-// logic beyond the handoff - that all lives in the fetched config.
+// TestRenderGrubConfig pins the bootstrap config at GrubConfigPath: one
+// configfile line in GRUB's network file syntax pointing at the boot
+// config server's per-MAC route, ${net_default_mac} left for the client.
 func TestRenderGrubConfig(t *testing.T) {
 	got, err := RenderGrubConfig("http://192.0.2.1:8090")
 	if err != nil {
@@ -297,9 +293,9 @@ func TestRenderGrubConfig(t *testing.T) {
 	}
 }
 
-// TestRenderGrubConfig_RejectsNonHTTP proves a boot config URL GRUB
-// could never fetch from (its netboot image has no TLS stack) fails at
-// render time - bootd's startup - not as a silent boot-time dead end.
+// TestRenderGrubConfig_RejectsNonHTTP proves an unfetchable boot config
+// URL (GRUB's netboot image has no TLS stack) fails at render time, not
+// as a silent boot-time dead end.
 func TestRenderGrubConfig_RejectsNonHTTP(t *testing.T) {
 	for _, url := range []string{"https://192.0.2.1:8090", "not a url", ""} {
 		if got, err := RenderGrubConfig(url); err == nil {

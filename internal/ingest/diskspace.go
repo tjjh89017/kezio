@@ -56,15 +56,12 @@ func realStatfs(path string) (uint64, error) {
 // root's filesystem does not have enough available space for the
 // partition about to be cloned.
 //
-// partitionBytes - the partition's full raw size, already known to the
-// pipeline from the partition table dump (see ParsedPartition.SizeBytes)
-// - is used as the estimate because it is a safe upper bound: partclone
-// -T only ever emits content for the partition's used blocks, which can
-// never exceed the partition's own size, so this can only over-estimate
-// the actual write, never under-estimate it and let a doomed clone start
-// anyway. It is not exact (a mostly-empty partition needs far less), but
-// a clear, early, if conservative, rejection here is the goal - not
-// reproducing partclone's own space accounting.
+// partitionBytes - the partition's full raw size (ParsedPartition.
+// SizeBytes) - is used as the estimate because it's a safe upper bound:
+// partclone only ever emits content for used blocks, never more than the
+// partition's own size, so this can over-estimate but never let a doomed
+// clone start. It is not exact, but a conservative early rejection is the
+// goal, not reproducing partclone's own space accounting.
 //
 // statfs nil means realStatfs; tests supply a fake to simulate an
 // arbitrary reported free-space figure.

@@ -18,30 +18,20 @@ package bmc
 
 import "fmt"
 
-// Well-known keys inside the Secret named by
-// Machine.spec.bmc.credentialsSecretRef. These follow the same convention
-// Kubernetes itself uses for the builtin "kubernetes.io/basic-auth" Secret
-// type, so an operator can reuse that Secret type verbatim for a Machine's
-// BMC credentials.
+// Keys match the builtin "kubernetes.io/basic-auth" Secret type, so an
+// operator can reuse that type verbatim for a Machine's BMC credentials
+// instead of inventing a kezio-specific shape.
 const (
 	SecretKeyUsername = "username"
 	SecretKeyPassword = "password"
 )
 
-// CredentialsFromSecretData extracts BMC credentials from a Secret's Data
-// map (corev1.Secret.Data - a map[string][]byte, so callers do not need to
-// import a Kubernetes API type into this package just to call this
-// helper). It looks up SecretKeyUsername and SecretKeyPassword; both keys
-// must be present and non-empty, or it returns an error naming the missing
-// key(s) but never the Secret's contents.
-//
-// The Secret referenced by Machine.spec.bmc.credentialsSecretRef is
-// expected to hold exactly these two keys - "username" and "password" -
-// which matches the builtin "kubernetes.io/basic-auth" Secret type, so an
-// operator can use that type directly rather than inventing a
-// kezio-specific shape (see config/samples for a placeholder example). A
-// Secret missing either key fails loudly here, at resolve time, rather
-// than connecting to the BMC with an empty username or password.
+// CredentialsFromSecretData takes a Secret's Data map directly
+// (map[string][]byte) so callers don't need to import a Kubernetes API
+// type just to call this. Both keys must be present and non-empty, or it
+// returns an error naming the missing key(s) but never the Secret's
+// contents - failing loudly here rather than connecting to the BMC with an
+// empty username or password.
 func CredentialsFromSecretData(data map[string][]byte) (Credentials, error) {
 	username, password := data[SecretKeyUsername], data[SecretKeyPassword]
 	switch {

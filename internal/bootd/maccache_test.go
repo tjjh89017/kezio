@@ -129,13 +129,10 @@ func TestMACCache_UpdateMovesMAC(t *testing.T) {
 	wantLast(t, sink, []string{"aa:bb:cc:dd:ee:02"})
 }
 
-// TestMACCache_CaseInsensitiveMAC is a table-driven check of the case
-// variant this cache must not be fooled by: Machine.spec.bootMACAddress
-// is validated case-insensitively (see keziov1alpha1.MACAddressPattern)
-// so an operator or seeder can write it in either case, while dnsmasq's
-// dhcp-hostsfile matching wants one canonical spelling. add/remove
-// normalize through bootserver.NormalizeMAC, so every case variant
-// below must land in the pushed allowlist as the same lower-case MAC.
+// TestMACCache_CaseInsensitiveMAC: bootMACAddress is validated
+// case-insensitively, but dnsmasq's hostsfile wants one canonical
+// spelling, so every case variant must land in the pushed allowlist as
+// the same lower-case MAC (via bootserver.NormalizeMAC).
 func TestMACCache_CaseInsensitiveMAC(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -171,11 +168,9 @@ func TestMACCache_MalformedMACIgnored(t *testing.T) {
 	}
 }
 
-// TestMACCache_StartGatesOnSync exercises NewMACCache/Start end to end
-// against a fake Informers implementation: nothing may reach the sink
-// until WaitForCacheSync succeeds, and the first post-sync push must
-// carry a Machine added through the informer (not through the
-// unexported onAdd helper directly) before Start observed sync.
+// TestMACCache_StartGatesOnSync: nothing reaches the sink until
+// WaitForCacheSync succeeds, and the first post-sync push carries a
+// Machine added through the informer before Start observed sync.
 func TestMACCache_StartGatesOnSync(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := keziov1alpha1.AddToScheme(scheme); err != nil {

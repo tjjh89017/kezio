@@ -42,21 +42,17 @@ type MACSink interface {
 }
 
 // MACCache keeps a local, live-updated set of every enrolled Machine's
-// normalized boot MAC address, fed by a controller-runtime cache
-// informer rather than a List/Get call per event - bootd runs
-// per-site, outside the manager process, and its MAC allowlist must
-// track Machine churn without putting per-boot load on the API server.
-// Every change is pushed to the configured MACSink, which is how the
-// dnsmasq MAC gate (the dhcp-hostsfile) stays current.
+// normalized boot MAC address, fed by a controller-runtime informer
+// rather than a List/Get per event, so the MAC allowlist tracks Machine
+// churn without per-boot API server load. Every change is pushed to the
+// configured MACSink (the dnsmasq dhcp-hostsfile).
 //
-// Fail-secure by construction: nothing is ever pushed to the sink -
-// which therefore keeps its initial, empty allowlist, booting nothing -
-// until the informer's first cache sync completes, and permanently if
-// that sync never completes (see Start). A machine that net-boots one
-// cycle late because the cache was not ready yet is an acceptable
-// cost; a machine or intruder net-booted because an unreachable API
-// server was silently treated as "nothing enrolled, so allow" would
-// not be.
+// Fail-secure by construction: nothing is pushed to the sink - which
+// keeps its empty allowlist, booting nothing - until the informer's
+// first cache sync completes, and permanently if it never completes (see
+// Start). A one-cycle-late boot is an acceptable cost; a machine net-booted
+// because an unreachable API server was treated as "nothing enrolled, so
+// allow" is not.
 type MACCache struct {
 	mu     sync.Mutex
 	counts map[string]int // normalized MAC -> number of Machines currently claiming it
@@ -96,18 +92,12 @@ func NewMACCache(ctx context.Context, informers ctrlcache.Informers, sink MACSin
 	return c, nil
 }
 
-// Start implements manager.Runnable: it waits for the Machine
-// informer's initial sync, then marks the cache synced, pushes the
-// first complete snapshot to the sink, and blocks until ctx is
-// cancelled. If the sync never completes (API server unreachable at
-// startup, context cancelled first), no snapshot is ever pushed - the
-// sink keeps its empty allowlist and nothing boots - rather than
-// guessing that an empty, never-synced cache means "nothing is
-// enrolled yet, so an empty push is accurate anyway" (a cache that
-// reports zero Machines because it failed to connect looks identical
-// to one that reports zero Machines because there genuinely are none,
-// and only the fail-secure default treats both cases the same, safe
-// way).
+// Start implements manager.Runnable: waits for the Machine informer's
+// initial sync, then pushes the first snapshot to the sink and blocks
+// until ctx is cancelled. If sync never completes, no snapshot is ever
+// pushed and nothing boots - a cache reporting zero Machines because it
+// failed to connect is indistinguishable from one reporting zero because
+// there are none, so only the fail-secure default is safe for both.
 func (c *MACCache) Start(ctx context.Context) error {
 	log := logf.FromContext(ctx).WithName("bootd-maccache")
 	if !c.informers.WaitForCacheSync(ctx) {
@@ -146,12 +136,10 @@ func (c *MACCache) snapshotLocked() []string {
 	return macs
 }
 
-// pushLocked pushes the current snapshot to the sink if the cache is
-// synced; callers hold c.mu. Holding the lock across the sink call
-// keeps pushes ordered - two racing informer events cannot deliver
-// their snapshots to the sink in reversed order and leave the
-// hostsfile stale. The sink's SetAllowedMACs is non-blocking (see
-// Dnsmasq.SetAllowedMACs), so the lock is never held for long.
+// pushLocked pushes the current snapshot if synced; callers hold c.mu.
+// Holding the lock across the sink call keeps pushes ordered - two
+// racing informer events can't deliver snapshots to the sink reversed
+// and leave the hostsfile stale.
 func (c *MACCache) pushLocked() {
 	if !c.synced.Load() || c.sink == nil {
 		return
@@ -205,12 +193,11 @@ func (c *MACCache) onDelete(obj any) {
 	c.remove(machine.Spec.BootMACAddress)
 }
 
-// add and remove maintain counts keyed by normalized MAC, rather than a
-// plain set, because bootMACAddress uniqueness is only a convention
-// (see internal/bootserver.Server.lookupMachine's doc comment) - two
-// Machines can transiently or permanently share a MAC in a
-// misconfigured cluster, and a plain set would let deleting one of them
-// incorrectly revoke the gate for the other still-enrolled Machine.
+// add and remove maintain counts keyed by normalized MAC, not a plain
+// set, because bootMACAddress uniqueness is only a convention (see
+// internal/bootserver.Server.lookupMachine) - a plain set would let
+// deleting one of two Machines sharing a MAC revoke the gate for the
+// other still-enrolled one.
 func (c *MACCache) add(rawMAC string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

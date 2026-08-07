@@ -22,18 +22,15 @@ import (
 	"testing"
 )
 
-// fakeStatfs returns a statfsFunc that always reports available,
-// regardless of path - a test double standing in for a filesystem of a
-// fixed, known size.
+// fakeStatfs returns a statfsFunc that always reports available.
 func fakeStatfs(available uint64) statfsFunc {
 	return func(string) (uint64, error) { return available, nil }
 }
 
 func noUsedBytes() (int64, error) { return 0, nil }
 
-// A declared length that comfortably fits the reported available space
-// is admitted, and its release func gives the reservation back so a
-// later, larger reservation that only fits once it is released succeeds.
+// A length that fits is admitted; release gives it back so a larger
+// reservation that only fits once released then succeeds.
 func TestAdmission_Reserve_PhysicalGuard_FitsAndReleases(t *testing.T) {
 	a := NewAdmission("/staging", noUsedBytes, 0)
 	a.statfs = fakeStatfs(500 << 20) // 500 MiB available
@@ -43,9 +40,7 @@ func TestAdmission_Reserve_PhysicalGuard_FitsAndReleases(t *testing.T) {
 		t.Fatalf("Reserve(100MiB) with 500MiB available: unexpected error %v", err)
 	}
 
-	// A second reservation that would not fit alongside the first
-	// (100 + 400 + headroom > 500) is rejected while the first is still
-	// held.
+	// 100 + 400 + headroom > 500: rejected while the first is still held.
 	if _, err := a.Reserve(400 << 20); !errors.Is(err, ErrInsufficientSpace) {
 		t.Fatalf("Reserve(400MiB) while 100MiB already reserved: err = %v, want ErrInsufficientSpace", err)
 	}
@@ -58,9 +53,8 @@ func TestAdmission_Reserve_PhysicalGuard_FitsAndReleases(t *testing.T) {
 	}
 }
 
-// A declared length that does not fit the available space (accounting
-// for the fixed headroom) is rejected outright, and rejection does not
-// leave anything in the reservation ledger.
+// A length that doesn't fit (with headroom) is rejected, and rejection
+// leaves nothing in the reservation ledger.
 func TestAdmission_Reserve_PhysicalGuard_TooLarge(t *testing.T) {
 	a := NewAdmission("/staging", noUsedBytes, 0)
 	a.statfs = fakeStatfs(200 << 20) // 200 MiB available
@@ -69,15 +63,14 @@ func TestAdmission_Reserve_PhysicalGuard_TooLarge(t *testing.T) {
 		t.Fatalf("Reserve(300MiB) with 200MiB available: err = %v, want ErrInsufficientSpace", err)
 	}
 
-	// A reservation that fits the untouched 200MiB must still succeed -
-	// the rejected attempt above must not have reserved anything.
+	// The rejected attempt above must not have reserved anything.
 	if _, err := a.Reserve(50 << 20); err != nil {
 		t.Fatalf("Reserve(50MiB) after a prior rejection: unexpected error %v", err)
 	}
 }
 
 // release is idempotent: calling it twice must not double-credit the
-// reservation ledger and let more space be admitted than actually exists.
+// ledger.
 func TestAdmission_Reserve_ReleaseIsIdempotent(t *testing.T) {
 	a := NewAdmission("/staging", noUsedBytes, 0)
 	a.statfs = fakeStatfs(200 << 20)
@@ -92,19 +85,15 @@ func TestAdmission_Reserve_ReleaseIsIdempotent(t *testing.T) {
 	if _, err := a.Reserve(100 << 20); err != nil {
 		t.Fatalf("Reserve after single release: unexpected error %v", err)
 	}
-	// A second call at this point would double the ledger's refund if
-	// release were not idempotent, wrongly admitting a reservation that
-	// does not fit.
+	// Would wrongly admit if release double-refunded the ledger.
 	if _, err := a.Reserve(100 << 20); !errors.Is(err, ErrInsufficientSpace) {
 		t.Fatalf("Reserve after the second reservation still held: err = %v, want ErrInsufficientSpace", err)
 	}
 }
 
-// Concurrent admission: many goroutines race to reserve slices of a
-// fixed-size volume. The reservation ledger must serialize them so the
-// sum of everything simultaneously admitted never exceeds what statfs
-// reports (minus headroom) - this is the mechanism that is supposed to
-// catch two individually-fine uploads jointly overflowing the volume.
+// Many goroutines race to reserve slices of a fixed-size volume; the
+// ledger must serialize them so simultaneous admission never exceeds
+// statfs minus headroom.
 func TestAdmission_Reserve_ConcurrentAdmissionNeverOverbooks(t *testing.T) {
 	const available = 100 << 20 // 100 MiB
 	const chunk = 10 << 20      // 10 MiB per goroutine
@@ -150,9 +139,8 @@ func TestAdmission_Reserve_ConcurrentAdmissionNeverOverbooks(t *testing.T) {
 	}
 }
 
-// The logical quota, when configured, accounts for both already-used
-// bytes (from usedBytes) and everything currently reserved - not just
-// one or the other.
+// The logical quota accounts for both already-used bytes and everything
+// currently reserved, not just one or the other.
 func TestAdmission_Reserve_QuotaGuard(t *testing.T) {
 	const quota = 100 << 20                                     // 100 MiB
 	usedBytes := func() (int64, error) { return 60 << 20, nil } // 60 MiB already staged
@@ -179,9 +167,7 @@ func TestAdmission_Reserve_QuotaGuard(t *testing.T) {
 	}
 }
 
-// quotaBytes <= 0 disables the logical quota guard entirely: an upload
-// that would vastly exceed any reasonable quota is still admitted as
-// long as the physical guard is satisfied.
+// quotaBytes <= 0 disables the logical quota guard entirely.
 func TestAdmission_Reserve_QuotaDisabledWhenZero(t *testing.T) {
 	usedBytes := func() (int64, error) {
 		t.Fatal("usedBytes must not be called when the quota is disabled")

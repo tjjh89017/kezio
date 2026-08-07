@@ -24,19 +24,16 @@ limitations under the License.
 // in a minimal live environment has no use for.
 //
 // Versioning: DeployPlan.SchemaVersion carries PlanSchemaVersion, bumped
-// whenever a change to DeployPlan's shape would make an older agent
-// misread a plan a newer one built (for example, PlanPartition.Torrent
-// []byte being replaced by TorrentURL string - a live image built before
-// that change decoded the new plan without error, found no torrent
-// bytes, and mkfs'd every content partition instead of restoring it).
-// The agent advertises the version it supports on every GET .../next poll
-// (AgentSchemaVersionHeader); internal/agentserver refuses to hand out a
-// plan - answering ActionWait instead, with a loud MachineConditionAgent
-// Compatible condition - to any agent whose advertised version is absent
-// or does not match, and internal/agent's own poll loop refuses to
-// execute a plan whose SchemaVersion it does not support even if one
-// somehow arrives, so a version mismatch never lands as a data-destroying
-// misread on either end.
+// on any breaking change to DeployPlan's shape (the kind that would make
+// an older agent decode a newer plan without error yet misread it - e.g.
+// finding no torrent bytes and mkfs'ing a content partition instead of
+// restoring it). The agent advertises its supported version on every GET
+// .../next poll (AgentSchemaVersionHeader); internal/agentserver withholds
+// a plan (ActionWait plus a MachineConditionAgentCompatible condition) for
+// any absent or mismatched version, and internal/agent's own poll loop
+// also refuses to execute a plan whose SchemaVersion it does not support -
+// so a version mismatch never lands as a data-destroying misread on
+// either end.
 package agentapi
 
 import (
@@ -60,12 +57,8 @@ const (
 )
 
 // PlanSchemaVersion is the current DeployPlan wire shape's version - see
-// the package doc comment's "Versioning" section. Version 1 is
-// retroactively the inline-torrent era (PlanPartition.Torrent []byte);
-// this is 2, the TorrentURL-based shape every field in this file
-// currently describes. Bump it, and update the package doc comment's
-// versioning paragraph, on the next breaking change to any type in this
-// file.
+// the package doc comment's "Versioning" section. Bump it, and update that
+// paragraph, on the next breaking change to any type in this file.
 const PlanSchemaVersion = 2
 
 // AgentSchemaVersionHeader is the HTTP header kezio-agent sets on every
@@ -120,9 +113,7 @@ type NextResponse struct {
 const ActionWait = "wait"
 
 // ActionDeploy is the NextResponse.Action value when NextResponse.Plan
-// is populated and ready to execute. Parsing and logging the plan is as
-// far as this work item goes - the executor that actually applies it
-// (sfdisk, torrent restore, mkfs/mkswap, finalize) is a later work item.
+// is populated and ready to execute.
 const ActionDeploy = "deploy"
 
 // ErrorResponse is the JSON body returned alongside any non-2xx
@@ -260,12 +251,10 @@ type ImageDeployPlan struct {
 	// grow this image's last partition (and its file system, when
 	// FSType names one the agent knows how to resize) to use whatever
 	// extra space Disk has beyond the layout SfdiskJSON itself asks for.
-	// Default false, and nothing in the controller sets this true today
-	// - no spec field wires it yet, a later work item's job - so every
-	// deploy plan built by internal/agentserver leaves the image's own
-	// partition sizes untouched. The field exists now so the agent side
-	// has real, tested behavior the day a controller-side field turns it
-	// on, instead of a silent no-op.
+	// Default false; nothing in the controller sets this true today, so
+	// every plan built by internal/agentserver leaves partition sizes
+	// untouched. The field exists so the agent side already has real,
+	// tested behavior once a controller-side field starts setting it.
 	GrowLastPartition bool `json:"growLastPartition,omitempty"`
 }
 
@@ -305,13 +294,11 @@ type PlanPartition struct {
 	// TorrentURL is where the agent fetches this partition's .torrent
 	// file from: the per-Image seeder pod serving this Machine's site,
 	// resolved to its own PodIP (see internal/agentserver's
-	// buildPlanPartition) - never bytes carried inline in the plan
-	// itself, since the plan is small, cacheable JSON and a .torrent
-	// scales with piece count the same way torrent.info does. Present
-	// iff InfoHash is; a partition with InfoHash set but this empty is a
-	// plan-building error the controller refuses to hand out (see
-	// buildPlanPartition), never a value the agent should treat as
-	// blank.
+	// buildPlanPartition) - never bytes inlined in the plan, since a
+	// .torrent scales with piece count unlike the rest of this small,
+	// cacheable JSON plan. Present iff InfoHash is; InfoHash set with this
+	// empty is a plan-building error the controller must refuse to hand
+	// out, never a value the agent should treat as blank.
 	TorrentURL string `json:"torrentURL,omitempty"`
 	// SwapUUID is the UUID to pass to mkswap, present for a swap
 	// partition (Role == "swap").

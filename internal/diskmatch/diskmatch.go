@@ -36,22 +36,16 @@ const giB = int64(1) << 30
 // unbounded error string.
 const maxListedDisks = 5
 
-// Match resolves hints against disks and returns the single disk that
-// satisfies every hint field that is set (logical AND; unset fields do not
-// constrain). Exact-match fields (deviceName, serialNumber, wwn, pciePath,
-// hctl) compare byte-for-byte, since these are machine-generated
-// identifiers where accidental whitespace should not silently widen a
-// match. model and vendor compare after trimming surrounding whitespace,
-// since these are free-text strings some firmware pads. All comparisons
-// are case-sensitive: the agent and the hint author read the same sysfs
-// source, so normalizing case would only hide a real mismatch.
+// Match resolves hints against disks: logical AND over set fields, unset
+// fields unconstrained. deviceName/serialNumber/wwn/pciePath/hctl compare
+// byte-for-byte (machine-generated identifiers; whitespace should not
+// widen a match); model/vendor compare after trimming whitespace
+// (firmware-padded free text). All comparisons are case-sensitive.
 //
-// When hints is nil or has no field set, Match falls back to "use the only
-// disk reported": exactly one disk resolves it, zero disks is an error,
-// and more than one disk requires a hint.
-//
-// Exactly one disk must satisfy the hints. Zero matches or two-or-more
-// matches are reported as errors and no disk is returned.
+// Nil/all-unset hints falls back to "use the only disk reported": exactly
+// one disk resolves, zero is an error, more than one requires a hint.
+// Otherwise exactly one disk must satisfy the hints; zero or 2+ matches
+// are errors.
 func Match(disks []keziov1alpha1.MachineHardwareDisk, hints *keziov1alpha1.TargetDiskHints) (*keziov1alpha1.MachineHardwareDisk, error) {
 	if !hasAnyHint(hints) {
 		switch len(disks) {

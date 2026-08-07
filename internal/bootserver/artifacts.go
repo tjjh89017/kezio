@@ -29,13 +29,9 @@ import (
 const artifactsPrefix = "/boot/artifacts/"
 
 // artifactsHandler serves the live kernel, initrd, and squashfs out of
-// dir. It wraps http.FileServer (which already resolves ".." path
-// segments against dir before opening anything, so it cannot be made to
-// read outside it) with one extra check: refuse a request that resolves
-// to a directory, so nothing under dir is ever browsable. This directory
-// is expected to hold only a handful of named boot artifacts; there is
-// no legitimate reason to list it, and doing so would give an
-// unauthenticated caller a map of exactly what this deployment serves.
+// dir. It wraps http.FileServer (which already resolves ".." safely) with
+// one extra check: refuse a request resolving to a directory, so an
+// unauthenticated caller can never list what this deployment serves.
 func artifactsHandler(dir string) http.Handler {
 	fileServer := http.FileServer(http.Dir(dir))
 	inner := http.StripPrefix(artifactsPrefix, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

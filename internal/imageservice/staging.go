@@ -175,13 +175,11 @@ func (s *Staging) RemoveUpload(name string) error {
 	return nil
 }
 
-// UsedBytes returns the total size, in bytes, of every completed upload
-// currently on the staging volume. An upload still in progress (its temp
-// file under uploads/.tmp, or a directory whose completion marker has
-// not been written yet) is not counted: its size is instead accounted
-// for through Admission's in-flight reservation ledger, not by scanning
-// disk state here. This is the "already staged" term in Admission's
-// logical quota check.
+// UsedBytes returns the total size of every completed upload on the
+// staging volume. An in-progress upload (.tmp file, or a directory with
+// no completion marker yet) is not counted here - it's accounted for
+// through Admission's in-flight reservation ledger instead. This is the
+// "already staged" term in Admission's logical quota check.
 func (s *Staging) UsedBytes() (int64, error) {
 	entries, err := os.ReadDir(s.uploadsDir())
 	if err != nil {
@@ -226,25 +224,20 @@ type UploadResult struct {
 	Idempotent bool
 }
 
-// Receive reads all of body, writes it to a temp file under the staging
-// root, and — once fully and successfully received — moves it into place
-// as the named upload. It never returns a partially written file at the
-// final path: on any error the temp file is removed and the named
-// upload's final path is left exactly as it was before the call.
+// Receive writes body to a temp file, then atomically renames it into
+// place as the named upload once fully received. On any error the temp
+// file is removed and the final path is left exactly as before the call
+// - never a partially written file at the final path.
 //
-// wantChecksum, when non-empty, must be in "sha256:<hex>" form; a mismatch
-// against the bytes actually read is reported as ErrChecksumMismatch and
-// nothing is written to the final path.
+// wantChecksum, when non-empty, is "sha256:<hex>"; a mismatch against the
+// bytes actually read is ErrChecksumMismatch with nothing written.
 //
 // If a completed upload already exists under name, Receive still reads
-// and hashes the full body (it never trusts a client-supplied checksum in
-// place of verifying the bytes actually sent), then compares the computed
-// checksum against the one already stored:
-//   - equal: the call is treated as an idempotent retry. The freshly
-//     received bytes are discarded and UploadResult describes the
-//     existing upload, with Idempotent set.
-//   - different: ErrNameConflict, so a name is never silently repointed
-//     at different content once it has one.
+// and hashes the full body (never trusting a client-supplied checksum
+// over verifying the bytes sent), then compares against what's stored:
+// equal is an idempotent retry (existing UploadResult, Idempotent set,
+// nothing written); different is ErrNameConflict (a name is never
+// silently repointed at different content).
 func (s *Staging) Receive(name string, body io.Reader, wantChecksum string) (UploadResult, error) {
 	dir, err := s.uploadDir(name)
 	if err != nil {

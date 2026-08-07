@@ -32,11 +32,8 @@ func newTestMachine(namespace, name string) *keziov1alpha1.Machine {
 	}
 }
 
-// TestFakeDeployerStateWalk drives a single machine through every phase in
-// the order the reconciler would call them across the state machine:
-// Enrolling (Register), Inspecting (Inspect), Available -> Provisioning
-// (Provision), and deletion (Deprovision). It also exercises PowerOn and
-// PowerOff, which run independently of the phase sequence.
+// Drives a single machine through every phase in reconciler call order:
+// Register, Inspect, Provision, Deprovision, plus PowerOn/PowerOff.
 func TestFakeDeployerStateWalk(t *testing.T) {
 	ctx := context.Background()
 	factory := NewFactory()
@@ -103,9 +100,7 @@ func TestFakeDeployerStateWalk(t *testing.T) {
 	}
 }
 
-// TestFakeDeployerPerMachineState checks that two machines built from the
-// same Factory get independent hardware inventories, so a multi-machine
-// test does not see one machine's fake data leak into another's.
+// Two machines from the same Factory get independent hardware inventories.
 func TestFakeDeployerPerMachineState(t *testing.T) {
 	ctx := context.Background()
 	factory := NewFactory()
@@ -143,10 +138,8 @@ func TestFakeDeployerPerMachineState(t *testing.T) {
 	}
 }
 
-// TestFakeDeployerStatePersistsAcrossNew checks that a new Deployer built
-// for the same machine (as happens on every reconcile) still sees the
-// state recorded by an earlier one, so a Register on one reconcile is
-// visible to an Inspect on the next.
+// A new Deployer built for the same machine (as happens every reconcile)
+// still sees state an earlier one recorded.
 func TestFakeDeployerStatePersistsAcrossNew(t *testing.T) {
 	ctx := context.Background()
 	factory := NewFactory()
@@ -173,9 +166,7 @@ func TestFakeDeployerStatePersistsAcrossNew(t *testing.T) {
 	}
 }
 
-// TestFakeDeployerErrorInjection checks that a FailFunc injects an error
-// only for the targeted machine and phase, letting a test exercise the
-// reconciler's error and backoff handling without touching every call.
+// A FailFunc injects an error only for the targeted machine and phase.
 func TestFakeDeployerErrorInjection(t *testing.T) {
 	ctx := context.Background()
 	failing := types.NamespacedName{Namespace: "default", Name: "node-fail"}

@@ -41,17 +41,15 @@ import "path/filepath"
 // Image-level concern, so this package only reserves the path for it and
 // does not define layout.json's schema.
 //
-// The extent files sit inside a content/ subdirectory - not directly
-// inside <info-hash-hex>/ - because BuildInfoDict's info dict is a
+// The extent files sit inside a content/ subdirectory, not directly
+// inside <info-hash-hex>/, because BuildInfoDict's info dict is a
 // BitTorrent v1 multi-file torrent with "name": contentName ("content").
 // BEP3 multi-file semantics resolve every file entry as
-// save_path/<name>/<path...>, and every compliant client (libtorrent
-// included) enforces that unconditionally - there is no way to add a
-// multi-file torrent whose files resolve directly under save_path with
-// no extra directory level. So for AddTorrent(save_path=ContentDir(...))
-// to find real bytes, the extent files have to actually live at
-// ContentDir(...)/content/<hex>, matching what the torrent's own file
-// entries already imply (see ContentDataDir, NestExtentFiles).
+// save_path/<name>/<path...> — no compliant client can resolve a
+// multi-file torrent's files directly under save_path with no extra
+// directory level. So for AddTorrent(save_path=ContentDir(...)) to find
+// real bytes, the extent files must live at ContentDir(...)/content/<hex>
+// (see ContentDataDir, NestExtentFiles).
 
 const (
 	// contentsDirName is the contents/ subdirectory under a store root.
@@ -100,15 +98,12 @@ func ContentTorrentPath(root string, hash InfoHash) string {
 
 // IngestScratchDir returns the per-Image scratch directory ingest may
 // use to stage a partition content directory on the store's own
-// filesystem before publishing it into contents/. It is keyed by
-// imageName (a validated Kubernetes object name, safe as a path
-// component) rather than by a random or per-attempt token: the Image
-// controller runs at most one ingest Job per Image, with a deterministic
-// Job name (see internal/controller's ingestJobName), so a retried
-// attempt after a crash reuses this same path and can safely clean up
-// whatever a previous attempt left behind before starting - no leftover
-// scratch survives a crashed job, and no coordination between attempts
-// is needed since they never run concurrently for the same Image.
+// filesystem before publishing it into contents/. Keyed by imageName
+// (a validated Kubernetes object name) rather than a per-attempt token,
+// because the Image controller runs at most one ingest Job per Image
+// with a deterministic name: a retried attempt after a crash reuses this
+// path and can clean up whatever the previous attempt left, with no
+// cross-attempt coordination needed since they never run concurrently.
 func IngestScratchDir(root, imageName string) string {
 	return filepath.Join(root, ingestDirName, imageName)
 }

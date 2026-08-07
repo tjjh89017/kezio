@@ -66,12 +66,11 @@ func TestResolveSource_Staged(t *testing.T) {
 }
 
 func TestResolveSource_StagedWithoutStaging(t *testing.T) {
-	// Staging is documented as optional on Dependencies (wired only when
+	// Staging is optional on Dependencies (wired only when
 	// STAGING_ROOT/INGEST_STAGING_PVC is configured - see cmd/ingest's
 	// buildFromEnv). A kezio-staged:// source with no staging resolver
 	// wired must fail with an actionable error, not dereference the nil
-	// interface: this is the exact shape of the deployment wiring gap
-	// that used to crash the ingest Job pod with a SIGSEGV.
+	// interface.
 	_, _, err := ResolveSource(context.Background(), "kezio-staged://golden", nil, nil, "unused-dest")
 	if err == nil {
 		t.Fatal("expected an error when staging is nil for a kezio-staged:// source")

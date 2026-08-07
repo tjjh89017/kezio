@@ -29,37 +29,27 @@ import (
 const grubContentType = "text/plain; charset=utf-8"
 
 // bootLocalConfig is the GRUB config handed back for every machine that
-// does not currently need to load the live boot environment: an unknown
-// MAC (a foreign machine on the same L2 segment, or a lookup failure -
-// see Server.handleGrubConfig's fail-secure fallback), a known machine
-// whose state does not call for a net boot, and a machine whose token
-// mint failed. It is a fixed, static string: no per-machine or
-// per-request data is ever interpolated into it, which is also what
-// keeps every "not netbooting right now" case byte-identical - a device
-// probing MACs on the segment cannot distinguish "not yours" from
-// "not right now" from "never heard of it" by response shape.
+// does not currently need the live boot environment: unknown MAC, lookup
+// failure, no net boot needed, or a failed token mint. It is a fixed
+// string with no per-request data interpolated, so every "not netbooting
+// right now" case is byte-identical - a device probing MACs cannot
+// distinguish "not yours" from "not right now" from "never heard of it".
 //
-// "exit" returns control to the firmware's own boot order without GRUB
-// attempting to load anything further, so the firmware proceeds to its
-// next configured boot entry - ordinarily the local disk.
+// "exit" returns control to the firmware's own boot order (ordinarily the
+// local disk) without GRUB attempting to load anything further.
 const bootLocalConfig = `# kezio: this machine does not need the live boot environment right now.
 set timeout=0
 exit
 `
 
-// GrubNetPath converts an HTTP base URL plus an absolute path into
-// GRUB's network file syntax: "http://192.0.2.1:8090" + "/boot/x"
-// becomes "(http,192.0.2.1:8090)/boot/x". GRUB does not understand
-// bare URLs at all - grub_file_open treats only a leading "(" as
-// naming a device, so a path like "http://host/x" is opened as a
-// relative path on the current $root device (the TFTP server, on a
-// net boot) and fails; the "(<protocol>,<server[:port]>)/<path>"
-// device syntax is the one form GRUB's network stack
-// (grub_net_open_real, which parses the optional ":port" itself)
-// actually resolves. Only the http scheme is accepted: GRUB's netboot
-// images carry an http module but no TLS stack, so an https URL here
-// could never be fetched by the firmware-side consumer this syntax
-// exists for.
+// GrubNetPath converts an HTTP base URL plus an absolute path into GRUB's
+// network file syntax: "http://192.0.2.1:8090" + "/boot/x" becomes
+// "(http,192.0.2.1:8090)/boot/x". GRUB does not understand bare URLs -
+// grub_file_open treats only a leading "(" as naming a device, otherwise
+// resolving the path relative to $root (the TFTP server on a net boot)
+// and failing; "(<protocol>,<server[:port]>)/<path>" is the form GRUB's
+// network stack actually resolves. Only http is accepted: GRUB's netboot
+// images carry an http module but no TLS stack.
 func GrubNetPath(serverURL, filePath string) (string, error) {
 	u, err := url.Parse(serverURL)
 	if err != nil {
@@ -77,24 +67,15 @@ func GrubNetPath(serverURL, filePath string) (string, error) {
 	return fmt.Sprintf("(%s,%s)%s%s", u.Scheme, u.Host, strings.TrimRight(u.Path, "/"), filePath), nil
 }
 
-// renderNetBootConfig builds the GRUB config for a machine that needs to
-// load the live boot environment: GRUB network paths (see GrubNetPath -
-// GRUB cannot open bare URLs) for the kernel and initrd artifacts, and
-// a cmdline carrying boot=live plus fetch=<squashfs URL> (the
-// parameters live-boot's initrd reads to fetch the root file
-// system over HTTP instead of a local disk - real URLs, since the
-// initrd's downloader is the consumer there, not GRUB), kezio.server
-// (so the agent knows where to register - internal/agentserver's own
-// address, Config.AgentServerURL, not this boot config server's own
-// ServerURL: see Config.AgentServerURL's doc comment for why conflating
-// the two sends every registration to a server that never mounts
-// internal/agentserver's routes), and kezio.token (the freshly minted,
-// single-use credential it registers with). token is the only
-// per-request value that ever appears in this output; everything else
-// comes from Config, which the operator controls, not the requesting
-// firmware. The error case is a malformed Config.ServerURL, an operator
-// misconfiguration surfaced per-request by the caller's fail-secure
-// boot-local fallback (see handleGrubConfig).
+// renderNetBootConfig builds the GRUB config for a machine that needs the
+// live boot environment: GrubNetPath paths for kernel/initrd, plus a
+// cmdline carrying boot=live, fetch=<squashfs URL> (real URL - live-boot's
+// initrd is the consumer, not GRUB), kezio.server (Config.AgentServerURL,
+// not ServerURL - see that field's doc comment for why conflating them
+// misroutes every registration), and kezio.token. token is the only
+// per-request value in the output; everything else comes from
+// operator-controlled Config. Errors on a malformed Config.ServerURL,
+// surfaced per-request by the caller's fail-secure boot-local fallback.
 func renderNetBootConfig(cfg Config, token string) (string, error) {
 	base := strings.TrimRight(cfg.ServerURL, "/")
 	kernelPath, err := GrubNetPath(base, "/boot/artifacts/"+cfg.KernelPath)

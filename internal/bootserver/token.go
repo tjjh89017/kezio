@@ -28,13 +28,11 @@ import (
 // force range for a value that is also short-lived and single-use.
 const tokenByteLength = 32
 
-// mintToken generates a new boot token and returns both the token itself
-// (embedded in the kernel cmdline the agent reads) and the SHA-256 hex
-// digest of it (the only form ever persisted, in
-// Machine.status.netBoot.tokenHash). Never storing the token itself
-// means a read of the Machine status - or of an etcd snapshot - cannot be
-// used to register as the machine; only whoever received the live
-// grub.cfg response can.
+// mintToken generates a new boot token, returning both the token itself
+// (embedded in the kernel cmdline) and its SHA-256 hex digest (the only
+// form ever persisted, in Machine.status.netBoot.tokenHash) - so a read
+// of Machine status or an etcd snapshot cannot be used to register as the
+// machine, only whoever received the live grub.cfg response can.
 func mintToken() (token, hash string, err error) {
 	buf := make([]byte, tokenByteLength)
 	if _, err := rand.Read(buf); err != nil {

@@ -19,15 +19,12 @@ limitations under the License.
 // internal/controller derives it under (see Name), and the fixed port
 // its pods serve .torrent files on (see TorrentHTTPPort).
 //
-// It exists as its own package, rather than living directly in
-// internal/controller (which creates these Deployments) or being
-// re-derived in internal/agentserver (which discovers them to resolve a
-// content partition's fetch URL - see agentserver's
-// resolveSeederTorrentURL), because internal/controller's own test
-// suite already imports internal/agentserver (to drive envtest through
-// the real agent HTTP server): internal/agentserver importing
-// internal/controller directly would close that into an import cycle.
-// This package depends on neither, so both can depend on it.
+// It is its own package, not part of internal/controller (which creates
+// these Deployments) or internal/agentserver (which discovers them via
+// agentserver's resolveSeederTorrentURL), because internal/controller's
+// tests already import internal/agentserver for envtest — agentserver
+// importing controller directly would close an import cycle. Depending
+// on neither lets both depend on this package.
 package seederdeploy
 
 import (
@@ -53,12 +50,10 @@ const namePrefix = "kezio-seeder-"
 const maxNameLength = 63
 
 // Name returns the deterministic Deployment name for imageName's seeder
-// at site. Deterministic so internal/controller's reconciler stays
-// idempotent, and always hash-suffixed (unlike a plain
-// prefix+imageName) because two different sites of the same Image must
-// never collide on one name, and internal/agentserver needs to compute
-// this exact same name (rather than list-and-filter) to Get the
-// Deployment directly when resolving a content partition's seeder URL.
+// at site: deterministic so internal/controller's reconciler stays
+// idempotent, and hash-suffixed so two sites of the same Image never
+// collide on one name. internal/agentserver recomputes this exact name
+// (rather than list-and-filter) to Get the Deployment directly.
 func Name(imageName, site string) string {
 	sum := sha256.Sum256([]byte(imageName + "\x00" + site))
 	suffix := "-" + hex.EncodeToString(sum[:])[:8]

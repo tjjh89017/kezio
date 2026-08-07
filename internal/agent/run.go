@@ -57,14 +57,12 @@ type Config struct {
 	// Nil discards them.
 	Logf func(format string, args ...any)
 	// Executor executes a DeployPlan received from a "deploy" poll
-	// response. Nil (the default in every test that only exercises the
-	// poll loop's logging) means a received plan is logged and never
-	// executed - the behavior this package had before the deploy
-	// executor existed. Production wiring (cmd/agent) sets it to a
-	// *deploy.Executor with real Runner/Ezio implementations; Run
-	// attaches this machine's own progress reporter to a copy of it
-	// once registration resolves the machine name and session token
-	// Executor.Progress needs.
+	// response. Nil means a received plan is only logged, never executed
+	// (every test that exercises just the poll loop's logging). Production
+	// wiring (cmd/agent) sets it to a *deploy.Executor with real
+	// Runner/Ezio implementations; Run attaches this machine's own
+	// progress reporter to a copy of it once registration resolves the
+	// machine name and session token Executor.Progress needs.
 	Executor *deploy.Executor
 }
 
@@ -140,8 +138,8 @@ func registerWithRetry(ctx context.Context, client *Client, cfg Config, hardware
 // logged; when cfg.Executor is set, it is also executed - once. A
 // successful execution latches deployed so a plan that stays available
 // on later polls (the controller keeps answering ActionDeploy until the
-// Machine leaves Provisioning, which is a later work item's job) is
-// never re-applied; a failed execution does not latch, so a transient
+// Machine leaves Provisioning) is never re-applied; a failed execution
+// does not latch, so a transient
 // failure (a disk not yet settled, a momentary ezio hiccup) gets retried
 // on the next poll.
 //

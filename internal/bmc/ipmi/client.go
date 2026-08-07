@@ -25,46 +25,36 @@ import (
 	"github.com/tjjh89017/kezio/internal/bmc"
 )
 
-// session is the subset of *ipmilib.Client this driver calls against one
-// already-open IPMI session, seamed out so driver's methods are
-// unit-testable against a fake session that records the exact call each
-// method issued, without a real BMC or network - the same split
-// internal/bmc/ipmitool's runner gives its exec driver. Method signatures
-// mirror ipmilib.Client's exactly, so *ipmilib.Client satisfies this
-// interface with no adapter needed.
+// session is the subset of *ipmilib.Client this driver calls, seamed out
+// so driver's methods are unit-testable against a fake session with no
+// real BMC or network. Signatures mirror ipmilib.Client's exactly, so
+// *ipmilib.Client satisfies this with no adapter.
 type session interface {
-	// ChassisControl issues one Chassis Control command (IPMI section
-	// 28.3) - power up/down/cycle/soft-shutdown.
+	// ChassisControl: IPMI section 28.3 - power up/down/cycle/soft-shutdown.
 	ChassisControl(ctx context.Context, control ipmilib.ChassisControl) (*ipmilib.ChassisControlResponse, error)
-	// GetChassisStatus issues one Get Chassis Status command (IPMI section
-	// 28.2), whose response's PowerIsOn field this driver reads for
-	// GetPowerState.
+	// GetChassisStatus: IPMI section 28.2; PowerIsOn feeds GetPowerState.
 	GetChassisStatus(ctx context.Context) (*ipmilib.GetChassisStatusResponse, error)
-	// SetBootDevice issues a Set System Boot Options command (IPMI section
-	// 28.12) encoding bootDeviceSelector/bootType/persist into the Boot
-	// Flags parameter - see this package's doc comment for the values
-	// SetOneTimePXEBoot passes.
+	// SetBootDevice: Set System Boot Options (IPMI section 28.12) - see
+	// the package doc for the values SetOneTimePXEBoot passes.
 	SetBootDevice(ctx context.Context, bootDeviceSelector ipmilib.BootDeviceSelector, bootType ipmilib.BIOSBootType, persist bool) error
-	// Close tears down the session. See withSession for why its error is
+	// Close tears down the session; see withSession for why its error is
 	// not propagated to a caller.
 	Close(ctx context.Context) error
 }
 
-// dialFunc opens one IPMI 2.0/RMCP+ session against host:port,
-// authenticated with creds, and returns it wrapped behind session. driver
+// dialFunc opens one IPMI 2.0/RMCP+ session against host:port. driver
 // holds one as a field (rather than calling dial directly) so tests can
-// substitute a fake that never touches the network - see dial and
-// driver.dial.
+// substitute a fake that never touches the network.
 type dialFunc func(ctx context.Context, host string, port int, creds bmc.Credentials) (session, error)
 
-// _ asserts *ipmilib.Client satisfies session at compile time, so a future
-// signature change in bougou/go-ipmi that breaks this seam fails the build
-// here rather than surfacing as a runtime interface-conversion failure.
+// _ asserts *ipmilib.Client satisfies session at compile time, so a
+// breaking signature change in bougou/go-ipmi fails the build here rather
+// than at runtime.
 var _ session = (*ipmilib.Client)(nil)
 
-// dial is the dialFunc connect wires up for production use: it opens a real
-// IPMI 2.0/RMCP+ (lanplus) session via bougou/go-ipmi, authenticated at the
-// ADMINISTRATOR privilege level (see this package's doc comment for why).
+// dial is the dialFunc connect wires up for production use: a real IPMI
+// 2.0/RMCP+ (lanplus) session via bougou/go-ipmi at ADMINISTRATOR
+// privilege (see the package doc for why).
 func dial(ctx context.Context, host string, port int, creds bmc.Credentials) (session, error) {
 	client, err := ipmilib.NewClient(host, port, creds.Username, creds.Password)
 	if err != nil {

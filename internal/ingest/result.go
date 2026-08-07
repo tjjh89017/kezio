@@ -32,9 +32,9 @@ import (
 // extent lists and piece hashes (those stay in torrent.info inside the
 // store) and the verbatim sfdisk JSON dump, which an unusually large
 // partition table could grow past the cap on its own. The ingest binary
-// writes that dump directly into the layout ConfigMap through the
-// Kubernetes API instead (see LayoutConfigMapName and
-// WriteLayoutConfigMap) - this result channel never carries it.
+// writes that dump directly into the ImageLayout object through the
+// Kubernetes API instead (see ImageLayoutName and WriteImageLayout) -
+// this result channel never carries it.
 type Result struct {
 	// Success is true when ingest completed and every field below is
 	// populated. False means Error explains what went wrong and Disk is

@@ -33,10 +33,10 @@ func newTestStaging(t *testing.T) (*Staging, string) {
 	return staging, root
 }
 
-// ResolveUpload returns the on-disk path of a completed upload, and refuses
-// both a name that was never uploaded and one that only partially uploaded
-// (its data file is present but its completion marker is not) — a broken
-// ResolveUpload here could hand the ingest job a partial file.
+// ResolveUpload returns the on-disk path of a completed upload, and
+// refuses both a never-uploaded name and a partial upload (data file
+// present, completion marker not) - it must never hand the ingest job a
+// partial file.
 func TestStaging_ResolveUpload(t *testing.T) {
 	staging, root := newTestStaging(t)
 
@@ -58,9 +58,8 @@ func TestStaging_ResolveUpload(t *testing.T) {
 		t.Error("ResolveUpload(never uploaded): got nil error, want non-nil")
 	}
 
-	// A partial upload: the data file exists but the completion marker
-	// (upload.sha256) does not, exactly the state a crash mid-Receive
-	// could leave behind if it bypassed the temp-file-then-rename path.
+	// Data file present, no completion marker: the state a crash
+	// mid-Receive could leave behind.
 	partialDir := filepath.Join(root, "uploads", "partial")
 	if err := os.MkdirAll(partialDir, 0o750); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
@@ -73,9 +72,8 @@ func TestStaging_ResolveUpload(t *testing.T) {
 	}
 }
 
-// RemoveUpload deletes a completed upload's directory, and is idempotent:
-// removing an upload that is already gone (or never existed) is not an
-// error, which matters if a retry runs this step twice.
+// RemoveUpload is idempotent: removing an already-gone (or never
+// existed) upload is not an error.
 func TestStaging_RemoveUpload(t *testing.T) {
 	staging, root := newTestStaging(t)
 
@@ -99,10 +97,9 @@ func TestStaging_RemoveUpload(t *testing.T) {
 	}
 }
 
-// UsedBytes sums only completed uploads: an in-progress upload (a temp
-// file under uploads/.tmp) must not be counted, since Admission's
-// in-flight reservation ledger - not a disk scan - is what accounts for
-// uploads that have not finished yet.
+// UsedBytes sums only completed uploads: an in-progress upload (under
+// uploads/.tmp) must not be counted, since Admission's reservation
+// ledger - not this scan - accounts for unfinished uploads.
 func TestStaging_UsedBytes(t *testing.T) {
 	staging, root := newTestStaging(t)
 

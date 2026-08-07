@@ -137,12 +137,9 @@ func TestValidateContentDir_UnexpectedFile(t *testing.T) {
 	}
 }
 
-// TestValidateContentDir_UnexpectedTopLevelEntry pins the structural check
-// that dir itself may only hold torrent.info and the content/ data
-// subdirectory - this is what would have caught the extent-files-left-flat
-// layout bug (see NestExtentFiles's doc comment): a stray file sitting
-// directly in dir, outside content/, must fail loudly instead of being
-// silently ignored.
+// TestValidateContentDir_UnexpectedTopLevelEntry pins that dir itself may
+// only hold torrent.info and the content/ data subdirectory: a stray file
+// directly in dir must fail loudly, not be silently ignored.
 func TestValidateContentDir_UnexpectedTopLevelEntry(t *testing.T) {
 	info := fixtureTorrentInfo()
 	dir := writeFixtureContentDir(t, info)
@@ -221,24 +218,20 @@ func TestNestExtentFiles(t *testing.T) {
 		t.Fatalf("NestExtentFiles: %v", err)
 	}
 
-	// Every extent file moved into the content/ data subdirectory...
 	for _, e := range info.Extents {
 		name := ExtentFileName(e.Offset)
 		if _, err := os.Stat(filepath.Join(ContentDataDir(dir), name)); err != nil {
 			t.Errorf("extent file %s missing from content data dir: %v", name, err)
 		}
-		// ...and no longer sits flat in dir.
 		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
 			t.Errorf("extent file %s still present flat in dir, stat err = %v", name, err)
 		}
 	}
 
-	// torrent.info is untouched: it stays directly in dir, not nested.
 	if _, err := os.Stat(filepath.Join(dir, TorrentInfoFileName)); err != nil {
 		t.Errorf("torrent.info missing from dir after NestExtentFiles: %v", err)
 	}
 
-	// The result is exactly what ValidateContentDir expects.
 	if err := ValidateContentDir(dir, info); err != nil {
 		t.Errorf("ValidateContentDir after NestExtentFiles: %v", err)
 	}

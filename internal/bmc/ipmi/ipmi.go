@@ -14,94 +14,60 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package ipmi implements internal/bmc.BMC over IPMI, using the pure-Go
+// Package ipmi implements internal/bmc.BMC over IPMI using the pure-Go
 // client github.com/bougou/go-ipmi. Importing this package registers the
-// "ipmi" scheme with internal/bmc's registry (see this file's init) as a
-// side effect - the same import-for-side-effect pattern internal/bmc/redfish
-// uses - so a caller only needs a blank import
-// (`_ "github.com/tjjh89017/kezio/internal/bmc/ipmi"`) to make bmc.Connect
-// resolve that scheme.
+// "ipmi" scheme with internal/bmc's registry (see init) - same
+// blank-import pattern as internal/bmc/redfish.
 //
-// # Library choice: bougou/go-ipmi, not an exec-ipmitool shim
+// # Library choice
 //
-// An earlier version of this driver shelled out to the "ipmitool" binary,
-// because the most visible pure-Go alternative at the time,
-// github.com/vmware/goipmi, was a poor fit: its native, dependency-free
-// transport only implements the "lan" interface (IPMI 1.5 RMCP, MD5/plain
-// password authentication) - the interface field it exposes for "lanplus"
-// (IPMI 2.0 RMCP+, the interface effectively every BMC shipped in the last
-// decade requires and defaults to) is not natively implemented at all; it
-// silently shells out to the ipmitool binary itself. That evaluation still
-// stands: goipmi remains the wrong choice for this driver.
-//
-// github.com/bougou/go-ipmi is different: it implements IPMI 2.0/RMCP+
-// session establishment (RAKP, cipher suite negotiation) natively in Go,
-// with no external binary in its call path, and is an actively maintained
-// project tracking current IPMI cipher-suite work. That closes the gap
-// goipmi left open, so this driver now talks IPMI directly instead of
-// through a subprocess: no binary needs to ship in the manager's container
-// image, and every kezio deployment gets ipmi:// support from the default
-// image rather than only from an opt-in variant.
+// The other visible pure-Go option, github.com/vmware/goipmi, only
+// natively implements the legacy "lan" interface (IPMI 1.5 RMCP); for
+// "lanplus" (IPMI 2.0/RMCP+, what essentially every current BMC requires)
+// it silently shells out to the ipmitool binary itself. bougou/go-ipmi
+// implements IPMI 2.0/RMCP+ session establishment (RAKP, cipher suite
+// negotiation) natively, so this driver needs no external binary and ships
+// in the default manager image.
 //
 // # The ipmitool:// fallback
 //
-// internal/bmc/ipmitool keeps the previous exec-ipmitool implementation
-// alive under a separate "ipmitool://" scheme. It exists as an
-// operator-selectable escape hatch: IPMI's long history of inconsistent
-// vendor firmware means a specific BMC can misbehave against this pure-Go
-// client while working fine against ipmitool's battle-tested reference
-// implementation. Reach for "ipmitool://" only when a BMC demonstrably
-// needs it (and after building/deploying the opt-in ipmitool-enabled
-// manager image it requires, see internal/bmc/ipmitool's doc comment);
-// every other IPMI Machine should use "ipmi://".
+// internal/bmc/ipmitool provides an exec-ipmitool "ipmitool://" scheme as
+// an operator-selectable escape hatch: IPMI's inconsistent vendor firmware
+// means a specific BMC can misbehave against this pure-Go client while
+// working against ipmitool's reference implementation. Use "ipmitool://"
+// only when a BMC demonstrably needs it (requires the opt-in
+// ipmitool-enabled manager image, see that package's doc comment);
+// otherwise use "ipmi://".
 //
 // # Command mapping
 //
-// Every bmc.BMC method opens one IPMI 2.0/RMCP+ session (see dial),
-// authenticated at the ADMINISTRATOR privilege level, issues exactly one
-// IPMI command over it, then closes the session - mirroring both
-// internal/bmc/ipmitool (which opens and tears down its own session on
-// every ipmitool invocation) and internal/bmc/redfish's rationale for not
-// holding a session open across calls (see that package's connect doc
-// comment): a kezio controller connects briefly, does one action, and
-// disconnects, often many times an hour across reconciles, and holding a
-// session open here with no Close hook on the bmc.BMC interface itself
-// would leak it.
+// Every bmc.BMC method opens one IPMI 2.0/RMCP+ session (ADMINISTRATOR
+// privilege, see dial), issues one command, then closes it - no session
+// held across calls (same as ipmitool and redfish), since a controller
+// connects briefly and disconnects often many times an hour and bmc.BMC
+// has no Close hook to release one.
 //
 //   - PowerOn: Chassis Control, "power up".
-//   - PowerOff: Chassis Control, "soft shutdown" - an ACPI soft-shutdown
-//     request to the running OS, not an immediate power cut (the wrong
-//     default for the same reason internal/bmc/redfish prefers
-//     GracefulShutdown over ForceOff, and internal/bmc/ipmitool prefers
-//     "chassis power soft" over "chassis power off").
-//   - PowerCycle: Chassis Control, "power cycle" (power off, pause, power
-//     back on as one BMC action), mirroring redfish's ForceRestart
-//     semantics. Per the IPMI spec this is only guaranteed to act when the
-//     chassis is already on; a BMC that rejects it while already off is
-//     IPMI protocol behavior this driver does not work around.
-//   - GetPowerState: Get Chassis Status, whose PowerIsOn field maps
-//     directly to PowerStateOn/PowerStateOff - IPMI's chassis status has no
-//     transitional third state the way Redfish does, so this driver never
-//     needs to report PowerStateUnknown except when the read itself fails.
-//   - SetOneTimePXEBoot: Set System Boot Options (IPMI section 28.12,
-//     parameter 5, Boot Flags) requesting BootDeviceSelectorForcePXE with
-//     BIOSBootTypeEFI (the equivalent of ipmitool's
-//     "options=efiboot") and persist=false - which sets the "boot flags
-//     valid" bit for exactly the next boot and leaves the persistent bit
-//     clear, so the override does not survive past that one boot.
+//   - PowerOff: Chassis Control, "soft shutdown" - an ACPI request to the
+//     running OS, not an immediate power cut (matches redfish's
+//     GracefulShutdown and ipmitool's "chassis power soft" preference).
+//   - PowerCycle: Chassis Control, "power cycle" (one BMC action),
+//     mirroring redfish's ForceRestart. Per spec, only guaranteed to act
+//     when the chassis is already on.
+//   - GetPowerState: Get Chassis Status; PowerIsOn maps directly to
+//     On/Off - IPMI has no transitional third state the way Redfish does,
+//     so PowerStateUnknown here only means the read itself failed.
+//   - SetOneTimePXEBoot: Set System Boot Options (section 28.12, Boot
+//     Flags) with BootDeviceSelectorForcePXE + BIOSBootTypeEFI (ipmitool's
+//     "options=efiboot") + persist=false, so the override applies to
+//     exactly the next boot.
 //
 // # Privilege level and credentials
 //
-// Every session is opened at the ADMINISTRATOR privilege level (see dial):
-// chassis control and boot-option changes require it on most BMCs, and a
-// lower privilege level would make some of these operations fail
-// unpredictably depending on the BMC's configured privilege ceiling for the
-// account.
-//
-// address and creds are never logged or included verbatim in an error:
-// bougou/go-ipmi's own errors do not embed the password (verified against
-// its source), and this driver's own wrapping never formats Credentials
-// directly - see Credentials' doc comment in internal/bmc.
+// Sessions open at ADMINISTRATOR privilege (see dial): chassis control and
+// boot-option changes require it on most BMCs. address and creds are never
+// logged or included verbatim in an error - see Credentials' doc comment
+// in internal/bmc.
 package ipmi
 
 import (
@@ -124,10 +90,9 @@ func init() {
 // none.
 const defaultPort = 623
 
-// driver implements bmc.BMC over IPMI for one host:port, authenticating
-// with one Credentials pair. It opens a fresh session (via dial) for every
-// bmc.BMC method call rather than holding one open across calls - see this
-// package's doc comment for why.
+// driver implements bmc.BMC over IPMI for one host:port. It opens a fresh
+// session (via dial) for every method call rather than holding one open
+// across calls - see the package doc.
 type driver struct {
 	host  string
 	port  int
@@ -136,11 +101,9 @@ type driver struct {
 }
 
 // connect is the bmc.Driver registered for the "ipmi" scheme. Like
-// internal/bmc/ipmitool's connect (and unlike internal/bmc/redfish's), this
-// does not itself talk to the BMC: every method call opens and closes its
-// own session (see this package's doc comment), so any unreachable-host or
-// bad-credentials error surfaces from the first method call instead of from
-// Connect.
+// ipmitool's connect (and unlike redfish's), it does not itself talk to
+// the BMC - any unreachable-host or bad-credentials error surfaces from
+// the first method call instead of from Connect.
 func connect(_ context.Context, address *url.URL, creds bmc.Credentials, _ bmc.Options) (bmc.BMC, error) {
 	host, port, err := hostPort(address)
 	if err != nil {
@@ -149,11 +112,9 @@ func connect(_ context.Context, address *url.URL, creds bmc.Credentials, _ bmc.O
 	return &driver{host: host, port: port, creds: creds, dial: dial}, nil
 }
 
-// hostPort extracts the BMC's host and optional port from address,
-// defaulting the port to defaultPort. address must carry only a
-// host[:port] (and no path): an IPMI target is not a resource tree the way
-// a Redfish System is, so there is nothing else in the address for this
-// driver to interpret.
+// hostPort extracts host and optional port (defaulting to defaultPort).
+// address must carry only host[:port], no path: an IPMI target isn't a
+// resource tree the way a Redfish System is.
 func hostPort(address *url.URL) (string, int, error) {
 	host := address.Hostname()
 	if host == "" {
@@ -174,12 +135,10 @@ func hostPort(address *url.URL) (string, int, error) {
 	return host, port, nil
 }
 
-// withSession opens a session via d.dial, runs fn against it, and closes it
-// afterward regardless of fn's outcome. The session's Close error is
-// intentionally discarded: fn's own error (a completed power/boot
-// operation that failed) is what a caller needs to see, and a session that
-// merely failed to tear down cleanly after a completed operation is not
-// something a caller can act on.
+// withSession opens a session, runs fn, and always closes it. The Close
+// error is discarded: fn's own error is what a caller needs to see, and a
+// session that failed to tear down after a completed operation isn't
+// actionable.
 func (d *driver) withSession(ctx context.Context, fn func(session) error) error {
 	s, err := d.dial(ctx, d.host, d.port, d.creds)
 	if err != nil {
@@ -201,10 +160,8 @@ func (d *driver) PowerOn(ctx context.Context) error {
 	return nil
 }
 
-// PowerOff implements bmc.BMC. It issues a "soft shutdown" chassis control
-// (an ACPI soft-shutdown request to the running OS) rather than a hard
-// power-down: see this package's doc comment for the rationale, which
-// mirrors internal/bmc/redfish's and internal/bmc/ipmitool's PowerOff.
+// PowerOff implements bmc.BMC using a "soft shutdown" chassis control
+// (ACPI request to the OS), not a hard power-down - see the package doc.
 func (d *driver) PowerOff(ctx context.Context) error {
 	err := d.withSession(ctx, func(s session) error {
 		_, err := s.ChassisControl(ctx, ipmilib.ChassisControlSoftShutdown)
@@ -245,12 +202,9 @@ func (d *driver) GetPowerState(ctx context.Context) (bmc.PowerState, error) {
 	return state, nil
 }
 
-// powerState maps IPMI's Get Chassis Status "power is on" flag to a
-// PowerState. IPMI's chassis status is always definitively on or off (no
-// transitional third state the way Redfish reports "PoweringOn"), so this
-// mapping is total and never itself needs to return PowerStateUnknown - the
-// only source of PowerStateUnknown for this driver is a failed read (see
-// GetPowerState).
+// powerState maps IPMI's "power is on" flag to a PowerState. IPMI has no
+// transitional third state (unlike Redfish's "PoweringOn"), so this never
+// itself returns PowerStateUnknown - only a failed read does (GetPowerState).
 func powerState(on bool) bmc.PowerState {
 	if on {
 		return bmc.PowerStateOn
@@ -258,9 +212,9 @@ func powerState(on bool) bmc.PowerState {
 	return bmc.PowerStateOff
 }
 
-// SetOneTimePXEBoot implements bmc.BMC. See this package's doc comment for
-// why BootDeviceSelectorForcePXE + BIOSBootTypeEFI + persist=false is a
-// one-time-only, EFI-compatible PXE boot override.
+// SetOneTimePXEBoot implements bmc.BMC. See the package doc for why
+// BootDeviceSelectorForcePXE + BIOSBootTypeEFI + persist=false is a
+// one-time EFI PXE boot override.
 func (d *driver) SetOneTimePXEBoot(ctx context.Context) error {
 	err := d.withSession(ctx, func(s session) error {
 		return s.SetBootDevice(ctx, ipmilib.BootDeviceSelectorForcePXE, ipmilib.BIOSBootTypeEFI, false)

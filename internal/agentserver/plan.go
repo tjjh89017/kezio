@@ -44,10 +44,10 @@ import (
 // find a fixed one.
 //
 // buildDeployPlan is deliberately not memoized or cached anywhere: it
-// reads the Image(s) and their ImageLayout fresh on every call and
-// builds every content partition's .torrent bytes fresh (see
-// buildImagePlan), so a plan handed to the agent always reflects the
-// current cluster state - there is nothing here to invalidate.
+// reads the Image(s), their ImageLayout, and each content partition's
+// seeder URL fresh on every call (see buildImagePlan), so a plan handed to
+// the agent always reflects current cluster state - there is nothing here
+// to invalidate.
 func buildDeployPlan(ctx context.Context, c client.Client, cfg Config, machine *keziov1alpha1.Machine) (*agentapi.DeployPlan, error) {
 	if machine.Status.State != keziov1alpha1.MachineStateProvisioning {
 		return nil, nil

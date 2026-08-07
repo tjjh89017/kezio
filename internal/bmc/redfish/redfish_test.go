@@ -41,10 +41,7 @@ type fakeRedfishServer struct {
 	resetCalls []resetCall
 	patchCalls []patchCall
 	// wantUsername/wantPassword, when either is non-empty, makes every
-	// handler require exactly this Basic Auth credential pair and
-	// respond 401 otherwise - this is what TestConnectSendsBasicAuthCredentials
-	// uses to confirm the driver actually presents the Credentials it was
-	// given, rather than connecting unauthenticated.
+	// handler require this exact Basic Auth pair and 401 otherwise.
 	wantUsername string
 	wantPassword string
 }
@@ -88,20 +85,15 @@ func (f *fakeRedfishServer) start(t *testing.T) *httptest.Server {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/redfish/v1/", func(w http.ResponseWriter, r *http.Request) {
-		// This pattern ends in "/", so ServeMux treats it as a subtree
-		// match: it also catches any request under /redfish/v1/ that has
-		// no more specific handler (for example a bogus System path),
-		// which must 404 rather than be answered with the service root.
+		// ServeMux's "/" subtree match also catches any bogus sub-path
+		// with no more specific handler, which must 404, not return the
+		// service root.
 		if r.URL.Path != "/redfish/v1/" {
 			http.NotFound(w, r)
 			return
 		}
-		// gofish fetches the service root before it authenticates (see
-		// ConnectContext), so a real Redfish service typically answers
-		// it anonymously; this handler does not call checkAuth for that
-		// reason, matching that behavior instead of forcing every fake
-		// test to pre-authenticate a request the real client never
-		// sends credentials on.
+		// gofish fetches the service root before authenticating, so this
+		// intentionally skips checkAuth to match real Redfish behavior.
 		writeJSON(w, map[string]any{
 			"@odata.id": "/redfish/v1/",
 			"Systems":   map[string]string{"@odata.id": "/redfish/v1/Systems"},
@@ -171,10 +163,8 @@ func (f *fakeRedfishServer) start(t *testing.T) *httptest.Server {
 			}
 			f.mu.Lock()
 			f.resetCalls = append(f.resetCalls, resetCall{systemID: id, resetType: body.ResetType})
-			// A reset to On/ForceRestart/GracefulShutdown moves the fake
-			// toward the matching terminal state, so a caller that reads
-			// GetPowerState back after PowerOn/PowerOff observes a
-			// change, the same as a real BMC eventually would.
+			// Move toward the matching terminal state so a caller reading
+			// GetPowerState after PowerOn/PowerOff observes the change.
 			switch body.ResetType {
 			case "On", "ForceRestart":
 				f.powerState[id] = "On"
@@ -342,13 +332,9 @@ func TestSetOneTimePXEBootPatchesBootOverride(t *testing.T) {
 }
 
 // TestDeploySequenceSetPXEBootThenPowerOnThenGetPowerState walks the real
-// deploy sequence end to end: SetOneTimePXEBoot, then PowerOn, then
-// GetPowerState. All three operate on the same cached system, so this
-// guards against an ordering regression where PowerOn's reset clobbers or
-// is blocked by the boot-override PATCH that came before it - a bug that
-// TestSetOneTimePXEBootPatchesBootOverride and
-// TestGetPowerStateObservesChangeAfterPowerOn cannot catch on their own,
-// since neither drives the sequence a deploy actually issues.
+// deploy sequence (SetOneTimePXEBoot, PowerOn, GetPowerState) on the same
+// cached system, guarding against PowerOn's reset clobbering the prior
+// boot-override PATCH.
 func TestDeploySequenceSetPXEBootThenPowerOnThenGetPowerState(t *testing.T) {
 	fake := newFakeRedfishServer("1")
 	server := fake.start(t)
@@ -414,12 +400,8 @@ func TestConnectWithoutSystemPathResolvesSoleSystem(t *testing.T) {
 	}
 }
 
-// TestErrorsDoNotContainCredentials drives every code path in this file
-// that can return an error while holding a live Credentials value, and
-// checks none of the resulting error strings contain the password. This
-// guards against a future change accidentally formatting creds into an
-// error (for example via a naive "%+v" on the ClientConfig or the
-// Credentials struct).
+// TestErrorsDoNotContainCredentials checks every error-returning path here
+// never leaks the password (e.g. via a naive "%+v" on ClientConfig).
 func TestErrorsDoNotContainCredentials(t *testing.T) {
 	const password = "correct-horse-battery-staple"
 	creds := bmc.Credentials{Username: "admin", Password: password}
@@ -520,10 +502,8 @@ func TestEndpointForRejectsAddressWithoutHost(t *testing.T) {
 	}
 }
 
-// TestConnectSendsBasicAuthCredentials confirms the driver actually
-// presents the Credentials it was given on the wire (via HTTP Basic Auth),
-// rather than connecting unauthenticated or dropping them - the fake
-// server rejects every request whose Basic Auth does not match exactly.
+// TestConnectSendsBasicAuthCredentials confirms the driver presents its
+// Credentials on the wire via HTTP Basic Auth rather than dropping them.
 func TestConnectSendsBasicAuthCredentials(t *testing.T) {
 	fake := newFakeRedfishServer("1")
 	fake.wantUsername, fake.wantPassword = "admin", "hunter2"

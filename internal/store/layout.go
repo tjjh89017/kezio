@@ -119,13 +119,11 @@ func ContentDataDir(dir string) string {
 }
 
 // NestExtentFiles moves each of info's extent files from directly inside
-// dir - where partclone -T (--btfiles) writes them, flat alongside
-// torrent.info, since partclone has no option to nest its output - into
-// dir's content/ data subdirectory (ContentDataDir), so the on-disk
-// layout matches what the torrent's own file entries already imply (see
-// ContentDataDir's doc comment). Call this once, right after partclone
-// finishes and before ValidateContentDir, on every content directory
-// this package's caller publishes.
+// dir - where partclone -T (--btfiles) writes them flat, alongside
+// torrent.info, having no option to nest its output - into dir's
+// content/ data subdirectory (ContentDataDir), matching what the
+// torrent's own file entries imply (see ContentDataDir). Call this once,
+// right after partclone finishes and before ValidateContentDir.
 func NestExtentFiles(dir string, info *TorrentInfo) error {
 	dataDir := ContentDataDir(dir)
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {

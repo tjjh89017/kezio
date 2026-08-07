@@ -36,21 +36,17 @@ import (
 	"github.com/tjjh89017/kezio/internal/bmc"
 )
 
-// testBMCScheme is the URL scheme testBMCConnect registers with
-// internal/bmc's registry (see this file's init), so a test Machine can
-// point bmcSpec.Address at "kezio-testbmc://<key>" and get a fake,
-// in-memory BMC back from agentDeployer.connectBMC instead of a real
-// driver trying to reach real hardware.
+// testBMCScheme is registered with internal/bmc's registry (see init), so
+// a test Machine pointing bmcSpec.Address at "kezio-testbmc://<key>" gets
+// a fake in-memory BMC back from connectBMC instead of real hardware.
 const testBMCScheme = "kezio-testbmc"
 
 func init() {
 	bmc.Register(testBMCScheme, testBMCConnect)
 }
 
-// testBMC is a fake bmc.BMC that records every call it receives and lets
-// a test script a failure from any method - the same seam pattern
-// deployer.FailFunc gives the fake Deployer, applied one level down at
-// the BMC itself.
+// testBMC is a fake bmc.BMC that records calls and lets a test script a
+// failure from any method.
 type testBMC struct {
 	mu sync.Mutex
 
@@ -61,11 +57,8 @@ type testBMC struct {
 	powerCycleCalls        int
 	getPowerStateCalls     int
 
-	// getPowerStateOverride, when non-empty, is what GetPowerState reports
-	// instead of state - letting a test simulate a BMC whose read-back
-	// power state disagrees with what a preceding PowerOn/PowerOff/
-	// PowerCycle call commanded (for example, a machine that fails to
-	// actually power on).
+	// getPowerStateOverride, when non-empty, overrides state - simulates a
+	// BMC whose read-back disagrees with the commanded power state.
 	getPowerStateOverride bmc.PowerState
 
 	setOneTimePXEBootErr error
@@ -142,12 +135,9 @@ var (
 )
 
 // testBMCFor returns (creating an initially-off fake on first use) the
-// fake BMC that testBMCConnect will hand back for a
-// "kezio-testbmc://<key>" address. Tests call this before Connect to
-// pre-script a failure, or after to inspect recorded calls; either way
-// the same *testBMC is returned for the same key, keyed independently of
-// bmc.Register's process-global registry so concurrent test cases (using
-// distinct keys) do not observe each other's calls.
+// fake BMC for a given "kezio-testbmc://<key>" address, keyed separately
+// from bmc.Register's process-global registry so concurrent test cases
+// using distinct keys don't observe each other's calls.
 func testBMCFor(key string) *testBMC {
 	testBMCsMu.Lock()
 	defer testBMCsMu.Unlock()
@@ -212,10 +202,8 @@ func bmcCredsSecret() *corev1.Secret {
 	}
 }
 
-// TestAgentDeployer_Register_WithBMC_SetsOneTimePXEBootAndPowersOn covers
-// the documented Register sequence when a BMC is configured and the
-// machine is currently off: SetOneTimePXEBoot then PowerOn (not
-// PowerCycle), and the reconciler-visible Result reports no error.
+// BMC configured, machine off: SetOneTimePXEBoot then PowerOn (not
+// PowerCycle), no error.
 func TestAgentDeployer_Register_WithBMC_SetsOneTimePXEBootAndPowersOn(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	address := testBMCAddress(t)
@@ -262,10 +250,8 @@ func TestAgentDeployer_Register_WithBMC_SetsOneTimePXEBootAndPowersOn(t *testing
 	}
 }
 
-// TestAgentDeployer_Register_BMCAlreadyOn_PowerCycles covers the other
-// branch of Register's power decision: a machine GetPowerState reports
-// already on must be forced through PowerCycle, not PowerOn, to
-// guarantee the clean boot the net boot needs.
+// Machine already on (per GetPowerState) must be forced through
+// PowerCycle, not PowerOn, for a clean net boot.
 func TestAgentDeployer_Register_BMCAlreadyOn_PowerCycles(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	address := testBMCAddress(t)
@@ -299,9 +285,8 @@ func TestAgentDeployer_Register_BMCAlreadyOn_PowerCycles(t *testing.T) {
 	}
 }
 
-// TestAgentDeployer_Register_NoBMC_FallsBackToNetbootWait covers the
-// pre-BMC behavior: a nil bmcSpec (spec.bmc absent) must leave Register's
-// netboot-wait no-op unchanged, with no BMC ever contacted.
+// Nil bmcSpec must leave Register's netboot-wait no-op unchanged, no BMC
+// contacted.
 func TestAgentDeployer_Register_NoBMC_FallsBackToNetbootWait(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	c := newAgentTestClient(t, machine)
@@ -326,10 +311,8 @@ func TestAgentDeployer_Register_NoBMC_FallsBackToNetbootWait(t *testing.T) {
 	}
 }
 
-// TestAgentDeployer_ConnectBMC_NonNilEmptyAddress_FallsBackToNetbootWait
-// covers the other no-BMC shape: a non-nil bmcSpec whose Address is still
-// empty must take the same fallback as a nil bmcSpec, and must never
-// attempt to resolve credentials or connect.
+// A non-nil bmcSpec with an empty Address must take the same no-BMC
+// fallback as a nil bmcSpec, never resolving credentials or connecting.
 func TestAgentDeployer_ConnectBMC_NonNilEmptyAddress_FallsBackToNetbootWait(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	c := newAgentTestClient(t, machine)
@@ -348,12 +331,8 @@ func TestAgentDeployer_ConnectBMC_NonNilEmptyAddress_FallsBackToNetbootWait(t *t
 	}
 }
 
-// TestAgentDeployer_Register_BMCConnectError_RedactsCredentials covers
-// the error path when the BMC credentials Secret does not exist: Register
-// must report a non-empty ErrorMessage, and that message must never
-// contain the Secret's would-be contents (trivially true here since none
-// were ever read, but this locks the observable behavior in as a
-// regression test).
+// Missing BMC credentials Secret: Register reports a non-empty
+// ErrorMessage that never contains credential contents.
 func TestAgentDeployer_Register_BMCConnectError_RedactsCredentials(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	address := testBMCAddress(t)
@@ -377,9 +356,8 @@ func TestAgentDeployer_Register_BMCConnectError_RedactsCredentials(t *testing.T)
 	}
 }
 
-// TestAgentDeployer_PowerOn_WithBMC_CallsThrough and its PowerOff sibling
-// cover the direct phase methods (no Register/RegisterData involved),
-// confirming they call through to the configured BMC.
+// PowerOn/PowerOff called directly (no Register involved) call through to
+// the configured BMC.
 func TestAgentDeployer_PowerOn_WithBMC_CallsThrough(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	address := testBMCAddress(t)
@@ -428,9 +406,7 @@ func TestAgentDeployer_PowerOff_WithBMC_CallsThrough(t *testing.T) {
 	}
 }
 
-// TestAgentDeployer_PowerOnOff_NoBMC_NoOp covers the pre-BMC fallback for
-// both power phases: no BMC configured must stay the documented no-op
-// (success, Dirty=true), unchanged from before this BMC wiring landed.
+// No BMC configured: PowerOn/PowerOff stay a no-op (success, Dirty=true).
 func TestAgentDeployer_PowerOnOff_NoBMC_NoOp(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	c := newAgentTestClient(t, machine)
@@ -453,9 +429,8 @@ func TestAgentDeployer_PowerOnOff_NoBMC_NoOp(t *testing.T) {
 	}
 }
 
-// TestAgentDeployer_PowerOn_BMCPowerOnFails_ReportsError covers a BMC
-// call itself failing (as opposed to connectBMC failing): the driver's
-// error must surface as Result.ErrorMessage.
+// A BMC PowerOn call itself failing (not connectBMC) must surface as
+// Result.ErrorMessage.
 func TestAgentDeployer_PowerOn_BMCPowerOnFails_ReportsError(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	address := testBMCAddress(t)
@@ -479,11 +454,9 @@ func TestAgentDeployer_PowerOn_BMCPowerOnFails_ReportsError(t *testing.T) {
 	}
 }
 
-// TestAgentDeployer_PowerOn_ObservesDriverReportedState covers the
-// GetPowerState read-back: even though the BMC's PowerOn call itself
-// reports success, a machine that fails to actually power on (the
-// read-back state disagrees with the commanded one) must be reflected in
-// Result.PoweredOn as the driver-reported state, not the commanded one.
+// Even if PowerOn itself reports success, a disagreeing GetPowerState
+// read-back must be reflected in Result.PoweredOn, not the commanded
+// state.
 func TestAgentDeployer_PowerOn_ObservesDriverReportedState(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	address := testBMCAddress(t)
@@ -496,9 +469,7 @@ func TestAgentDeployer_PowerOn_ObservesDriverReportedState(t *testing.T) {
 	dep := &agentDeployer{client: c, key: types.NamespacedName{Namespace: "default", Name: "node-01"}, bmcSpec: machine.Spec.BMC}
 
 	fakeKey := strings.TrimPrefix(address, testBMCScheme+"://")
-	// PowerOn itself succeeds (no powerOnErr), but the BMC still reports
-	// the machine as off on read-back - simulating hardware that never
-	// actually powered on despite acknowledging the command.
+	// Simulate hardware that never actually powered on despite ack'ing PowerOn.
 	testBMCFor(fakeKey).getPowerStateOverride = bmc.PowerStateOff
 
 	result, err := dep.PowerOn(context.Background())
@@ -513,8 +484,7 @@ func TestAgentDeployer_PowerOn_ObservesDriverReportedState(t *testing.T) {
 	}
 }
 
-// TestAgentDeployer_PowerOff_ObservesDriverReportedState is
-// PowerOn's read-back test mirrored for PowerOff.
+// PowerOn's read-back test, mirrored for PowerOff.
 func TestAgentDeployer_PowerOff_ObservesDriverReportedState(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	address := testBMCAddress(t)
@@ -541,10 +511,8 @@ func TestAgentDeployer_PowerOff_ObservesDriverReportedState(t *testing.T) {
 	}
 }
 
-// TestAgentDeployer_PowerOn_GetPowerStateFails_PoweredOnNil covers the
-// read-back itself failing: the PowerOn call already succeeded, so that
-// failure must not surface as Result.ErrorMessage, only as a nil
-// Result.PoweredOn (nothing observed to report).
+// The read-back itself failing after a successful PowerOn must not
+// surface as Result.ErrorMessage, only as a nil Result.PoweredOn.
 func TestAgentDeployer_PowerOn_GetPowerStateFails_PoweredOnNil(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	address := testBMCAddress(t)
@@ -571,8 +539,7 @@ func TestAgentDeployer_PowerOn_GetPowerStateFails_PoweredOnNil(t *testing.T) {
 	}
 }
 
-// TestAgentDeployer_PowerCycle_WithBMC_CallsThrough covers PowerCycle's
-// BMC-driven path, the same shape as PowerOn/PowerOff.
+// PowerCycle's BMC-driven path, same shape as PowerOn/PowerOff.
 func TestAgentDeployer_PowerCycle_WithBMC_CallsThrough(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	address := testBMCAddress(t)
@@ -600,13 +567,8 @@ func TestAgentDeployer_PowerCycle_WithBMC_CallsThrough(t *testing.T) {
 	}
 }
 
-// TestAgentDeployer_PowerCycle_NoBMC_NoOp covers PowerCycle's fallback:
-// without a BMC configured it must stay a no-op that reports success,
-// the same shape PowerOn/PowerOff fall back to - this is what lets
-// reconcileProvisioning's AfterDeploy=Reboot handling leave the reboot to
-// the agent's own "systemctl reboot", and reconcileInspecting's
-// stuck-machine detection simply keep waiting, when no BMC is
-// configured.
+// No BMC configured: PowerCycle stays a no-op reporting success, same as
+// PowerOn/PowerOff.
 func TestAgentDeployer_PowerCycle_NoBMC_NoOp(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	c := newAgentTestClient(t, machine)
@@ -624,8 +586,7 @@ func TestAgentDeployer_PowerCycle_NoBMC_NoOp(t *testing.T) {
 	}
 }
 
-// TestAgentDeployer_PowerCycle_BMCPowerCycleFails_ReportsError covers a
-// BMC PowerCycle call itself failing.
+// A BMC PowerCycle call itself failing.
 func TestAgentDeployer_PowerCycle_BMCPowerCycleFails_ReportsError(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	address := testBMCAddress(t)

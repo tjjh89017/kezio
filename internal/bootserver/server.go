@@ -78,20 +78,13 @@ func New(c client.Client, cfg Config) *Server {
 
 // NeedLeaderElection implements manager.LeaderElectionRunnable: this
 // server must start regardless of leader election status. Without this,
-// mgr.Add's default (any Runnable that does not implement
-// LeaderElectionRunnable, or that implements it and returns true, is
-// placed in the manager's leader-election-gated group - see
-// controller-runtime's runnables.Add) leaves GRUB's grub.cfg fetch and
-// the live artifact download unanswered for as long as the previous
-// leader's lease has not yet expired after a rolling update - by
-// default, controller-runtime never releases a lease on graceful
-// shutdown (LeaderElectionReleaseOnCancel defaults false, see
-// cmd/main.go), so a redeployed manager pod can pass its readiness probe
-// (a static ping, unrelated to leadership) while this server stays dark
-// for up to a full lease duration. A machine mid net-boot cannot wait
-// out that gap, and with the Deployment always running a single replica
-// (config/manager/manager.yaml has no replica count override) there is
-// no "other leader" this server would ever need to defer to anyway.
+// mgr.Add's default leaves GRUB's grub.cfg fetch unanswered for up to a
+// full lease duration after a rolling update, since controller-runtime
+// never releases a lease on graceful shutdown by default
+// (LeaderElectionReleaseOnCancel=false) and the readiness probe is
+// unrelated to leadership. A machine mid net-boot cannot wait that out,
+// and with a single-replica Deployment there is no other leader to defer
+// to anyway.
 func (s *Server) NeedLeaderElection() bool {
 	return false
 }
@@ -108,14 +101,9 @@ func (s *Server) now() time.Time {
 func (s *Server) Start(ctx context.Context) error {
 	httpServer := &http.Server{
 		Addr: s.Config.Addr,
-		// This handler serves firmware and GRUB clients directly, over
-		// plain HTTP by design: at boot time the firmware has no TLS
-		// trust store to validate a certificate against yet.
-		// ReadHeaderTimeout bounds a slow-header client
-		// from tying up a connection indefinitely; it is the one
-		// http.Server hardening knob that has no legitimate reason to be
-		// left unset for an Internet-reachable-shaped listener like this
-		// one.
+		// Plain HTTP by design: at boot time firmware has no TLS trust
+		// store yet. ReadHeaderTimeout bounds a slow-header client from
+		// tying up a connection indefinitely.
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
@@ -183,24 +171,19 @@ func (s *Server) handleGrubConfig(w http.ResponseWriter, r *http.Request, rawMAC
 
 	machine, err := s.lookupMachine(ctx, mac)
 	if err != nil {
-		// Fail secure: a lookup error (API server unreachable, an
-		// ambiguous multi-match - see lookupMachine) must never be
-		// treated as "this machine needs the live environment". The
-		// worst outcome of handing back boot-local on an error is a
-		// machine that stays on its existing disk one boot cycle
-		// longer; the worst outcome of the opposite mistake is handing
-		// a live-environment boot (and a token) to whichever machine an
-		// ambiguous lookup happened to pick.
+		// Fail secure: a lookup error (unreachable API server, ambiguous
+		// multi-match) must never be treated as "needs the live
+		// environment" - the worst case of boot-local on error is one
+		// extra boot cycle on the existing disk, versus handing a token
+		// to whichever machine an ambiguous lookup happened to pick.
 		log.Error(err, "looking up machine by boot MAC failed; boot local disk", "mac", mac)
 		writeBootLocal(w)
 		return
 	}
 	if machine == nil {
-		// Deliberately Info, not Error: an unknown MAC is the expected,
-		// routine case for every foreign machine sharing this L2
-		// segment (see the package doc comment) - it is not a fault
-		// condition, but it is worth a log line so an operator can spot
-		// a MAC that keeps asking and was never enrolled.
+		// Info, not Error: an unknown MAC is routine for a foreign
+		// machine on this L2 segment, worth logging so an operator can
+		// spot a MAC that keeps asking but was never enrolled.
 		log.Info("grub.cfg request for an unknown MAC; boot local disk", "mac", mac, "remote", r.RemoteAddr)
 		writeBootLocal(w)
 		return
@@ -220,9 +203,8 @@ func (s *Server) handleGrubConfig(w http.ResponseWriter, r *http.Request, rawMAC
 
 	config, err := renderNetBootConfig(s.Config, token)
 	if err != nil {
-		// Fail secure, same as every branch above: a ServerURL GRUB
-		// could never fetch from (see GrubNetPath) must not leak a
-		// half-rendered config carrying a live token.
+		// Fail secure: must not leak a half-rendered config with a live
+		// token.
 		log.Error(err, "rendering net boot config failed; boot local disk", "machine", machine.Name)
 		writeBootLocal(w)
 		return
@@ -231,14 +213,11 @@ func (s *Server) handleGrubConfig(w http.ResponseWriter, r *http.Request, rawMAC
 }
 
 // lookupMachine resolves mac (already normalized) to the Machine whose
-// spec.bootMACAddress matches, using the MachineBootMACIndexField index.
-// It returns (nil, nil) for no match - not an error - since "unknown
-// MAC" is an ordinary, expected outcome (see handleGrubConfig). More than
-// one match is an error: bootMACAddress is meant to be unique per
-// machine, so this is a misconfiguration the field indexer alone cannot
-// prevent (it is not enforced by a webhook), and picking either match
-// for a live-environment boot and a token would be a guess this package
-// is not willing to make.
+// spec.bootMACAddress matches. Returns (nil, nil) for no match - an
+// ordinary, expected outcome, not an error. More than one match is an
+// error: bootMACAddress uniqueness is only a convention (not enforced by
+// a webhook), and picking either match for a live-environment boot and a
+// token would be a guess this package is not willing to make.
 func (s *Server) lookupMachine(ctx context.Context, mac string) (*keziov1alpha1.Machine, error) {
 	var list keziov1alpha1.MachineList
 	if err := s.Client.List(ctx, &list, client.MatchingFields{MachineBootMACIndexField: mac}); err != nil {
@@ -254,44 +233,28 @@ func (s *Server) lookupMachine(ctx context.Context, mac string) (*keziov1alpha1.
 	}
 }
 
-// Phase-failure Ready condition reasons that call for a net boot to
-// retry, mirrored from internal/controller/machine_controller.go's
-// unexported reason constants of the same string value (reasonInspectFailed,
-// reasonProvisionFailed): this package does not import the controller
-// package (it must not depend on reconciler internals), so the two
-// string literals below are the coupling - if those reason strings ever
-// change, needsNetBoot's Error-state branch must change with them.
+// Phase-failure Ready condition reasons that call for a net boot retry,
+// mirrored from internal/controller/machine_controller.go's unexported
+// reasonInspectFailed/reasonProvisionFailed (this package must not import
+// the controller package) - these string literals are the coupling; if
+// those reason strings change, needsNetBoot's Error-state branch must too.
 const (
 	reasonInspectFailedString   = "InspectFailed"
 	reasonProvisionFailedString = "ProvisionFailed"
 )
 
-// needsNetBoot reports whether machine currently needs to load the live
-// boot environment over the network, as opposed to booting its local
-// disk. This is the boot flow's mapping from Machine.status.state (plus,
-// for the Error state, the failed phase recorded on the Ready condition)
-// onto a boot decision:
+// needsNetBoot maps Machine.status.state (plus, for Error, the failed
+// phase on the Ready condition) onto a boot decision:
 //
-//   - Inspecting: the controller is waiting on the agent to boot and
-//     report hardware inventory - it can only do that from the live
-//     environment.
-//   - Provisioning: the agent is writing the target disk from the live
-//     environment; the disk being written is never a safe thing to boot
-//     from yet.
+//   - Inspecting: agent must boot live to report hardware inventory.
+//   - Provisioning: agent is writing the target disk from the live
+//     environment; the disk being written is never safe to boot from yet.
 //   - Error, when the failed phase was inspection or provisioning: the
-//     retry re-enters the same phase (see the controller's
-//     reconcileError), so it needs the live environment again for the
-//     same reason as above. An Error from any other phase (for example
-//     RegisterFailed, a BMC-side failure that never reached a net boot)
-//     does not.
-//   - Enrolling: registration with the deployer has not progressed to a
-//     hardware-inspecting net boot yet.
-//   - Available: the machine is idle with nothing to do; it keeps
-//     running whatever OS is already on its disk.
-//   - Provisioned: the deployment already finished and the machine
-//     should be running the OS that was just written to disk - net
-//     booting it again would undo the whole point of finishing a
-//     deployment.
+//     retry re-enters the same phase, needing the live environment again.
+//     Any other Error phase (e.g. RegisterFailed) does not.
+//   - Enrolling: hasn't progressed to a hardware-inspecting net boot yet.
+//   - Available: idle, keeps running whatever OS is already on disk.
+//   - Provisioned: deployment finished; net booting again would undo it.
 func needsNetBoot(machine *keziov1alpha1.Machine) bool {
 	switch machine.Status.State {
 	case keziov1alpha1.MachineStateInspecting, keziov1alpha1.MachineStateProvisioning:

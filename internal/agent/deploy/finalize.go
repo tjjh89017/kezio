@@ -215,8 +215,8 @@ func parseEFIBootEntries(listing, label string) []string {
 // itself asks for. It is a no-op unless ip.GrowLastPartition is true or
 // force is true; see ip.GrowLastPartition's field comment for why every
 // plan the controller builds today leaves it false, making the
-// force=false path unreachable in production until a later work item
-// wires a spec field to it. force is set by the "growLastPartition"
+// force=false path unreachable in production until a controller-side
+// field starts setting it. force is set by the "growLastPartition"
 // builtin post hook step (runHooks.go's builtin registry), which grows
 // on explicit request regardless of ip.GrowLastPartition.
 func (e *Executor) growLastPartition(ctx context.Context, ip agentapi.ImageDeployPlan, force bool) error {
@@ -268,8 +268,8 @@ func fsResizeCommand(fsType, device string) (cmd []string, ok bool) {
 // finalize and the terminal progress report are both done: systemctl
 // reboot for keziov1alpha1.AfterDeployReboot (the default, including an
 // empty AfterDeploy), systemctl poweroff for AfterDeployPowerOff. This is
-// the agent doing its own reboot directly - a BMC-driven reboot is a
-// later work item, not implemented here.
+// the agent doing its own reboot directly; a BMC-driven reboot is not
+// implemented here.
 func (e *Executor) rebootOrPowerOff(ctx context.Context, afterDeploy string) error {
 	action := "reboot"
 	if afterDeploy == keziov1alpha1.AfterDeployPowerOff {

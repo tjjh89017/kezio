@@ -17,36 +17,27 @@ limitations under the License.
 // Package bootserver implements the HTTP endpoints a network-booting
 // firmware and its GRUB loader talk to before an agent ever runs:
 //
-//   - GET /boot/grub.cfg-<mac>: GRUB's own config fetch. It resolves the
-//     requesting NIC's MAC address to a Machine, decides whether that
-//     machine currently needs to load the live boot environment or boot
-//     its local disk, and for the former mints a fresh single-use token
-//     embedded in the kernel cmdline.
+//   - GET /boot/grub.cfg-<mac>: GRUB's own config fetch. Resolves the
+//     requesting NIC's MAC to a Machine, decides whether it needs the
+//     live boot environment or its local disk, and for the former mints
+//     a fresh single-use token embedded in the kernel cmdline.
 //   - GET /boot/artifacts/...: serves the live kernel, initramfs, and
-//     squashfs GRUB's config points at, from a directory mounted into the
-//     manager container out of band.
+//     squashfs from a directory mounted into the manager container out
+//     of band.
 //   - GET /boot/http/<name>: serves the signed shim/grub EFI binaries
-//     (bootserver.ShimFilename / bootserver.GrubFilename - the exact
-//     allowlist internal/bootd's TFTP server also serves) for UEFI HTTP
-//     Boot, an alternative to PXE+TFTP that some firmware supports. This
-//     is the endpoint internal/bootd.Config.HTTPBootURL is expected to
-//     point at (see that field's doc comment and
-//     config/bootd/README.md's UEFI HTTP Boot section) - PXE+TFTP
-//     firmware never touches this route at all.
+//     (the same allowlist internal/bootd's TFTP server serves) for UEFI
+//     HTTP Boot, an alternative to PXE+TFTP some firmware supports;
+//     PXE+TFTP firmware never touches this route.
 //
-// All three endpoints are unauthenticated by design: a UEFI firmware or a
-// GRUB instance has no credential to present, and the whole point of a
-// network boot flow is that a machine has nothing installed yet. Every
-// design choice in this package follows from that: the grub.cfg
-// responses read from Kubernetes are visible to anything that can reach
-// this port (any device on the same L2 segment, in the ordinary
-// deployment), and a request is never trusted to be an operator-owned
-// machine just because it presents that machine's MAC address - the MAC
-// only selects which config to hand back, and the config it gets never
-// contains anything more sensitive than a token whose only power is to
-// register once as that one machine, for a short and bounded window,
-// consuming it in the process. See Server's doc comment and the
-// STRIDE analysis in its package tests for the full threat model.
+// All three endpoints are unauthenticated by design: firmware/GRUB have
+// no credential to present, and a machine with nothing installed yet has
+// none to give. A request is never trusted to be an operator-owned
+// machine just because it presents that machine's MAC - the MAC only
+// selects which config to hand back, and the config never contains
+// anything more sensitive than a token whose only power is to register
+// once as that one machine, for a short bounded window, consumed in the
+// process. See Server's doc comment and the STRIDE analysis in its
+// package tests for the full threat model.
 //
 // Server implements sigs.k8s.io/controller-runtime/pkg/manager.Runnable,
 // so it runs embedded in the same manager process as the Machine

@@ -27,20 +27,17 @@ import (
 
 // Options carries driver-independent connection settings.
 type Options struct {
-	// InsecureSkipVerify disables TLS certificate verification for
-	// drivers that connect over HTTPS. It defaults to false (verify):
-	// real BMCs commonly ship a self-signed certificate, so this exists
-	// as an explicit, deliberate opt-out rather than a default, and a
-	// caller setting it should treat that as a documented trust
-	// decision for that specific Machine, not a blanket default.
+	// InsecureSkipVerify disables TLS cert verification for HTTPS
+	// drivers. Defaults false: real BMCs commonly ship self-signed certs,
+	// so opting out is a deliberate per-Machine trust decision, not a
+	// blanket default.
 	InsecureSkipVerify bool
 }
 
 // Driver connects to a BMC at address (already parsed, scheme included)
 // using creds, and returns a BMC bound to it. Registered drivers must not
-// log address or creds: the caller (Connect) already logs neither, and a
-// driver wrapping a lower-level client error must redact both before
-// returning it - see address.Redacted() and Credentials' doc comment.
+// log address or creds; a driver wrapping a lower-level client error must
+// redact both first - see address.Redacted() and Credentials' doc comment.
 type Driver func(ctx context.Context, address *url.URL, creds Credentials, opts Options) (BMC, error)
 
 var (
@@ -48,17 +45,13 @@ var (
 	registry   = map[string]Driver{}
 )
 
-// Register associates a URL scheme (for example "redfish") with a Driver.
-// It is meant to be called from a driver package's init(), the same
-// pattern database/sql drivers use: importing internal/bmc/redfish for its
-// side effect registers "redfish" without internal/bmc ever importing it
-// back, and an IPMI driver (a later addition) plugs in the same way,
-// registering its own scheme(s) without touching this package or the
-// Redfish driver.
+// Register is meant to be called from a driver package's init() (the
+// database/sql pattern): importing internal/bmc/redfish registers
+// "redfish" without this package importing it back, and other drivers
+// plug in the same way without touching each other.
 //
-// Register panics if scheme is already registered or is empty: both are
-// programming errors caught at package init time, not a runtime condition
-// a caller needs to recover from.
+// Panics if scheme is already registered or empty - both are programming
+// errors caught at package init time.
 func Register(scheme string, driver Driver) {
 	scheme = strings.ToLower(scheme)
 	if scheme == "" {
@@ -76,17 +69,12 @@ func Register(scheme string, driver Driver) {
 	registry[scheme] = driver
 }
 
-// Connect parses address, picks the driver registered for its scheme, and
-// uses it to connect. address is Machine.spec.bmc.address (for example
-// "redfish://10.0.0.10/redfish/v1/Systems/1"); creds are the credentials
-// already resolved from Machine.spec.bmc.credentialsSecretRef (see
-// CredentialsFromSecretData).
-//
-// Neither address nor creds is ever logged here or included verbatim in an
-// error: an unparsable or unknown-scheme address is reported through
-// (*url.URL).Redacted(), which strips embedded userinfo but keeps enough
-// of the address (host, path) to be useful for diagnosing a misconfigured
-// Machine.
+// Connect parses address (e.g. "redfish://10.0.0.10/redfish/v1/Systems/1"),
+// picks the driver registered for its scheme, and connects. Neither
+// address nor creds is ever logged or included verbatim in an error - an
+// unparsable or unknown-scheme address is reported through
+// (*url.URL).Redacted(), which strips embedded userinfo but keeps host/path
+// for diagnosing a misconfigured Machine.
 func Connect(ctx context.Context, address string, creds Credentials, opts Options) (BMC, error) {
 	parsed, err := url.Parse(address)
 	if err != nil {
@@ -123,12 +111,8 @@ func registeredSchemesLocked() []string {
 	return schemes
 }
 
-// RegisteredSchemes returns the URL schemes currently registered with a
-// Driver, sorted. It exists for callers that need to check or report on
-// registration state without going through Connect - for example the
-// Machine validating webhook, which rejects a spec.bmc.address whose
-// scheme has no registered driver rather than letting that surface later
-// as a Connect failure during a deploy.
+// RegisteredSchemes lets callers (e.g. the Machine validating webhook)
+// check registration state without going through Connect.
 func RegisteredSchemes() []string {
 	registryMu.RLock()
 	defer registryMu.RUnlock()

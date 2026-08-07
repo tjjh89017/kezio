@@ -51,18 +51,12 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 	return n, err
 }
 
-// logRequests wraps next so every request this server answers - a
-// success as much as an anomaly - leaves one record: method, path,
-// status, bytes written, remote address and duration. handleGrubConfig's
-// own branches already log the anomaly paths (malformed/unknown MAC,
-// lookup/token/render failure) with more specific context; this line is
-// deliberately terse and applies to every route including the ones with
-// no anomaly logging of their own at all (the artifacts and EFI file
-// servers) - it exists to close the gap where a successful fetch left no
-// trace anywhere. Always on, not behind a flag: this server's total
-// request volume is a handful of enrolled machines mid boot, so the
-// per-request logging cost is negligible next to a boot that failed
-// silently past the last anomaly log line.
+// logRequests wraps next so every request - success or anomaly - leaves
+// one record, closing the gap left by routes with no anomaly logging of
+// their own (the artifacts and EFI file servers). Always on, not behind a
+// flag: this server's request volume (a handful of enrolled machines mid
+// boot) makes the per-request cost negligible next to a boot that failed
+// silently.
 func logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec := &statusRecorder{ResponseWriter: w}

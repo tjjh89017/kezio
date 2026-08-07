@@ -139,10 +139,9 @@ func (d *fakeDeployer) Inspect(_ context.Context, data *InspectData) (Result, er
 	return Result{Dirty: true}, nil
 }
 
-// Provision reports a completed deployment on the first call: the fake has
-// no image content to move, so it does not need to poll. It fills in the
-// resolved-disk output fields with plausible fake device paths, the same
-// shape a real deployment plan would resolve from the disk hints.
+// Provision reports a completed deployment on the first call (no image
+// content to move, so no need to poll), filling resolved-disk fields with
+// plausible fake device paths.
 func (d *fakeDeployer) Provision(_ context.Context, data *ProvisionData) (Result, error) {
 	if msg := d.fail(PhaseProvision); msg != "" {
 		return Result{ErrorMessage: msg}, nil

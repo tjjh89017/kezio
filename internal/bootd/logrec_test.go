@@ -25,12 +25,10 @@ import (
 )
 
 // recordingSink is a minimal logr.LogSink that appends every message
-// passed to Info, guarded by a mutex since the code under test logs
-// from multiple goroutines (the dnsmasq supervisor's log-forwarding
-// goroutines, for example). Used to assert on log content directly
-// rather than on internal call counts, since lines like "served TFTP
-// file" are the operator-facing signal this package's tests exist to
-// pin (see tftp.go's readHandler and dnsmasq.go's Start).
+// passed to Info, guarded by a mutex since the code under test logs from
+// multiple goroutines. Used to assert on log content directly, since
+// lines like "served TFTP file" are the operator-facing signal these
+// tests exist to pin.
 type recordingSink struct {
 	mu   sync.Mutex
 	msgs []string

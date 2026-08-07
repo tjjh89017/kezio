@@ -35,28 +35,21 @@ type Result struct {
 	// Dirty is true when the call produced information the reconciler
 	// should persist to Machine.status before deciding what happens next.
 	Dirty bool
-	// RequeueAfter is how long to wait before calling this phase again.
-	// Zero means the phase is complete; a non-zero value asks for another
-	// poll. Provision is the phase that typically uses this, since it is
-	// idempotent and polled until the deployment finishes.
+	// RequeueAfter is how long to wait before calling this phase again;
+	// zero means the phase is complete. Provision is the typical user,
+	// since it is idempotent and polled until the deployment finishes.
 	RequeueAfter time.Duration
-	// ErrorMessage is set when the phase itself failed (for example, the
-	// BMC rejected the power command, or the deployment plan could not be
-	// applied). The reconciler records it on Machine.status.errorMessage,
-	// moves the machine to the Error state, and retries with backoff. An
-	// empty ErrorMessage means the call succeeded; a non-nil Go error
-	// returned alongside it signals an unrelated, transient problem (for
-	// example a context cancellation) that the reconciler should just
-	// requeue without recording a machine-level error.
+	// ErrorMessage set means the phase itself failed: reconciler records it
+	// on Machine.status.errorMessage, moves to Error, retries with backoff.
+	// A returned Go error (independent of this field) instead means an
+	// unrelated transient problem (e.g. context cancellation): requeue
+	// without recording a machine-level error.
 	ErrorMessage string
-	// PoweredOn carries the power state actually read back from the BMC
-	// (via GetPowerState) after a successful, BMC-driven PowerOn,
-	// PowerOff, or PowerCycle call. It is nil when no BMC is configured
-	// (the documented no-op fallback those calls take) or when the
-	// read-back state could not be resolved to on/off (bmc.PowerStateUnknown,
-	// or the read itself failed). The reconciler uses it, when set, to
-	// record Machine.status.poweredOn from what the BMC actually observed
-	// rather than assuming the commanded state took effect.
+	// PoweredOn is the power state read back from the BMC (GetPowerState)
+	// after a successful BMC-driven PowerOn/PowerOff/PowerCycle. Nil when
+	// no BMC is configured, or the read-back state was
+	// bmc.PowerStateUnknown/failed - callers should not assume the
+	// commanded state took effect in that case.
 	PoweredOn *bool
 }
 
@@ -82,10 +75,9 @@ type InspectData struct {
 }
 
 // ProvisionData carries the resolved deployment plan for the provision
-// phase: the OS image, any extra data images, and where each one writes.
-// ResolvedTargetDisk and ResolvedDataImageDisks are output fields, nil/empty
-// on input; a call that completes the deployment (Result.RequeueAfter == 0,
-// no error) fills them in, the same way InspectData.Hardware is filled in.
+// phase. ResolvedTargetDisk/ResolvedDataImageDisks are output fields,
+// filled in once the deployment completes (Result.RequeueAfter == 0, no
+// error).
 type ProvisionData struct {
 	// ImageRef names the OS image to deploy. Absent when the machine
 	// deploys only DataImages.
@@ -133,15 +125,10 @@ type Deployer interface {
 	PowerOn(ctx context.Context) (Result, error)
 	// PowerOff powers the machine off.
 	PowerOff(ctx context.Context) (Result, error)
-	// PowerCycle forces the machine through an immediate power-on reset.
-	// It drives two callers: reconcileProvisioning's AfterDeploy=Reboot
-	// handling (routing that reboot through the BMC instead of leaving it
-	// to the agent's own reboot) and reconcileInspecting's stuck-machine
-	// recovery (forcing a machine that never actually net booted to try
-	// again). Without a BMC configured it is a no-op that reports success,
-	// the same fallback shape as PowerOn/PowerOff: there is nothing this
-	// Deployer can drive, so the caller's own documented fallback (the
-	// agent's own reboot, or simply continuing to wait) takes over.
+	// PowerCycle forces an immediate power-on reset. Used by
+	// reconcileProvisioning's AfterDeploy=Reboot handling and
+	// reconcileInspecting's stuck-machine recovery. Without a BMC it is a
+	// no-op that reports success, like PowerOn/PowerOff.
 	PowerCycle(ctx context.Context) (Result, error)
 }
 

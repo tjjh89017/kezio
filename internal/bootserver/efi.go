@@ -23,15 +23,10 @@ import (
 
 // ShimFilename and GrubFilename name the two signed EFI binaries both
 // boot fronts serve: shim (chainloading into grub) and the grub image it
-// loads. This package's HTTP Boot route (handleEFI, GET
-// /boot/http/<name>, below) and internal/bootd's TFTP server
-// (internal/bootd/tftp.go) both need the exact same two names, and
-// internal/bootd already imports this package (for NormalizeMAC), so
-// this is the single definition: internal/bootd.ShimFilename /
-// internal/bootd.GrubFilename alias these rather than redefining them,
-// which is what keeps the two fronts from drifting apart - a name added
-// to one allowlist and not the other is the failure mode a single source
-// of truth closes off.
+// loads. This package's HTTP Boot route and internal/bootd's TFTP server
+// both need the exact same two names; internal/bootd.ShimFilename /
+// internal/bootd.GrubFilename alias these rather than redefining them, so
+// the two allowlists cannot drift apart.
 const (
 	ShimFilename = "shimx64.efi"
 	GrubFilename = "grubx64.efi"
@@ -51,28 +46,18 @@ var allowedEFIFiles = map[string]bool{
 const efiContentType = "application/octet-stream"
 
 // handleEFI implements GET /boot/http/{name}, the UEFI HTTP Boot
-// counterpart to internal/bootd's TFTP shim/grub service: it is where
-// Config.HTTPBootURL (internal/bootd's Config field bootd hands firmware
-// as the DHCP boot filename) is expected to point, for example
-// "http://10.0.0.5:8090/boot/http/shimx64.efi" (see
-// config/bootd/README.md's UEFI HTTP Boot section).
+// counterpart to internal/bootd's TFTP shim/grub service - where
+// internal/bootd's Config.HTTPBootURL is expected to point, e.g.
+// "http://10.0.0.5:8090/boot/http/shimx64.efi".
 //
-// name comes from a single net/http ServeMux path segment ({name} cannot
-// itself contain a "/", encoded or not: PathValue decodes only the bytes
-// within that one segment), and is then checked against allowedEFIFiles
-// by exact equality before it is ever joined onto Config.EFIDir. Neither
-// an unrecognized name nor a path-traversal attempt can reach the
-// filesystem: filepath.Join is only ever called with one of the two
-// literal strings in allowedEFIFiles, never with attacker-controlled
-// input. This mirrors TFTPServer.readHandler's allowlist-by-basename
-// posture (internal/bootd/tftp.go) applied to a request shape where the
-// filesystem-facing check is even simpler, since the route pattern
-// already bounds name to one segment.
+// name is a single ServeMux path segment (cannot contain "/"), checked
+// against allowedEFIFiles by exact equality before ever being joined onto
+// Config.EFIDir - filepath.Join only ever sees one of the two literal
+// allowlisted strings, never attacker-controlled input.
 //
-// http.ServeFile (not a hand-rolled io.Copy) handles the actual
-// response: correct Content-Length, conditional-GET caching headers, and
-// Range support, since some UEFI HTTP Boot firmware issues ranged
-// fetches.
+// http.ServeFile (not a hand-rolled io.Copy) handles the response:
+// correct Content-Length, conditional-GET caching, and Range support,
+// since some UEFI HTTP Boot firmware issues ranged fetches.
 func (s *Server) handleEFI(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if !allowedEFIFiles[name] {

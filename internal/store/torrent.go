@@ -33,24 +33,20 @@ const InfoHashSize = sha1.Size
 type InfoHash [InfoHashSize]byte
 
 // contentName is the fixed "name" field of every content torrent this
-// package builds. A content is addressed purely by its info hash, which is
-// derived only from the extent layout and piece hashes (see BuildInfoDict);
-// the name has no bearing on that and carries no partition identity, so a
-// constant keeps info-hash computation deterministic without needing any
-// caller-supplied naming scheme. ezio does not read this field: the
-// consuming BitTorrent client resolves each file back to its partition
-// offset by parsing the file's own leaf name as hex; it never reads the
+// package builds. Content is addressed purely by info hash (extent
+// layout + piece hashes, see BuildInfoDict), so a constant name keeps
+// hash computation deterministic without a caller-supplied naming
+// scheme. ezio never reads this field: a consuming client recovers a
+// file's partition offset from its own leaf name (hex), not the
 // directory name.
 const contentName = "content"
 
 // BuildInfoDict bencodes info's BitTorrent v1 info dict: one file per
 // extent (named by ExtentFileName, so ezio can recover each file's
 // partition offset), a fixed piece length of PieceSize, and the piece
-// hashes taken verbatim from torrent.info. This mirrors how ezio's own
+// hashes taken verbatim from torrent.info — mirroring how ezio's own
 // torrent-building tooling assembles the same info dict from the same
-// three offset/length/sha1 streams - one file per extent, the same fixed
-// 16 MiB piece length, one hash per sha1 line - as a BitTorrent v1-only
-// torrent.
+// three streams.
 //
 // Extents are sorted by Offset before encoding, so the result depends only
 // on the set of (offset, length) extents and the piece hash sequence, not

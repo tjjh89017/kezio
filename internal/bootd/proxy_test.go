@@ -72,12 +72,8 @@ func TestNewProxyServer_RequiresAtLeastOneUpstream(t *testing.T) {
 	}
 }
 
-// TestProxyConfig_Enabled pins the exact rule cmd/bootd relies on to
-// decide whether to add a ProxyServer to the manager at all: enabled iff
-// at least one upstream URL is set, disabled (the zero value) when
-// bootd's proxy env vars are left unset entirely - so an existing bootd
-// deployment that never sets them keeps behaving exactly as it did
-// before this type existed.
+// TestProxyConfig_Enabled pins the rule cmd/bootd relies on: enabled iff
+// at least one upstream URL is set.
 func TestProxyConfig_Enabled(t *testing.T) {
 	cases := []struct {
 		name string
@@ -98,10 +94,9 @@ func TestProxyConfig_Enabled(t *testing.T) {
 	}
 }
 
-// TestNewProxyServer_RejectsInvalidUpstreamURL pins the fail-loudly
-// requirement: a malformed or non-HTTP(S) upstream URL is rejected at
-// construction time (cmd/bootd's startup), not discovered later as every
-// proxied request silently 502ing.
+// TestNewProxyServer_RejectsInvalidUpstreamURL: a malformed or non-HTTP(S)
+// upstream URL is rejected at construction, not discovered later as every
+// request silently 502ing.
 func TestNewProxyServer_RejectsInvalidUpstreamURL(t *testing.T) {
 	cases := []struct {
 		name string
@@ -224,15 +219,11 @@ func TestProxyServer_ForwardsBootRoutes(t *testing.T) {
 	}
 }
 
-// TestProxyServer_StreamsResponseBody proves a large/streamed upstream
-// response body passes through intact - the shape a live kernel/initrd/
-// squashfs download over GET /boot/artifacts/... actually takes, as
-// opposed to the small fixed bodies the other tests use.
+// TestProxyServer_StreamsResponseBody proves a large/streamed body (like a
+// kernel/initrd/squashfs download) passes through intact.
 func TestProxyServer_StreamsResponseBody(t *testing.T) {
-	// Bigger than any single default buffer stage a naive implementation
-	// might truncate at, and built from a repeating, position-dependent
-	// pattern (not all zeros) so any byte-level corruption is caught by
-	// bytes.Equal rather than a length check alone.
+	// Bigger than any default buffer stage, and a repeating
+	// position-dependent pattern so byte-level corruption is caught.
 	want := bytes.Repeat([]byte("kezio-live-artifact-stream-"), 8192)
 
 	bootUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -289,10 +280,8 @@ func TestProxyServer_MapsUpstreamErrorToBadGateway(t *testing.T) {
 }
 
 // TestProxyServer_OnlyProxiesConfiguredPrefix proves the two upstreams
-// are independent: configuring only the agent upstream leaves /boot/...
-// unhandled (a plain 404 from the ServeMux, since nothing is registered
-// for it) rather than accidentally falling through to the agent
-// upstream or panicking on a nil handler.
+// are independent: only the agent upstream configured leaves /boot/...
+// a plain 404, not a fallthrough to the agent upstream.
 func TestProxyServer_OnlyProxiesConfiguredPrefix(t *testing.T) {
 	var got recordedRequest
 	agentUpstream := newRecordingUpstream(t, http.StatusOK, "ok", &got)
@@ -316,11 +305,8 @@ func TestProxyServer_OnlyProxiesConfiguredPrefix(t *testing.T) {
 	}
 }
 
-// TestProxyServer_Addr pins ProxyConfig.Addr's default: DefaultProxyAddr
-// when unset, the configured value otherwise. cmd/bootd overrides this
-// default itself (binding to BOOTD_SERVER_IP specifically rather than
-// every interface), so this only pins the package-level fallback a
-// direct caller of NewProxyServer would get.
+// TestProxyServer_Addr pins ProxyConfig.Addr's default (DefaultProxyAddr
+// when unset) vs an explicit value.
 func TestProxyServer_Addr(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer upstream.Close()
@@ -344,11 +330,7 @@ func TestProxyServer_Addr(t *testing.T) {
 }
 
 // TestProxyServer_StartServesAndShutsDown exercises the manager.Runnable
-// contract end to end through a real listener (not just Handler()
-// directly): Start binds Addr, serves a proxied request, and returns
-// cleanly once its context is cancelled - the same lifecycle
-// internal/bootserver.Server and internal/agentserver.Server are already
-// tested against.
+// contract: Start binds Addr, serves, and returns cleanly on cancel.
 func TestProxyServer_StartServesAndShutsDown(t *testing.T) {
 	var got recordedRequest
 	agentUpstream := newRecordingUpstream(t, http.StatusOK, "ok", &got)
@@ -359,13 +341,9 @@ func TestProxyServer_StartServesAndShutsDown(t *testing.T) {
 		t.Fatalf("NewProxyServer: %v", err)
 	}
 
-	// Addr "127.0.0.1:0" (ephemeral port) means Start itself must bind
-	// the real listening address before this test can reach it; since
-	// Start does not report back which port the kernel chose, exercise
-	// Handler() directly here for the request/response assertion and
-	// keep Start's own contract (starts, serves through its own bound
-	// listener, shuts down cleanly on cancel) covered by the ctx-cancel
-	// behavior below.
+	// Addr uses an ephemeral port Start doesn't report back, so exercise
+	// Handler() directly for the request/response assertion and leave
+	// Start's bind/serve/shutdown contract to the ctx-cancel check below.
 	front := httptest.NewServer(srv.Handler())
 	defer front.Close()
 	resp, err := http.Get(front.URL + "/agent/register")
@@ -396,12 +374,8 @@ func TestProxyServer_StartServesAndShutsDown(t *testing.T) {
 	}
 }
 
-// TestProxyServer_ReadyReflectsListenState pins the exact contract
-// cmd/bootd's readyz check relies on: Ready is false before Start ever
-// runs, flips true only once Start's listener is actually bound, and
-// flips back false once serving stops - so a caller polling Ready never
-// sees "healthy" for a front that cannot yet, or can no longer, answer a
-// request.
+// TestProxyServer_ReadyReflectsListenState: Ready is false before Start
+// runs, true once the listener is bound, false again once serving stops.
 func TestProxyServer_ReadyReflectsListenState(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer upstream.Close()
@@ -442,12 +416,9 @@ func TestProxyServer_ReadyReflectsListenState(t *testing.T) {
 	}
 }
 
-// TestProxyServer_StartReturnsErrorOnBindFailure proves a listener that
-// cannot bind (the address is already taken here) is reported back to
-// the caller as an error - the same failure manager.Start propagates
-// into cmd/bootd's own "problem running bootd" fatal log line - instead
-// of Start silently doing nothing forever. Ready must also stay false:
-// nothing about a failed bind should ever look healthy.
+// TestProxyServer_StartReturnsErrorOnBindFailure proves a bind failure
+// (address already in use) is reported as an error, not silently ignored,
+// and Ready stays false.
 func TestProxyServer_StartReturnsErrorOnBindFailure(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer upstream.Close()

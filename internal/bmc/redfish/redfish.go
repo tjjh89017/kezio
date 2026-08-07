@@ -64,14 +64,9 @@ func connect(ctx context.Context, address *url.URL, creds bmc.Credentials, opts 
 		Username: creds.Username,
 		Password: creds.Password,
 		Insecure: opts.InsecureSkipVerify,
-		// BasicAuth sends credentials on every request instead of
-		// creating a server-side session. A kezio controller connects
-		// briefly, does one power action, and disconnects - often many
-		// times an hour across reconciles - and most BMCs cap
-		// concurrent Redfish sessions in the single digits. Avoiding
-		// session creation altogether removes both the need to Logout
-		// on every code path (including error returns) and the risk of
-		// exhausting the BMC's session pool.
+		// BasicAuth avoids creating a server-side session: a controller
+		// connects briefly, often many times an hour, and most BMCs cap
+		// concurrent Redfish sessions in the single digits.
 		BasicAuth: true,
 	})
 	if err != nil {
@@ -142,21 +137,16 @@ func (d *driver) PowerOn(_ context.Context) error {
 	return d.reset(schemas.OnResetType)
 }
 
-// PowerOff implements bmc.BMC. It requests GracefulShutdown rather than
-// ForceOff: a Machine that has already deployed an OS may be running one,
-// and an orderly shutdown avoids losing in-flight writes to the disk this
-// package's caller just spent a deployment writing. Any BMC that does not
-// support GracefulShutdown reports that as a normal reset error, exactly
-// like it would for an unsupported ResetType from any other cause.
+// PowerOff implements bmc.BMC using GracefulShutdown rather than ForceOff,
+// to avoid losing in-flight disk writes on a Machine already running a
+// deployed OS.
 func (d *driver) PowerOff(_ context.Context) error {
 	return d.reset(schemas.GracefulShutdownResetType)
 }
 
-// PowerCycle implements bmc.BMC. It requests ForceRestart, an immediate
-// power-on reset that does not depend on a running OS responding: the
-// deploy flow uses PowerCycle exactly when it needs a guaranteed boot
-// cycle (for example, to pick up a freshly set one-time PXE boot), not
-// when a graceful restart would do.
+// PowerCycle implements bmc.BMC using ForceRestart, an immediate
+// power-on reset independent of a running OS - used when a guaranteed
+// boot cycle is needed (e.g. to pick up a freshly set one-time PXE boot).
 func (d *driver) PowerCycle(_ context.Context) error {
 	return d.reset(schemas.ForceRestartResetType)
 }
@@ -168,11 +158,9 @@ func (d *driver) reset(resetType schemas.ResetType) error {
 	return nil
 }
 
-// GetPowerState implements bmc.BMC. It re-fetches the System resource
-// rather than reusing the cached one from connect time, so repeated calls
-// (for example, a caller polling for a power state change after PowerOn)
-// observe the BMC's current state rather than a snapshot from whenever
-// this driver was constructed.
+// GetPowerState implements bmc.BMC, re-fetching the System resource
+// (rather than reusing the cached one from connect time) so a caller
+// polling for a state change sees the BMC's current state.
 func (d *driver) GetPowerState(_ context.Context) (bmc.PowerState, error) {
 	system, err := schemas.GetComputerSystem(d.client, d.systemURI)
 	if err != nil {

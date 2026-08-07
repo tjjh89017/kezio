@@ -35,21 +35,15 @@ var ErrEmptyToken = errors.New("bearer token must not be empty")
 // against one fixed token loaded at startup from a mounted Secret (see
 // LoadToken). It never logs or echoes the token.
 //
-// This is the only authentication the image service performs. Network
-// exposure — whether the Service in front of it is ClusterIP, a
-// LoadBalancer, or a NodePort reachable from outside the cluster — is a
-// deployment choice for the cluster operator, not something this package
-// decides; it assumes only that callers can reach it at L3 and that this
-// bearer check is the sole gate on writes. Deployments that expose the
-// service beyond the cluster network should put TLS in front of it (for
-// example an Ingress or a Service-fronting proxy), since a bearer token
-// sent over plain HTTP is only as safe as the network it crosses.
+// This bearer check is the sole gate on writes; network exposure (Service
+// type, Ingress, etc.) is the cluster operator's choice, not this
+// package's concern. Deployments exposed beyond the cluster network
+// should put TLS in front, since a bearer token over plain HTTP is only
+// as safe as the network it crosses.
 type Authenticator struct {
-	// tokenHash is sha256(token), never the token itself, so a copy of
-	// the Authenticator value (or a crash dump) does not hold the raw
-	// secret redundantly. Comparison hashes the presented token the same
-	// way before a constant-time compare, so equality checking never
-	// runs in time proportional to the token's own length either.
+	// tokenHash is sha256(token), never the raw token, so a value copy or
+	// crash dump doesn't hold the secret. Comparison hashes the presented
+	// token the same way before a constant-time compare.
 	tokenHash [sha256.Size]byte
 }
 

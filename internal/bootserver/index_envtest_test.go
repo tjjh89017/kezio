@@ -35,15 +35,9 @@ import (
 )
 
 // TestSetupFieldIndexer_EnvtestLookup exercises SetupFieldIndexer against
-// a real API server (via envtest), the thing a fake client's WithIndex
-// cannot verify on its own: that a manager cache actually built with
-// this package's index name and extractor function serves an O(1)
-// lookup by boot MAC once the manager is running, the same way
-// cmd/main.go wires it up in production. server_test.go's fake-client
-// tests cover the handler logic in detail; this test exists only to
-// catch a wiring mistake between SetupFieldIndexer and Server that a
-// fake client (which accepts any index name/func pair you hand it,
-// production wiring included or not) would not.
+// a real API server (envtest) to catch a wiring mistake between
+// SetupFieldIndexer and Server that a fake client (which accepts any
+// index name/func pair) would not.
 func TestSetupFieldIndexer_EnvtestLookup(t *testing.T) {
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" && firstEnvtestBinaryDir() == "" {
 		t.Skip("no envtest binaries available (run `make setup-envtest`, or set KUBEBUILDER_ASSETS)")
@@ -121,11 +115,8 @@ func TestSetupFieldIndexer_EnvtestLookup(t *testing.T) {
 	waitForServe(t, s, "aa:bb:cc:dd:ee:01")
 }
 
-// waitForServe polls the grub.cfg handler until it stops reporting the
-// machine as unknown (the cache needs a moment to observe the Create
-// above) and then asserts it resolved to a net-boot config, proving the
-// production index wiring (SetupFieldIndexer) and Server's lookup agree
-// on the same index name and key shape.
+// waitForServe polls the grub.cfg handler until the cache observes the
+// Create above and it resolves to a net-boot config.
 func waitForServe(t *testing.T, s *Server, mac string) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)

@@ -24,50 +24,36 @@ limitations under the License.
 // and hands the machine off to the deployed OS (systemctl reboot or
 // poweroff, per DeployPlan.AfterDeploy).
 //
-// Finalize deliberately never opens or modifies the root file systems
-// inside the deployed disks: no chroot, no update-initramfs. The content
-// ezio restored is byte-identical to the source image, so every UUID it
-// carries (root file system, swap - see mkswap --uuid) already matches
-// whatever the image's own fstab and bootloader configuration expects;
-// there is nothing to regenerate. efibootmgr itself only ever touches
-// firmware NVRAM, and finalize never opens the ESP's file system either:
-// it relies entirely on kezio's own image contract (see
-// internal/agent/deploy's efiRemovableLoaderPath doc comment) that a
-// bootable Image already carries its fallback bootloader at the path
-// firmware falls back to on its own, with no NVRAM boot entry involved,
-// whenever the entry efibootmgr created does not survive to the next
-// boot. Deliberately no validation checks this contract anywhere in
-// kezio - the documented contract is the whole of it. An image that does
-// not meet it can opt into the "install-removable-fallback" builtin post
-// hook step (hooks.go) instead.
+// Finalize never opens or modifies the deployed disks' root file systems
+// (no chroot, no update-initramfs): the content ezio restored is
+// byte-identical to the source image, so every UUID it carries already
+// matches what that image's own fstab/bootloader config expects - nothing
+// to regenerate. It never opens the ESP's file system either; it relies on
+// kezio's image contract that a bootable Image already carries its
+// fallback bootloader at the path firmware falls back to on its own (see
+// efiRemovableLoaderPath), with no validation enforcing that contract
+// anywhere. An image that does not meet it can opt into the
+// "install-removable-fallback" builtin post hook step (hooks.go) instead.
 //
-// Between content writing and finalize, Execute runs plan.Hooks
-// (runHooks, in hooks.go): every PostHook internal/agentserver resolved
-// into the plan, already carrying each step's templated script content.
-// This is the one place finalize's own "never chroots" rule does not
-// apply - a chrootScript step deliberately mounts and chroots into the
-// deployed root file system - but only on the cluster operator's own
-// explicit request through a PostHook's steps, never automatically.
+// Between content writing and finalize, Execute runs plan.Hooks (runHooks,
+// hooks.go): every PostHook internal/agentserver resolved into the plan.
+// This is the one place finalize's "never chroots" rule does not apply - a
+// chrootScript step deliberately chroots into the deployed root file
+// system - but only on the operator's explicit request via a PostHook
+// step, never automatically.
 //
-
 // This is the highest-blast-radius code in kezio: a wrong disk here
-// destroys data with no undo. Every destructive command it issues names
-// a device the DeployPlan itself supplied (never a glob, never a
-// resolved-then-forgotten value), and Execute validates the entire plan
-// - every disk exists and is large enough, every partition's device path
-// is exactly what the plan's own naming convention predicts - before any
-// command runs, so a single inconsistency anywhere in the plan aborts
-// the whole deployment having written nothing at all rather than leaving
-// some disks touched and others not.
+// destroys data with no undo. Every destructive command names a device the
+// DeployPlan itself supplied, and Execute validates the whole plan (every
+// disk exists and is large enough, every partition's device path matches
+// the plan's own naming convention) before any command runs, so a single
+// inconsistency aborts the deployment having written nothing at all.
 //
-// Every external command (sfdisk, blockdev, mkfs.*, mkswap)
-// and the ezio gRPC control plane are reached through the small Runner
-// and EzioClient/EzioLauncher interfaces this package defines, not
-// os/exec or seeder.Dial directly, so Execute's orchestration - which
-// partitions get which command, in what order, when the stop policy
-// pauses a torrent, when the local daemon shuts down - is unit-testable
-// with fakes and needs no real devices or root. The exec-backed
-// production implementations live in cmd/agent.
+// External commands and the ezio gRPC control plane are reached through
+// the small Runner and EzioClient/EzioLauncher interfaces this package
+// defines, not os/exec or seeder.Dial directly, so Execute's orchestration
+// is unit-testable with fakes and needs no real devices or root. The
+// exec-backed production implementations live in cmd/agent.
 package deploy
 
 import (
@@ -159,22 +145,18 @@ type Executor struct {
 	// Logf receives progress and diagnostic messages in fmt.Printf
 	// style. Nil discards them.
 	Logf func(format string, args ...any)
-	// Console, when non-nil, additionally receives finalize's boot
-	// summary (see finalize's own doc comment) written directly, once,
-	// right after the terminal progress report. That report's
-	// StepMessage is the primary channel for this information; this
-	// exists alongside it as a belt-and-braces echo, because the report
-	// travels over a network request and a Kubernetes API write, either
-	// of which can silently lose the information (a dropped request, a
-	// conflict retry that never lands before the reboot below) with no
-	// second attempt - Execute treats a failed report as logged-and-
-	// ignored, never worth failing an otherwise-complete deploy over
-	// (see report's doc comment). A write to /dev/console (production
-	// wiring: cmd/agent) needs neither the network nor the controller:
-	// it lands in the same serial capture every diagnostics dump already
-	// collects, synchronously, before Execute reboots the machine. Nil
-	// (the default in every test that does not exercise this) means the
-	// echo is skipped entirely - the original StepMessage-only behavior.
+	// Console, when non-nil, additionally receives finalize's boot summary
+	// (see finalize's own doc comment) written directly, once, right after
+	// the terminal progress report. That report's StepMessage is the
+	// primary channel; this is a belt-and-braces echo, since the report
+	// travels over a network request and a Kubernetes API write - either
+	// can silently lose it (a dropped request, a conflict retry that never
+	// lands before the reboot below) with no second attempt, and a failed
+	// report is only logged, never worth failing an otherwise-complete
+	// deploy over. A write to /dev/console (cmd/agent) needs neither the
+	// network nor the controller: it lands in the same serial capture
+	// every diagnostics dump collects, synchronously, before reboot. Nil
+	// skips the echo entirely.
 	Console io.Writer
 	// PollInterval is how often the seeding loop polls
 	// GetTorrentStatus. Zero means DefaultPollInterval.

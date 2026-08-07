@@ -41,23 +41,17 @@ const DefaultMaxUploads = 3
 
 // DefaultMaxConnections is KEZIO's own default for AddTorrent's
 // max_connections, applied when neither the cluster-wide operator
-// default nor a per-Machine override sets one. This is deliberately
-// higher than ezio's own default of 5: a routed, cross-site swarm needs
-// enough per-torrent connections to reach a peer at every site through
-// the tracker, and a small handful of sites plus one central seeder can
-// exceed 5 distinct peers on its own. It stays well below a LAN-style
-// large fan-out, since more connections do not find more useful peers
-// once every reachable site is already connected - they just add idle
-// connections across routed links. See config/seeder/README.md's "WAN
-// swarm tuning" section.
+// default nor a per-Machine override sets one. Deliberately higher than
+// ezio's default of 5, since a routed cross-site swarm needs enough
+// connections to reach a peer at every site through the tracker; it
+// stays below a LAN-style fan-out since more connections past that don't
+// find more peers. See config/seeder/README.md's "WAN swarm tuning".
 const DefaultMaxConnections = 10
 
-// AddRequest has no "unset" sentinel of its own: passing 0 through for
-// either max_uploads or max_connections tells ezio to allow zero peers,
-// not "use ezio's default". ResolveMaxUploads/ResolveMaxConnections
-// exist so every AddTorrent caller in KEZIO resolves a real positive
-// value the same way, instead of each caller re-deriving its own
-// fallback.
+// AddRequest has no "unset" sentinel: passing 0 for max_uploads or
+// max_connections tells ezio to allow zero peers, not "use ezio's
+// default". ResolveMaxUploads/ResolveMaxConnections give every caller
+// the same real-positive-value fallback instead of each re-deriving one.
 
 // ResolveMaxUploads returns tuning's MaxUploads when set, else
 // DefaultMaxUploads. tuning may be nil.
@@ -79,14 +73,11 @@ func ResolveMaxConnections(tuning *keziov1alpha1.MachineEzioTuning) int32 {
 
 // Torrent is one torrent's status, trimmed from ezioapi.Torrent to the
 // fields callers need. Hash is lowercase hex, matching both ezio's wire
-// format and store.InfoHash.String(). Beyond the fields the seeder
-// reconciler diffs against, this also carries the byte counters and
-// timers the agent's deploy-side stop policy needs
-// (internal/agent/deploy): TotalDone/Total for progress percent,
-// TotalPayloadUpload/TotalDone for the "upload > 3x size" pause
-// condition, and FinishedTime/LastUpload for the "finished and idle"
-// pause condition - these mirror ezio's own stop-policy semantics for
-// a finished, idle torrent.
+// format and store.InfoHash.String(). Besides what the seeder
+// reconciler diffs against, it carries the counters and timers
+// internal/agent/deploy's stop policy needs: TotalDone/Total for
+// progress percent, TotalPayloadUpload/TotalDone for the "upload > 3x
+// size" pause condition, FinishedTime/LastUpload for "finished and idle".
 type Torrent struct {
 	Hash       string
 	IsFinished bool
@@ -118,12 +109,11 @@ type Client struct {
 }
 
 // Dial opens a gRPC connection to the ezio daemon listening at target
-// (host:port, the daemon's --listen address). The connection has no
-// transport security: ezio's gRPC control plane is reached over the
-// cluster network (kube-apiserver-adjacent trust boundary, not the public
-// data network the BitTorrent swarm uses), matching how every other
-// in-cluster kezio component (image-service, the ingest Job) talks
-// unencrypted to trusted peers within the cluster.
+// (host:port, the daemon's --listen address). No transport security:
+// ezio's gRPC control plane is reached over the cluster network, a
+// trusted boundary distinct from the public BitTorrent data network,
+// matching how other in-cluster kezio components talk unencrypted to
+// trusted peers.
 func Dial(target string) (*Client, error) {
 	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -140,19 +130,14 @@ func (c *Client) Close() error {
 // AddTorrent adds torrent (a bencoded .torrent file, see
 // internal/store.BuildTorrentFile) to the daemon with save_path as its
 // data directory. seedMode marks every piece verified without ezio
-// re-hashing the content — the caller's responsibility to guarantee the
-// files at save_path truly match torrent, which holds here because
-// save_path is a content-addressed, immutable store directory (see
-// internal/store's InfoHash contract): if the files did not match, they
-// would not be filed under that hash to begin with.
+// re-hashing: safe because save_path is a content-addressed, immutable
+// store directory (internal/store's InfoHash contract) — files that
+// didn't match wouldn't be filed under that hash to begin with.
 //
-// maxUploads and maxConnections are the per-torrent AddTorrent tuning
-// values (ezio's max_uploads/max_connections); callers resolve these
-// ahead of time (see ResolveMaxUploads/ResolveMaxConnections) rather
-// than this method applying a fallback of its own, so the same
-// operator-default-then-Machine-override precedence holds regardless of
-// which caller (the seeder reconciler or the agent's leecher) is adding
-// the torrent.
+// maxUploads and maxConnections are resolved by the caller beforehand
+// (see ResolveMaxUploads/ResolveMaxConnections), not defaulted here, so
+// the operator-default-then-Machine-override precedence is the same
+// whether the seeder reconciler or the agent's leecher adds the torrent.
 func (c *Client) AddTorrent(ctx context.Context, torrent []byte, savePath string, seedMode bool, maxUploads, maxConnections int32) error {
 	resp, err := c.rpc.AddTorrent(ctx, &ezioapi.AddRequest{
 		Torrent:            torrent,
@@ -198,10 +183,9 @@ func (c *Client) GetTorrentStatus(ctx context.Context, hashes []string) (map[str
 }
 
 // PauseTorrent pauses the torrent identified by hash (lowercase hex info
-// hash). ezio keeps seeding a paused torrent's already-verified pieces to
-// nobody - a paused torrent simply stops all network activity - which is
-// exactly the deploy-side stop policy's "stop pushing this partition's
-// data" primitive (see internal/agent/deploy).
+// hash): all network activity for it stops, which is the deploy-side
+// stop policy's "stop pushing this partition's data" primitive (see
+// internal/agent/deploy).
 func (c *Client) PauseTorrent(ctx context.Context, hash string) error {
 	if _, err := c.rpc.PauseTorrent(ctx, &ezioapi.PauseTorrentRequest{Hash: hash}); err != nil {
 		return fmt.Errorf("PauseTorrent: %w", err)

@@ -96,10 +96,8 @@ func TestIngestScratchDir(t *testing.T) {
 		t.Errorf("IngestScratchDir = %q, want %q", dir, wantDir)
 	}
 
-	// The scratch dir must live under the store root itself (not under
-	// contents/ or images/), so it always shares a filesystem with
-	// contents/ and a rename from one to the other is guaranteed
-	// same-device.
+	// Must live directly under root (not under contents/ or images/) so
+	// a rename into contents/ is guaranteed same-device.
 	if filepath.Dir(filepath.Dir(dir)) != root {
 		t.Errorf("IngestScratchDir %q is not two levels below root %q", dir, root)
 	}

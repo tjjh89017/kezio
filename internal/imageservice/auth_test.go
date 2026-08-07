@@ -23,8 +23,8 @@ import (
 	"testing"
 )
 
-// A deployment that leaves its token Secret empty must fail closed: it must
-// not build an Authenticator that accepts every request.
+// An empty token Secret must fail closed, not build an Authenticator that
+// accepts every request.
 func TestNewAuthenticator_EmptyToken(t *testing.T) {
 	auth, err := NewAuthenticator("")
 	if auth != nil {

@@ -24,11 +24,9 @@ import (
 )
 
 // StagingSpaceHeadroom is subtracted from the staging filesystem's
-// reported available space before comparing it against a declared
-// upload length. It keeps admission conservative against the
-// filesystem-level overhead (metadata blocks, reserved blocks, and the
-// small amount of space Staging.Receive itself uses for a temp file
-// during a rename) that a raw available-bytes figure does not capture.
+// reported available space before comparing it against a declared upload
+// length, covering filesystem overhead (metadata/reserved blocks, the
+// temp file Staging.Receive uses during rename) a raw figure misses.
 const StagingSpaceHeadroom = 64 << 20 // 64 MiB
 
 // ErrInsufficientSpace reports that an upload's declared length would
@@ -42,24 +40,15 @@ var ErrInsufficientSpace = errors.New("insufficient staging space")
 // every other upload currently admitted) over the configured quota.
 var ErrQuotaExceeded = errors.New("staging quota exceeded")
 
-// statfsFunc reports the number of bytes available to an unprivileged
-// process on the filesystem holding path - what a real statfs(2) call
-// reports as "available" (Bavail), which already excludes blocks
-// reserved for privileged processes, unlike "free" (Bfree). It exists as
-// an injectable seam: Admission's tests simulate arbitrary free-space
-// figures without needing a filesystem actually sized that way.
+// statfsFunc reports bytes available to an unprivileged process on the
+// filesystem holding path (Bavail, which excludes blocks reserved for
+// privileged processes, unlike Bfree). Injectable seam for tests.
 type statfsFunc func(path string) (availableBytes uint64, err error)
 
-// realStatfs is the production statfsFunc, backed by syscall.Statfs.
-//
-// What this measures depends entirely on what path resolves to. For a
-// staging directory backed by a real network-attached PVC, it is that
-// volume's own free space. For a local-path/hostPath-backed volume (a
-// common single-node deployment shape - see config/image-service's PVC
-// comment), path resolves to a directory on the node's root or a
-// node-local disk, so this measures the node filesystem itself; on that
-// deployment shape the node filesystem genuinely is the true limit an
-// upload can hit, so measuring it here is correct, not a workaround.
+// realStatfs is the production statfsFunc, backed by syscall.Statfs. For a
+// local-path/hostPath-backed staging volume (see config/image-service's
+// PVC comment), path resolves to the node filesystem itself, which is
+// genuinely the true limit on that deployment shape - not a workaround.
 func realStatfs(path string) (uint64, error) {
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(path, &st); err != nil {
@@ -74,27 +63,16 @@ func realStatfs(path string) (uint64, error) {
 // implementation.
 type usedBytesFunc func() (int64, error)
 
-// Admission enforces the two capacity guards a streamed upload must pass
-// before this service reads a single body byte:
-//
-//   - a physical guard, always active: the staging directory
-//     filesystem's currently available space (see realStatfs) must be
-//     enough to hold the declared upload length, with headroom.
-//   - a logical guard, active only when quotaBytes > 0: the sum of
-//     already-completed uploads' sizes plus every currently in-flight
-//     upload's declared length must not exceed quotaBytes. This is a
-//     policy limit (for example, keeping one tenant's uploads from
-//     filling a staging volume other tenants share), independent of how
-//     much physical space happens to be free.
-//
-// Both guards are checked against reserved space, not just a
-// point-in-time available/used figure: Reserve tracks every admitted,
-// not-yet-finished upload's declared length in an in-memory ledger, so
-// two concurrent uploads that would each individually fit are still
-// caught if their sum would not. The ledger is process-local and
-// unpersisted; that is correct because exactly one image-service
-// instance owns a given staging directory (see the package doc comment),
-// so there is never a second process's reservations to account for.
+// Admission enforces two capacity guards before a streamed upload's body
+// is read: a physical guard (always active - available staging space,
+// with headroom, per realStatfs) and a logical guard (active only when
+// quotaBytes > 0 - completed + in-flight uploads must not exceed the
+// quota, a policy limit independent of physical space). Both guards check
+// against an in-memory reservation ledger of admitted-but-unfinished
+// uploads, not just a point-in-time figure, so concurrent uploads that
+// would each individually fit are still caught if their sum would not.
+// The ledger is process-local: correct because exactly one image-service
+// instance owns a given staging directory.
 type Admission struct {
 	stagingDir string
 	statfs     statfsFunc

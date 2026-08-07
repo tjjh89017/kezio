@@ -32,9 +32,8 @@ import (
 )
 
 // fakeEZIO is an in-memory ezioapi.EZIOServer standing in for a real ezio
-// daemon: enough behavior to exercise Client's request/response mapping
-// and to let the seeder reconciler's own tests simulate a fresh daemon
-// (empty torrents) or one that already has content added.
+// daemon, with enough behavior to exercise Client's request/response
+// mapping.
 type fakeEZIO struct {
 	ezioapi.UnimplementedEZIOServer
 

@@ -94,13 +94,10 @@ type uploadResponse struct {
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 
-	// A streamed upload must declare its length: it lets this handler
-	// reject an oversize request before reading a single body byte
-	// (never buffering it first), and rules out unbounded
-	// chunked-transfer request bodies for this endpoint. MaxBytesReader
-	// below is the second, independent layer that still applies even if
-	// this check were ever bypassed (for example a client that lies
-	// about Content-Length).
+	// Content-Length is required so an oversize request is rejected before
+	// reading any body byte, and to rule out unbounded chunked bodies.
+	// MaxBytesReader below is a second, independent layer for a client
+	// that lies about Content-Length.
 	if r.ContentLength < 0 {
 		http.Error(w, "Content-Length is required", http.StatusLengthRequired)
 		return
@@ -110,23 +107,14 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Capacity admission: reject before reading a single body byte when
-	// the declared length would not fit the staging volume's available
-	// space, or (if a quota is configured) would push staged usage over
-	// it. This is deliberately separate from the maxUploadBytes checks
-	// above, which bound one request in isolation; admission also
-	// accounts for every other upload currently in flight (see
-	// Admission's doc comment), which is what actually protects against
-	// two individually-fine uploads jointly overflowing the volume.
+	// Capacity admission, separate from the maxUploadBytes checks above:
+	// accounts for every other upload currently in flight, protecting
+	// against individually-fine uploads jointly overflowing the volume.
 	if s.admission != nil {
 		release, err := s.admission.Reserve(r.ContentLength)
 		if err != nil {
-			// 507 Insufficient Storage (RFC 4918), not 413: the request
-			// itself is not too large in the abstract (a smaller
-			// staging volume or a lighter quota would have accepted the
-			// exact same request), so the failure is about this
-			// server's current storage state, not the size of the
-			// upload as such.
+			// 507 Insufficient Storage (RFC 4918), not 413: this is about
+			// current storage state, not the upload size as such.
 			http.Error(w, err.Error(), http.StatusInsufficientStorage)
 			return
 		}
@@ -168,11 +156,8 @@ func (s *Server) writeUploadError(w http.ResponseWriter, r *http.Request, name s
 	case errors.Is(err, ErrNameConflict):
 		http.Error(w, err.Error(), http.StatusConflict)
 	case isMaxBytesError(err):
-		// Belt-and-braces: the explicit Content-Length check in
-		// handleUpload rejects an oversize declared length before any
-		// read; this catches the remaining case of a client that
-		// declares a small Content-Length but then streams more bytes
-		// than it claimed.
+		// Catches a client that declares a small Content-Length but
+		// streams more bytes than claimed.
 		http.Error(w, "upload exceeds the maximum allowed size", http.StatusRequestEntityTooLarge)
 	default:
 		s.logger.Error("upload failed", "name", name, "remote", r.RemoteAddr, "err", err)

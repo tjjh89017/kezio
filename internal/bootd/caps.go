@@ -44,30 +44,23 @@ var dnsmasqCaps = []int{
 	unix.CAP_NET_RAW,
 }
 
-// raiseAmbientCaps copies each of dnsmasqCaps that this process holds
-// in its permitted set into its inheritable and ambient sets, so they
-// survive execve into the dnsmasq child even when that child is
-// non-root.
+// raiseAmbientCaps copies each of dnsmasqCaps this process holds in its
+// permitted set into its inheritable and ambient sets, so they survive
+// execve into the dnsmasq child even when that child is non-root.
 //
-// In the pod this is belt-and-braces, not the load-bearing mechanism:
-// bootd runs as uid 0 there (config/bootd's deployment), because
-// Kubernetes puts a non-root container's added capabilities in the
-// bounding set only - permitted comes out empty after execve of a
-// binary with no file capabilities, and allowPrivilegeEscalation=false
-// (no_new_privs) forbids regaining them via file capabilities, so a
-// non-root bootd has nothing to raise (lab-verified: dnsmasq then dies
-// with "missing required capability NET_ADMIN"). As root, execve
-// re-grants the bounding set's capabilities to the child by itself.
-// The ambient raise still matters for any non-root environment whose
-// runtime does grant permitted capabilities (the containerized lab's
-// setpriv harness): only the ambient set carries them across execve
-// into a capability-less, non-root binary.
+// In the pod this is belt-and-braces, not load-bearing: bootd runs as uid
+// 0 (config/bootd's deployment), because Kubernetes grants a non-root
+// container's added capabilities to its bounding set only - permitted
+// comes out empty after execve with no_new_privs set, so a non-root bootd
+// has nothing to raise (lab-verified: dnsmasq then dies with "missing
+// required capability NET_ADMIN"). As root, execve re-grants the bounding
+// set to the child on its own; the ambient raise matters for non-root
+// runtimes that do grant permitted capabilities (the lab's setpriv
+// harness), where only ambient carries them across execve.
 //
-// Best-effort: each failure is logged and skipped rather than
-// returned, because in environments that already put the capability
-// in the ambient set there is nothing to do, and the definitive error
-// surface is dnsmasq's own startup check, which names any capability
-// it is missing.
+// Best-effort: failures are logged and skipped, not returned - dnsmasq's
+// own startup check is the definitive error surface, naming whatever
+// capability is missing.
 func raiseAmbientCaps(log logr.Logger) {
 	hdr := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
 	var data [2]unix.CapUserData

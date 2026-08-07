@@ -23,10 +23,9 @@ import (
 
 // This file hand-rolls the minimal bencoding (BEP3) this package needs:
 // writing a fixed-shape info dict and wrapping it into a .torrent file.
-// The shape is small and fixed (no arbitrary maps, no decoding), so a
-// general-purpose bencode dependency was judged not worth adding; a
-// generic encoder would still need this file's dict-key ordering logic to
-// produce a canonical (and therefore hash-stable) info dict.
+// A generic bencode dependency would still need this file's dict-key
+// ordering logic to produce a canonical, hash-stable info dict, so one
+// was not added.
 
 // bencodeString writes a bencoded byte string: "<len>:<bytes>". BEP3
 // strings are byte strings, not necessarily UTF-8 text, so this takes

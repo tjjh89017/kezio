@@ -301,9 +301,7 @@ func TestHostPortRejectsAddressWithPath(t *testing.T) {
 }
 
 // TestConnectRegistersIPMIToolScheme confirms importing this package makes
-// bmc.Connect resolve "ipmitool://" to this driver: Connect does not itself
-// talk to the BMC (see connect's doc comment), so this only needs to
-// succeed without touching a real ipmitool binary or BMC.
+// bmc.Connect resolve "ipmitool://" to this driver.
 func TestConnectRegistersIPMIToolScheme(t *testing.T) {
 	b, err := bmc.Connect(context.Background(), "ipmitool://10.0.0.10:6230", bmc.Credentials{Username: "admin", Password: "hunter2"}, bmc.Options{})
 	if err != nil {

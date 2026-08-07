@@ -700,11 +700,11 @@ func TestExecute_ReportsFinalizeAndTerminalSteps(t *testing.T) {
 }
 
 // TestExecute_TerminalReportCarriesFinalizeBootSummary exercises the gap
-// attempt 38's post-mortem found: the agent's own log output never
-// reaches the deployed machine's serial console, and the machine is gone
-// the moment it reboots into the deployed disk, so the terminal progress
-// report is the only place finalize's boot-entry outcome (the resulting
-// efibootmgr listing) survives to be read after the fact.
+// that motivates Console: the agent's own log output never reaches the
+// deployed machine's serial console, and the machine is gone the moment it
+// reboots into the deployed disk, so the terminal progress report is the
+// only place finalize's boot-entry outcome (the resulting efibootmgr
+// listing) survives to be read after the fact.
 func TestExecute_TerminalReportCarriesFinalizeBootSummary(t *testing.T) {
 	runner := newFakeRunner()
 	runner.outputs["efibootmgr "] = []byte(

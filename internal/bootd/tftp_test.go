@@ -78,11 +78,8 @@ func TestTFTPServer_ServesAllowedFiles(t *testing.T) {
 	}
 }
 
-// TestTFTPServer_LogsServedFile pins the observability fix readHandler's
-// success path relies on (see tftp.go): a completed read must log at the
-// default verbosity - without it, bootd's log cannot tell an operator
-// whether a client that got a DHCP offer ever came back to fetch the file
-// it named.
+// TestTFTPServer_LogsServedFile: a completed read must log at the default
+// verbosity, so an operator can tell whether a client fetched its file.
 func TestTFTPServer_LogsServedFile(t *testing.T) {
 	dir := setupTFTPDir(t)
 	srv := &TFTPServer{Dir: dir}
@@ -125,12 +122,9 @@ func TestTFTPServer_RejectsPathTraversal(t *testing.T) {
 	}
 }
 
-// TestTFTPServer_AcceptsLeadingSlash pins the one path normalization
-// readHandler performs: GRUB requests prefix-relative files with a
-// leading "/" ("/grub/grub.cfg", and shim-side fetches can arrive as
-// "/shimx64.efi" depending on how the firmware joins the DHCP boot
-// filename), so exactly one leading slash is stripped before the exact
-// allowlist match - the allowlist itself stays as tight as before.
+// TestTFTPServer_AcceptsLeadingSlash: GRUB and some firmware request
+// paths with a leading "/", so exactly one leading slash is stripped
+// before the allowlist match.
 func TestTFTPServer_AcceptsLeadingSlash(t *testing.T) {
 	dir := setupTFTPDir(t)
 	srv := &TFTPServer{Dir: dir}
@@ -166,11 +160,8 @@ func TestTFTPServer_ServesGrubConfigFromMemory(t *testing.T) {
 	}
 }
 
-// TestTFTPServer_RejectsGrubConfigWhenUnset proves an empty GrubConfig
-// keeps the path fail-closed: no BOOTD_BOOT_CONFIG_URL, no file - the
-// request is rejected like any other unknown name instead of serving
-// an empty config that would make GRUB fail one step later with less
-// evidence.
+// TestTFTPServer_RejectsGrubConfigWhenUnset: an empty GrubConfig keeps
+// the path fail-closed, rejected like any other unknown name.
 func TestTFTPServer_RejectsGrubConfigWhenUnset(t *testing.T) {
 	dir := setupTFTPDir(t)
 	srv := &TFTPServer{Dir: dir}
@@ -181,10 +172,8 @@ func TestTFTPServer_RejectsGrubConfigWhenUnset(t *testing.T) {
 	}
 }
 
-// TestTFTPServer_GrubConfigDoesNotWidenAllowlist proves configuring
-// GrubConfig adds exactly one servable path: neighbors of
-// grub/grub.cfg (the netboot image's memdisk bootstrap probes
-// $prefix/x86_64-efi/grub.cfg and $prefix/grub.cfg-amd64 first) and
+// TestTFTPServer_GrubConfigDoesNotWidenAllowlist proves GrubConfig adds
+// exactly one servable path: neighbors of grub/grub.cfg and
 // traversal shaped like the grub directory stay rejected.
 func TestTFTPServer_GrubConfigDoesNotWidenAllowlist(t *testing.T) {
 	dir := setupTFTPDir(t)

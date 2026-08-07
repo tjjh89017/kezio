@@ -44,11 +44,9 @@ func TestExecRunnerRedactsCredentialsOnError(t *testing.T) {
 	}
 }
 
-// TestExecRunnerReturnsFriendlyErrorWhenIpmitoolNotFound points PATH at an
-// empty directory (so exec.LookPath("ipmitool") fails the way it would on
-// the default manager image, which never carries the ipmitool binary) and
-// checks execRunner.Run returns a friendly, actionable error instead of a
-// raw "executable file not found" message.
+// TestExecRunnerReturnsFriendlyErrorWhenIpmitoolNotFound simulates the
+// default manager image (no ipmitool on PATH) and checks execRunner.Run
+// returns an actionable error rather than a raw "not found" message.
 func TestExecRunnerReturnsFriendlyErrorWhenIpmitoolNotFound(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 

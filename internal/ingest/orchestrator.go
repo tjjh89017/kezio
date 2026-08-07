@@ -117,15 +117,12 @@ func run(ctx context.Context, cfg Config, deps Dependencies) (*ResultDisk, error
 	// scratchDir is where partclone writes each partition's content
 	// directly, on the store's own filesystem, before publishContent's
 	// final same-filesystem rename into contents/ (see processPartition
-	// and publishContent). It is keyed by ImageName, so a retried
-	// attempt after a crash reuses the same path; clean it before this
-	// attempt starts (a prior crash may have left a half-written
-	// content behind) and after it ends either way, so nothing under
-	// contents/ is ever left half-published and nothing accumulates
-	// under .ingest/ across attempts. The store volume needs headroom
-	// for this - one in-flight partition's content plus whatever is
-	// already published under contents/ - since content is written
-	// here directly rather than assembled on the work volume first.
+	// and publishContent). It is keyed by ImageName so a retried attempt
+	// reuses the same path; clean it before and after this attempt so
+	// nothing under contents/ is ever left half-published and nothing
+	// accumulates under .ingest/. The store volume needs headroom for one
+	// in-flight partition's content plus whatever is already published,
+	// since content lands here directly rather than via the work volume.
 	scratchDir := store.IngestScratchDir(cfg.StoreRoot, cfg.ImageName)
 	if err := os.RemoveAll(scratchDir); err != nil {
 		return nil, fmt.Errorf("clean ingest scratch dir: %w", err)
@@ -288,28 +285,23 @@ func processPartition(ctx context.Context, cfg Config, deps Dependencies, rawPat
 
 // publishContent validates a partclone content directory that partclone
 // wrote directly into the store's per-Image ingest scratch tree (see
-// processPartition and store.IngestScratchDir - contentDir already
-// lives on storeRoot's own filesystem, not the work dir), computes its
-// info hash, and publishes it into the store at its content-addressed
-// path. If a content directory with the same hash already exists (this
-// exact content was ingested before, by this Image or another one), the
-// scratch copy is discarded instead: content is deduplicated by hash,
-// since a slot (a disk position) and its partition content (the
-// immutable, content-addressed payload) are decoupled.
+// processPartition and store.IngestScratchDir - contentDir is already on
+// storeRoot's own filesystem, not the work dir), computes its info hash,
+// and publishes it into the store at its content-addressed path. If a
+// directory with that hash already exists (this exact content was
+// ingested before), the scratch copy is discarded instead: content is
+// deduplicated by hash, since a slot (a disk position) and its content
+// (the immutable, content-addressed payload) are decoupled.
 //
-// Because contentDir is already on storeRoot's filesystem,
-// os.Rename(contentDir, dest) is always a same-filesystem, atomic
-// operation: a reader never observes a partially written
-// contents/<hash> directory, and a crash between partclone finishing
-// and this rename leaves at worst an orphaned scratch directory, which
-// the next attempt for this Image cleans up (see run's scratchDir
-// handling). This is also why partclone is pointed at the scratch
-// directory directly rather than a work-dir path that would need
-// copying onto storeRoot's filesystem first: partclone's -T extent
-// output is sequential writes, which land on a networked store exactly
-// as well as on local disk, so the copy step that direction would need
-// is pure overhead - it would write every content byte twice for no
-// benefit.
+// Because contentDir is already on storeRoot's filesystem, the final
+// os.Rename(contentDir, dest) is always same-filesystem and atomic: a
+// reader never sees a partially written contents/<hash>, and a crash
+// between partclone finishing and this rename leaves at worst an
+// orphaned scratch directory, cleaned up by the next attempt (see run's
+// scratchDir handling). This is also why partclone targets the scratch
+// directory directly rather than a work-dir path needing a copy onto
+// storeRoot's filesystem afterward: that copy would write every content
+// byte twice for no benefit.
 func publishContent(storeRoot, contentDir string) (store.InfoHash, int64, error) {
 	torrentInfo, err := store.LoadContentDirTorrentInfo(contentDir)
 	if err != nil {

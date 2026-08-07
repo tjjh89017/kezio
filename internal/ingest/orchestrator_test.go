@@ -139,7 +139,7 @@ func TestRun_Success(t *testing.T) {
 }
 
 // A missing LayoutWriter must fail the run outright rather than silently
-// skip persisting the layout ConfigMap: cmd/ingest always wires one in
+// skip persisting the ImageLayout: cmd/ingest always wires one in
 // production (see buildFromEnv), so a nil value here signals a wiring
 // bug, not an optional feature.
 func TestRun_NoLayoutWriterFails(t *testing.T) {
@@ -160,8 +160,8 @@ func TestRun_NoLayoutWriterFails(t *testing.T) {
 	}
 }
 
-// A LayoutWriter failure must fail the whole run: without the layout
-// ConfigMap, the Image controller has nothing to record at
+// A LayoutWriter failure must fail the whole run: without the
+// ImageLayout, the Image controller has nothing to record at
 // status.disk.layoutRef and would otherwise advance the Image to Ready
 // on incomplete state.
 func TestRun_LayoutWriterFailurePropagates(t *testing.T) {
@@ -432,15 +432,11 @@ func TestPublishContent_SkipsWhenContentAlreadyPublished(t *testing.T) {
 }
 
 // TestPublishContent_ConcurrentIdenticalContentDedups exercises the
-// post-rename recovery branch: two ingest runs publishing byte-identical
-// content race to rename into the same contents/<hash> directory. Whichever
-// loses the rename must observe that the destination now exists and treat it
-// as a successful dedup (not an error), leaving exactly one content directory
-// and no leftover scratch. The two goroutines process identical input through
-// the same deterministic prep before either stats the destination, and are
-// released together, so in practice one wins the rename and the other takes
-// the recovery path; the assertions pin the dedup contract regardless of which
-// internal guard fired, since that is the observable behavior.
+// post-rename recovery branch: two runs publishing byte-identical content
+// race to rename into the same contents/<hash> directory. Whichever loses
+// must observe the destination already exists and treat that as a
+// successful dedup, not an error, leaving one content directory and no
+// leftover scratch.
 func TestPublishContent_ConcurrentIdenticalContentDedups(t *testing.T) {
 	storeRoot := t.TempDir()
 

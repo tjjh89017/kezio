@@ -36,10 +36,8 @@ func newTestServer(t *testing.T, maxUploadBytes int64) (*Server, string) {
 	return newTestServerWithAdmission(t, maxUploadBytes, nil)
 }
 
-// newTestServerWithAdmission is like newTestServer but lets a test supply
-// its own Admission (for example, one built with a fake statfsFunc) to
-// exercise the capacity-guard path in handleUpload. admission == nil
-// disables both capacity guards, matching newTestServer.
+// newTestServerWithAdmission lets a test supply its own Admission to
+// exercise the capacity-guard path; nil disables both guards.
 func newTestServerWithAdmission(t *testing.T, maxUploadBytes int64, admission *Admission) (*Server, string) {
 	t.Helper()
 	root := t.TempDir()
@@ -75,9 +73,8 @@ func authHeader() map[string]string {
 	return map[string]string{"Authorization": "Bearer " + testToken}
 }
 
-// Auth reject: an upload with no bearer token, and one with the wrong
-// token, are both rejected before anything is written to the staging
-// area.
+// An upload with no bearer token, and one with the wrong token, are both
+// rejected before anything is written to the staging area.
 func TestHandleUpload_AuthReject(t *testing.T) {
 	srv, root := newTestServer(t, 1<<20)
 	h := srv.Handler()
@@ -99,9 +96,8 @@ func TestHandleUpload_AuthReject(t *testing.T) {
 	}
 }
 
-// Happy path: an authenticated streamed upload lands under the staging
-// root with the expected bytes, and the response reports the staged
-// reference the client uses as Image.spec.source.url.
+// An authenticated streamed upload lands under the staging root with the
+// expected bytes, and the response reports the staged reference.
 func TestHandleUpload_HappyPath(t *testing.T) {
 	srv, root := newTestServer(t, 1<<20)
 	h := srv.Handler()
@@ -137,9 +133,8 @@ func TestHandleUpload_HappyPath(t *testing.T) {
 		t.Errorf("stored bytes = %q, want %q", stored, body)
 	}
 
-	// Re-uploading the same name with the same content is an idempotent
-	// success, not a conflict, and does not require the client to also
-	// pass the checksum.
+	// Re-uploading the same name/content is idempotent success, not a
+	// conflict, without needing the client to pass a checksum.
 	rec = putUpload(t, h, "ubuntu-2404-golden", body, authHeader())
 	if rec.Code != http.StatusOK {
 		t.Fatalf("idempotent re-upload: got status %d, want %d, body %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -152,8 +147,8 @@ func TestHandleUpload_HappyPath(t *testing.T) {
 	}
 }
 
-// A client-asserted checksum that does not match the bytes actually
-// streamed is rejected, and nothing is left behind under the staged name.
+// A checksum mismatch is rejected, and nothing is left behind under the
+// staged name.
 func TestHandleUpload_ChecksumMismatch(t *testing.T) {
 	srv, root := newTestServer(t, 1<<20)
 	h := srv.Handler()
@@ -180,9 +175,9 @@ func TestHandleUpload_ChecksumMismatch(t *testing.T) {
 	}
 }
 
-// Reusing a name with different content (no checksum asserted, so the
-// mismatch is only caught by comparing against what is already stored) is
-// a conflict, not a silent overwrite.
+// Reusing a name with different content (no checksum asserted; caught by
+// comparing against what's already stored) is a conflict, not an
+// overwrite.
 func TestHandleUpload_NameConflictDifferentContent(t *testing.T) {
 	srv, _ := newTestServer(t, 1<<20)
 	h := srv.Handler()
@@ -198,8 +193,8 @@ func TestHandleUpload_NameConflictDifferentContent(t *testing.T) {
 	}
 }
 
-// A name that attempts path traversal is rejected before any filesystem
-// path is built from it, and the request never reaches the staging area.
+// A path-traversal name is rejected before any filesystem path is built
+// from it.
 func TestHandleUpload_PathTraversal(t *testing.T) {
 	srv, root := newTestServer(t, 1<<20)
 	h := srv.Handler()
@@ -218,12 +213,8 @@ func TestHandleUpload_PathTraversal(t *testing.T) {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 
-		// The mux either cleans/redirects a path with a literal ".."
-		// segment before routing (301/307), fails to route a
-		// path-separator-bearing name to the {name} handler at all
-		// (404), or the handler itself rejects the name (400). All three
-		// keep the request from ever reaching Staging with an
-		// unvalidated name.
+		// Mux redirect (301/307) on "..", 404 on unroutable separators, or
+		// 400 from the handler - all keep an unvalidated name from Staging.
 		switch rec.Code {
 		case http.StatusBadRequest, http.StatusNotFound, http.StatusMovedPermanently, http.StatusTemporaryRedirect:
 		default:
@@ -245,10 +236,8 @@ func TestHandleUpload_PathTraversal(t *testing.T) {
 	}
 }
 
-// An upload whose declared Content-Length exceeds the configured limit is
-// rejected without reading the body, and one that lies about its length
-// (a shorter Content-Length than the bytes actually sent) is still capped
-// by the second, independent MaxBytesReader layer.
+// A declared Content-Length exceeding the configured limit is rejected
+// without reading the body.
 func TestHandleUpload_Oversize(t *testing.T) {
 	srv, _ := newTestServer(t, 8)
 	h := srv.Handler()
@@ -259,9 +248,8 @@ func TestHandleUpload_Oversize(t *testing.T) {
 	}
 }
 
-// A client that understates its Content-Length (so the header passes the
-// early check) but then streams more bytes than it declared is still
-// capped, by the independent http.MaxBytesReader layer.
+// A client that understates Content-Length (passing the early check) but
+// streams more bytes is still capped by the independent MaxBytesReader.
 func TestHandleUpload_OversizeLiedContentLength(t *testing.T) {
 	srv, _ := newTestServer(t, 8)
 	h := srv.Handler()
@@ -294,10 +282,8 @@ func TestHandleUpload_MissingContentLength(t *testing.T) {
 	}
 }
 
-// An upload whose declared Content-Length would not fit the staging
-// volume's available space is rejected with 507 Insufficient Storage,
-// before any body byte is read, and nothing is written to the staging
-// area.
+// An upload that would not fit staging's available space is rejected with
+// 507 before any body byte is read.
 func TestHandleUpload_InsufficientStagingSpace(t *testing.T) {
 	admission := NewAdmission("unused", noUsedBytes, 0)
 	admission.statfs = fakeStatfs(4) // far too little for the body below, even with no headroom
@@ -316,9 +302,8 @@ func TestHandleUpload_InsufficientStagingSpace(t *testing.T) {
 	}
 }
 
-// A configured logical quota is enforced the same way: an upload that
-// would push staged usage over the quota is rejected with 507, even
-// though physical space is plentiful.
+// A logical quota is enforced the same way, even with plentiful physical
+// space.
 func TestHandleUpload_QuotaExceeded(t *testing.T) {
 	usedBytes := func() (int64, error) { return 90, nil }
 	admission := NewAdmission("unused", usedBytes, 100) // 90 already used, quota 100
@@ -333,15 +318,10 @@ func TestHandleUpload_QuotaExceeded(t *testing.T) {
 	}
 }
 
-// Concurrent uploads that would each individually fit but jointly exceed
-// available space are caught: the reservation each admitted upload holds
-// while its body streams is what a plain per-request statfs check would
-// miss (see TestAdmission_Reserve_ConcurrentAdmissionNeverOverbooks for
-// the ledger-only version of this scenario). Here the second upload is
-// only actually admitted once the first has released its reservation by
-// completing, since httptest.NewRequest'd bodies stream fully before this
-// handler returns; the ledger is still what makes that release
-// deterministic and race-free.
+// Uploads that would each individually fit but jointly exceed available
+// space are caught by the per-upload reservation held while its body
+// streams (see TestAdmission_Reserve_ConcurrentAdmissionNeverOverbooks
+// for the ledger-only version).
 func TestHandleUpload_ConcurrentUploadsRespectSharedReservation(t *testing.T) {
 	admission := NewAdmission("unused", noUsedBytes, 0)
 	// Exactly enough for one of the two uploads below, plus headroom -
@@ -357,10 +337,8 @@ func TestHandleUpload_ConcurrentUploadsRespectSharedReservation(t *testing.T) {
 		t.Fatalf("first upload: got status %d, want %d, body %s", rec.Code, http.StatusCreated, rec.Body.String())
 	}
 
-	// The first upload's request has already completed (and released its
-	// reservation) by the time this second call runs, so it succeeds too
-	// - demonstrating the reservation was correctly released rather than
-	// permanently exhausting the volume's reported capacity.
+	// The first upload has released its reservation by the time this runs,
+	// so it succeeds too - the reservation was released, not permanent.
 	second := bytes.Repeat([]byte("b"), 10<<20)
 	rec = putUpload(t, h, "second", second, authHeader())
 	if rec.Code != http.StatusCreated {

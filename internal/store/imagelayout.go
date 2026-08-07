@@ -112,9 +112,9 @@ func (s ImageLayoutSlot) IsBlank() bool {
 }
 
 // WriteImageLayout writes layout to <root>/images/<imageName>/layout.json,
-// creating the image directory if necessary. The write is atomic (a temp
-// file renamed into place), so a reader never observes a partially written
-// file. imageName must already be a validated Kubernetes object name (see
+// creating the image directory if necessary. The write is atomic (temp
+// file renamed into place) so a reader never observes a partial file.
+// imageName must already be a validated Kubernetes object name (see
 // ImageDir).
 func WriteImageLayout(root, imageName string, layout *ImageLayout) error {
 	dir := ImageDir(root, imageName)

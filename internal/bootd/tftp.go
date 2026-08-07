@@ -45,26 +45,19 @@ const (
 	GrubFilename = bootserver.GrubFilename
 )
 
-// GrubConfigPath is the one non-basename path TFTPServer serves:
-// Debian's netboot-signed GRUB image (grub-efi-amd64-signed's
-// grubnetx64.efi.signed, published as grubx64.efi - see
-// hack/live-image/build.sh) is built with the embedded prefix "/grub"
-// resolved against the device it was loaded from, so after shim
-// chainloads it over TFTP it sources (tftp,<next-server>)/grub/grub.cfg
-// (via its embedded memdisk bootstrap config; the image is monolithic,
-// with every module it needs built in, so no x86_64-efi module tree is
-// ever fetched). TFTPServer answers this path from TFTPServer.GrubConfig
-// - rendered in-memory content, not a file under Dir, because it embeds
-// the site-specific boot config server URL (see RenderGrubConfig) that
-// a release-published artifact could never carry.
+// GrubConfigPath is the one non-basename path TFTPServer serves: Debian's
+// netboot-signed GRUB image (grubx64.efi, embedded prefix "/grub") sources
+// (tftp,<next-server>)/grub/grub.cfg after shim chainloads it - the image
+// is monolithic (no module tree fetched separately). TFTPServer answers
+// this from TFTPServer.GrubConfig, rendered in-memory content rather than
+// a file under Dir, because it embeds the site-specific boot config
+// server URL (RenderGrubConfig) a release-published artifact can't carry.
 const GrubConfigPath = "grub/grub.cfg"
 
-// allowedTFTPFiles is queried by basename only (see readHandler): a
-// fixed allowlist, not a directory listing, is what makes this server
-// safe to expose to any device on the boot L2 segment - there is no
-// filename that reaches anything outside cfg.TFTPDir, because there is
-// no filename this server will open that was not already hard-coded
-// here.
+// allowedTFTPFiles is queried by basename only (see readHandler): a fixed
+// allowlist, not a directory listing, is what makes this server safe to
+// expose on the boot L2 segment - no filename reaches outside cfg.TFTPDir
+// because none but these are ever opened.
 var allowedTFTPFiles = map[string]bool{
 	ShimFilename: true,
 	GrubFilename: true,
@@ -116,18 +109,14 @@ func (t *TFTPServer) Start(ctx context.Context) error {
 	}
 }
 
-// readHandler returns the RRQ handler passed to tftp.NewServer. filename
-// arrives from the wire exactly as the client requested it; after
+// readHandler returns the RRQ handler passed to tftp.NewServer. After
 // stripping one optional leading "/" (GRUB requests prefix-relative
-// files as "/grub/grub.cfg", firmware requests the DHCP-advertised name
-// without a slash), it is matched exactly: GrubConfigPath is answered
-// from memory (never the filesystem), and everything else is validated
-// against allowedTFTPFiles by basename before ever touching the
-// filesystem, which rejects both an unrecognized name and any
-// path-traversal attempt (a request for "../../etc/passwd" has
-// filepath.Base "passwd", which is not in the allowlist, so it is
-// rejected the same as any other unknown name - it is never joined onto
-// t.Dir at all).
+// files, firmware requests the DHCP-advertised name bare), GrubConfigPath
+// is answered from memory and everything else is validated against
+// allowedTFTPFiles by basename before touching the filesystem - a
+// path-traversal request like "../../etc/passwd" has basename "passwd",
+// not in the allowlist, so it's rejected before ever being joined onto
+// t.Dir.
 func (t *TFTPServer) readHandler(log logr.Logger) func(filename string, rf io.ReaderFrom) error {
 	return func(filename string, rf io.ReaderFrom) error {
 		name := strings.TrimPrefix(filename, "/")
@@ -155,12 +144,9 @@ func (t *TFTPServer) readHandler(log logr.Logger) func(filename string, rf io.Re
 		if _, err := rf.ReadFrom(f); err != nil {
 			return fmt.Errorf("serving %s: %w", base, err)
 		}
-		// Logged at the default level, alongside dnsmasq's own
-		// forwarded per-request lines (see dnsmasq.go): a completed
-		// TFTP transfer is the next low-volume, high-value checkpoint
-		// in the same boot sequence, and its absence is what tells an
-		// operator a client got a DHCP offer but never came back for
-		// the file it named.
+		// A completed TFTP transfer is the next checkpoint after
+		// dnsmasq's forwarded per-request lines; its absence tells an
+		// operator a client got a DHCP offer but never fetched the file.
 		log.Info("served TFTP file", "requested", filename)
 		return nil
 	}

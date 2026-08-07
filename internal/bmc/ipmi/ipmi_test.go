@@ -315,11 +315,8 @@ func TestHostPortRejectsAddressWithPath(t *testing.T) {
 	}
 }
 
-// TestHostPortAcceptsPortAtUint16Range checks the parsed port survives the
-// full valid TCP/UDP port range without truncation or overflow: url.URL
-// already rejects a non-numeric port for us (Port() returns "" for one), so
-// the only value this driver itself must parse correctly is a numeric
-// string up to 65535.
+// TestHostPortAcceptsPortAtUint16Range checks the port survives the full
+// valid TCP/UDP range without truncation.
 func TestHostPortAcceptsPortAtUint16Range(t *testing.T) {
 	u, err := url.Parse("ipmi://10.0.0.10:65535")
 	if err != nil {
@@ -335,9 +332,7 @@ func TestHostPortAcceptsPortAtUint16Range(t *testing.T) {
 }
 
 // TestConnectRegistersIPMIScheme confirms importing this package makes
-// bmc.Connect resolve "ipmi://" to this driver: Connect does not itself
-// talk to the BMC (see connect's doc comment), so this only needs to
-// succeed without touching a real network or BMC.
+// bmc.Connect resolve "ipmi://" to this driver.
 func TestConnectRegistersIPMIScheme(t *testing.T) {
 	b, err := bmc.Connect(context.Background(), "ipmi://10.0.0.10:6230", bmc.Credentials{Username: "admin", Password: "hunter2"}, bmc.Options{})
 	if err != nil {

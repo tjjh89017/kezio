@@ -48,12 +48,10 @@ func newAgentTestClient(t *testing.T, machine *keziov1alpha1.Machine) client.Cli
 		Build()
 }
 
-// setProgressCondition writes machine's MachineConditionProvisioningProgress
-// condition directly (standing in for internal/agentserver's real
-// handleProgress handler, which this package does not import), with
-// ObservedGeneration pinned to observedGeneration so a test can exercise
-// agentDeployer.Provision's staleness check independently of whatever
-// machine's current generation happens to be.
+// setProgressCondition writes the ProvisioningProgress condition directly
+// (standing in for agentserver's real handler), with ObservedGeneration
+// pinned so tests can exercise Provision's staleness check independently
+// of the machine's actual generation.
 func setProgressCondition(t *testing.T, c client.Client, key types.NamespacedName, reason, message string, observedGeneration int64) {
 	t.Helper()
 	ctx := context.Background()
@@ -87,10 +85,7 @@ func newProvisioningMachine() *keziov1alpha1.Machine {
 	return m
 }
 
-// TestAgentDeployer_Provision_NoConditionYetKeepsPolling covers the "agent
-// has not reported anything yet" case Provision's doc comment describes:
-// no MachineConditionProvisioningProgress at all must ask the reconciler
-// to poll again, not fail or succeed.
+// No ProvisioningProgress condition at all must poll, not fail or succeed.
 func TestAgentDeployer_Provision_NoConditionYetKeepsPolling(t *testing.T) {
 	machine := newProvisioningMachine()
 	c := newAgentTestClient(t, machine)
@@ -108,11 +103,8 @@ func TestAgentDeployer_Provision_NoConditionYetKeepsPolling(t *testing.T) {
 	}
 }
 
-// TestAgentDeployer_Provision_IntermediateStepKeepsPolling covers every
-// intermediate whole-plan step (and the pre-whole-plan-step fallback
-// values an older agent, or the summarizer's own "Unknown", might
-// report): Provision must keep polling, not treat any of them as
-// success or failure.
+// Every intermediate whole-plan step (plus older-agent fallback values and
+// "Unknown") must keep polling, not be treated as success or failure.
 func TestAgentDeployer_Provision_IntermediateStepKeepsPolling(t *testing.T) {
 	for _, reason := range []string{
 		agentapi.DeployStepPartitioning,
@@ -143,11 +135,9 @@ func TestAgentDeployer_Provision_IntermediateStepKeepsPolling(t *testing.T) {
 	}
 }
 
-// TestAgentDeployer_Provision_TerminalSuccessEchoesResolvedDisks covers
-// the success path: reaching DeployStepRebootingToDisk must complete the
-// deployment and fill ResolvedTargetDisk/ResolvedDataImageDisks from
-// status.provisioning - the same disks diskmatch already resolved and
-// recorded there - rather than fabricating or re-deriving them.
+// DeployStepRebootingToDisk must complete the deployment and echo
+// ResolvedTargetDisk/ResolvedDataImageDisks from status.provisioning
+// rather than re-deriving them.
 func TestAgentDeployer_Provision_TerminalSuccessEchoesResolvedDisks(t *testing.T) {
 	machine := newProvisioningMachine()
 	c := newAgentTestClient(t, machine)
@@ -180,9 +170,8 @@ func TestAgentDeployer_Provision_TerminalSuccessEchoesResolvedDisks(t *testing.T
 	}
 }
 
-// TestAgentDeployer_Provision_FailedStepReportsError covers the failure
-// path: DeployStepFailed must report Result.ErrorMessage (carrying the
-// agent's own failure detail), not keep polling or silently succeed.
+// DeployStepFailed must report Result.ErrorMessage, not keep polling or
+// silently succeed.
 func TestAgentDeployer_Provision_FailedStepReportsError(t *testing.T) {
 	machine := newProvisioningMachine()
 	c := newAgentTestClient(t, machine)
@@ -202,13 +191,9 @@ func TestAgentDeployer_Provision_FailedStepReportsError(t *testing.T) {
 	}
 }
 
-// TestAgentDeployer_Provision_StaleGenerationKeepsPolling covers the case
-// a redeploy (spec change bumping Generation) races a still-live
-// terminal-success condition left over from the previous deployment to
-// this same Machine: a condition whose ObservedGeneration lags the
-// Machine's current Generation must not be trusted as this deployment's
-// own report - Provision must keep polling for a fresh one, never
-// short-circuit to success on stale data.
+// A condition whose ObservedGeneration lags a just-bumped Generation
+// (redeploy racing a stale terminal-success left from the prior
+// deployment) must not be trusted; Provision must keep polling.
 func TestAgentDeployer_Provision_StaleGenerationKeepsPolling(t *testing.T) {
 	machine := newProvisioningMachine()
 	c := newAgentTestClient(t, machine)
@@ -243,11 +228,7 @@ func TestAgentDeployer_Provision_StaleGenerationKeepsPolling(t *testing.T) {
 	}
 }
 
-// TestAgentDeployer_Deprovision_ReportsSuccess covers Deprovision's
-// documented minimal scope: a no-op that reports success, since this
-// Deployer holds nothing worth releasing and onDelete deletes the whole
-// object immediately after a successful call anyway (see Deprovision's
-// doc comment).
+// Deprovision is a no-op reporting success (see its doc comment).
 func TestAgentDeployer_Deprovision_ReportsSuccess(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	c := newAgentTestClient(t, machine)

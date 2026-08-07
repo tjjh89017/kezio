@@ -18,12 +18,9 @@ package bootserver
 
 import "testing"
 
-// TestGrubNetPath pins the one file-path syntax GRUB's network stack
-// resolves: "(http,host:port)/path". A bare URL is not it -
-// grub_file_open treats only a leading "(" as naming a device, so
-// "http://host/path" is opened as a relative path on $root (the TFTP
-// server, mid net-boot) and fails; that mistake is exactly what
-// GrubNetPath exists to make unrepresentable.
+// TestGrubNetPath pins the one syntax GRUB's network stack resolves:
+// "(http,host:port)/path" - a bare URL like "http://host/path" is instead
+// opened as a relative path on $root and fails.
 func TestGrubNetPath(t *testing.T) {
 	for name, tc := range map[string]struct {
 		serverURL string
@@ -80,16 +77,11 @@ func TestGrubNetPath(t *testing.T) {
 	}
 }
 
-// TestRenderNetBootConfig_FetchParam pins the exact live-boot cmdline
-// contract: boot=live selects the live-boot initrd path at all, and
-// fetch=<squashfs URL> is what live-boot's initrd reads to download the
-// root file system over HTTP instead of expecting a local disk. Both
-// tokens must appear together on the same "linux" line GRUB emits, ahead
-// of the separate "initrd" line for the kernel's own initrd image. The
-// linux/initrd file arguments use GRUB's network path syntax (GRUB is
-// the consumer that opens those files), while fetch= and kezio.server=
-// stay real URLs (live-boot's initrd and the agent consume those, not
-// GRUB).
+// TestRenderNetBootConfig_FetchParam pins the live-boot cmdline contract:
+// boot=live and fetch=<squashfs URL> appear together on the "linux" line,
+// ahead of a separate "initrd" line. linux/initrd use GRUB's network path
+// syntax; fetch= and kezio.server= stay real URLs (live-boot's initrd and
+// the agent consume those, not GRUB).
 func TestRenderNetBootConfig_FetchParam(t *testing.T) {
 	cfg := Config{
 		ServerURL: "http://boot.example.test:8090",
@@ -111,15 +103,10 @@ func TestRenderNetBootConfig_FetchParam(t *testing.T) {
 	}
 }
 
-// TestRenderNetBootConfig_KezioServerUsesAgentServerURL pins the fix for
-// a registration handshake that used to never complete: kezio.server=
-// (where the agent registers) must come from Config.AgentServerURL, not
-// ServerURL (the boot config server's own address, used only for the
-// kernel/initrd/squashfs paths on the same line) - internal/agentserver
-// and internal/bootserver are two different Services on two different
-// container ports fronting the same controller-manager Pod, so
-// collapsing kezio.server= onto ServerURL sends every agent registration
-// to a server that never mounts internal/agentserver's routes.
+// TestRenderNetBootConfig_KezioServerUsesAgentServerURL: kezio.server=
+// must come from Config.AgentServerURL, not ServerURL (used only for the
+// kernel/initrd/squashfs paths) - collapsing the two would send every
+// agent registration to a server that never mounts agentserver's routes.
 func TestRenderNetBootConfig_KezioServerUsesAgentServerURL(t *testing.T) {
 	cfg := Config{
 		ServerURL:      "http://boot.example.test:8090",
