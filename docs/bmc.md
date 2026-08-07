@@ -17,10 +17,9 @@ address you configure:
 
 ## Redfish is the recommended path
 
-Use `redfish://` when the BMC supports it. It has no extra binary
-dependency, so it works with the default manager image, and it is the
-protocol modern BMC hardware prefers over IPMI. `redfish://` connects
-over HTTPS; `redfishs://` is an accepted alias for the same behavior.
+Use `redfish://` when the BMC supports it. It is the protocol modern
+BMC hardware prefers over IPMI. `redfish://` connects over HTTPS;
+`redfishs://` is an accepted alias for the same behavior.
 
 ### `redfish+http://` is a lab-only escape hatch, not for production BMCs
 
