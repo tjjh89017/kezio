@@ -228,6 +228,27 @@ jobs:
           sudo ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images ls | grep -E 'kezio(-boot-artifacts)?:probe-boot-artifacts' || true
           echo "::endgroup::"
 
+      - name: Inspect both imported images side by side
+        # Instrumentation for the fetch-boot-artifacts ImagePullBackOff:
+        # confirms whether the boot-artifacts image actually lands in
+        # containerd's content store in the same form the manager image
+        # does, before any Deployment ever asks for it.
+        run: |
+          set +e
+          echo "===== ctr images ls (unfiltered) ====="
+          sudo ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images ls
+          echo "===== ctr images ls --digests, manager and boot-artifacts ====="
+          sudo ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images ls --digests | grep -E 'kezio(-boot-artifacts)?:probe-boot-artifacts'
+          echo "===== crictl images (unfiltered) ====="
+          sudo crictl images
+          echo "===== crictl images -o json, manager ====="
+          sudo crictl inspecti "${MANAGER_IMG}"
+          echo "===== crictl images -o json, boot-artifacts ====="
+          sudo crictl inspecti "${BOOT_ARTIFACTS_IMG}"
+          echo "===== ctr images check (manifest completeness) ====="
+          sudo ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images check | grep -E 'kezio(-boot-artifacts)?:probe-boot-artifacts'
+          true
+
       - name: Wait past one kubelet image-gc period
         if: ${{ inputs.reproduce_known_failure }}
         # See this workflow's own header comment: kubelet's image
