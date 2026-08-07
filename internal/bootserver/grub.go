@@ -39,30 +39,12 @@ const grubContentType = "text/plain; charset=utf-8"
 // probing MACs on the segment cannot distinguish "not yours" from
 // "not right now" from "never heard of it" by response shape.
 //
-// This chainloads the local disk's UEFI removable-fallback bootloader
-// directly (see internal/agent/deploy's efiRemovableLoaderPath doc
-// comment for the same \EFI\BOOT\BOOTX64.EFI contract on the deploy
-// side: finalize guarantees every bootable Image carries its fallback
-// loader there) rather than handing control back to the firmware with
-// "exit" and trusting BDS to fall through to the next boot entry on its
-// own. That fallthrough was the previous approach here, and it is not
-// reliable: measured against a real UEFI boot (KubeVirt/OVMF), a plain
-// "exit" after GRUB has already run does not resume BDS at the next
-// BootOrder entry - the firmware repeats the same PXE boot entry from
-// scratch instead, so a machine whose only local boot device is this
-// GRUB-served config never reaches its disk and loops until the
-// firmware itself gives up into its setup menu. Chainloading here does
-// not depend on that firmware behavior at all. search's target is
-// hardcoded to the one path efiRemovableLoaderPath deploys for amd64;
-// kezio has no aarch64 support yet on either side of this contract.
+// "exit" returns control to the firmware's own boot order without GRUB
+// attempting to load anything further, so the firmware proceeds to its
+// next configured boot entry - ordinarily the local disk.
 const bootLocalConfig = `# kezio: this machine does not need the live boot environment right now.
 set timeout=0
-insmod part_gpt
-insmod fat
-insmod chain
-search --no-floppy --set=root --file /EFI/BOOT/BOOTX64.EFI
-chainloader /EFI/BOOT/BOOTX64.EFI
-boot
+exit
 `
 
 // GrubNetPath converts an HTTP base URL plus an absolute path into
