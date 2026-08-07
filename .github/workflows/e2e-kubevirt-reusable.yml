@@ -2011,6 +2011,12 @@ jobs:
             sleep 10
           done
           kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o yaml
+          # Capture the per-Image seeder's log NOW, seconds into the
+          # 45s teardown grace period: the leech-attribution check runs
+          # after the multi-minute layer-2/3 boot waits, by which time
+          # the Deployment (and its log) is deliberately gone.
+          kubectl -n kezio-system logs deployment/"${SEEDER_DEPLOYMENT_NAME}" --tail=-1 \
+            > "${RUNNER_TEMP}/seeder-upload.log" || true
 
       - name: "Verify layer 1 (controller): status.provisioning matches spec, conditions clean"
         run: |
@@ -2285,9 +2291,16 @@ jobs:
             exit 1
           fi
 
-          seeder_log="$(kubectl -n kezio-system logs deployment/"${SEEDER_DEPLOYMENT_NAME}" --tail=-1)"
+          # Read the log captured at the moment of Provisioned (see the
+          # Provisioned wait step): the Deployment itself has been torn
+          # down by its grace period minutes before this step runs.
+          seeder_log="$(cat "${RUNNER_TEMP}/seeder-upload.log" 2>/dev/null || true)"
+          if [ -z "${seeder_log}" ]; then
+            echo "::error::no captured seeder log at ${RUNNER_TEMP}/seeder-upload.log - the capture at Provisioned failed." >&2
+            exit 1
+          fi
           if ! grep -qE '\[U: [1-9][0-9.]*MB/s\]' <<<"${seeder_log}"; then
-            echo "::error::per-Image seeder Deployment ${SEEDER_DEPLOYMENT_NAME}'s log shows no nonzero upload-rate line - nothing appears to have actually leeched from it." >&2
+            echo "::error::per-Image seeder Deployment ${SEEDER_DEPLOYMENT_NAME}'s captured log shows no nonzero upload-rate line - nothing appears to have actually leeched from it." >&2
             echo "${seeder_log}"
             exit 1
           fi
