@@ -22,3 +22,6 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: latest
+
+      - name: Check composite action.yml metadata for GitHub-evaluated expressions
+        run: go run ./hack/lint-action-metadata

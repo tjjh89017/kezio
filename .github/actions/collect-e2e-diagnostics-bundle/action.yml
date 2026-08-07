@@ -22,7 +22,7 @@ inputs:
   output-dir:
     description: Directory the collected files are written into (created if missing).
     required: false
-    default: ${{ runner.temp }}/e2e-bundle
+    default: e2e-bundle
   deployments:
     description: >-
       Newline-separated "deployment-name:output-file" pairs. Each

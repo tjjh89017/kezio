@@ -172,6 +172,11 @@ endif
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
 	$(GOLANGCI_LINT) run
+	go run ./hack/lint-action-metadata
+
+.PHONY: lint-action-metadata
+lint-action-metadata: ## Reject GitHub-evaluated expressions in composite action.yml metadata fields
+	go run ./hack/lint-action-metadata
 
 .PHONY: lint-fix
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
