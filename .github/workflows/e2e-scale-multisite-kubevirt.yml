@@ -485,10 +485,10 @@ jobs:
           set -euo pipefail
           sudo apt-get install -y --no-install-recommends tcpdump || true
           sudo -- sh -c "nohup tcpdump -i '${SITE_A_BRIDGE}' -w '${RUNNER_TEMP}/bridge-site-a.pcap' \
-            udp port 67 or port 68 or port 69 \
+            udp port 67 or port 68 or port 69 or tcp port 80 \
             >/tmp/tcpdump-bridge-site-a.log 2>&1 &"
           sudo -- sh -c "nohup tcpdump -i '${SITE_B_BRIDGE}' -w '${RUNNER_TEMP}/bridge-site-b.pcap' \
-            udp port 67 or port 68 or port 69 \
+            udp port 67 or port 68 or port 69 or tcp port 80 \
             >/tmp/tcpdump-bridge-site-b.log 2>&1 &"
 
       - name: Install local-path-provisioner and mark it the default StorageClass
@@ -1029,6 +1029,18 @@ jobs:
           kubectl wait vmi/e2e-scale-site-a -n kezio-system --for=condition=Ready --timeout=180s
           kubectl wait vmi/e2e-scale-site-b -n kezio-system --for=condition=Ready --timeout=180s
 
+      - name: Start continuous VM console capture (site-a)
+        uses: ./.github/actions/capture-vm-console
+        with:
+          vm-name: e2e-scale-site-a
+          logfile: ${{ runner.temp }}/console-site-a.log
+
+      - name: Start continuous VM console capture (site-b)
+        uses: ./.github/actions/capture-vm-console
+        with:
+          vm-name: e2e-scale-site-b
+          logfile: ${{ runner.temp }}/console-site-b.log
+
       - name: Wait for both Machines to reach Provisioned, sampling swarm peer counts meanwhile
         # The main gating wait: both site Machines must independently
         # reach Provisioned - i.e. both leech the same Image over the
@@ -1341,6 +1353,35 @@ jobs:
           done
           exit 0
 
+      - name: Collect the always-on diagnostics bundle
+        if: always()
+        # Unconditional, like the pcap/per-site log flushes above:
+        # controller-manager's log is where the boot server's own
+        # per-request lines land (see internal/bootserver's logRequests),
+        # and the rest is the same Machine/Image/events picture the
+        # failure-only dump above prints inline - useful on a passing run
+        # too, not only a failing one.
+        uses: ./.github/actions/collect-e2e-diagnostics-bundle
+        with:
+          output-dir: ${{ runner.temp }}
+          deployments: |
+            kezio-controller-manager:controller-manager.log
+            kezio-ezio-seeder-site-a:ezio-seeder-site-a.log
+            kezio-ezio-seeder-site-b:ezio-seeder-site-b.log
+            kezio-ezio-seeder:ezio-seeder-central.log
+            kezio-opentracker:opentracker.log
+            kezio-image-service:image-service.log
+          job-label-selectors: |
+            kezio.kojuro.date/image:ingest.log
+          resources: |
+            machine/e2e-scale-site-a:machine-site-a.yaml
+            machine/e2e-scale-site-b:machine-site-b.yaml
+            image/e2e-scale-ubuntu:image.yaml
+            vm/e2e-scale-site-a:vm-site-a.yaml
+            vm/e2e-scale-site-b:vm-site-b.yaml
+            vmi/e2e-scale-site-a:vmi-site-a.yaml
+            vmi/e2e-scale-site-b:vmi-site-b.yaml
+
       - name: Upload E2E diagnostics artifacts
         # Always, not just on failure - this lane had no artifact upload
         # at all before; the bridge captures are worth having on a
@@ -1352,6 +1393,8 @@ jobs:
         with:
           name: e2e-diagnostics-${{ github.job }}
           path: |
+            ${{ runner.temp }}/console-site-a.log
+            ${{ runner.temp }}/console-site-b.log
             ${{ runner.temp }}/bridge-site-a.pcap
             ${{ runner.temp }}/bridge-site-a-pcap.txt
             ${{ runner.temp }}/bridge-site-b.pcap
@@ -1360,5 +1403,20 @@ jobs:
             ${{ runner.temp }}/bootd-site-b.log
             ${{ runner.temp }}/existing-dhcp-site-a.log
             ${{ runner.temp }}/existing-dhcp-site-b.log
+            ${{ runner.temp }}/controller-manager.log
+            ${{ runner.temp }}/ezio-seeder-site-a.log
+            ${{ runner.temp }}/ezio-seeder-site-b.log
+            ${{ runner.temp }}/ezio-seeder-central.log
+            ${{ runner.temp }}/opentracker.log
+            ${{ runner.temp }}/image-service.log
+            ${{ runner.temp }}/ingest.log
+            ${{ runner.temp }}/machine-site-a.yaml
+            ${{ runner.temp }}/machine-site-b.yaml
+            ${{ runner.temp }}/image.yaml
+            ${{ runner.temp }}/vm-site-a.yaml
+            ${{ runner.temp }}/vm-site-b.yaml
+            ${{ runner.temp }}/vmi-site-a.yaml
+            ${{ runner.temp }}/vmi-site-b.yaml
+            ${{ runner.temp }}/events.txt
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 14

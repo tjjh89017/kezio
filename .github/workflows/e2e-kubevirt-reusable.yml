@@ -662,7 +662,7 @@ jobs:
           set -euo pipefail
           sudo apt-get install -y --no-install-recommends tcpdump || true
           sudo -- sh -c "nohup tcpdump -i '${PROVISIONING_BRIDGE}' -w '${RUNNER_TEMP}/bridge.pcap' \
-            udp port 67 or port 68 or port 69 \
+            udp port 67 or port 68 or port 69 or tcp port 80 \
             >/tmp/tcpdump-bridge.log 2>&1 &"
 
       - name: Install local-path-provisioner and mark it the default StorageClass
@@ -1295,7 +1295,7 @@ jobs:
           fi
 
           sudo -- sh -c "nohup nsenter -t '${sandbox_pid}' -n -- tcpdump -i net1 -w '${RUNNER_TEMP}/bootd-netns.pcap' \
-            udp port 67 or port 68 or port 69 \
+            udp port 67 or port 68 or port 69 or tcp port 80 \
             >/tmp/tcpdump-bootd-netns.log 2>&1 &" \
             || echo "::warning::bootd pod-netns capture: failed to start nsenter/tcpdump inside bootd's netns - skipping this diagnostic capture, it does not affect the e2e result"
           exit 0
@@ -1921,56 +1921,15 @@ jobs:
         # No `if:` guard - both the bmc_mode and non-bmc_mode branches
         # above land here with the VMI already Ready, so this runs
         # exactly once regardless of which power path this job used.
-        #
-        # Runs for the rest of the job (nohup + disown, the same
-        # backgrounding pattern used elsewhere in this job) so the
-        # eventual "Dump diagnostics on failure" step's 20-second live
-        # `virtctl console` attach - which only ever sees whatever the
-        # guest happens to print in that narrow window, nothing from
-        # before it - is no longer the only window onto the guest: this
-        # file accumulates the VM's serial console from the moment it
-        # started, through however this job ends.
-        #
-        # `virtctl console` puts the local terminal into raw mode to
-        # relay guest input, which fails outright without a real TTY
-        # (verified against virtctl v1.9.0: it errors "not a terminal"
-        # on a plain pipe or file redirect). `script` supplies a fake
-        # pty - the standard way to run a TTY-requiring program
-        # headlessly - and, given a logfile argument, records everything
-        # written to that pty there, byte for byte, without also needing
-        # a real terminal itself.
-        #
-        # A single `virtctl console` attach only lasts as long as the VMI
-        # it attached to: bmc_mode's own later "power cycle to consume
-        # KubeVirtBMC's one-shot PXE override" step tears the VMI down
-        # and brings up a new one (a fresh virt-launcher pod, fresh
-        # console socket), which drops this attach for good - a prior
-        # run lost the entire new VMI's boot to an unobserved console
-        # this way. The loop below reattaches (through the same `script`
-        # capture, `-a` so it appends rather than truncates) every time
-        # the attach exits, printing a marker line either side of the
-        # gap so the uploaded console.log still reads as one continuous
-        # history across however many VMI generations this job goes
-        # through, instead of silently going dark after the first.
-        run: |
-          set -euo pipefail
-          cat >"${RUNNER_TEMP}/console-capture-loop.sh" <<'CONSOLE_CAPTURE_LOOP'
-          #!/bin/bash
-          set -uo pipefail
-          vm_name="$1"
-          namespace="$2"
-          logfile="$3"
-          while true; do
-          echo "===== console-capture: (re)attaching to ${vm_name} at $(date -Is) =====" >>"${logfile}"
-          script -qec "virtctl console '${vm_name}' -n '${namespace}'" -a "${logfile}"
-          echo "===== console-capture: disconnected from ${vm_name} at $(date -Is); reattaching in 2s (a VMI recreation or a transient drop, not necessarily a failure) =====" >>"${logfile}"
-          sleep 2
-          done
-          CONSOLE_CAPTURE_LOOP
-          chmod +x "${RUNNER_TEMP}/console-capture-loop.sh"
-          nohup "${RUNNER_TEMP}/console-capture-loop.sh" "${TARGET_VM_NAME}" kezio-system "${RUNNER_TEMP}/console.log" \
-            >/tmp/console-capture-wrapper.log 2>&1 &
-          disown
+        # bmc_mode's own later "power cycle to consume KubeVirtBMC's
+        # one-shot PXE override" step tears the VMI down and brings up a
+        # new one (fresh virt-launcher pod, fresh console socket); the
+        # action's reattach loop covers that VMI-recreation case, not
+        # just a transient drop.
+        uses: ./.github/actions/capture-vm-console
+        with:
+          vm-name: ${{ inputs.target_vm_name }}
+          logfile: ${{ runner.temp }}/console.log
 
       - name: Attach the per-Image seeder Deployment to the provisioning bridge
         # The Machine created above (already Register-ing/Inspect-ing by
@@ -2673,22 +2632,38 @@ jobs:
             tcpdump -vvv -r "${RUNNER_TEMP}/bootd-netns.pcap" > "${RUNNER_TEMP}/bootd-netns-pcap.txt" 2>&1
           fi
 
-      - name: Flush the bootd and existing-dhcp logs to the artifact
+      - name: Collect the always-on diagnostics bundle
         if: always()
         # Unconditional, like the pcap flushes above: bootd's pod log
-        # now carries dnsmasq's forwarded per-request log-dhcp decision
-        # lines (see internal/bootd's forwardLines), and the
-        # existing-dhcp pod's own log-dhcp log shows whether relayed
-        # lease traffic ever arrived - both are the DHCP story a passing
-        # OR failing run needs on record. The failure-only diagnostics
-        # dump includes both logs too, but only on failure.
-        run: |
-          set +e
-          kubectl -n kezio-system logs deployment/kezio-bootd --all-containers --tail=-1 \
-            > "${RUNNER_TEMP}/bootd.log" 2>&1 || true
-          kubectl -n kezio-system logs deployment/kezio-existing-dhcp --all-containers --tail=-1 \
-            > "${RUNNER_TEMP}/existing-dhcp.log" 2>&1 || true
-          exit 0
+        # carries dnsmasq's forwarded per-request log-dhcp decision lines
+        # (see internal/bootd's forwardLines), controller-manager's log
+        # is where the boot server's own per-request lines land (see
+        # internal/bootserver's logRequests), and the rest is the same
+        # Machine/Image/events picture the failure-only dump below
+        # prints inline - both are worth having on a passing run too, not
+        # only a failing one. The per-Image seeder Deployment is
+        # deliberately absent here: reconcileSeederDeployments removes it
+        # once the Machine finishes provisioning, so by the time this
+        # step runs on a passing run it is usually already gone (its logs
+        # are read live, mid-test, in the "Verify the per-Image seeder
+        # Deployment served real BitTorrent traffic" step instead).
+        uses: ./.github/actions/collect-e2e-diagnostics-bundle
+        with:
+          output-dir: ${{ runner.temp }}
+          deployments: |
+            kezio-controller-manager:controller-manager.log
+            kezio-bootd:bootd.log
+            kezio-existing-dhcp:existing-dhcp.log
+            kezio-opentracker:opentracker.log
+            kezio-image-service:image-service.log
+            kezio-ezio-seeder:ezio-seeder.log
+          job-label-selectors: |
+            kezio.kojuro.date/image:ingest.log
+          resources: |
+            machine/${{ inputs.target_vm_name }}:machine.yaml
+            image/${{ inputs.image_name }}:image.yaml
+            vm/${{ inputs.target_vm_name }}:vm.yaml
+            vmi/${{ inputs.target_vm_name }}:vmi.yaml
 
       - name: Dump KubeVirtBMC diagnostics on failure
         if: ${{ failure() && inputs.bmc_mode }}
@@ -2733,5 +2708,15 @@ jobs:
             ${{ runner.temp }}/bootd-netns-pcap.txt
             ${{ runner.temp }}/bootd.log
             ${{ runner.temp }}/existing-dhcp.log
+            ${{ runner.temp }}/controller-manager.log
+            ${{ runner.temp }}/opentracker.log
+            ${{ runner.temp }}/image-service.log
+            ${{ runner.temp }}/ezio-seeder.log
+            ${{ runner.temp }}/ingest.log
+            ${{ runner.temp }}/machine.yaml
+            ${{ runner.temp }}/image.yaml
+            ${{ runner.temp }}/vm.yaml
+            ${{ runner.temp }}/vmi.yaml
+            ${{ runner.temp }}/events.txt
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 14

@@ -322,7 +322,7 @@ jobs:
           set -euo pipefail
           sudo apt-get install -y --no-install-recommends tcpdump || true
           sudo -- sh -c "nohup tcpdump -i '${PROVISIONING_BRIDGE}' -w '${RUNNER_TEMP}/bridge.pcap' \
-            udp port 67 or port 68 or port 69 \
+            udp port 67 or port 68 or port 69 or tcp port 80 \
             >/tmp/tcpdump-bridge.log 2>&1 &"
 
       - name: Install cert-manager, KubeVirt, virtctl, and CDI
@@ -686,6 +686,17 @@ jobs:
           done
           kubectl wait vmi/e2e-boot-path-vm -n kezio-system --for=condition=Ready --timeout=180s
 
+      - name: Start continuous VM console capture
+        # This is exactly the boot the job needs to see the most - PXE,
+        # GRUB, the live kernel/initrd fetch, the squashfs boot, and
+        # kezio-agent's own startup - so a live attach in "Dump
+        # diagnostics on failure" (which only ever sees the last 20s) is
+        # no longer the only window onto it.
+        uses: ./.github/actions/capture-vm-console
+        with:
+          vm-name: e2e-boot-path-vm
+          logfile: ${{ runner.temp }}/console.log
+
       - name: Wait for the Machine to reach Available with reported hardware
         # Generous but bounded: PXE discovery + TFTP + the kernel/initrd
         # HTTP fetch + the live-boot squashfs fetch + kezio-agent startup
@@ -790,19 +801,25 @@ jobs:
             tcpdump -vvv -r "${RUNNER_TEMP}/bridge.pcap" > "${RUNNER_TEMP}/bridge-pcap.txt" 2>&1
           fi
 
-      - name: Flush the bootd and existing-dhcp logs to the artifact
+      - name: Collect the always-on diagnostics bundle
         if: always()
-        # Unconditional, like the pcap flush above - both pods' logs
-        # carry log-dhcp decision lines (see internal/bootd's
-        # forwardLines for bootd's own), useful on a passing run too,
-        # not only a failing one.
-        run: |
-          set +e
-          kubectl -n kezio-system logs deployment/kezio-bootd --all-containers --tail=-1 \
-            > "${RUNNER_TEMP}/bootd.log" 2>&1 || true
-          kubectl -n kezio-system logs deployment/kezio-existing-dhcp --all-containers --tail=-1 \
-            > "${RUNNER_TEMP}/existing-dhcp.log" 2>&1 || true
-          exit 0
+        # Unconditional, like the pcap flush above: bootd's and
+        # existing-dhcp's logs carry log-dhcp decision lines (see
+        # internal/bootd's forwardLines for bootd's own), and
+        # controller-manager's log is where the boot server's own
+        # per-request lines land (see internal/bootserver's logRequests)
+        # - all useful on a passing run too, not only a failing one.
+        uses: ./.github/actions/collect-e2e-diagnostics-bundle
+        with:
+          output-dir: ${{ runner.temp }}
+          deployments: |
+            kezio-controller-manager:controller-manager.log
+            kezio-bootd:bootd.log
+            kezio-existing-dhcp:existing-dhcp.log
+          resources: |
+            machine/e2e-boot-path-vm:machine.yaml
+            vm/e2e-boot-path-vm:vm.yaml
+            vmi/e2e-boot-path-vm:vmi.yaml
 
       - name: Upload E2E diagnostics artifacts
         # Always, not just on failure - this lane had no artifact upload
@@ -815,9 +832,15 @@ jobs:
         with:
           name: e2e-diagnostics-${{ github.job }}
           path: |
+            ${{ runner.temp }}/console.log
             ${{ runner.temp }}/bridge.pcap
             ${{ runner.temp }}/bridge-pcap.txt
             ${{ runner.temp }}/bootd.log
             ${{ runner.temp }}/existing-dhcp.log
+            ${{ runner.temp }}/controller-manager.log
+            ${{ runner.temp }}/machine.yaml
+            ${{ runner.temp }}/vm.yaml
+            ${{ runner.temp }}/vmi.yaml
+            ${{ runner.temp }}/events.txt
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 14

@@ -144,13 +144,15 @@ func (s *Server) Start(ctx context.Context) error {
 // itself.
 const grubConfigNamePrefix = "grub.cfg-"
 
-// Handler returns the routed http.Handler.
+// Handler returns the routed http.Handler, wrapped in logRequests so
+// every request this server answers leaves a record (see logRequests's
+// own doc comment for why that wrap is unconditional).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /boot/{name}", s.handleBootPath)
 	mux.Handle("GET "+artifactsPrefix, artifactsHandler(s.Config.ArtifactsDir))
 	mux.HandleFunc("GET /boot/http/{name}", s.handleEFI)
-	return mux
+	return logRequests(mux)
 }
 
 // handleBootPath dispatches GET /boot/<name>: today the only recognized
