@@ -1,0 +1,354 @@
+name: Probe - seeder single-homing and torrent HTTP serving
+
+# Answers the two questions the seeder single-homing/HTTP-torrent change
+# (SeederDeploymentConfig.Network, cmd/seeder's HTTP server) actually
+# introduces, against a real Multus-enabled cluster, in minutes rather
+# than waiting on the full-deploy KubeVirt lane's ~60 steps:
+#
+#   (a) does a pod carrying the v1.multus-cni.io/default-network
+#       annotation actually come up single-homed on the named
+#       NetworkAttachmentDefinition's subnet, with pod.Status.PodIP
+#       landing there instead of on the ordinary cluster pod network -
+#       the exact property internal/agentserver's resolveSeederTorrentURL
+#       relies on when it builds a deploy plan's TorrentURL straight from
+#       PodIP?
+#   (b) does cmd/seeder's HTTP server (internal/controller's
+#       buildSeederDeployment wires it as the seeder-register container's
+#       "torrent" port) actually serve a staged content directory's
+#       content.torrent at GET /torrents/<infohash>, and 404 for an
+#       unknown hash?
+#
+# Deliberately does not drive this through the real Image/Machine/
+# seeder_deployment.go reconcile loop (that would also need a live-boot
+# VM or a hand-crafted Image+Machine+partition-PVC fixture staged through
+# the storage layer): internal/controller's own unit tests
+# (TestBuildSeederDeployment_NetworkAnnotation,
+# TestBuildSeederDeployment_RegisterContainerExposesTorrentPort) already
+# cover "does the controller wire the annotation and port correctly
+# into the pod template it builds" in milliseconds, with no cluster at
+# all. What only a real cluster can answer is whether Multus and
+# cmd/seeder's own HTTP server actually behave the way that pod template
+# assumes once a real CNI ADD runs - so this probe applies a bare Pod
+# carrying the exact same annotation/port/command shape directly,
+# skipping the Image/Machine machinery that would otherwise dominate the
+# job's runtime without adding coverage of either question above.
+on:
+  workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  RKE2_VERSION: "v1.36.2+rke2r1"
+  SEEDER_IMG: "example.com/kezio-seeder:probe-seeder-network"
+  EZIO_REF: "v2.0.29"
+  PROBE_NAMESPACE: kezio-seeder-probe
+  PROBE_NAD: kezio-seeder-probe-network
+  PROBE_BRIDGE: kzprobebr0
+  # Host address on the bridge (not the pod's - see "Create the
+  # provisioning bridge" below): gives the runner an on-link route into
+  # the NAD's static /24 so it can curl the probe pod directly, the same
+  # L2-sharing trick e2e-kubevirt-reusable.yml's own provisioning bridge
+  # uses to reach bootd's net1 with no NAT or veth-into-netns needed.
+  PROBE_HOST_IP: 192.0.2.1/24
+  PROBE_POD_IP: 192.0.2.5
+
+jobs:
+  seeder-network:
+    name: Verify Multus single-homing and the torrent HTTP endpoint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Create the provisioning bridge
+        run: |
+          set -euo pipefail
+          sudo ip link add "${PROBE_BRIDGE}" type bridge
+          sudo ip addr add "${PROBE_HOST_IP}" dev "${PROBE_BRIDGE}"
+          sudo ip link set "${PROBE_BRIDGE}" up
+
+      - name: Install RKE2 with Multus enabled
+        uses: ./.github/actions/install-rke2
+        with:
+          rke2-version: ${{ env.RKE2_VERSION }}
+
+      - name: Wait for the Multus NetworkAttachmentDefinition CRD (RKE2's own rke2-multus HelmChart addon)
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + 300 ))
+          until kubectl get crd network-attachment-definitions.k8s.cni.cncf.io >/dev/null 2>&1; do
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::network-attachment-definitions.k8s.cni.cncf.io CRD did not appear within the timeout - RKE2's rke2-multus HelmChart addon may not have installed." >&2
+              kubectl get helmcharts -A -o wide || true
+              exit 1
+            fi
+            sleep 5
+          done
+          kubectl wait --for=condition=Established crd/network-attachment-definitions.k8s.cni.cncf.io --timeout=60s
+
+      - name: Create the namespace and the seeder NetworkAttachmentDefinition
+        # Plain bridge CNI, static ipam, same shape as
+        # e2e-kubevirt-reusable.yml's own kezio-seeder-network NAD - one
+        # NAD, one address, no tuning chain needed (this probe's own
+        # curl traffic is ordinary unicast within the /24).
+        run: |
+          set -euo pipefail
+          kubectl create namespace "${PROBE_NAMESPACE}"
+          cat <<EOF | kubectl apply -f -
+          apiVersion: k8s.cni.cncf.io/v1
+          kind: NetworkAttachmentDefinition
+          metadata:
+            name: ${PROBE_NAD}
+            namespace: ${PROBE_NAMESPACE}
+          spec:
+            config: |
+              {
+                "cniVersion": "0.3.1",
+                "name": "${PROBE_NAD}",
+                "plugins": [
+                  {
+                    "type": "bridge",
+                    "bridge": "${PROBE_BRIDGE}",
+                    "ipam": {
+                      "type": "static",
+                      "addresses": [
+                        {"address": "${PROBE_POD_IP}/24"}
+                      ]
+                    }
+                  }
+                ]
+              }
+          EOF
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build the seeder image
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file docker/seeder/Dockerfile \
+            --tag "${SEEDER_IMG}" \
+            --cache-from "type=gha,scope=seeder" \
+            --cache-to "type=gha,mode=max,scope=seeder" \
+            --build-arg "EZIO_REF=${EZIO_REF}" \
+            --load \
+            .
+
+      - name: Import the seeder image into RKE2 containerd
+        run: |
+          set -euo pipefail
+          docker save "${SEEDER_IMG}" | sudo ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images import -
+
+      - name: Stage a content directory (torrent.info + content.torrent, no real payload)
+        # cmd/seeder's contentDirs() only requires content.torrent to
+        # exist to consider a directory servable, and
+        # store.LoadContentDirTorrentInfo only reads torrent.info - the
+        # real extent data content/ subdirectory (store.ValidateContentDir's
+        # concern) is never touched by either the HTTP index or the
+        # info-hash computation this probe exercises, so a minimal
+        # torrent.info with no backing payload is a faithful fixture for
+        # both questions this probe answers. Written with `go run` against
+        # this checkout's own internal/store package - the exact same
+        # info-hash computation ingest and buildDeployPlan use - so the
+        # infoHash and content.torrent bytes this probe requests back are
+        # real, not hand-rolled test doubles of the wire format.
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/seeder-content"
+          # Written under the checkout, not $RUNNER_TEMP: `go run` refuses
+          # to import an "internal/..." package from a file outside the
+          # importing module's own directory tree, regardless of working
+          # directory, so the generator has to live inside this checkout
+          # to import internal/store at all. Removed again in the last
+          # step below, since it is scratch, not part of the repo.
+          mkdir -p .probe-fixture
+          cat <<'EOF' > .probe-fixture/gen_fixture.go
+          package main
+
+          import (
+          	"fmt"
+          	"os"
+          	"path/filepath"
+
+          	"github.com/tjjh89017/kezio/internal/store"
+          )
+
+          func main() {
+          	dir := os.Args[1]
+          	info := &store.TorrentInfo{
+          		BlockSize:   4096,
+          		BlocksTotal: 100,
+          		Extents:     []store.Extent{{Offset: 0, Length: store.PieceSize}},
+          		PieceHashes: []store.PieceHash{{1, 2, 3, 4, 5}},
+          	}
+          	hash, err := store.ComputeInfoHash(info)
+          	if err != nil {
+          		panic(err)
+          	}
+
+          	infoFile, err := os.Create(filepath.Join(dir, store.TorrentInfoFileName))
+          	if err != nil {
+          		panic(err)
+          	}
+          	defer infoFile.Close()
+          	if err := store.WriteTorrentInfo(infoFile, info); err != nil {
+          		panic(err)
+          	}
+
+          	torrentBytes, err := store.BuildTorrentFile(info, "http://tracker.example.invalid/announce")
+          	if err != nil {
+          		panic(err)
+          	}
+          	if err := os.WriteFile(filepath.Join(dir, store.ContentTorrentFileName), torrentBytes, 0o644); err != nil {
+          		panic(err)
+          	}
+
+          	fmt.Print(hash.String())
+          }
+          EOF
+          hash="$(go run .probe-fixture/gen_fixture.go "${RUNNER_TEMP}/seeder-content")"
+          rm -rf .probe-fixture
+          echo "PROBE_INFO_HASH=${hash}" >> "$GITHUB_ENV"
+          echo "staged content dir for info hash ${hash}:"
+          ls -la "${RUNNER_TEMP}/seeder-content"
+
+      - name: Create the ConfigMap the probe pod mounts as its content directory
+        run: |
+          set -euo pipefail
+          kubectl -n "${PROBE_NAMESPACE}" create configmap kezio-seeder-probe-content \
+            --from-file="${RUNNER_TEMP}/seeder-content"
+
+      - name: Apply the probe pod
+        # Same annotation/command/port shape internal/controller's
+        # buildSeederDeployment stamps onto a real per-Image seeder
+        # Deployment's pod template (see SeederDeploymentConfig.Network
+        # and cmd/seeder's own "torrent" containerPort), applied directly
+        # to a bare Pod so this job never needs the Image/Machine/
+        # partition-PVC machinery that would otherwise dominate its
+        # runtime - see this workflow's own header comment for why.
+        run: |
+          set -euo pipefail
+          cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: seeder-probe
+            namespace: ${PROBE_NAMESPACE}
+            annotations:
+              v1.multus-cni.io/default-network: ${PROBE_NAD}
+          spec:
+            restartPolicy: Never
+            securityContext:
+              runAsNonRoot: true
+              seccompProfile:
+                type: RuntimeDefault
+            containers:
+              - name: seeder-register
+                image: ${SEEDER_IMG}
+                command: ["/usr/local/bin/kezio-seeder-register"]
+                env:
+                  - name: CONTENT_ROOT
+                    value: /content
+                  - name: EZIO_TARGET
+                    value: 127.0.0.1:50051
+                ports:
+                  - name: torrent
+                    containerPort: 8080
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities:
+                    drop: ["ALL"]
+                volumeMounts:
+                  - name: content
+                    mountPath: /content/probe-content
+                    readOnly: true
+            volumes:
+              - name: content
+                configMap:
+                  name: kezio-seeder-probe-content
+          EOF
+          kubectl -n "${PROBE_NAMESPACE}" wait pod/seeder-probe --for=condition=Ready --timeout=120s
+
+      - name: Verify the pod is single-homed on the NAD's subnet
+        # This is question (a): pod.Status.PodIP must be the
+        # provisioning-network address the static-ipam NAD assigned, not
+        # RKE2's own canal pod CIDR - the property
+        # SeederDeploymentConfig.Network's doc comment claims
+        # default-network gives "by construction".
+        run: |
+          set -euo pipefail
+          pod_ip="$(kubectl -n "${PROBE_NAMESPACE}" get pod seeder-probe -o jsonpath='{.status.podIP}')"
+          echo "pod IP: ${pod_ip}"
+          if [ "${pod_ip}" != "${PROBE_POD_IP}" ]; then
+            echo "::error::seeder-probe PodIP is ${pod_ip}, want the NAD's static address ${PROBE_POD_IP} - default-network did not replace the cluster network as expected." >&2
+            kubectl -n "${PROBE_NAMESPACE}" get pod seeder-probe -o yaml
+            exit 1
+          fi
+
+          network_status="$(kubectl -n "${PROBE_NAMESPACE}" get pod seeder-probe \
+            -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}')"
+          echo "network-status: ${network_status}"
+          if ! grep -q "${PROBE_NAD}" <<<"${network_status}"; then
+            echo "::error::seeder-probe has no ${PROBE_NAD} attachment in its network-status" >&2
+            exit 1
+          fi
+
+      - name: Verify the torrent HTTP endpoint serves the staged content and 404s otherwise
+        # Question (b). The runner reaches PROBE_POD_IP directly: it sits
+        # on the same bridge as the pod's own Multus-attached interface,
+        # both addressed out of the NAD's /24, so no port-forward or
+        # Service is needed - the same no-NAT, on-link reachability
+        # config/seeder/README.md's data-network requirement describes.
+        run: |
+          set -euo pipefail
+          curl -sf -o "${RUNNER_TEMP}/got.torrent" "http://${PROBE_POD_IP}:8080/torrents/${PROBE_INFO_HASH}"
+          if ! cmp -s "${RUNNER_TEMP}/got.torrent" "${RUNNER_TEMP}/seeder-content/content.torrent"; then
+            echo "::error::GET /torrents/<hash> returned bytes that differ from the staged content.torrent" >&2
+            exit 1
+          fi
+          echo "GET /torrents/${PROBE_INFO_HASH} returned the exact staged .torrent bytes."
+
+          status="$(curl -s -o /dev/null -w '%{http_code}' "http://${PROBE_POD_IP}:8080/torrents/0000000000000000000000000000000000000000")"
+          if [ "${status}" != "404" ]; then
+            echo "::error::GET /torrents/<unknown hash> returned HTTP ${status}, want 404" >&2
+            exit 1
+          fi
+          echo "GET /torrents/<unknown hash> correctly returned 404."
+
+      - name: Record the result
+        if: always()
+        run: |
+          {
+            echo "## Seeder single-homing / torrent HTTP probe"
+            echo "See \"Verify the pod is single-homed...\" and \"Verify the torrent HTTP endpoint...\" step logs for the pass/fail detail on each of the two questions this probe answers."
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          echo "===== probe namespace pods ====="
+          kubectl -n "${PROBE_NAMESPACE}" get pods -o wide
+          echo "===== seeder-probe describe ====="
+          kubectl -n "${PROBE_NAMESPACE}" describe pod seeder-probe
+          echo "===== seeder-probe logs ====="
+          kubectl -n "${PROBE_NAMESPACE}" logs pod/seeder-probe --all-containers --tail=1000
+          echo "===== NetworkAttachmentDefinition ====="
+          kubectl -n "${PROBE_NAMESPACE}" get network-attachment-definitions -o yaml
+          echo "===== bridge state on the runner ====="
+          ip -d link show "${PROBE_BRIDGE}" || true
+          ip addr show "${PROBE_BRIDGE}" || true

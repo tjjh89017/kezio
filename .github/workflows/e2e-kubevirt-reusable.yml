@@ -1002,7 +1002,17 @@ jobs:
           # the "Verify the per-Image seeder Deployment is torn down"
           # step below observes the actual deletion inside this job's
           # time budget instead of only the create half of the
-          # lifecycle.
+          # lifecycle. SEEDER_DEPLOYMENT_NETWORK names the same
+          # kezio-seeder-network NAD created above as the pod template's
+          # v1.multus-cni.io/default-network - not the additive
+          # k8s.v1.cni.cncf.io/networks annotation the opentracker patch
+          # above uses - so every per-Image seeder pod this reconciler
+          # creates is single-homed on the provisioning bridge from the
+          # moment it is created: no post-hoc patch needed (see the
+          # "Attach the per-Image seeder Deployment..." step below,
+          # which now only waits and verifies), and pod.Status.PodIP is
+          # the provisioning address agentserver's DeployPlan builder
+          # points the target VM's leecher at.
           kubectl -n kezio-system set env deployment/kezio-controller-manager \
             INGEST_IMAGE="${INGEST_IMG}" \
             INGEST_STORE_PVC=kezio-store \
@@ -1012,6 +1022,7 @@ jobs:
             SEEDER_DEPLOYMENT_IMAGE="${SEEDER_IMG}" \
             SEEDER_DEPLOYMENT_STORE_PVC=kezio-store \
             SEEDER_DEPLOYMENT_GRACE_PERIOD=45s \
+            SEEDER_DEPLOYMENT_NETWORK=kezio-seeder-network \
             BOOT_SERVER_ADDR=:8090 \
             BOOT_ARTIFACTS_DIR=/boot-artifacts \
             BOOT_SERVER_URL="http://${PROVISIONING_BOOTD_NET1_IP%%/*}:80" \
@@ -1917,7 +1928,7 @@ jobs:
           vm-name: ${{ inputs.target_vm_name }}
           logfile: ${{ runner.temp }}/console.log
 
-      - name: Attach the per-Image seeder Deployment to the provisioning bridge
+      - name: Verify the per-Image seeder Deployment is single-homed on the provisioning bridge
         # The Machine created above (already Register-ing/Inspect-ing by
         # this point, well before it reaches Provisioning) is what
         # actually drives internal/controller/seeder_deployment.go's
@@ -1928,19 +1939,21 @@ jobs:
         # real Machine driving it, not a unit test poking the reconciler
         # directly.
         #
-        # That Deployment's pod template carries no Multus annotation at
-        # all (see buildSeederDeployment - the network attachment is
-        # future work, out of scope here); left alone it would only get
-        # the cluster pod network, which the target VM on the raw
-        # provisioning bridge has no route into. This step attaches it to
-        # kezio-seeder-network - the exact same NAD the shared fleet
-        # would have used, safe to reuse here because that fleet has been
-        # scaled to zero since before any Machine existed (see the
-        # "Deploy image-service+seeder..." step) - the same workflow-side
-        # patch pattern used there, applied to whichever Deployment name
-        # reconcileSeederDeployments actually chose (seederDeploymentName
-        # hashes the image+site into the name, so this can't be a static
-        # patch the way opentracker's is).
+        # Unlike the opentracker patch above, no kubectl patch happens
+        # here: SEEDER_DEPLOYMENT_NETWORK (set on the controller-manager
+        # before this Machine ever existed) makes buildSeederDeployment
+        # stamp every per-Image seeder pod's template with
+        # v1.multus-cni.io/default-network: kezio-seeder-network from
+        # the moment reconcileSeederDeployments creates it - the pod is
+        # single-homed on the provisioning bridge by construction, never
+        # dual-homed the way the opentracker/tracker pods above are with
+        # the additive k8s.v1.cni.cncf.io/networks annotation. This step
+        # only waits for that Deployment and its pod, then verifies the
+        # attachment actually took and that pod.Status.PodIP - the exact
+        # value agentserver's buildPlanPartition resolves into the
+        # target VM's deploy plan (see internal/agentserver/plan.go's
+        # resolveSeederTorrentURL) - landed on the provisioning subnet,
+        # not the cluster pod network.
         run: |
           set -euo pipefail
           deadline=$(( $(date +%s) + 300 ))
@@ -1962,9 +1975,6 @@ jobs:
           echo "per-Image seeder Deployment: ${seeder_dep}"
           echo "SEEDER_DEPLOYMENT_NAME=${seeder_dep}" >> "$GITHUB_ENV"
 
-          kubectl -n kezio-system patch deployment/"${seeder_dep}" --type=strategic -p='{
-            "spec":{"template":{"metadata":{"annotations":{"k8s.v1.cni.cncf.io/networks":"kezio-seeder-network"}}}}
-          }'
           kubectl rollout status deployment/"${seeder_dep}" -n kezio-system --timeout=180s
 
           # Same non-terminating-pod network-status check the swarm pods
@@ -1980,6 +1990,13 @@ jobs:
             -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}')"
           if ! grep -q "kezio-seeder-network" <<<"${network_status}"; then
             echo "::error::per-Image seeder pod ${pod_name} has no kezio-seeder-network attachment in its network-status; got: ${network_status}" >&2
+            exit 1
+          fi
+
+          pod_ip="$(kubectl -n kezio-system get pod "${pod_name}" -o jsonpath='{.status.podIP}')"
+          if [[ "${pod_ip}" != "${PROVISIONING_SEEDER_NET1_IP%%/*}" ]]; then
+            echo "::error::per-Image seeder pod ${pod_name} PodIP is ${pod_ip}, want the provisioning bridge address ${PROVISIONING_SEEDER_NET1_IP%%/*} - default-network did not replace the cluster network as expected." >&2
+            kubectl -n kezio-system get pod "${pod_name}" -o yaml || true
             exit 1
           fi
           echo "SEEDER_DEPLOYMENT_POD=${pod_name}" >> "$GITHUB_ENV"
