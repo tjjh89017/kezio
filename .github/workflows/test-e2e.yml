@@ -18,10 +18,17 @@ name: E2E Tests
 on:
   push:
   pull_request:
+  # Manual dispatch exists so a verdict can be requested deliberately:
+  # push-triggered runs are superseded by the next push (see concurrency
+  # below), which has repeatedly destroyed evidence mid-investigation.
+  workflow_dispatch:
 
 # Supersede an in-flight run when a newer commit is pushed to the same ref.
+# A manually dispatched run gets its own group (keyed by run id) so no
+# later push can cancel it - the whole point of dispatching one is that
+# its verdict survives unrelated work.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 env:
