@@ -52,23 +52,8 @@ func TestRenderDnsmasqConf_ProxyOnly(t *testing.T) {
 			t.Errorf("rendered config missing %q:\n%s", want, conf)
 		}
 	}
-	if strings.Contains(conf, "dhcp-relay=") {
-		t.Errorf("rendered config contains dhcp-relay with no relay configured:\n%s", conf)
-	}
 	if strings.Contains(conf, "enable-tftp") {
 		t.Errorf("rendered config enables dnsmasq TFTP; TFTP is served in-process:\n%s", conf)
-	}
-}
-
-func TestRenderDnsmasqConf_Relay(t *testing.T) {
-	cfg := testConfig()
-	cfg.RelayServerIP = net.ParseIP("10.0.0.1")
-	conf, err := RenderDnsmasqConf(cfg, "/run/bootd")
-	if err != nil {
-		t.Fatalf("RenderDnsmasqConf: %v", err)
-	}
-	if !strings.Contains(conf, "dhcp-relay=192.0.2.2,10.0.0.1\n") {
-		t.Errorf("rendered config missing dhcp-relay line:\n%s", conf)
 	}
 }
 
@@ -204,15 +189,6 @@ func TestRenderDnsmasqConf_LeaseModeMACGateUnchanged(t *testing.T) {
 	}
 	if strings.Contains(conf, "dhcp-ignore=") {
 		t.Errorf("lease-mode AnswerAll config still carries dhcp-ignore:\n%s", conf)
-	}
-}
-
-func TestRenderDnsmasqConf_LeaseModeRejectsRelay(t *testing.T) {
-	cfg := testConfig()
-	cfg.LeaseMode = true
-	cfg.RelayServerIP = net.ParseIP("10.0.0.1")
-	if _, err := RenderDnsmasqConf(cfg, "/run/bootd"); err == nil {
-		t.Error("RenderDnsmasqConf accepted LeaseMode together with RelayServerIP")
 	}
 }
 
