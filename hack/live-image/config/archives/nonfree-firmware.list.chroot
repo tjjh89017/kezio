@@ -1,0 +1,13 @@
+# Guarantees non-free-firmware is actually fetchable, independent of
+# live-build's own --archive-areas/--parent-archive-areas handling:
+# those flags record LB_(PARENT_)ARCHIVE_AREAS correctly in
+# config/bootstrap, but the top-level /etc/apt/sources.list line that
+# mechanism writes did not reliably carry non-free-firmware through in
+# CI (main-only sources.list, "firmware-linux has no installation
+# candidate"), while this repo's own config/archives/*.list.chroot files
+# (see drbl.list.chroot) have been reliable in the same environment.
+# @DISTRIBUTION@ is substituted with LB_DISTRIBUTION_CHROOT by
+# live-build's chroot_archives step. No separate key file: this apt
+# source is deb.debian.org itself, already trusted via
+# debian-archive-keyring from the base bootstrap.
+deb http://deb.debian.org/debian @DISTRIBUTION@ non-free-firmware

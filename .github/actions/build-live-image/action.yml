@@ -10,6 +10,15 @@ description: >-
 runs:
   using: composite
   steps:
+    - name: DEBUG diagnose deb.debian.org non-free-firmware component
+      shell: bash
+      run: |
+        set -x
+        getent hosts deb.debian.org || true
+        curl -sI http://deb.debian.org/debian/dists/testing/Release || true
+        curl -s http://deb.debian.org/debian/dists/testing/Release | grep -i "^Components:" || true
+        curl -sI http://deb.debian.org/debian/dists/testing/non-free-firmware/binary-amd64/Packages || true
+
     - name: Build live image
       shell: bash
       run: hack/live-image/build.sh
