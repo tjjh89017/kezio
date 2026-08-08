@@ -1,0 +1,32 @@
+name: Import image tarballs into RKE2 containerd
+
+description: >-
+  Imports one or more previously-downloaded/built image tarballs into the
+  RKE2 node's containerd, so pods scheduled on it resolve the image
+  locally instead of pulling from a registry. Every RKE2-based e2e lane in
+  main.yaml needs this after "Install RKE2" and before the images are
+  referenced by name - only the set of image names differs per lane.
+
+inputs:
+  images:
+    description: >-
+      Image names to import, whitespace- or newline-separated (e.g.
+      "manager ingest image-service"). Each name maps to "<tarball-dir>/<name>.tar".
+    required: true
+  tarball-dir:
+    description: 'Directory holding the "<name>.tar" tarballs to import.'
+    default: "/tmp/images"
+
+runs:
+  using: composite
+  steps:
+    - name: Import the image tarballs into RKE2 containerd
+      shell: bash
+      env:
+        IMAGES: ${{ inputs.images }}
+        TARBALL_DIR: ${{ inputs.tarball-dir }}
+      run: |
+        set -euo pipefail
+        for name in ${IMAGES}; do
+          sudo ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images import "${TARBALL_DIR}/${name}.tar"
+        done

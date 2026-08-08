@@ -1,0 +1,31 @@
+name: Create the provisioning bridge
+
+description: >-
+  Creates the host bridge the BMC e2e lane's boot-path participants
+  (bootd, the existing DHCP responder, the tracker/seeder pods, and the
+  target VM) all attach a Multus interface to, and gives the runner
+  itself an address on it.
+
+inputs:
+  bridge-name:
+    description: 'Name of the bridge device to create, e.g. "kezio-prov0".'
+    required: true
+  host-ip:
+    description: 'CIDR address to assign the runner on the bridge, e.g. "192.0.2.1/24".'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # PROVISIONING_HOST_IP is the runner's own address, not a gateway -
+    # every boot-path participant gets its own Multus address instead.
+    - name: Create the provisioning bridge
+      shell: bash
+      env:
+        PROVISIONING_BRIDGE: ${{ inputs.bridge-name }}
+        PROVISIONING_HOST_IP: ${{ inputs.host-ip }}
+      run: |
+        set -euo pipefail
+        sudo ip link add "${PROVISIONING_BRIDGE}" type bridge
+        sudo ip addr add "${PROVISIONING_HOST_IP}" dev "${PROVISIONING_BRIDGE}"
+        sudo ip link set "${PROVISIONING_BRIDGE}" up

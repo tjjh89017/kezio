@@ -1,0 +1,72 @@
+name: Wait for a Machine-backed VM to reach a printableStatus
+
+description: >-
+  Polls VirtualMachine.status.printableStatus until it matches
+  target-status or a deadline passes. On timeout, dumps the Machine.
+  Does not itself patch spec.online - the caller triggers the power
+  transition first.
+
+inputs:
+  vm-name:
+    description: Name of the Machine/VirtualMachine to wait on.
+    required: true
+  namespace:
+    description: Namespace the Machine/VirtualMachine lives in.
+    required: false
+    default: kezio-system
+  target-status:
+    description: VirtualMachine.status.printableStatus to wait for (e.g. Stopped, Running).
+    required: true
+  timeout-seconds:
+    description: How long to poll before giving up.
+    required: false
+    default: "300"
+  timeout-error-message:
+    description: "Error text logged via ::error:: when the deadline passes."
+    required: true
+  extra-field-jsonpath:
+    description: >-
+      Optional extra jsonpath (against the Machine) to poll and print
+      alongside printableStatus, purely for diagnostics - it is not part
+      of the success condition. Leave empty to print status only.
+    required: false
+    default: ""
+  extra-field-label:
+    description: Label to print before the extra field's value. Required when extra-field-jsonpath is set.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Poll VM printableStatus
+      shell: bash
+      env:
+        VM_NAME: ${{ inputs.vm-name }}
+        NAMESPACE: ${{ inputs.namespace }}
+        TARGET_STATUS: ${{ inputs.target-status }}
+        TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
+        TIMEOUT_ERROR_MESSAGE: ${{ inputs.timeout-error-message }}
+        EXTRA_FIELD_JSONPATH: ${{ inputs.extra-field-jsonpath }}
+        EXTRA_FIELD_LABEL: ${{ inputs.extra-field-label }}
+      run: |
+        set -euo pipefail
+        deadline=$(( $(date +%s) + TIMEOUT_SECONDS ))
+        while true; do
+          status="$(kubectl get vm "${VM_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.printableStatus}' || true)"
+          line="$(date -Is) VM printableStatus=${status:-<none>}"
+          if [ -n "${EXTRA_FIELD_JSONPATH}" ]; then
+            extra_value="$(kubectl get machine "${VM_NAME}" -n "${NAMESPACE}" -o jsonpath="${EXTRA_FIELD_JSONPATH}" || true)"
+            line="${line} ${EXTRA_FIELD_LABEL}=${extra_value:-<none>}"
+          fi
+          echo "${line}"
+          if [ "${status}" = "${TARGET_STATUS}" ]; then
+            break
+          fi
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::${TIMEOUT_ERROR_MESSAGE}" >&2
+            kubectl get machine "${VM_NAME}" -n "${NAMESPACE}" -o yaml
+            exit 1
+          fi
+          sleep 5
+        done

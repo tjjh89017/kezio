@@ -1,0 +1,47 @@
+name: Wait for a VMI's qemu-guest-agent to connect
+
+description: >-
+  Polls VirtualMachineInstance.status.conditions[type=AgentConnected] until
+  it reports status=True or a deadline passes. On timeout, dumps the VMI.
+
+inputs:
+  vm-name:
+    description: Name of the VirtualMachineInstance to wait on.
+    required: true
+  namespace:
+    description: Namespace the VirtualMachineInstance lives in.
+    required: false
+    default: kezio-system
+  timeout-seconds:
+    description: How long to poll before giving up.
+    required: false
+    default: "600"
+  timeout-error-message:
+    description: "Error text logged via ::error:: when the deadline passes."
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Poll VMI AgentConnected
+      shell: bash
+      env:
+        VM_NAME: ${{ inputs.vm-name }}
+        NAMESPACE: ${{ inputs.namespace }}
+        TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
+        TIMEOUT_ERROR_MESSAGE: ${{ inputs.timeout-error-message }}
+      run: |
+        set -euo pipefail
+        deadline=$(( $(date +%s) + TIMEOUT_SECONDS ))
+        while true; do
+          connected="$(kubectl get vmi "${VM_NAME}" -n "${NAMESPACE}" \
+            -o jsonpath='{.status.conditions[?(@.type=="AgentConnected")].status}' || true)"
+          echo "$(date -Is) VMI AgentConnected: ${connected:-<none>}"
+          [ "${connected}" = "True" ] && break
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::${TIMEOUT_ERROR_MESSAGE}" >&2
+            kubectl get vmi "${VM_NAME}" -n "${NAMESPACE}" -o yaml || true
+            exit 1
+          fi
+          sleep 5
+        done

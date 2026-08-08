@@ -1,0 +1,33 @@
+name: Build the live boot image
+
+description: >-
+  Runs hack/live-image/build.sh and writes a size summary for
+  dist/live/{vmlinuz,initrd.img,filesystem.squashfs,shimx64.efi,grubx64.efi}
+  to GITHUB_STEP_SUMMARY. Shared by main.yaml's and release.yaml's
+  boot-artifacts jobs - identical in both, only the steps that consume
+  dist/live/ afterwards (artifact upload vs. GitHub Release) differ.
+
+runs:
+  using: composite
+  steps:
+    - name: Build live image
+      shell: bash
+      run: hack/live-image/build.sh
+
+    - name: Write size summary
+      shell: bash
+      run: |
+        {
+          echo "## Live boot image artifacts"
+          echo
+          echo "Target squashfs size: 100-300 MiB."
+          echo
+          echo "| artifact | size |"
+          echo "| --- | --- |"
+          for f in dist/live/vmlinuz dist/live/initrd.img dist/live/filesystem.squashfs dist/live/shimx64.efi dist/live/grubx64.efi; do
+            name="$(basename "${f}")"
+            size_bytes="$(stat -c%s "${f}")"
+            size_mib="$(awk -v b="${size_bytes}" 'BEGIN { printf "%.1f", b / 1048576 }')"
+            echo "| ${name} | ${size_mib} MiB |"
+          done
+        } >>"${GITHUB_STEP_SUMMARY}"

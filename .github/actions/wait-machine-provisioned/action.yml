@@ -1,0 +1,51 @@
+name: Wait for a Machine to reach Provisioned
+
+description: >-
+  Polls Machine.status.state until it reaches Provisioned or a deadline
+  passes. Treats state Error as a terminal failure - it dumps the Machine
+  and exits immediately rather than waiting out the deadline. On success,
+  dumps the Machine once more so its final state is in the job log.
+
+inputs:
+  machine-name:
+    description: Name of the Machine to wait on.
+    required: true
+  namespace:
+    description: Namespace the Machine lives in.
+    required: false
+    default: kezio-system
+  timeout-seconds:
+    description: How long to poll before giving up.
+    required: false
+    default: "1800"
+
+runs:
+  using: composite
+  steps:
+    - name: Poll Machine.status.state
+      shell: bash
+      env:
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        NAMESPACE: ${{ inputs.namespace }}
+        TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
+      run: |
+        set -euo pipefail
+        deadline=$(( $(date +%s) + TIMEOUT_SECONDS ))
+        while true; do
+          state="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.state}' || true)"
+          echo "$(date -Is) Machine state: ${state:-<none>}"
+          if [ "${state}" = "Provisioned" ]; then
+            break
+          fi
+          if [ "${state}" = "Error" ]; then
+            echo "::error::Machine ${MACHINE_NAME} landed in Error while deploying." >&2
+            kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o yaml
+            exit 1
+          fi
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::Machine ${MACHINE_NAME} did not reach Provisioned within the timeout." >&2
+            exit 1
+          fi
+          sleep 10
+        done
+        kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o yaml

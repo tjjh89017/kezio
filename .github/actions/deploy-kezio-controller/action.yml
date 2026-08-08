@@ -1,0 +1,25 @@
+name: Deploy CRDs and the controller-manager
+
+description: >-
+  Installs the kezio CRDs, deploys the controller-manager with the given
+  image, and waits for its Deployment to become ready.
+
+inputs:
+  manager-image:
+    description: 'Controller-manager image, e.g. "example.com/kezio:v0.0.1".'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Deploy CRDs and the controller-manager
+      shell: bash
+      env:
+        MANAGER_IMG: ${{ inputs.manager-image }}
+      run: |
+        set -euo pipefail
+        make install
+        make deploy IMG="${MANAGER_IMG}"
+        # bootd's dnsmasq child needs NET_ADMIN/NET_RAW, outside both PSA profiles.
+        kubectl label --overwrite ns kezio-system pod-security.kubernetes.io/enforce=privileged
+        kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s

@@ -1,0 +1,42 @@
+name: Dump operator logs on failure
+
+description: >-
+  Common pods / controller-manager-logs / events skeleton shared by every
+  RKE2-based e2e lane's failure-only diagnostic dump in main.yaml
+  (e2e-fast, e2e-image-path, e2e-boot-path). Each lane also inspects a few
+  lane-specific resources in between (e.g. image-path's ingest Jobs/PVC/
+  image-service, boot-path's boot/agent Services and Machine CR) - pass
+  those as extra-commands, one kubectl invocation per line, run after the
+  controller-manager logs and before the events dump. Always runs under
+  `set +e`: a dump step must never fail the job on its own.
+
+  Not the e2e-bmc job's dump-e2e-diagnostics action - that one dumps a much
+  wider KubeVirt/KubeVirtBMC surface and stays separate on purpose.
+
+inputs:
+  extra-commands:
+    description: >-
+      Extra shell commands to run between the controller-manager logs and
+      the events dump, one per line. Blank lines are skipped. Leave unset
+      to run just the common skeleton (pods, controller-manager logs,
+      events).
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Run the operator log dump
+      shell: bash
+      env:
+        EXTRA_COMMANDS: ${{ inputs.extra-commands }}
+      run: |
+        set +e
+        kubectl get pods -n kezio-system -o wide
+        kubectl -n kezio-system logs deployment/kezio-controller-manager --all-containers --tail=500
+        if [ -n "${EXTRA_COMMANDS}" ]; then
+          while IFS= read -r cmd; do
+            [ -z "${cmd}" ] && continue
+            eval "${cmd}"
+          done <<< "${EXTRA_COMMANDS}"
+        fi
+        kubectl get events -n kezio-system --sort-by=.lastTimestamp

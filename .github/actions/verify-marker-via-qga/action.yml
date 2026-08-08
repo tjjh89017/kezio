@@ -1,0 +1,77 @@
+name: Verify the marker file via QGA
+
+description: >-
+  Reads the marker file back from a running VM through QGA's
+  guest-file-open/read/close commands - issued via `virsh
+  qemu-agent-command` inside the VM's own virt-launcher pod, since there is
+  no SSH path to the guest - and compares it against the expected token.
+  Used by main.yaml's e2e-bmc job, both before and after the BMC power
+  cycle.
+
+inputs:
+  vm-name:
+    description: Name of the target VM (both the VMI and its kubevirt.io/vm label value).
+    required: true
+  namespace:
+    description: Namespace the VM's virt-launcher pod and libvirt domain live in.
+    required: false
+    default: kezio-system
+  marker-path:
+    description: Guest path the marker file was written to.
+    required: true
+  expected-token:
+    description: Marker token expected to be read back from marker-path.
+    required: true
+  context-suffix:
+    description: >-
+      Phrase appended to the log/error messages below, e.g. "
+      (post-BMC-power-cycle)" for a repeat verification after a power
+      cycle. Defaults to empty for a plain first-time verification.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Verify the marker file via QGA
+      # No SSH: read via QGA's guest-file-* commands over virsh
+      # qemu-agent-command inside the VM's own virt-launcher pod.
+      shell: bash
+      env:
+        VM_NAME: ${{ inputs.vm-name }}
+        NAMESPACE: ${{ inputs.namespace }}
+        MARKER_PATH: ${{ inputs.marker-path }}
+        EXPECTED_TOKEN: ${{ inputs.expected-token }}
+        CONTEXT_SUFFIX: ${{ inputs.context-suffix }}
+      run: |
+        set -euo pipefail
+        launcher_pod="$(kubectl get pods -n "${NAMESPACE}" -l "kubevirt.io/vm=${VM_NAME}" -o json \
+          | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)][0].metadata.name')"
+        if [ -z "${launcher_pod}" ] || [ "${launcher_pod}" = "null" ]; then
+          echo "::error::no non-terminating virt-launcher pod found for VM ${VM_NAME}" >&2
+          exit 1
+        fi
+        domain="${NAMESPACE}_${VM_NAME}"
+
+        qga_exec() {
+          kubectl exec -n "${NAMESPACE}" "${launcher_pod}" -c compute -- \
+            virsh qemu-agent-command "${domain}" "$1"
+        }
+
+        open_reply="$(qga_exec "{\"execute\":\"guest-file-open\",\"arguments\":{\"path\":\"${MARKER_PATH}\",\"mode\":\"r\"}}")"
+        handle="$(jq -r '.return' <<<"${open_reply}")"
+        if [ "${handle}" = "null" ] || [ -z "${handle}" ]; then
+          echo "::error::guest-file-open on ${MARKER_PATH} failed${CONTEXT_SUFFIX}: ${open_reply}" >&2
+          exit 1
+        fi
+
+        read_reply="$(qga_exec "{\"execute\":\"guest-file-read\",\"arguments\":{\"handle\":${handle},\"count\":4096}}")"
+        qga_exec "{\"execute\":\"guest-file-close\",\"arguments\":{\"handle\":${handle}}}" >/dev/null
+
+        marker_content="$(jq -r '.return["buf-b64"]' <<<"${read_reply}" | base64 -d | tr -d '\n')"
+        echo "marker content${CONTEXT_SUFFIX}: ${marker_content}"
+
+        if [ "${marker_content}" != "${EXPECTED_TOKEN}" ]; then
+          echo "::error::marker file content mismatch${CONTEXT_SUFFIX}: guest has ${marker_content@Q}, expected ${EXPECTED_TOKEN@Q}" >&2
+          exit 1
+        fi

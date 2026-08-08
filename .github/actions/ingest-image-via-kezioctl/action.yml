@@ -1,0 +1,63 @@
+name: Ingest an image through kezioctl
+
+description: >-
+  Port-forwards the image-service Service, waits for it to answer
+  healthz, then uploads an image through kezioctl. The port-forward is
+  backgrounded and left running past this action's own end: its PID is
+  exported as PF_PID via GITHUB_ENV so a later step in the calling job
+  can kill it (composite actions have no `if: always()` of their own, so
+  that cleanup can't live here). Used by main.yaml's e2e-bmc job.
+
+inputs:
+  image-path:
+    description: Path to the image file to upload.
+    required: true
+  image-name:
+    description: Name to give the Image resource.
+    required: true
+  namespace:
+    description: Namespace the image-service Service and the Image resource live in.
+    required: false
+    default: kezio-system
+  token:
+    description: Bearer token kezioctl authenticates the upload with.
+    required: true
+  format:
+    description: Image format passed to kezioctl.
+    required: false
+    default: qcow2
+  local-port:
+    description: Local port the image-service Service is port-forwarded to.
+    required: false
+    default: "18080"
+
+runs:
+  using: composite
+  steps:
+    - name: Ingest the image through kezioctl
+      shell: bash
+      env:
+        IMAGE_PATH: ${{ inputs.image-path }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+        NAMESPACE: ${{ inputs.namespace }}
+        TOKEN: ${{ inputs.token }}
+        FORMAT: ${{ inputs.format }}
+        LOCAL_PORT: ${{ inputs.local-port }}
+      run: |
+        set -euo pipefail
+
+        kubectl -n "${NAMESPACE}" port-forward svc/kezio-image-service "${LOCAL_PORT}:8080" &
+        PF_PID=$!
+        echo "PF_PID=${PF_PID}" >> "$GITHUB_ENV"
+
+        for _ in $(seq 1 30); do
+          curl -sf -o /dev/null "http://127.0.0.1:${LOCAL_PORT}/healthz" && break
+          sleep 1
+        done
+
+        bin/kezioctl image upload "${IMAGE_PATH}" \
+          --name "${IMAGE_NAME}" \
+          --namespace "${NAMESPACE}" \
+          --server "http://127.0.0.1:${LOCAL_PORT}" \
+          --token "${TOKEN}" \
+          --format "${FORMAT}"

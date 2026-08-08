@@ -62,33 +62,18 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Log in to ghcr.io
-        uses: docker/login-action@v4
+      - name: Push to ghcr.io
+        uses: ./.github/actions/push-image-to-ghcr
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Derive image metadata
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}
-          tags: |
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}
+          tags-spec: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-
-      - name: Build and push
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: ${{ matrix.dockerfile }}
+          dockerfile: ${{ matrix.dockerfile }}
           platforms: ${{ matrix.platforms }}
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.name }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+          cache-scope: ${{ matrix.name }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
   boot-artifacts:
     name: Boot artifacts
@@ -103,62 +88,15 @@ jobs:
       - name: Clone the code
         uses: actions/checkout@v7
 
-      - name: Build live image
-        run: hack/live-image/build.sh
+      - name: Build the live boot image
+        uses: ./.github/actions/build-live-image
 
-      - name: Write size summary
-        run: |
-          {
-            echo "## Live boot image artifacts"
-            echo
-            echo "Target squashfs size: 100-300 MiB."
-            echo
-            echo "| artifact | size |"
-            echo "| --- | --- |"
-            for f in dist/live/vmlinuz dist/live/initrd.img dist/live/filesystem.squashfs dist/live/shimx64.efi dist/live/grubx64.efi; do
-              name="$(basename "${f}")"
-              size_bytes="$(stat -c%s "${f}")"
-              size_mib="$(awk -v b="${size_bytes}" 'BEGIN { printf "%.1f", b / 1048576 }')"
-              echo "| ${name} | ${size_mib} MiB |"
-            done
-          } >>"${GITHUB_STEP_SUMMARY}"
-
-      - name: Create draft GitHub Release
-        # Draft-first: a re-run for the same tag resumes instead of
-        # erroring on "already exists"; published only once assets land.
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          tag="${{ github.ref_name }}"
-          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            echo "Release ${tag} already exists; uploading assets to it."
-          else
-            gh release create "${tag}" --repo "${GITHUB_REPOSITORY}" \
-              --title "${tag}" --target "${GITHUB_SHA}" --generate-notes --draft
-          fi
-
-      - name: Upload release assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh release upload "${{ github.ref_name }}" --repo "${GITHUB_REPOSITORY}" --clobber \
-            dist/live/vmlinuz \
-            dist/live/initrd.img \
-            dist/live/filesystem.squashfs \
-            dist/live/shimx64.efi \
-            dist/live/grubx64.efi \
-            dist/live/manifest.json \
-            dist/live/sha256sums
-
-      - name: Publish GitHub Release
-        # Barrier: flips draft=false only after every asset uploaded.
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh release edit "${{ github.ref_name }}" --repo "${GITHUB_REPOSITORY}" --draft=false
+      - name: Publish the GitHub Release
+        uses: ./.github/actions/publish-github-release
+        with:
+          tag: ${{ github.ref_name }}
+          target-sha: ${{ github.sha }}
+          github-token: ${{ github.token }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4

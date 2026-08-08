@@ -1,0 +1,37 @@
+name: Fetch the Ubuntu cloud image
+
+description: >-
+  Downloads the pristine Ubuntu cloud image e2e jobs build on, caching it
+  across runs by its source URL so a repeat run with the same URL skips
+  the download entirely.
+
+inputs:
+  image-url:
+    description: 'URL to download the cloud image from on a cache miss.'
+    required: true
+  image-path:
+    description: 'Path the cloud image is cached at, and downloaded to on a cache miss.'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # The cache key must stay exactly "ubuntu-cloud-image-<url>" - it is
+    # not versioned, so changing its shape orphans every cache entry
+    # already stored under the old key.
+    - name: Cache the Ubuntu cloud image
+      id: cache-cloud-image
+      uses: actions/cache@v6
+      with:
+        path: ${{ inputs.image-path }}
+        key: ubuntu-cloud-image-${{ inputs.image-url }}
+
+    - name: Download the Ubuntu cloud image
+      if: steps.cache-cloud-image.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        IMAGE_URL: ${{ inputs.image-url }}
+        IMAGE_PATH: ${{ inputs.image-path }}
+      run: |
+        set -euo pipefail
+        curl -sfL -o "${IMAGE_PATH}" "${IMAGE_URL}"

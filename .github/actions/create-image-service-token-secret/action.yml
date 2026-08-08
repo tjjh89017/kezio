@@ -1,0 +1,38 @@
+name: Create the image-service bearer token Secret
+
+description: >-
+  Creates (or idempotently updates) the Secret that carries the
+  image-service's bearer token, via "kubectl create --dry-run=client -o
+  yaml | kubectl apply -f -" so re-running the step on an existing Secret
+  is safe. Used by main.yaml's e2e-bmc job ahead of deploying the
+  image-service, which reads the token from this Secret; the token itself
+  is also handed to ./.github/actions/ingest-image-via-kezioctl as the
+  client-side credential.
+
+inputs:
+  token:
+    description: Bearer token value to store in the Secret.
+    required: true
+  namespace:
+    description: Namespace to create the Secret in.
+    required: false
+    default: kezio-system
+  secret-name:
+    description: Name of the Secret to create.
+    required: false
+    default: kezio-image-service-token
+
+runs:
+  using: composite
+  steps:
+    - name: Create the image-service bearer token Secret
+      shell: bash
+      env:
+        TOKEN: ${{ inputs.token }}
+        NAMESPACE: ${{ inputs.namespace }}
+        SECRET_NAME: ${{ inputs.secret-name }}
+      run: |
+        set -euo pipefail
+        kubectl -n "${NAMESPACE}" create secret generic "${SECRET_NAME}" \
+          --from-literal=token="${TOKEN}" \
+          --dry-run=client -o yaml | kubectl apply -f -
