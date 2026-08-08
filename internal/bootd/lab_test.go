@@ -45,10 +45,7 @@ import (
 //   - BOOTD_LAB=1: enables the test.
 //   - BOOTD_LAB_IFACE, BOOTD_LAB_SERVER_IP, BOOTD_LAB_CIDR: the
 //     provisioning interface/address/subnet inside the lab namespace.
-//   - BOOTD_LAB_RELAY: optional relay target (BOOTD_DHCP_RELAY_SERVER
-//     equivalent).
-//   - BOOTD_LAB_LEASE_MODE=1: enables Config.LeaseMode (mutually
-//     exclusive with BOOTD_LAB_RELAY, same as production).
+//   - BOOTD_LAB_LEASE_MODE=1: enables Config.LeaseMode.
 //   - BOOTD_LAB_LEASE_RANGE_START, BOOTD_LAB_LEASE_RANGE_END: optional
 //     explicit lease range bounds; both unset auto-derives from
 //     BOOTD_LAB_CIDR.
