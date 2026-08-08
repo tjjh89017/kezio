@@ -1,8 +1,11 @@
 #!/bin/sh
 # Runs last (9900) so every package install/purge hook has already run.
-# Written under /root/ - build.sh's collect_artifacts copies it out
+# Written under /tmp, not /root: build.sh's collect_artifacts reads it
+# back from outside the chroot as a non-root host user, and /root is
+# 0700 - not traversable by anyone but root, even though the file
+# itself would be readable. /tmp stays world-traversable. Copied out
 # before config/rootfs/excludes drops it from the squashfs; it's
 # CI/dev-facing, not something a booted live system needs on disk.
 set -eu
 
-dpkg-query -W -f='${Installed-Size}\t${Package}\n' | sort -rn >/root/package-sizes.txt
+dpkg-query -W -f='${Installed-Size}\t${Package}\n' | sort -rn >/tmp/package-sizes.txt

@@ -207,7 +207,7 @@ collect_artifacts() {
 
 	# hooks/live/9900-package-size-report.hook.chroot's report. Not part
 	# of manifest.json/sha256sums - the CI step summary reads it directly.
-	cp "${live_dir}/chroot/root/package-sizes.txt" "${dist_dir}/package-sizes.txt"
+	cp "${live_dir}/chroot/tmp/package-sizes.txt" "${dist_dir}/package-sizes.txt"
 
 	# manifest.json: sizes and sha256s for every artifact, so the CI step
 	# summary can report them against the 100-300 MiB squashfs target and

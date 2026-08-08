@@ -25,7 +25,7 @@ usr/share/locale/*
 
 # hooks/live/9900-package-size-report.hook.chroot's report - build.sh
 # copies it out of chroot/ before this list ever applies.
-root/package-sizes.txt
+tmp/package-sizes.txt
 
 # live-build already publishes vmlinuz/initrd.img separately from
 # binary/live/; the /boot copies inside the chroot have no runtime
