@@ -1,10 +1,11 @@
 name: Fail fast if the downloaded boot artifacts are empty
 description: >-
   Checks that vmlinuz, initrd.img, filesystem.squashfs, shimx64.efi,
-  grubx64.efi, and manifest.json exist and are non-empty under the given
-  directory. Guards against a download-artifact step that "succeeded" but
-  handed off a truncated or zero-byte boot-artifacts set, which would
-  otherwise surface much later as an obscure boot failure instead of here.
+  grubx64.efi, kernel.config, and manifest.json exist and are non-empty
+  under the given directory. Guards against a download-artifact step that
+  "succeeded" but handed off a truncated or zero-byte boot-artifacts set,
+  which would otherwise surface much later as an obscure boot failure
+  instead of here.
 
 inputs:
   artifacts-dir:
@@ -22,7 +23,7 @@ runs:
       run: |
         set -euo pipefail
         missing=()
-        for f in vmlinuz initrd.img filesystem.squashfs shimx64.efi grubx64.efi manifest.json; do
+        for f in vmlinuz initrd.img filesystem.squashfs shimx64.efi grubx64.efi kernel.config manifest.json; do
           [ -s "${ARTIFACTS_DIR}/${f}" ] || missing+=("${f}")
         done
         if [ "${#missing[@]}" -gt 0 ]; then

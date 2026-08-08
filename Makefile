@@ -271,7 +271,7 @@ docker-push-bootd: ## Push docker image for kezio-bootd.
 # BOOT_ARTIFACTS_IMG is the image tag for kezio-boot-artifacts. Unlike
 # every other docker-build-* target above, its build context must
 # already hold dist/live/ (hack/live-image/build.sh's output: vmlinuz,
-# initrd.img, filesystem.squashfs, shimx64.efi, grubx64.efi,
+# initrd.img, filesystem.squashfs, shimx64.efi, grubx64.efi, kernel.config,
 # manifest.json) - there is no Go binary here to compile, only those
 # files to package; see docker/boot-artifacts/Dockerfile and
 # config/bootserver's/config/bootd's fetch-boot-artifacts

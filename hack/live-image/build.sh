@@ -4,9 +4,9 @@
 # PXE-booting machine. It also stages the signed shimx64.efi/grubx64.efi
 # kezio-bootd serves over TFTP (see stage_signed_boot_binaries), so the
 # whole PXE-to-agent artifact set - vmlinuz, initrd.img,
-# filesystem.squashfs, shimx64.efi, grubx64.efi, manifest.json,
-# sha256sums - comes out of dist/live/ as one set for
-# .github/workflows/build-live-image.yml to publish together.
+# filesystem.squashfs, shimx64.efi, grubx64.efi, kernel.config,
+# manifest.json, sha256sums - comes out of dist/live/ as one set for
+# main.yaml's boot-artifacts job to publish together.
 #
 # Tool choice: Debian live-build, not dracut+livenet. The initrd's only
 # job at boot is to DHCP the NIC, fetch the squashfs over HTTP from the
@@ -24,14 +24,6 @@
 # the live-build container runs with --privileged; no narrower
 # --cap-add set reliably covers every mount/chroot/loop operation it
 # performs. The CI runner (ubuntu-latest) supports privileged containers.
-#
-# Determinism: this script pins what upstream itself pins (the ezio
-# release tag docker/seeder/Dockerfile builds by default) and otherwise
-# tracks Debian sid, the same as every other kezio image (see
-# docker/seeder/Dockerfile's header for why sid, not a snapshot pin, is
-# the right tradeoff). A byte-identical rebuild is not the goal; a
-# rebuild from the same commit producing a working image with the same
-# package set is.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -39,46 +31,18 @@ repo_root="$(cd "${script_dir}/../.." && pwd)"
 live_dir="${script_dir}"
 dist_dir="${repo_root}/dist/live"
 
-# EZIO_REF selects the ezio revision built inside the live-build chroot
-# (see hooks/live/0400-build-ezio.hook.chroot). Defaults to
-# docker/seeder/Dockerfile's own default so the live image ships the same ezio
-# revision as the seeder pods it swarms with, unless a caller
-# deliberately overrides one or the other.
-ezio_ref="${EZIO_REF:-v2.0.29}"
-
 log() {
 	printf '[build-live-image] %s\n' "$*" >&2
 }
 
 cleanup_includes() {
-	# config/includes.chroot is populated fresh on every run (kezio-agent
-	# plus the ezio source-build inputs staged below) and is never
-	# committed - see .gitignore. Clearing it first keeps a stale
-	# EZIO_REF or a stale kezio-agent binary from a previous run from
-	# lingering into this build.
+	# config/includes.chroot (kezio-agent, staged fresh by build_agent
+	# below) is never committed - see .gitignore. Clearing it first keeps
+	# a stale kezio-agent binary from a previous run from lingering into
+	# this build.
 	rm -rf "${live_dir}/config/includes.chroot"
 	mkdir -p "${live_dir}/config/includes.chroot"
 	cp -a "${live_dir}/config/includes.chroot.static/." "${live_dir}/config/includes.chroot/"
-}
-
-stage_ezio_build_inputs() {
-	# ezio is compiled *inside* the live-build chroot by
-	# hooks/live/0400-build-ezio.hook.chroot, not built separately and
-	# copied in: the chroot is a full Debian sid system actively using
-	# its own glibc/libstdc++/etc while `lb build` assembles it, and
-	# staging a separately-built binary's shared-library closure over
-	# those paths corrupts the chroot mid-extraction (the distroless
-	# approach docker/seeder/Dockerfile's runtime stage uses works only
-	# because that base is empty). Building against the chroot's own apt
-	# snapshot guarantees ABI consistency by construction instead.
-	#
-	# This function only hands the hook its input: the pinned ref,
-	# staged under includes.chroot so it lands in the chroot before
-	# hooks run; the hook removes it again once ezio is built.
-	log "staging ezio ${ezio_ref} for the in-chroot build"
-	local stage_dir="${live_dir}/config/includes.chroot/usr/local/src/kezio-ezio"
-	mkdir -p "${stage_dir}"
-	printf '%s' "${ezio_ref}" >"${stage_dir}/ezio_ref"
 }
 
 stage_signed_boot_binaries() {
@@ -227,6 +191,14 @@ collect_artifacts() {
 	cp "${binary_live}/initrd.img" "${dist_dir}/initrd.img"
 	cp "${binary_live}/filesystem.squashfs" "${dist_dir}/filesystem.squashfs"
 
+	# config-<ver> has no other path into dist/live/ once
+	# config/rootfs/excludes drops /boot from the squashfs.
+	cp "${live_dir}"/chroot/boot/config-* "${dist_dir}/kernel.config"
+
+	# hooks/live/9900-package-size-report.hook.chroot's report. Not part
+	# of manifest.json/sha256sums - the CI step summary reads it directly.
+	cp "${live_dir}/chroot/root/package-sizes.txt" "${dist_dir}/package-sizes.txt"
+
 	# manifest.json: sizes and sha256s for every artifact, so the CI step
 	# summary can report them against the 100-300 MiB squashfs target and
 	# downstream can check integrity against internal/bootserver's
@@ -245,7 +217,7 @@ collect_artifacts() {
 		{
 			printf '{\n  "agentCommit": "%s",\n  "artifacts": [\n' "${agent_commit}"
 			first=1
-			for f in vmlinuz initrd.img filesystem.squashfs shimx64.efi grubx64.efi; do
+			for f in vmlinuz initrd.img filesystem.squashfs shimx64.efi grubx64.efi kernel.config; do
 				[ "${first}" -eq 1 ] || printf ',\n'
 				first=0
 				size="$(stat -c%s "${f}")"
@@ -265,7 +237,7 @@ collect_artifacts() {
 	# files into.
 	(
 		cd "${dist_dir}"
-		sha256sum vmlinuz initrd.img filesystem.squashfs shimx64.efi grubx64.efi manifest.json >sha256sums
+		sha256sum vmlinuz initrd.img filesystem.squashfs shimx64.efi grubx64.efi kernel.config manifest.json >sha256sums
 	)
 	log "checksums written to ${dist_dir}/sha256sums"
 }
@@ -273,7 +245,6 @@ collect_artifacts() {
 main() {
 	mkdir -p "${dist_dir}"
 	cleanup_includes
-	stage_ezio_build_inputs
 	stage_signed_boot_binaries
 	build_agent
 	run_live_build

@@ -15,10 +15,22 @@
 # carries outside of usr/share/locale) are enough. This is a standard
 # live-image slimming step; see the 100-300 MiB filesystem.squashfs
 # target this build works against (dist/live/manifest.json, reported by
-# .github/workflows/build-live-image.yml).
+# main.yaml's boot-artifacts job).
 usr/share/doc/*
 usr/share/man/*
 usr/share/groff/*
 usr/share/info/*
 usr/share/lintian/*
 usr/share/locale/*
+
+# hooks/live/9900-package-size-report.hook.chroot's report - build.sh
+# copies it out of chroot/ before this list ever applies.
+root/package-sizes.txt
+
+# live-build already publishes vmlinuz/initrd.img separately from
+# binary/live/; the /boot copies inside the chroot have no runtime
+# reader (the kernel is already running by the time this pivots in).
+# /lib/modules is kept - that one is read at runtime. config-* is kept
+# too - collect_artifacts publishes it as kernel.config.
+boot/vmlinuz-*
+boot/initrd.img-*
