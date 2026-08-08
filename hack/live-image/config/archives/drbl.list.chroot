@@ -1,0 +1,4 @@
+# .chroot only, no .binary counterpart - this repo is never configured
+# in the shipped image, only during the build so
+# hooks/live/0400-install-ezio.hook.chroot can install the ezio .deb.
+deb https://free.nchc.org.tw/drbl-core drbl live-sid

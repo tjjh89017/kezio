@@ -1,0 +1,16 @@
+#!/bin/sh
+# Installs ezio from the DRBL apt repository (config/archives/drbl.*)
+# instead of building it from source in this chroot: apt resolves its
+# shared-library dependencies against this chroot's own sid snapshot and
+# fails closed if they're missing, and no compiler ever touches the
+# chroot, so there is no build-toolchain residue to purge afterward.
+#
+# Pinned to an exact version, not "latest": the DRBL pool keeps every
+# old version, so this is deterministic and fails loud if the pool ever
+# prunes it, instead of silently taking a newer daily build.
+set -eu
+
+apt-get update
+apt-get install -y --no-install-recommends ezio=2.0.29-drblsid~202608052131
+apt-get clean
+rm -rf /var/lib/apt/lists/*

@@ -1,7 +1,7 @@
 name: Write fake boot artifacts into dist/live
 description: >-
   Stages tiny dummy vmlinuz/initrd.img/filesystem.squashfs/shimx64.efi/
-  grubx64.efi/manifest.json under dist/live/ - the exact file set
+  grubx64.efi/kernel.config/manifest.json under dist/live/ - the exact file set
   hack/live-image/build.sh produces and docker/boot-artifacts/Dockerfile
   packages - without running that ~90 minute `lb build`. What is under
   test in the probes calling this action is the plumbing (Dockerfile,
@@ -38,6 +38,7 @@ runs:
         echo "fake filesystem.squashfs - probe only, not a real squashfs" > "${DIST_DIR}/filesystem.squashfs"
         echo "fake shimx64.efi - probe only, not a real signed shim" > "${DIST_DIR}/shimx64.efi"
         echo "fake grubx64.efi - probe only, not a real signed grub" > "${DIST_DIR}/grubx64.efi"
+        echo "fake kernel.config - probe only, not a real kernel config" > "${DIST_DIR}/kernel.config"
         printf '{\n  "agentCommit": "%s",\n  "note": "fake artifacts written by write-fake-boot-artifacts for a probe run - not a real build"\n}\n' \
           "${AGENT_COMMIT}" > "${DIST_DIR}/manifest.json"
         jq empty "${DIST_DIR}/manifest.json"

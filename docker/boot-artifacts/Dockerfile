@@ -1,13 +1,14 @@
 # Packages the live boot artifacts hack/live-image/build.sh produces
 # (vmlinuz, initrd.img, filesystem.squashfs, shimx64.efi, grubx64.efi,
-# manifest.json) into an OCI image, so config/bootserver's and
-# config/bootd's fetch-boot-artifacts initContainers can populate their
-# shared emptyDir with a plain `cp` instead of a runtime curl against a
-# GitHub Release (see .github/workflows/build-live-image.yml for the
+# kernel.config, manifest.json) into an OCI image, so config/bootserver's
+# and config/bootd's fetch-boot-artifacts initContainers can populate
+# their shared emptyDir with a plain `cp` instead of a runtime curl
+# against a GitHub Release (see main.yaml's boot-artifacts job for the
 # publishing side of this and why an OCI image replaces that runtime
 # fetch). Build context is the repository root; every COPY source below
-# comes from dist/live/, the same directory build-live-image.yml already
-# uploads as release assets.
+# comes from dist/live/, the same directory that job already uploads as
+# release assets. kernel.config rides along for artifact-set consistency;
+# bootserver/bootd don't read it at boot time.
 #
 # busybox, not distroless/scratch: the whole point of this image is to
 # be `cp`-able by an initContainer with no extra tooling, and busybox's
@@ -27,6 +28,7 @@ COPY --chown=65532:65532 dist/live/initrd.img /boot-artifacts/initrd.img
 COPY --chown=65532:65532 dist/live/filesystem.squashfs /boot-artifacts/filesystem.squashfs
 COPY --chown=65532:65532 dist/live/shimx64.efi /boot-artifacts/shimx64.efi
 COPY --chown=65532:65532 dist/live/grubx64.efi /boot-artifacts/grubx64.efi
+COPY --chown=65532:65532 dist/live/kernel.config /boot-artifacts/kernel.config
 COPY --chown=65532:65532 dist/live/manifest.json /boot-artifacts/manifest.json
 
 USER 65532:65532

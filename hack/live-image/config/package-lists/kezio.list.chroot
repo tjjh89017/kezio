@@ -57,3 +57,16 @@ systemd-resolved
 # emitting an ssh-enabled live image out of the CI build alone must
 # never happen.
 openssh-server
+
+# Non-free firmware for the fleet hardware this image cannot enumerate
+# (issue #18) - listed explicitly rather than via --firmware-chroot true
+# so the set stays reviewable here like every other package. Full set,
+# no trimming to specific NIC families: firmware-linux pulls in
+# firmware-linux-free + firmware-misc-nonfree; the rest cover NIC/storage
+# controller families initramfs-tools' MODULES=most may pull modules for.
+firmware-linux
+firmware-realtek
+firmware-bnx2
+firmware-bnx2x
+firmware-qlogic
+firmware-cavium

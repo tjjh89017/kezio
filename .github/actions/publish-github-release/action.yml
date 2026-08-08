@@ -54,6 +54,7 @@ runs:
           dist/live/filesystem.squashfs \
           dist/live/shimx64.efi \
           dist/live/grubx64.efi \
+          dist/live/kernel.config \
           dist/live/manifest.json \
           dist/live/sha256sums
 

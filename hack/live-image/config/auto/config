@@ -22,7 +22,7 @@ set -e
 lb config noauto \
 	--architectures amd64 \
 	--distribution sid \
-	--archive-areas "main" \
+	--archive-areas "main non-free-firmware" \
 	--binary-images iso-hybrid \
 	--linux-packages "linux-image" \
 	--debian-installer none \
