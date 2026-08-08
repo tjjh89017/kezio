@@ -1,17 +1,7 @@
 name: Release
 
-# Cuts a full release from a "v*" tag: pushes all six kezio images to
-# ghcr.io/tjjh89017 under the tag (moving no "latest" - main.yaml's
-# images job owns that, on every push to main), then builds the live
-# boot image and publishes it on both channels a release needs it on -
-# a GitHub Release (human download) and the kezio-boot-artifacts ghcr
-# image (runtime consumption by config/bootserver's and config/bootd's
-# fetch-boot-artifacts initContainers).
-#
-# The release itself is created as a draft first, assets uploaded to the
-# draft, and only then published (draft=false) - so a failure partway
-# through asset upload leaves an unpublished draft instead of a
-# release that looks final but is missing artifacts.
+# Publishes images and boot artifacts on a "v*" tag. Never touches
+# main.yaml's ":main" ghcr tag.
 on:
   push:
     tags:
@@ -26,10 +16,7 @@ env:
 
 jobs:
   images:
-    # Image <-> Dockerfile mapping (must stay in sync with the
-    # per-binary docker-build-* targets in the Makefile) and the
-    # QEMU-emulation architecture note both match main.yaml's images job
-    # exactly - see that job's comments for the full rationale.
+    # Matrix mirrors main.yaml's images job exactly.
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -59,7 +46,7 @@ jobs:
           - name: seeder
             image: kezio-seeder
             dockerfile: docker/seeder/Dockerfile
-            # amd64-only: see main.yaml's images job for the rationale.
+            # amd64-only: ezio's C++ build is too slow under QEMU emulation.
             platforms: linux/amd64
           - name: bootd
             image: kezio-bootd
@@ -90,7 +77,6 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
 
       - name: Build and push
         uses: docker/build-push-action@v7
@@ -107,9 +93,8 @@ jobs:
   boot-artifacts:
     name: Boot artifacts
     runs-on: ubuntu-latest
-    # `lb build` compiles ezio from source (cmake/make, the same as
-    # docker/seeder/Dockerfile's builder stage) and then assembles a full
-    # Debian sid chroot into a squashfs - budget generously.
+    # `lb build` compiles ezio from source and assembles a full Debian
+    # sid chroot into a squashfs - budget generously.
     timeout-minutes: 90
     permissions:
       contents: write
@@ -119,9 +104,6 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Build live image
-        # ubuntu-latest's Docker already runs privileged containers -
-        # hack/live-image/build.sh needs that for `lb build`'s own
-        # chroot/mount work; see the script's header for why.
         run: hack/live-image/build.sh
 
       - name: Write size summary
@@ -142,13 +124,8 @@ jobs:
           } >>"${GITHUB_STEP_SUMMARY}"
 
       - name: Create draft GitHub Release
-        # Draft-first: the release stays invisible (and "gh release
-        # view" below still finds it, so a re-run of this job for the
-        # same tag resumes instead of erroring on "already exists")
-        # until every asset has uploaded and the tag is explicitly
-        # published below - so a failure partway through asset upload
-        # never leaves a release that looks finished but is missing
-        # artifacts.
+        # Draft-first: a re-run for the same tag resumes instead of
+        # erroring on "already exists"; published only once assets land.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -176,8 +153,7 @@ jobs:
             dist/live/sha256sums
 
       - name: Publish GitHub Release
-        # The barrier: only once every asset above has uploaded
-        # successfully does the release stop being a draft.
+        # Barrier: flips draft=false only after every asset uploaded.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -195,10 +171,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push kezio-boot-artifacts to ghcr
-        # Tagged both with the release tag itself (so a caller can pin
-        # an exact boot-artifacts version the same way it could pin a
-        # release tag) and "latest" (the default every
-        # fetch-boot-artifacts initContainer pulls).
+        # "latest" is the default every fetch-boot-artifacts initContainer pulls.
         uses: docker/build-push-action@v7
         with:
           context: .

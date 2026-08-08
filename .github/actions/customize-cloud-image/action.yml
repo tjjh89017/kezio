@@ -2,9 +2,7 @@ name: Customize the Ubuntu cloud image with a marker file and qemu-guest-agent
 description: >-
   Injects a fresh marker token and qemu-guest-agent (plus its full runtime
   dependency closure) into a pristine Ubuntu cloud image, offline, via
-  virt-customize. Shared by e2e-kubevirt-reusable.yml and
-  e2e-scale-multisite-kubevirt.yml so the debugging history behind this step
-  lives in one place.
+  virt-customize. Used by main.yaml's e2e-bmc job.
 
 inputs:
   source-image-path:

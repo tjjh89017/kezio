@@ -1,11 +1,5 @@
 name: CI
 
-# The single CI entry point: every push to main, every pull request, and
-# on-demand dispatch all funnel through this file. Tag pushes ("v*") are
-# release.yaml's job instead - see that file for the full-publish path
-# this workflow deliberately does not take (boot-artifacts here uploads
-# an ephemeral workflow artifact only, and images here never pushes on a
-# tag).
 on:
   push:
     branches:
@@ -29,7 +23,7 @@ on:
         type: boolean
         default: true
       bmc_dhcp_scenario:
-        description: "Which DHCP scenario the e2e-bmc lane drives (see e2e-kubevirt-reusable.yml's dhcp_scenario input)."
+        description: "Which DHCP scenario the e2e-bmc lane drives."
         required: false
         type: choice
         options:
@@ -43,14 +37,9 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAMESPACE: tjjh89017
-  # RKE2 version the e2e jobs install. Pinned so the e2e cluster doesn't
-  # shift under us on a stable branch; bump deliberately.
+  # Bump deliberately - shifts every RKE2-based lane's control plane.
   RKE2_VERSION: "v1.36.2+rke2r1"
-  # RKE2 has no default StorageClass (unlike k3s's bundled local-path);
-  # config/e2e-image-path's staging and per-partition-content PVCs
-  # request storageClassName local-path explicitly, so this
-  # rancher/local-path-provisioner release is installed and marked
-  # default in that job below.
+  # RKE2 ships no default StorageClass, unlike k3s.
   LOCAL_PATH_PROVISIONER_VERSION: "v0.0.37"
 
 jobs:
@@ -93,40 +82,11 @@ jobs:
           make test
 
   images:
-    # Builds the four kezio images on every push to main and every PR;
-    # only pushes to ghcr.io/tjjh89017 on a push to main (moving "latest"
-    # tag) - a PR run builds to catch a broken Dockerfile without ever
-    # authenticating to the registry. This is additive to the e2e job,
-    # which builds the manager image locally and imports it into an
-    # RKE2 node's containerd with `ctr images import` - that flow never
-    # pulls from a registry, so it is unaffected by whatever this job
-    # pushes or how long it takes to push it.
-    #
-    # kezio-boot-artifacts (docker/boot-artifacts/Dockerfile) is NOT in
-    # this matrix: it packages hack/live-image/build.sh's output, which
-    # only exists after that (many-minutes) build has run - see the
-    # boot-artifacts job below, which never pushes to ghcr, and
-    # release.yaml, which does on a "v*" tag.
-    #
-    # Image <-> Dockerfile mapping (must stay in sync with the per-binary
-    # docker-build-* targets in the Makefile):
-    #   kezio                <- Dockerfile                        (controller manager)
-    #   kezio-ipmi           <- docker/manager-ipmi/Dockerfile     (opt-in, ipmitool-enabled manager)
-    #   kezio-image-service  <- docker/image-service/Dockerfile
-    #   kezio-ingest         <- docker/ingest/Dockerfile
-    #   kezio-seeder         <- docker/seeder/Dockerfile
-    #   kezio-bootd          <- docker/bootd/Dockerfile
-    #
-    # Architecture: manager, image-service, ingest and bootd cross-compile
-    # their Go binary (BUILDPLATFORM/TARGETPLATFORM) and only need apt-get
-    # to install a handful of prebuilt runtime packages, so they build
-    # fine under QEMU emulation for both amd64 and arm64. The seeder image
-    # instead compiles ezio's C++ stack (libtorrent-rasterbar, boost,
-    # grpc) from source with cmake; doing that under QEMU emulation is
-    # very slow. Seeder therefore builds amd64-only for now - TODO: add an
-    # arm64 leg once either a native arm64 runner is available or the
-    # emulated build time has been measured and judged acceptable.
+    # Image <-> Dockerfile mapping must stay in sync with the Makefile's
+    # docker-build-* targets. Seeder is amd64-only: ezio's C++ build
+    # (cmake/boost/libtorrent) is too slow under QEMU emulation.
     name: ${{ matrix.name }}
+    needs: [lint, test]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -140,27 +100,32 @@ jobs:
             image: kezio
             dockerfile: Dockerfile
             platforms: linux/amd64,linux/arm64
+            local-tag: example.com/kezio:v0.0.1
           - name: manager-ipmi
             image: kezio-ipmi
             dockerfile: docker/manager-ipmi/Dockerfile
             platforms: linux/amd64,linux/arm64
+            local-tag: example.com/kezio-ipmi:e2e
           - name: image-service
             image: kezio-image-service
             dockerfile: docker/image-service/Dockerfile
             platforms: linux/amd64,linux/arm64
+            local-tag: example.com/kezio-image-service:e2e
           - name: ingest
             image: kezio-ingest
             dockerfile: docker/ingest/Dockerfile
             platforms: linux/amd64,linux/arm64
+            local-tag: example.com/kezio-ingest:e2e
           - name: seeder
             image: kezio-seeder
             dockerfile: docker/seeder/Dockerfile
-            # amd64-only: see the architecture note above the `on:` block.
             platforms: linux/amd64
+            local-tag: example.com/kezio-seeder:e2e
           - name: bootd
             image: kezio-bootd
             dockerfile: docker/bootd/Dockerfile
             platforms: linux/amd64,linux/arm64
+            local-tag: example.com/kezio-bootd:e2e
     steps:
       - name: Clone the code
         uses: actions/checkout@v7
@@ -170,6 +135,30 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
+
+      # load:true cannot hold a multi-platform manifest - amd64 only, for
+      # the tarball hand-off every downstream job consumes.
+      - name: Build (amd64, loaded locally)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          load: true
+          tags: ${{ matrix.local-tag }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+      - name: Save the image to a tarball
+        run: docker save ${{ matrix.local-tag }} -o /tmp/${{ matrix.name }}.tar
+
+      - name: Upload the image tarball
+        uses: actions/upload-artifact@v7
+        with:
+          name: image-tar-${{ matrix.name }}
+          path: /tmp/${{ matrix.name }}.tar
+          retention-days: 1
+          if-no-files-found: error
 
       - name: Log in to ghcr.io
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -181,51 +170,40 @@ jobs:
 
       - name: Derive image metadata
         id: meta
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
 
-      - name: Build (and push on main)
+      # Multi-arch push, main only - PRs never authenticate or push.
+      - name: Push to ghcr.io
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/build-push-action@v7
         with:
           context: .
           file: ${{ matrix.dockerfile }}
           platforms: ${{ matrix.platforms }}
-          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
 
   boot-artifacts:
-    # Builds the kezio live boot image (kernel + initrd + squashfs) plus
-    # the signed shimx64.efi/grubx64.efi kezio-bootd serves over TFTP,
-    # with hack/live-image/build.sh, and uploads the result as an
-    # ephemeral workflow artifact for inspection AND for the e2e-bmc
-    # job below to download (via its boot_artifacts_artifact input) -
-    # built here exactly once and handed off, never rebuilt in-lane and
-    # never pulled from ghcr by that job. No ghcr publish here - see
-    # release.yaml, which builds the same artifacts on a "v*" tag and
-    # publishes them to both a GitHub Release and the
-    # kezio-boot-artifacts ghcr image.
     name: Boot artifacts
     needs: [lint, test]
     if: github.event_name != 'workflow_dispatch' || inputs.run_boot_artifacts
     runs-on: ubuntu-latest
-    # `lb build` compiles ezio from source (cmake/make, the same as
-    # docker/seeder/Dockerfile's builder stage) and then assembles a full
-    # Debian sid chroot into a squashfs - budget generously.
+    # `lb build` compiles ezio from source and assembles a full Debian sid
+    # chroot into a squashfs - budget generously.
     timeout-minutes: 90
     steps:
       - name: Clone the code
         uses: actions/checkout@v7
 
       - name: Build live image
-        # ubuntu-latest's Docker already runs privileged containers -
-        # hack/live-image/build.sh needs that for `lb build`'s own
-        # chroot/mount work; see the script's header for why.
         run: hack/live-image/build.sh
 
       - name: Write size summary
@@ -261,19 +239,8 @@ jobs:
           if-no-files-found: error
 
   e2e-fast:
-    # Fast lane: the fake-deployer, stub-ingest Image/Machine lifecycle
-    # from test/e2e/e2e_test.go. Never touches image-service, ingest, or
-    # the seeder - see e2e-image-path below, which is additive and runs
-    # on its own runner so this job's timing never regresses because of
-    # it.
-    #
-    # cert-manager is required from here on: every kezio CRD carries a
-    # defaulting and a validating webhook, and the controller-manager
-    # cannot serve admission requests until cert-manager has minted its
-    # serving certificate (installed by `make test-e2e` itself, always
-    # "latest" - see test/utils.InstallCertManager).
     name: Run against RKE2
-    needs: [lint, test]
+    needs: [lint, test, images]
     if: github.event_name != 'workflow_dispatch' || inputs.run_e2e
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -289,21 +256,11 @@ jobs:
       - name: Resource check (fail fast if the runner is under-resourced)
         run: |
           set -euo pipefail
-          echo "===== CPU ====="
           nproc
-          echo "===== Memory ====="
           free -h
-          echo "===== Disk ====="
           df -h
-
           cpus="$(nproc)"
           mem_mb="$(free -m | awk '/^Mem:/{print $2}')"
-
-          # GitHub-hosted ubuntu-latest runners give 4 vCPUs / 16 GiB RAM.
-          # These thresholds only catch a runner that is clearly the wrong
-          # class (e.g. a misconfigured self-hosted runner), not normal
-          # variance on the hosted fleet. Bumped from k3s's 6000 MiB floor:
-          # RKE2's etcd + canal control plane runs roughly 1 GiB heavier.
           if [ "$cpus" -lt 2 ]; then
             echo "::error::Runner has only ${cpus} CPU(s); kezio e2e needs at least 2." >&2
             exit 1
@@ -313,11 +270,13 @@ jobs:
             exit 1
           fi
 
+      - name: Download the manager image tarball
+        uses: actions/download-artifact@v7
+        with:
+          name: image-tar-manager
+          path: /tmp/images
+
       - name: Write the RKE2 config (must exist before the service starts)
-        # Plain canal here - this lane never creates a NetworkAttachmentDefinition
-        # or touches Multus, unlike the KubeVirt VM lanes (see
-        # e2e-kubevirt-reusable.yml), so there is no reason to pay for the
-        # multus HelmChart addon in this always-on, every-push/PR lane.
         run: |
           set -euo pipefail
           sudo mkdir -p /etc/rancher/rke2
@@ -331,20 +290,11 @@ jobs:
           set -euo pipefail
           curl -sfL https://get.rke2.io | sudo INSTALL_RKE2_VERSION="${RKE2_VERSION}" sh -
           sudo systemctl enable --now rke2-server.service
-
-          # kubectl/ctr/crictl ship under /var/lib/rancher/rke2/bin, not on
-          # PATH by default - symlink them into /usr/local/bin (inside
-          # sudo's secure_path) the same way the k3s installer always put
-          # its own "k3s" binary there.
           sudo ln -sf /var/lib/rancher/rke2/bin/kubectl /usr/local/bin/kubectl
           sudo ln -sf /var/lib/rancher/rke2/bin/ctr /usr/local/bin/ctr
           sudo ln -sf /var/lib/rancher/rke2/bin/crictl /usr/local/bin/crictl
-
           echo "KUBECONFIG=/etc/rancher/rke2/rke2.yaml" >> "$GITHUB_ENV"
           export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-          # RKE2 registers its node a moment after the service starts; wait
-          # for the node object to exist before waiting on its Ready condition,
-          # since `kubectl wait` errors out immediately on zero matches.
           for _ in $(seq 1 90); do
             [ "$(kubectl get nodes --no-headers 2>/dev/null | wc -l)" -ge 1 ] && break
             sleep 2
@@ -352,7 +302,12 @@ jobs:
           kubectl wait --for=condition=Ready node --all --timeout=300s
           kubectl get nodes -o wide
 
+      - name: Import the manager image into RKE2 containerd
+        run: sudo ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images import /tmp/images/manager.tar
+
       - name: Running Test e2e
+        env:
+          E2E_SKIP_MANAGER_IMAGE_BUILD: "true"
         run: |
           set -euo pipefail
           go mod tidy
@@ -362,52 +317,20 @@ jobs:
         if: failure()
         run: |
           set +e
-          echo "===== kezio-system pods ====="
           kubectl get pods -n kezio-system -o wide
-          echo "===== controller-manager logs ====="
           kubectl -n kezio-system logs deployment/kezio-controller-manager --all-containers --tail=500
-          echo "===== kezio CRs ====="
           kubectl get machines,images,posthooks -A -o wide
-          echo "===== events ====="
           kubectl get events -n kezio-system --sort-by=.lastTimestamp
 
   e2e-image-path:
-    # Slow lane: test/e2e's "Image ingest and seeding (image-path)"
-    # Context (test/e2e/e2e_image_path_test.go), gated on E2E_IMAGE_PATH=true
-    # below. It deploys image-service on top of the same base
-    # config/default the fast job exercises, uploads a real Ubuntu cloud
-    # image through kezioctl, and drives it through real
-    # qemu-img/sfdisk/partclone ingest and the per-partition-PVC/publish
-    # path - see that file's doc comments for the full flow. This lane
-    # runs no seeder: this stage never creates a Machine, and seeding is
-    # demand-driven by a Machine deploying the Image (see
-    # internal/controller/seeder_deployment.go) - end-to-end seeding proof
-    # lives in the deploy-path lane instead. This is a separate job (own
-    # runner, own RKE2, own timeout) precisely so none of that weight
-    # lands on the e2e-fast job above.
     name: Run image-path against RKE2
-    needs: [lint, test]
+    needs: [lint, test, images]
     if: github.event_name != 'workflow_dispatch' || inputs.run_e2e
     runs-on: ubuntu-latest
-    # Honest budget, not a guess: RKE2 + cert-manager install (~1-2m),
-    # building+importing the manager/image-service/ingest images (~2-3m,
-    # small Go binaries), downloading the Ubuntu cloud image (cached
-    # after the first run, see the cache step below), then real ingest
-    # (qemu-img convert + sfdisk + partclone over a several-hundred-MiB
-    # image, a few minutes). 60 minutes leaves generous headroom on an
-    # otherwise-busy runner.
     timeout-minutes: 60
     env:
-      # Ubuntu's "minimal" cloud image, not the full one: honestly, a
-      # bare GPT+ESP+rootfs disk with an ext4 root is all this stage
-      # needs to exercise ingest's partition/filesystem handling, and the
-      # minimal image is roughly half the download + qemu-img-convert +
-      # partclone time of the full cloud image for the same coverage.
       # /releases/noble/release/ always serves the latest 24.04 LTS point
-      # build, so this stays "latest-minor" without needing a version
-      # bump here. Pinned in one place (not inlined below) so a future
-      # bump (or a fallback to the full cloud image, if the minimal image
-      # ever turns out to lack something ingest needs) is a one-line change.
+      # build.
       UBUNTU_CLOUD_IMAGE_URL: "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img"
       INGEST_IMG: "example.com/kezio-ingest:e2e"
       IMAGE_SERVICE_IMG: "example.com/kezio-image-service:e2e"
@@ -423,22 +346,12 @@ jobs:
       - name: Resource check (fail fast if the runner is under-resourced)
         run: |
           set -euo pipefail
-          echo "===== CPU ====="
           nproc
-          echo "===== Memory ====="
           free -h
-          echo "===== Disk ====="
           df -h
-
           cpus="$(nproc)"
           mem_mb="$(free -m | awk '/^Mem:/{print $2}')"
           disk_avail_gb="$(df -BG --output=avail / | tail -1 | tr -dc '0-9')"
-
-          # Same CPU/RAM floor as the fast job (see e2e-fast's own
-          # resource-check step, including its RKE2-vs-k3s bump). Disk
-          # gets its own, higher floor: this job builds two local images
-          # and downloads and converts a several-hundred-MiB cloud image,
-          # on top of everything the fast job already needs.
           if [ "$cpus" -lt 2 ]; then
             echo "::error::Runner has only ${cpus} CPU(s); kezio e2e needs at least 2." >&2
             exit 1
@@ -457,45 +370,26 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/ubuntu-cloud.img
-          # Keyed on the pinned URL (env, above): bumping that env var
-          # (a version/URL change) naturally misses the old cache instead
-          # of serving a stale image under a reused key.
           key: ubuntu-cloud-image-${{ env.UBUNTU_CLOUD_IMAGE_URL }}
 
       - name: Download the Ubuntu cloud image
         if: steps.cache-cloud-image.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          curl -sfL -o "${{ runner.temp }}/ubuntu-cloud.img" "${UBUNTU_CLOUD_IMAGE_URL}"
+        run: curl -sfL -o "${{ runner.temp }}/ubuntu-cloud.img" "${UBUNTU_CLOUD_IMAGE_URL}"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+      - name: Download the component image tarballs
+        uses: actions/download-artifact@v7
+        with:
+          name: image-tar-manager
+          path: /tmp/images
 
-      - name: Warm the ingest/image-service image caches
-        # Builds (and loads into the local docker daemon, never pushes -
-        # this stage never depends on ghcr, see this job's own doc
-        # comment) the same two images `make docker-build-ingest`/
-        # `docker-build-image-service` build later, under the same tags,
-        # with GitHub Actions' layer cache. The scope names match the
-        # images job's matrix exactly, so a push to main (which does
-        # depend on ghcr, unlike this job) and this job share one warm
-        # cache.
-        run: |
-          set -euo pipefail
-          for spec in "ingest:docker/ingest/Dockerfile:${INGEST_IMG}" "image-service:docker/image-service/Dockerfile:${IMAGE_SERVICE_IMG}"; do
-            IFS=: read -r scope dockerfile tag <<< "${spec}"
-            docker buildx build \
-              --file "${dockerfile}" \
-              --tag "${tag}" \
-              --cache-from "type=gha,scope=${scope}" \
-              --cache-to "type=gha,mode=max,scope=${scope}" \
-              --load \
-              .
-          done
+      - name: Download the ingest and image-service image tarballs
+        uses: actions/download-artifact@v7
+        with:
+          pattern: "image-tar-@(ingest|image-service)"
+          path: /tmp/images
+          merge-multiple: true
 
       - name: Write the RKE2 config (must exist before the service starts)
-        # Plain canal - this job never touches Multus/NADs, just PVCs, so
-        # canal alone (no multus addon cost) is enough.
         run: |
           set -euo pipefail
           sudo mkdir -p /etc/rancher/rke2
@@ -509,20 +403,11 @@ jobs:
           set -euo pipefail
           curl -sfL https://get.rke2.io | sudo INSTALL_RKE2_VERSION="${RKE2_VERSION}" sh -
           sudo systemctl enable --now rke2-server.service
-
-          # kubectl/ctr/crictl ship under /var/lib/rancher/rke2/bin, not on
-          # PATH by default - symlink them into /usr/local/bin (inside
-          # sudo's secure_path) the same way the k3s installer always put
-          # its own "k3s" binary there.
           sudo ln -sf /var/lib/rancher/rke2/bin/kubectl /usr/local/bin/kubectl
           sudo ln -sf /var/lib/rancher/rke2/bin/ctr /usr/local/bin/ctr
           sudo ln -sf /var/lib/rancher/rke2/bin/crictl /usr/local/bin/crictl
-
           echo "KUBECONFIG=/etc/rancher/rke2/rke2.yaml" >> "$GITHUB_ENV"
           export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-          # RKE2 registers its node a moment after the service starts; wait
-          # for the node object to exist before waiting on its Ready condition,
-          # since `kubectl wait` errors out immediately on zero matches.
           for _ in $(seq 1 90); do
             [ "$(kubectl get nodes --no-headers 2>/dev/null | wc -l)" -ge 1 ] && break
             sleep 2
@@ -530,13 +415,14 @@ jobs:
           kubectl wait --for=condition=Ready node --all --timeout=300s
           kubectl get nodes -o wide
 
+      - name: Import the component images into RKE2 containerd
+        run: |
+          set -euo pipefail
+          for f in manager ingest image-service; do
+            sudo ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images import "/tmp/images/${f}.tar"
+          done
+
       - name: Install local-path-provisioner and mark it the default StorageClass
-        # RKE2 ships no default StorageClass (k3s bundled local-path by
-        # default; RKE2 deliberately does not). config/e2e-image-path's
-        # staging PVC (applied by this workflow) and the per-partition
-        # content PVCs (created by the Image reconciler during the suite
-        # run) both request storageClassName local-path explicitly, so
-        # that name must exist here before the suite runs.
         run: |
           set -euo pipefail
           kubectl apply -f "https://raw.githubusercontent.com/rancher/local-path-provisioner/${LOCAL_PATH_PROVISIONER_VERSION}/deploy/local-path-storage.yaml"
@@ -544,14 +430,12 @@ jobs:
           kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
 
       - name: Running Test e2e (image-path)
+        env:
+          E2E_SKIP_MANAGER_IMAGE_BUILD: "true"
+          E2E_SKIP_IMAGE_PATH_IMAGE_BUILD: "true"
         run: |
           set -euo pipefail
           go mod tidy
-          # Mirrors `make test-e2e`'s own prerequisites (manifests/
-          # generate/fmt/vet - see the Makefile's test-e2e target) since
-          # this step calls `go test` directly instead of going through
-          # that target, needed only to raise -timeout past its fixed 15m
-          # for this much slower stage.
           make manifests generate fmt vet
           E2E_IMAGE_PATH=true \
           E2E_UBUNTU_QCOW2_PATH="${{ runner.temp }}/ubuntu-cloud.img" \
@@ -563,46 +447,20 @@ jobs:
         if: failure()
         run: |
           set +e
-          echo "===== kezio-system pods ====="
           kubectl get pods -n kezio-system -o wide
-          echo "===== controller-manager logs ====="
           kubectl -n kezio-system logs deployment/kezio-controller-manager --all-containers --tail=500
-          echo "===== ingest Job(s) ====="
           kubectl get jobs -n kezio-system -l kezio.kojuro.date/image -o wide
-          echo "===== ingest Job logs ====="
           kubectl logs -n kezio-system -l kezio.kojuro.date/image --all-containers --tail=500
-          echo "===== partition PVCs ====="
           kubectl get pvc -n kezio-system -l app.kubernetes.io/component=partition-content -o wide
-          echo "===== image-service logs ====="
           kubectl logs -n kezio-system deploy/kezio-image-service --tail=500
-          echo "===== kezio Images ====="
           kubectl get images -A -o wide
-          echo "===== events ====="
           kubectl get events -n kezio-system --sort-by=.lastTimestamp
 
   e2e-boot-path:
-    # Boot-path lane: test/e2e's "Boot path (control-plane wiring)"
-    # Context (test/e2e/e2e_boot_path_test.go), gated on E2E_BOOT_PATH=true
-    # below. It proves the real boot config server (internal/bootserver)
-    # and agent registration server (internal/agentserver) wiring - a
-    # real minted single-use token, a real Machine status update - by
-    # standing in a plain HTTP client for kezio-agent instead of driving
-    # an actual PXE boot. It does NOT start a VM, does NOT touch
-    # kezio-bootd's proxyDHCP/TFTP responder, and does NOT fetch a real
-    # kernel/initrd/squashfs: those need a NIC on a real L2 broadcast
-    # domain and a UEFI firmware actually executing GRUB, which a plain
-    # RKE2-on-canal job's pod network cannot provide - see the e2e-bmc
-    # job below (a real KVM-backed KubeVirt VM, Multus, and a BMC-driven
-    # PXE boot) for that heavier, separable stage.
     name: Run boot-path against RKE2
-    needs: [lint, test]
+    needs: [lint, test, images]
     if: github.event_name != 'workflow_dispatch' || inputs.run_e2e
     runs-on: ubuntu-latest
-    # Small, in-process HTTP servers and one reconciler cycle per phase -
-    # no image builds beyond the manager itself, no real network boot.
-    # Generous headroom over the fast lane's 30m only because it shares
-    # this file's resource-check/RKE2-install boilerplate, not because the
-    # boot-path specs themselves are slow.
     timeout-minutes: 30
     steps:
       - name: Clone the code
@@ -616,19 +474,11 @@ jobs:
       - name: Resource check (fail fast if the runner is under-resourced)
         run: |
           set -euo pipefail
-          echo "===== CPU ====="
           nproc
-          echo "===== Memory ====="
           free -h
-          echo "===== Disk ====="
           df -h
-
           cpus="$(nproc)"
           mem_mb="$(free -m | awk '/^Mem:/{print $2}')"
-
-          # Same floor as e2e-fast's own resource-check step (see its
-          # comment, including its RKE2-vs-k3s bump): this lane is no
-          # heavier than that one.
           if [ "$cpus" -lt 2 ]; then
             echo "::error::Runner has only ${cpus} CPU(s); kezio e2e needs at least 2." >&2
             exit 1
@@ -638,8 +488,13 @@ jobs:
             exit 1
           fi
 
+      - name: Download the manager image tarball
+        uses: actions/download-artifact@v7
+        with:
+          name: image-tar-manager
+          path: /tmp/images
+
       - name: Write the RKE2 config (must exist before the service starts)
-        # Plain canal - this lane never touches Multus/NADs.
         run: |
           set -euo pipefail
           sudo mkdir -p /etc/rancher/rke2
@@ -653,20 +508,11 @@ jobs:
           set -euo pipefail
           curl -sfL https://get.rke2.io | sudo INSTALL_RKE2_VERSION="${RKE2_VERSION}" sh -
           sudo systemctl enable --now rke2-server.service
-
-          # kubectl/ctr/crictl ship under /var/lib/rancher/rke2/bin, not on
-          # PATH by default - symlink them into /usr/local/bin (inside
-          # sudo's secure_path) the same way the k3s installer always put
-          # its own "k3s" binary there.
           sudo ln -sf /var/lib/rancher/rke2/bin/kubectl /usr/local/bin/kubectl
           sudo ln -sf /var/lib/rancher/rke2/bin/ctr /usr/local/bin/ctr
           sudo ln -sf /var/lib/rancher/rke2/bin/crictl /usr/local/bin/crictl
-
           echo "KUBECONFIG=/etc/rancher/rke2/rke2.yaml" >> "$GITHUB_ENV"
           export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
-          # RKE2 registers its node a moment after the service starts; wait
-          # for the node object to exist before waiting on its Ready condition,
-          # since `kubectl wait` errors out immediately on zero matches.
           for _ in $(seq 1 90); do
             [ "$(kubectl get nodes --no-headers 2>/dev/null | wc -l)" -ge 1 ] && break
             sleep 2
@@ -674,7 +520,12 @@ jobs:
           kubectl wait --for=condition=Ready node --all --timeout=300s
           kubectl get nodes -o wide
 
+      - name: Import the manager image into RKE2 containerd
+        run: sudo ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images import /tmp/images/manager.tar
+
       - name: Running Test e2e (boot-path)
+        env:
+          E2E_SKIP_MANAGER_IMAGE_BUILD: "true"
         run: |
           set -euo pipefail
           go mod tidy
@@ -685,60 +536,739 @@ jobs:
         if: failure()
         run: |
           set +e
-          echo "===== kezio-system pods ====="
           kubectl get pods -n kezio-system -o wide
-          echo "===== controller-manager logs ====="
           kubectl -n kezio-system logs deployment/kezio-controller-manager --all-containers --tail=500
-          echo "===== kezio-boot-server / kezio-agent-server Services ====="
           kubectl get svc -n kezio-system kezio-boot-server kezio-agent-server -o wide
-          echo "===== boot-path Machine ====="
           kubectl get machine e2e-boot-node-01 -n kezio-system -o yaml
-          echo "===== events ====="
           kubectl get events -n kezio-system --sort-by=.lastTimestamp
 
   e2e-bmc:
-    # kezio's production-representative acceptance lane: a real KVM-backed
-    # KubeVirt VM, powered on and PXE-booted through a real KubeVirtBMC/
-    # Redfish endpoint (kezio never ships without a BMC driver), leeching
-    # a real Image over BitTorrent and writing it to disk - see
-    # e2e-kubevirt-reusable.yml's own header comment for the full flow.
-    # Consumes the boot-artifacts job's own workflow artifact
-    # (boot_artifacts_artifact) instead of rebuilding the live boot image
-    # in-lane or pulling the published ghcr image - the artifact hand-off
-    # this file exists to wire up, so this lane always exercises the
-    # exact boot image built from this commit. Heaviest job in this
-    # graph (KVM setup, cluster+addon installs, a full live PXE boot, a
-    # real partclone/BitTorrent deploy, KubeVirtBMC's own control plane
-    # and webhook, plus an extra power cycle) - see the reusable
-    # workflow's own timeout-minutes for the budget.
     name: BMC e2e
-    needs: [lint, test, boot-artifacts, e2e-fast, e2e-image-path, e2e-boot-path]
-    # needs.boot-artifacts.result == 'success' is explicit, not implicit:
-    # a skipped job (e.g. workflow_dispatch with run_boot_artifacts=false)
-    # still satisfies the default success() check GitHub Actions uses for
-    # a needs gate, which would otherwise let this job run with no
-    # artifact to download.
+    needs: [lint, test, boot-artifacts, images, e2e-fast, e2e-image-path, e2e-boot-path]
+    # A skipped needs-job still satisfies the default success() gate -
+    # boot-artifacts can skip via run_boot_artifacts=false, so guard it
+    # explicitly; images never self-skips.
     if: (github.event_name != 'workflow_dispatch' || inputs.run_bmc_e2e) && needs.boot-artifacts.result == 'success'
-    uses: ./.github/workflows/e2e-kubevirt-reusable.yml
-    permissions:
-      contents: read
-    with:
-      boot_artifacts_artifact: kezio-live-image
-      # Only a workflow_dispatch run can select "lease" - a push/pull_request
-      # run always drives the default "no-relay" scenario, one scenario per
-      # push (see e2e-kubevirt-reusable.yml's dhcp_scenario input for what
-      # each scenario proves).
-      dhcp_scenario: ${{ github.event_name == 'workflow_dispatch' && inputs.bmc_dhcp_scenario || 'no-relay' }}
-      manager_image: "example.com/kezio:e2e-bmc"
-      bootd_image: "example.com/kezio-bootd:e2e-bmc"
-      ingest_image: "example.com/kezio-ingest:e2e-bmc"
-      seeder_image: "example.com/kezio-seeder:e2e-bmc"
-      image_service_image: "example.com/kezio-image-service:e2e-bmc"
-      target_vm_name: "e2e-bmc-vm"
-      target_vm_mac: "52:54:00:be:ef:03"
-      target_vm_disk_serial: "KEZIOE2EBMCDISK1"
-      image_name: "e2e-bmc-ubuntu"
-      image_service_token: "kezio-e2e-bmc-token"
-      # ezio_ref, kubevirtbmc_version, and opentracker_image are left at
-      # the reusable workflow's own defaults, which are kezio's current
-      # values - this graph needs no overrides.
+    runs-on: ubuntu-latest
+    # Non-build-boot-artifacts budget: KVM setup, cluster+addon installs, a
+    # full live PXE boot through a real BMC power-on, a cloud image
+    # download+convert+clone, a real partclone write, a BitTorrent leech,
+    # an in-guest reboot, a second PXE cycle, the deployed OS booting far
+    # enough for qemu-guest-agent to connect, and a second BMC power cycle.
+    timeout-minutes: 100
+    env:
+      KUBEVIRT_VERSION: "v1.9.0"
+      CDI_VERSION: "v1.65.0"
+      KUBEVIRTBMC_VERSION: "v0.9.0"
+      PROVISIONING_BRIDGE: kezio-prov0
+      PROVISIONING_HOST_IP: 192.0.2.1/24
+      PROVISIONING_BOOTD_NET1_IP: 192.0.2.2/24
+      PROVISIONING_EXISTING_DHCP_NET1_IP: 192.0.2.3/24
+      PROVISIONING_TRACKER_NET1_IP: 192.0.2.4/24
+      PROVISIONING_SEEDER_NET1_IP: 192.0.2.5/24
+      PROVISIONING_CIDR: 192.0.2.0/24
+      PROVISIONING_DHCP_RANGE: "192.0.2.10,192.0.2.100,255.255.255.0,12h"
+      # Only workflow_dispatch may select "lease"; push/pull_request always
+      # drive "no-relay".
+      DHCP_SCENARIO: ${{ github.event_name == 'workflow_dispatch' && inputs.bmc_dhcp_scenario || 'no-relay' }}
+      TARGET_VM_NAME: "e2e-bmc-vm"
+      TARGET_VM_MAC: "52:54:00:be:ef:03"
+      TARGET_VM_DISK_SERIAL: "KEZIOE2EBMCDISK1"
+      # KubeVirtBMC names the Service "<vm>-virtbmc" on port 80, plain HTTP.
+      BMC_REDFISH_ADDRESS: "redfish+http://e2e-bmc-vm-virtbmc.kezio-system.svc.cluster.local/redfish/v1/Systems/1"
+      BMC_CREDS_SECRET: "e2e-bmc-vm-bmc-creds"
+      UBUNTU_CLOUD_IMAGE_URL: "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img"
+      MANAGER_IMG: "example.com/kezio:v0.0.1"
+      BOOTD_IMG: "example.com/kezio-bootd:e2e"
+      INGEST_IMG: "example.com/kezio-ingest:e2e"
+      SEEDER_IMG: "example.com/kezio-seeder:e2e"
+      IMAGE_SERVICE_IMG: "example.com/kezio-image-service:e2e"
+      BOOT_ARTIFACTS_IMG: "example.com/kezio-boot-artifacts:e2e"
+      OPENTRACKER_IMG: "ghcr.io/tunisiano187/opentracker-docker:master"
+      EXISTING_DHCP_IMG: "jpillora/dnsmasq:1.1@sha256:78a9c6711031a557d9c6a79a0b6e060c4ac09de3a8755c78d690acb55b4ccd15"
+      IMAGE_NAME: "e2e-bmc-ubuntu"
+      IMAGE_SERVICE_TOKEN: "kezio-e2e-bmc-token"
+      MARKER_PATH: "/etc/kezio-build-id"
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Download the boot-artifacts hand-off
+        uses: actions/download-artifact@v7
+        with:
+          name: kezio-live-image
+          path: dist/live
+
+      - name: Fail fast if the downloaded boot artifacts are empty
+        run: |
+          set -euo pipefail
+          missing=()
+          for f in vmlinuz initrd.img filesystem.squashfs shimx64.efi grubx64.efi manifest.json; do
+            [ -s "dist/live/${f}" ] || missing+=("${f}")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::boot-artifacts artifact download is missing or empty: ${missing[*]}" >&2
+            exit 1
+          fi
+
+      - name: Fail fast unless /dev/kvm is usable
+        run: |
+          set -euo pipefail
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm does not exist on this runner; KubeVirt VMs need hardware virtualization." >&2
+            exit 1
+          fi
+          sudo usermod -aG kvm "$(whoami)"
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - name: Raise inotify limits
+        run: |
+          sudo sysctl -w fs.inotify.max_user_watches=1048576
+          sudo sysctl -w fs.inotify.max_user_instances=8192
+
+      - name: Resource check (fail fast if the runner is under-resourced)
+        run: |
+          set -euo pipefail
+          nproc
+          free -h
+          df -h
+          cpus="$(nproc)"
+          mem_mb="$(free -m | awk '/^Mem:/{print $2}')"
+          disk_avail_gb="$(df -BG --output=avail / | tail -1 | tr -dc '0-9')"
+          if [ "$cpus" -lt 4 ]; then
+            echo "::error::Runner has only ${cpus} CPU(s); the BMC e2e stage needs at least 4." >&2
+            exit 1
+          fi
+          if [ "$mem_mb" -lt 14000 ]; then
+            echo "::error::Runner has only ${mem_mb} MiB RAM; the BMC e2e stage needs at least 14000 MiB." >&2
+            exit 1
+          fi
+          if [ "$disk_avail_gb" -lt 25 ]; then
+            echo "::error::Runner has only ${disk_avail_gb} GiB free disk; the BMC e2e stage needs at least 25 GiB." >&2
+            exit 1
+          fi
+
+      # PROVISIONING_HOST_IP is the runner's own address, not a gateway -
+      # every boot-path participant gets its own Multus address instead.
+      - name: Create the provisioning bridge
+        run: |
+          set -euo pipefail
+          sudo ip link add "${PROVISIONING_BRIDGE}" type bridge
+          sudo ip addr add "${PROVISIONING_HOST_IP}" dev "${PROVISIONING_BRIDGE}"
+          sudo ip link set "${PROVISIONING_BRIDGE}" up
+
+      - name: Cache the Ubuntu cloud image
+        id: cache-cloud-image
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/ubuntu-cloud.img
+          key: ubuntu-cloud-image-${{ env.UBUNTU_CLOUD_IMAGE_URL }}
+
+      - name: Download the Ubuntu cloud image
+        if: steps.cache-cloud-image.outputs.cache-hit != 'true'
+        run: curl -sfL -o "${{ runner.temp }}/ubuntu-cloud.img" "${UBUNTU_CLOUD_IMAGE_URL}"
+
+      - name: Customize the Ubuntu cloud image with a marker file and qemu-guest-agent
+        uses: ./.github/actions/customize-cloud-image
+        with:
+          source-image-path: "${{ runner.temp }}/ubuntu-cloud.img"
+          output-image-path: "${{ runner.temp }}/ubuntu-cloud-marked.img"
+          marker-path: "${{ env.MARKER_PATH }}"
+          cloud-image-url: "${{ env.UBUNTU_CLOUD_IMAGE_URL }}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build kezioctl
+        run: make build-kezioctl
+
+      - name: Download the component image tarballs
+        uses: actions/download-artifact@v7
+        with:
+          pattern: "image-tar-@(manager|bootd|ingest|seeder|image-service)"
+          path: /tmp/images
+          merge-multiple: true
+
+      - name: Install RKE2 with Multus enabled
+        uses: ./.github/actions/install-rke2
+        with:
+          rke2-version: ${{ env.RKE2_VERSION }}
+
+      - name: Harden the provisioning bridge for real PXE/DHCP traffic
+        uses: ./.github/actions/harden-provisioning-bridge
+
+      - name: Install local-path-provisioner and mark it the default StorageClass
+        run: |
+          set -euo pipefail
+          kubectl apply -f "https://raw.githubusercontent.com/rancher/local-path-provisioner/${LOCAL_PATH_PROVISIONER_VERSION}/deploy/local-path-storage.yaml"
+          kubectl -n local-path-storage rollout status deployment/local-path-provisioner --timeout=180s
+          kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+
+      # Packages dist/live/ (downloaded above) into BOOT_ARTIFACTS_IMG -
+      # cheap local repackaging, not a from-source live-image rebuild.
+      - name: Build and import the component and boot-artifacts images
+        run: |
+          set -euo pipefail
+          make docker-build-boot-artifacts BOOT_ARTIFACTS_IMG="${BOOT_ARTIFACTS_IMG}"
+          for f in manager bootd ingest seeder image-service; do
+            sudo ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images import "/tmp/images/${f}.tar"
+          done
+          docker save "${BOOT_ARTIFACTS_IMG}" | sudo ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images import -
+
+      - name: Install cert-manager, KubeVirt, virtctl, and CDI
+        uses: ./.github/actions/install-cluster-addons
+        with:
+          kubevirt-version: ${{ env.KUBEVIRT_VERSION }}
+          cdi-version: ${{ env.CDI_VERSION }}
+
+      - name: Install KubeVirtBMC
+        run: |
+          set -euo pipefail
+          kubectl apply -f "https://github.com/kubevirtbmc/kubevirtbmc/releases/download/${KUBEVIRTBMC_VERSION}/kubevirtbmc-install.yaml"
+          kubectl -n kubevirtbmc-system wait deployment/kubevirtbmc-controller-manager --for=condition=Available --timeout=300s
+
+      - name: Deploy CRDs and the controller-manager
+        run: |
+          set -euo pipefail
+          make install
+          make deploy IMG="${MANAGER_IMG}"
+          # bootd's dnsmasq child needs NET_ADMIN/NET_RAW, outside both PSA profiles.
+          kubectl label --overwrite ns kezio-system pod-security.kubernetes.io/enforce=privileged
+          kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
+
+      - name: Create the provisioning NetworkAttachmentDefinitions
+        uses: ./.github/actions/create-provisioning-nads
+
+      - name: Create the image-service bearer token Secret
+        run: |
+          set -euo pipefail
+          kubectl -n kezio-system create secret generic kezio-image-service-token \
+            --from-literal=token="${IMAGE_SERVICE_TOKEN}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy image-service+seeder+store+boot/agent servers, wire real ingest/seeding/deploy
+        run: |
+          set -euo pipefail
+          cd config/manager && ../../bin/kustomize edit set image controller="${MANAGER_IMG}"
+          cd ../..
+          cd config/image-service && ../../bin/kustomize edit set image "image-service=${IMAGE_SERVICE_IMG}"
+          cd ../..
+          cd config/seeder
+          ../../bin/kustomize edit set image "seeder=${SEEDER_IMG}"
+          ../../bin/kustomize edit set image "ghcr.io/tunisiano187/opentracker-docker=${OPENTRACKER_IMG}"
+          cd ../..
+          bin/kustomize build config/e2e-deploy-path | kubectl apply -f -
+
+          # Attaches opentracker to the provisioning bridge - the
+          # production annotation config/seeder ships commented out.
+          kubectl -n kezio-system patch deployment/kezio-opentracker --type=strategic -p='{
+            "spec":{"template":{"metadata":{"annotations":{"k8s.v1.cni.cncf.io/networks":"kezio-tracker-network"}}}}
+          }'
+
+          # SEEDER_TRACKER_URL must be opentracker's own bridge address:
+          # both swarm sides announce through it and opentracker registers
+          # each peer at its announce source address - no ClusterIP, no
+          # socat, no NAT anywhere on this path.
+          kubectl -n kezio-system set env deployment/kezio-controller-manager \
+            INGEST_IMAGE="${INGEST_IMG}" \
+            INGEST_STAGING_PVC=kezio-image-service-staging \
+            INGEST_SERVICE_ACCOUNT=kezio-ingest \
+            SEEDER_TRACKER_URL="http://${PROVISIONING_TRACKER_NET1_IP%%/*}:6969/announce" \
+            SEEDER_DEPLOYMENT_IMAGE="${SEEDER_IMG}" \
+            SEEDER_DEPLOYMENT_GRACE_PERIOD=45s \
+            SEEDER_DEPLOYMENT_NETWORK=kezio-seeder-network \
+            BOOT_SERVER_ADDR=:8090 \
+            BOOT_ARTIFACTS_DIR=/boot-artifacts \
+            BOOT_SERVER_URL="http://${PROVISIONING_BOOTD_NET1_IP%%/*}:80" \
+            AGENT_SERVER_ADDR=:8091 \
+            BOOT_AGENT_SERVER_URL="http://${PROVISIONING_BOOTD_NET1_IP%%/*}:80" \
+            DEPLOYER=agent
+
+          kubectl -n kezio-system patch deployment/kezio-controller-manager --type=json \
+            --patch-file=config/e2e-boot-path/boot-artifacts-init-patch.yaml
+          kubectl -n kezio-system set image deployment/kezio-controller-manager \
+            fetch-boot-artifacts="${BOOT_ARTIFACTS_IMG}"
+
+          kubectl rollout status deployment/kezio-controller-manager -n kezio-system --timeout=180s
+          for d in kezio-image-service kezio-opentracker; do
+            kubectl rollout status deployment/"${d}" -n kezio-system --timeout=180s
+          done
+
+          for spec in "opentracker:kezio-tracker-network"; do
+            component="${spec%%:*}"
+            nad_name="${spec#*:}"
+            pod_name="$(kubectl -n kezio-system get pods -l app.kubernetes.io/component="${component}" -o json \
+              | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)][0].metadata.name')"
+            if [ -z "${pod_name}" ] || [ "${pod_name}" = "null" ]; then
+              echo "::error::no non-terminating ${component} pod found" >&2
+              exit 1
+            fi
+            network_status="$(kubectl -n kezio-system get pod "${pod_name}" \
+              -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}')"
+            if ! grep -q "${nad_name}" <<<"${network_status}"; then
+              echo "::error::${component} pod ${pod_name} has no ${nad_name} attachment in its network-status; got: ${network_status}" >&2
+              exit 1
+            fi
+          done
+
+          if ! curl -s -o /dev/null --max-time 10 "http://${PROVISIONING_TRACKER_NET1_IP%%/*}:6969/announce"; then
+            echo "::error::opentracker not reachable at ${PROVISIONING_TRACKER_NET1_IP%%/*}:6969 on the provisioning bridge" >&2
+            exit 1
+          fi
+
+      - name: Deploy the existing-dhcp pod on the provisioning bridge
+        id: existing-dhcp
+        if: ${{ env.DHCP_SCENARIO != 'lease' }}
+        uses: ./.github/actions/deploy-existing-dhcp
+        with:
+          namespace: kezio-system
+          name: kezio-existing-dhcp
+          image: ${{ env.EXISTING_DHCP_IMG }}
+          bridge: ${{ env.PROVISIONING_BRIDGE }}
+          static-cidr: ${{ env.PROVISIONING_EXISTING_DHCP_NET1_IP }}
+          dhcp-range: ${{ env.PROVISIONING_DHCP_RANGE }}
+
+      - name: Deploy kezio-bootd on the provisioning bridge
+        uses: ./.github/actions/deploy-bootd
+
+      - name: Assert the boot artifacts agent commit
+        uses: ./.github/actions/assert-boot-artifacts-agent-commit
+        with:
+          bootd-ip: ${{ env.PROVISIONING_BOOTD_NET1_IP }}
+          expected-commit: ${{ github.sha }}
+          build-boot-artifacts: "true"
+
+      - name: Ingest the marker-customized Ubuntu image through kezioctl
+        run: |
+          set -euo pipefail
+          kubectl -n kezio-system port-forward svc/kezio-image-service 18080:8080 &
+          PF_PID=$!
+          echo "PF_PID=${PF_PID}" >> "$GITHUB_ENV"
+          for _ in $(seq 1 30); do
+            curl -sf -o /dev/null "http://127.0.0.1:18080/healthz" && break
+            sleep 1
+          done
+
+          bin/kezioctl image upload "${UBUNTU_CLOUD_IMAGE_PATH}" \
+            --name "${IMAGE_NAME}" \
+            --namespace kezio-system \
+            --server http://127.0.0.1:18080 \
+            --token "${IMAGE_SERVICE_TOKEN}" \
+            --format qcow2
+
+      - name: Wait for the Image to reach Ready (real ingest - qemu-img, sfdisk, partclone)
+        uses: ./.github/actions/wait-for-image-ready
+        with:
+          image-name: ${{ env.IMAGE_NAME }}
+
+      - name: Stop the image-service port-forward
+        if: always()
+        run: kill "${PF_PID}" 2>/dev/null || true
+
+      - name: Provision the target VM through a real KubeVirtBMC/Redfish endpoint
+        uses: ./.github/actions/provision-target-vm-via-bmc
+
+      - name: Start continuous VM console capture
+        uses: ./.github/actions/capture-vm-console
+        with:
+          vm-name: ${{ env.TARGET_VM_NAME }}
+          logfile: ${{ runner.temp }}/console.log
+
+      - name: Verify the per-Image seeder Deployment is single-homed on the provisioning bridge
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + 300 ))
+          seeder_dep=""
+          while true; do
+            seeder_dep="$(kubectl -n kezio-system get deployments \
+              -l "kezio.kojuro.date/seeder-image=${IMAGE_NAME}" \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+            if [ -n "${seeder_dep}" ]; then
+              break
+            fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::no per-Image seeder Deployment labelled kezio.kojuro.date/seeder-image=${IMAGE_NAME} appeared" >&2
+              kubectl -n kezio-system get machine "${TARGET_VM_NAME}" -o yaml || true
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "per-Image seeder Deployment: ${seeder_dep}"
+          echo "SEEDER_DEPLOYMENT_NAME=${seeder_dep}" >> "$GITHUB_ENV"
+
+          kubectl rollout status deployment/"${seeder_dep}" -n kezio-system --timeout=180s
+
+          pod_name="$(kubectl -n kezio-system get pods -l "kezio.kojuro.date/seeder-image=${IMAGE_NAME}" -o json \
+            | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)][0].metadata.name')"
+          if [ -z "${pod_name}" ] || [ "${pod_name}" = "null" ]; then
+            echo "::error::no non-terminating pod found for per-Image seeder Deployment ${seeder_dep}" >&2
+            exit 1
+          fi
+          network_status="$(kubectl -n kezio-system get pod "${pod_name}" \
+            -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}')"
+          if ! grep -q "kezio-seeder-network" <<<"${network_status}"; then
+            echo "::error::per-Image seeder pod ${pod_name} has no kezio-seeder-network attachment in its network-status; got: ${network_status}" >&2
+            exit 1
+          fi
+
+          pod_ip="$(kubectl -n kezio-system get pod "${pod_name}" -o jsonpath='{.status.podIP}')"
+          if [[ "${pod_ip}" != "${PROVISIONING_SEEDER_NET1_IP%%/*}" ]]; then
+            echo "::error::per-Image seeder pod ${pod_name} PodIP is ${pod_ip}, want ${PROVISIONING_SEEDER_NET1_IP%%/*}" >&2
+            kubectl -n kezio-system get pod "${pod_name}" -o yaml || true
+            exit 1
+          fi
+          echo "SEEDER_DEPLOYMENT_POD=${pod_name}" >> "$GITHUB_ENV"
+
+      - name: Wait for the Machine to reach Provisioned
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + 1800 ))
+          while true; do
+            state="$(kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.status.state}' || true)"
+            echo "$(date -Is) Machine state: ${state:-<none>}"
+            if [ "${state}" = "Provisioned" ]; then
+              break
+            fi
+            if [ "${state}" = "Error" ]; then
+              echo "::error::Machine ${TARGET_VM_NAME} landed in Error while deploying." >&2
+              kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o yaml
+              exit 1
+            fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::Machine ${TARGET_VM_NAME} did not reach Provisioned within the timeout." >&2
+              exit 1
+            fi
+            sleep 10
+          done
+          kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o yaml
+
+      - name: "Verify layer 1 (controller): status.provisioning matches spec, conditions clean"
+        run: |
+          set -euo pipefail
+          machine_json="$(kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o json)"
+
+          provisioned_image="$(jq -r '.status.provisioning.image.imageRef.name' <<<"${machine_json}")"
+          if [ "${provisioned_image}" != "${IMAGE_NAME}" ]; then
+            echo "::error::status.provisioning.image.imageRef.name = ${provisioned_image}, want ${IMAGE_NAME}" >&2
+            exit 1
+          fi
+
+          target_disk="$(jq -r '.status.provisioning.image.targetDisk' <<<"${machine_json}")"
+          if [ -z "${target_disk}" ] || [ "${target_disk}" = "null" ]; then
+            echo "::error::status.provisioning.image.targetDisk is empty" >&2
+            exit 1
+          fi
+          echo "resolved target disk: ${target_disk}"
+
+          ready_status="$(jq -r '.status.conditions[] | select(.type=="Ready") | .status' <<<"${machine_json}")"
+          if [ "${ready_status}" != "True" ]; then
+            echo "::error::Ready condition status = ${ready_status}, want True" >&2
+            echo "${machine_json}" | jq '.status.conditions'
+            exit 1
+          fi
+
+      - name: "Verify the no-relay proxyDHCP scenario answered leases directly"
+        if: ${{ env.DHCP_SCENARIO == 'no-relay' }}
+        run: |
+          set -euo pipefail
+          existing_dhcp_log="$(kubectl -n kezio-system logs deployment/kezio-existing-dhcp --all-containers --tail=-1)"
+          if ! grep -qF "DHCPDISCOVER" <<<"${existing_dhcp_log}" || ! grep -qF "DHCPACK" <<<"${existing_dhcp_log}"; then
+            echo "::error::existing-dhcp's own log shows no DHCPDISCOVER/DHCPACK exchange" >&2
+            echo "${existing_dhcp_log}"
+            exit 1
+          fi
+
+      - name: "Verify the lease scenario made bootd its own segment's lease authority"
+        if: ${{ env.DHCP_SCENARIO == 'lease' }}
+        run: |
+          set -euo pipefail
+          if kubectl -n kezio-system get deployment/kezio-existing-dhcp >/dev/null 2>&1; then
+            echo "::error::kezio-existing-dhcp exists in the lease scenario" >&2
+            exit 1
+          fi
+
+          bootd_log="$(kubectl -n kezio-system logs deployment/kezio-bootd --all-containers --tail=-1)"
+          if ! grep -qF "DHCPACK" <<<"${bootd_log}"; then
+            echo "::error::bootd's dnsmasq log shows no DHCPACK - it never issued a lease of its own under BOOTD_LEASE_MODE." >&2
+            echo "${bootd_log}"
+            exit 1
+          fi
+
+      # KubeVirtBMC-only accommodation: it restores the one-shot PXE
+      # override only on VMI recreation, not on an in-guest reboot -
+      # unlike real firmware, which consumes it after a single boot.
+      - name: "BMC power cycle to consume KubeVirtBMC's one-shot PXE override (VMI recreation)"
+        run: |
+          set -euo pipefail
+
+          old_uid="$(kubectl get vmi "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.metadata.uid}')"
+          echo "current VMI UID: ${old_uid}"
+
+          kubectl patch machine "${TARGET_VM_NAME}" -n kezio-system --type=merge -p '{"spec":{"online":false}}'
+
+          deadline=$(( $(date +%s) + 300 ))
+          while true; do
+            status="$(kubectl get vm "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.status.printableStatus}' || true)"
+            vmi_now="$(kubectl get vmi "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+            echo "$(date -Is) VM printableStatus=${status:-<none>} VMI UID=${vmi_now:-<gone>}"
+            if [ "${status}" = "Stopped" ] && [ -z "${vmi_now}" ]; then
+              break
+            fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::VM ${TARGET_VM_NAME} did not stop and its VMI did not disappear within the timeout." >&2
+              kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o yaml
+              exit 1
+            fi
+            sleep 5
+          done
+
+          kubectl patch machine "${TARGET_VM_NAME}" -n kezio-system --type=merge -p '{"spec":{"online":true}}'
+
+          deadline=$(( $(date +%s) + 300 ))
+          new_uid=""
+          while true; do
+            status="$(kubectl get vm "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.status.printableStatus}' || true)"
+            new_uid="$(kubectl get vmi "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+            echo "$(date -Is) VM printableStatus=${status:-<none>} VMI UID=${new_uid:-<none>}"
+            if [ "${status}" = "Running" ] && [ -n "${new_uid}" ] && [ "${new_uid}" != "${old_uid}" ]; then
+              break
+            fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::VM ${TARGET_VM_NAME} did not come back up with a new VMI within the timeout." >&2
+              kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o yaml
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "new VMI UID: ${new_uid}"
+
+          deadline=$(( $(date +%s) + 120 ))
+          while true; do
+            if kubectl -n kubevirtbmc-system logs deployment/kubevirtbmc-controller-manager --since=5m 2>/dev/null \
+                | grep -F "oneshot boot order restored successfully" | grep -qF "${TARGET_VM_NAME}"; then
+              echo "KubeVirtBMC restored the original boot order (one-shot consumed)."
+              break
+            fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::KubeVirtBMC never logged consuming the one-shot boot override for ${TARGET_VM_NAME}." >&2
+              kubectl -n kubevirtbmc-system logs deployment/kubevirtbmc-controller-manager --tail=200
+              exit 1
+            fi
+            sleep 5
+          done
+
+          kubectl wait vmi/"${TARGET_VM_NAME}" -n kezio-system --for=condition=Ready --timeout=180s
+
+      - name: "Wait for layer 2 (boot): the deployed disk boots and qemu-guest-agent connects"
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + 600 ))
+          while true; do
+            connected="$(kubectl get vmi "${TARGET_VM_NAME}" -n kezio-system \
+              -o jsonpath='{.status.conditions[?(@.type=="AgentConnected")].status}' || true)"
+            echo "$(date -Is) VMI AgentConnected: ${connected:-<none>}"
+            [ "${connected}" = "True" ] && break
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::qemu-guest-agent never connected within the timeout after Provisioned." >&2
+              kubectl get vmi "${TARGET_VM_NAME}" -n kezio-system -o yaml || true
+              exit 1
+            fi
+            sleep 5
+          done
+
+          guest_os_id="$(kubectl get vmi "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.status.guestOSInfo.id}')"
+          echo "guestOSInfo.id: ${guest_os_id}"
+          if [ "${guest_os_id}" != "ubuntu" ]; then
+            echo "::error::guestOSInfo.id = ${guest_os_id}, want ubuntu" >&2
+            exit 1
+          fi
+
+      # No SSH: read via QGA's guest-file-* commands over virsh
+      # qemu-agent-command inside the VM's own virt-launcher pod.
+      - name: "Verify layer 3 (content): read the marker file back through QGA and compare"
+        run: |
+          set -euo pipefail
+          launcher_pod="$(kubectl get pods -n kezio-system -l "kubevirt.io/vm=${TARGET_VM_NAME}" -o json \
+            | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)][0].metadata.name')"
+          if [ -z "${launcher_pod}" ] || [ "${launcher_pod}" = "null" ]; then
+            echo "::error::no non-terminating virt-launcher pod found for VM ${TARGET_VM_NAME}" >&2
+            exit 1
+          fi
+          domain="kezio-system_${TARGET_VM_NAME}"
+
+          qga_exec() {
+            kubectl exec -n kezio-system "${launcher_pod}" -c compute -- \
+              virsh qemu-agent-command "${domain}" "$1"
+          }
+
+          open_reply="$(qga_exec "{\"execute\":\"guest-file-open\",\"arguments\":{\"path\":\"${MARKER_PATH}\",\"mode\":\"r\"}}")"
+          handle="$(jq -r '.return' <<<"${open_reply}")"
+          if [ "${handle}" = "null" ] || [ -z "${handle}" ]; then
+            echo "::error::guest-file-open on ${MARKER_PATH} failed: ${open_reply}" >&2
+            exit 1
+          fi
+
+          read_reply="$(qga_exec "{\"execute\":\"guest-file-read\",\"arguments\":{\"handle\":${handle},\"count\":4096}}")"
+          qga_exec "{\"execute\":\"guest-file-close\",\"arguments\":{\"handle\":${handle}}}" >/dev/null
+
+          marker_content="$(jq -r '.return["buf-b64"]' <<<"${read_reply}" | base64 -d | tr -d '\n')"
+          echo "marker content: ${marker_content}"
+
+          if [ "${marker_content}" != "${MARKER_TOKEN}" ]; then
+            echo "::error::marker file content mismatch: guest has ${marker_content@Q}, expected ${MARKER_TOKEN@Q}" >&2
+            exit 1
+          fi
+
+      - name: "Verify the per-Image seeder Deployment is torn down after its grace period"
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + 120 ))
+          while kubectl -n kezio-system get deployment "${SEEDER_DEPLOYMENT_NAME}" >/dev/null 2>&1; do
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::per-Image seeder Deployment ${SEEDER_DEPLOYMENT_NAME} was not removed within the grace period plus poll budget." >&2
+              kubectl -n kezio-system get deployment "${SEEDER_DEPLOYMENT_NAME}" -o yaml || true
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "per-Image seeder Deployment ${SEEDER_DEPLOYMENT_NAME} was removed."
+
+      - name: "BMC power cycle: PowerOff through the BMC (spec.online=false)"
+        run: |
+          set -euo pipefail
+          kubectl patch machine "${TARGET_VM_NAME}" -n kezio-system --type=merge -p '{"spec":{"online":false}}'
+
+          deadline=$(( $(date +%s) + 300 ))
+          while true; do
+            status="$(kubectl get vm "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.status.printableStatus}' || true)"
+            powered_on="$(kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.status.poweredOn}' || true)"
+            echo "$(date -Is) VM printableStatus=${status:-<none>} Machine status.poweredOn=${powered_on:-<none>}"
+            [ "${status}" = "Stopped" ] && break
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::VM ${TARGET_VM_NAME} did not stop within the timeout after spec.online=false." >&2
+              kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o yaml
+              exit 1
+            fi
+            sleep 5
+          done
+
+      - name: "BMC power cycle: PowerOn through the BMC (spec.online=true) and reconnect"
+        run: |
+          set -euo pipefail
+          kubectl patch machine "${TARGET_VM_NAME}" -n kezio-system --type=merge -p '{"spec":{"online":true}}'
+
+          deadline=$(( $(date +%s) + 300 ))
+          while true; do
+            status="$(kubectl get vm "${TARGET_VM_NAME}" -n kezio-system -o jsonpath='{.status.printableStatus}' || true)"
+            echo "$(date -Is) VM printableStatus: ${status:-<none>}"
+            [ "${status}" = "Running" ] && break
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::VM ${TARGET_VM_NAME} did not start within the timeout after spec.online=true." >&2
+              kubectl get machine "${TARGET_VM_NAME}" -n kezio-system -o yaml
+              exit 1
+            fi
+            sleep 5
+          done
+          kubectl wait vmi/"${TARGET_VM_NAME}" -n kezio-system --for=condition=Ready --timeout=180s
+
+          deadline=$(( $(date +%s) + 600 ))
+          while true; do
+            connected="$(kubectl get vmi "${TARGET_VM_NAME}" -n kezio-system \
+              -o jsonpath='{.status.conditions[?(@.type=="AgentConnected")].status}' || true)"
+            echo "$(date -Is) VMI AgentConnected: ${connected:-<none>}"
+            [ "${connected}" = "True" ] && break
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::qemu-guest-agent never reconnected after the BMC-driven PowerOn." >&2
+              kubectl get vmi "${TARGET_VM_NAME}" -n kezio-system -o yaml || true
+              exit 1
+            fi
+            sleep 5
+          done
+
+      - name: "Verify layer 3 again after the BMC power cycle: read the marker file back through QGA and compare"
+        run: |
+          set -euo pipefail
+          launcher_pod="$(kubectl get pods -n kezio-system -l "kubevirt.io/vm=${TARGET_VM_NAME}" -o json \
+            | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)][0].metadata.name')"
+          if [ -z "${launcher_pod}" ] || [ "${launcher_pod}" = "null" ]; then
+            echo "::error::no non-terminating virt-launcher pod found for VM ${TARGET_VM_NAME}" >&2
+            exit 1
+          fi
+          domain="kezio-system_${TARGET_VM_NAME}"
+
+          qga_exec() {
+            kubectl exec -n kezio-system "${launcher_pod}" -c compute -- \
+              virsh qemu-agent-command "${domain}" "$1"
+          }
+
+          open_reply="$(qga_exec "{\"execute\":\"guest-file-open\",\"arguments\":{\"path\":\"${MARKER_PATH}\",\"mode\":\"r\"}}")"
+          handle="$(jq -r '.return' <<<"${open_reply}")"
+          if [ "${handle}" = "null" ] || [ -z "${handle}" ]; then
+            echo "::error::guest-file-open on ${MARKER_PATH} failed (post-BMC-power-cycle): ${open_reply}" >&2
+            exit 1
+          fi
+
+          read_reply="$(qga_exec "{\"execute\":\"guest-file-read\",\"arguments\":{\"handle\":${handle},\"count\":4096}}")"
+          qga_exec "{\"execute\":\"guest-file-close\",\"arguments\":{\"handle\":${handle}}}" >/dev/null
+
+          marker_content="$(jq -r '.return["buf-b64"]' <<<"${read_reply}" | base64 -d | tr -d '\n')"
+          echo "marker content (post-BMC-power-cycle): ${marker_content}"
+
+          if [ "${marker_content}" != "${MARKER_TOKEN}" ]; then
+            echo "::error::marker file content mismatch after the BMC power cycle: guest has ${marker_content@Q}, expected ${MARKER_TOKEN@Q}" >&2
+            exit 1
+          fi
+
+      - name: Dump diagnostics on failure
+        uses: ./.github/actions/dump-e2e-diagnostics
+
+      - name: Collect the always-on diagnostics bundle
+        if: always()
+        uses: ./.github/actions/collect-e2e-diagnostics-bundle
+        with:
+          output-dir: ${{ runner.temp }}
+          deployments: |
+            kezio-controller-manager:controller-manager.log
+            kezio-bootd:bootd.log
+            kezio-existing-dhcp:existing-dhcp.log
+            kezio-opentracker:opentracker.log
+            kezio-image-service:image-service.log
+          job-label-selectors: |
+            kezio.kojuro.date/image:ingest.log
+          resources: |
+            machine/${{ env.TARGET_VM_NAME }}:machine.yaml
+            image/${{ env.IMAGE_NAME }}:image.yaml
+            vm/${{ env.TARGET_VM_NAME }}:vm.yaml
+            vmi/${{ env.TARGET_VM_NAME }}:vmi.yaml
+
+      - name: Upload E2E diagnostics artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-diagnostics-${{ github.job }}-${{ env.TARGET_VM_NAME }}
+          path: |
+            ${{ runner.temp }}/console.log
+            ${{ runner.temp }}/diagnostics-dump.log
+            ${{ runner.temp }}/diagnostics-kubevirtbmc-dump.log
+            ${{ runner.temp }}/bootd.log
+            ${{ runner.temp }}/existing-dhcp.log
+            ${{ runner.temp }}/controller-manager.log
+            ${{ runner.temp }}/opentracker.log
+            ${{ runner.temp }}/image-service.log
+            ${{ runner.temp }}/ezio-seeder.log
+            ${{ runner.temp }}/ingest.log
+            ${{ runner.temp }}/machine.yaml
+            ${{ runner.temp }}/image.yaml
+            ${{ runner.temp }}/vm.yaml
+            ${{ runner.temp }}/vmi.yaml
+            ${{ runner.temp }}/events.txt
+          if-no-files-found: ignore
+          retention-days: 14
