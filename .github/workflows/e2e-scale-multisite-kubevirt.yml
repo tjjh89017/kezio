@@ -224,7 +224,7 @@ jobs:
         run: |
           set -euo pipefail
           if ! docker manifest inspect "${BOOT_ARTIFACTS_IMG}" >/dev/null; then
-            echo "::error::No boot-artifacts image at ${BOOT_ARTIFACTS_IMG}. Publish one first: push a \"v*\" tag, or dispatch build-live-image.yml with publish=true - a plain workflow_dispatch of build-live-image.yml without publish=true only validates the build and skips both publishing steps." >&2
+            echo "::error::No boot-artifacts image at ${BOOT_ARTIFACTS_IMG}. Publish one first by pushing a \"v*\" tag - release.yaml builds and publishes kezio-boot-artifacts on every such tag (see that workflow's own header comment)." >&2
             exit 1
           fi
 
