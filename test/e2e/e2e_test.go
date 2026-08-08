@@ -379,17 +379,6 @@ spec:
 	if imagePathEnabled {
 		registerImagePathContext()
 	}
-
-	// registerBootPathContext (e2e_boot_path_test.go) adds the "Boot
-	// path (control-plane wiring)" Context as a sibling of the above,
-	// for the same "same suite behind an env gate" reasoning
-	// imagePathEnabled's call site documents. It runs after
-	// registerImagePathContext's specs, if any, since it switches the
-	// shared controller-manager Deployment to DEPLOYER=agent - see
-	// registerBootPathContext's own doc comment.
-	if bootPathEnabled {
-		registerBootPathContext()
-	}
 })
 
 // serviceAccountToken returns a token for the specified service account in the given namespace.

@@ -68,7 +68,7 @@ func newTestServer(t *testing.T, now time.Time, machines ...*keziov1alpha1.Machi
 }
 
 // TestServer_NeedLeaderElectionIsFalse guards against a regression that
-// broke the boot-path e2e (test/e2e/e2e_boot_path_test.go) - see
+// broke agent registration during a rolling update - see
 // bootserver.TestServer_NeedLeaderElectionIsFalse's doc comment for the
 // full reasoning; this server needs the identical guarantee for the
 // same reason (a rolling update must not leave POST /agent/register

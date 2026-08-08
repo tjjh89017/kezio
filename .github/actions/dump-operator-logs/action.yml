@@ -3,9 +3,9 @@ name: Dump operator logs on failure
 description: >-
   Common pods / controller-manager-logs / events skeleton shared by every
   RKE2-based e2e lane's failure-only diagnostic dump in main.yaml
-  (e2e-fast, e2e-image-path, e2e-boot-path). Each lane also inspects a few
+  (e2e-fast, e2e-image-path). Each lane also inspects a few
   lane-specific resources in between (e.g. image-path's ingest Jobs/PVC/
-  image-service, boot-path's boot/agent Services and Machine CR) - pass
+  image-service) - pass
   those as extra-commands, one kubectl invocation per line, run after the
   controller-manager logs and before the events dump. Always runs under
   `set +e`: a dump step must never fail the job on its own.

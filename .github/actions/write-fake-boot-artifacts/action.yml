@@ -10,8 +10,7 @@ description: >-
   itself, so fake bytes exercise every one of those layers identically
   to real ones. manifest.json is still valid JSON with a real
   agentCommit field, so the "Assert the boot artifacts agent commit"
-  step real lanes run (see e2e-boot-path-kubevirt.yml) can be exercised
-  against it too.
+  step the BMC e2e lane runs can be exercised against it too.
 
 inputs:
   agent-commit:
