@@ -73,10 +73,9 @@ spec:
               bmc:
                 description: |-
                   BMC identifies the board management controller that powers and
-                  boot-orders this machine. When absent, the machine has no reachable
-                  BMC: it net boot-waits for inspection and deployment, and its power
-                  state is left to whoever operates it (or to the agent's own
-                  systemctl calls).
+                  boot-orders this machine. The controller uses it to power the
+                  machine on for inspection and deployment, and to set its power
+                  state afterward.
                 properties:
                   address:
                     description: |-
@@ -364,6 +363,7 @@ spec:
                     type: string
                 type: object
             required:
+            - bmc
             - bootMACAddress
             type: object
           status:

@@ -31,7 +31,10 @@ const MACAddressPattern = `^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$`
 const BMCAddressPattern = `^[a-zA-Z][a-zA-Z0-9+.-]*://.+`
 
 // MachineBMC identifies the board management controller that powers and
-// boot-orders the machine, and the credentials used to reach it.
+// boot-orders the machine, and the credentials used to reach it. Every
+// Machine requires one: the controller uses it to power the machine on
+// for inspection and deployment, and to control its post-deploy power
+// state.
 type MachineBMC struct {
 	// Address is the BMC endpoint URL. Its scheme selects the driver, for
 	// example "redfish://" or "ipmi://".
@@ -168,12 +171,10 @@ const (
 // MachineSpec defines the desired state of Machine.
 type MachineSpec struct {
 	// BMC identifies the board management controller that powers and
-	// boot-orders this machine. When absent, the machine has no reachable
-	// BMC: it net boot-waits for inspection and deployment, and its power
-	// state is left to whoever operates it (or to the agent's own
-	// systemctl calls).
-	// +optional
-	BMC *MachineBMC `json:"bmc,omitempty"`
+	// boot-orders this machine. The controller uses it to power the
+	// machine on for inspection and deployment, and to set its power
+	// state afterward.
+	BMC MachineBMC `json:"bmc"`
 	// BootMACAddress is the MAC address of the NIC the machine network
 	// boots from. The boot config server uses it to find this machine.
 	// +kubebuilder:validation:Pattern=`^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$`
