@@ -47,9 +47,8 @@ type Result struct {
 	ErrorMessage string
 	// PoweredOn is the power state read back from the BMC (GetPowerState)
 	// after a successful BMC-driven PowerOn/PowerOff/PowerCycle. Nil when
-	// no BMC is configured, or the read-back state was
-	// bmc.PowerStateUnknown/failed - callers should not assume the
-	// commanded state took effect in that case.
+	// the read-back state was bmc.PowerStateUnknown/failed - callers
+	// should not assume the commanded state took effect in that case.
 	PoweredOn *bool
 }
 
@@ -61,9 +60,8 @@ type RegisterData struct {
 	// boots from.
 	BootMACAddress string
 	// BMC identifies the board management controller that powers and
-	// boot-orders the machine. Nil means the machine has no BMC
-	// configured.
-	BMC *keziov1alpha1.MachineBMC
+	// boot-orders the machine.
+	BMC keziov1alpha1.MachineBMC
 }
 
 // InspectData carries what the inspect phase needs, and receives the
@@ -127,8 +125,7 @@ type Deployer interface {
 	PowerOff(ctx context.Context) (Result, error)
 	// PowerCycle forces an immediate power-on reset. Used by
 	// reconcileProvisioning's AfterDeploy=Reboot handling and
-	// reconcileInspecting's stuck-machine recovery. Without a BMC it is a
-	// no-op that reports success, like PowerOn/PowerOff.
+	// reconcileInspecting's stuck-machine recovery.
 	PowerCycle(ctx context.Context) (Result, error)
 }
 
