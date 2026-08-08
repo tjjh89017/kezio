@@ -250,13 +250,10 @@ func (r *MachineReconciler) reconcileAvailable(ctx context.Context, machine *kez
 // "systemctl reboot", never through this method. For the no-OS-image
 // case, AfterDeployReboot/AfterDeployPowerOff are handled here through
 // dep.PowerCycle/dep.PowerOff, the same Deployer methods reconcilePower
-// uses: BMC-driven (forced reset / graceful shutdown) when the Machine
-// has one configured, a documented no-op on agentDeployer otherwise - in
-// which case AfterDeployReboot falls back to the agent's own reboot and
-// AfterDeployPowerOff is left to an operator or a future agent-driven
-// poweroff rather than guessed at here. Either way this never races the
-// agent's own reboot, since it only fires for the no-OS-image path that
-// reboot never touches.
+// uses: BMC-driven (forced reset / graceful shutdown) through the
+// Machine's required spec.bmc. This never races the agent's own reboot,
+// since it only fires for the no-OS-image path that reboot never
+// touches.
 func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *keziov1alpha1.Machine, dep deployer.Deployer) (ctrl.Result, error) {
 	if message, err := r.checkReferencedImagesFailed(ctx, machine); err != nil {
 		return ctrl.Result{}, err
@@ -306,13 +303,10 @@ func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *
 			if rcResult.ErrorMessage != "" {
 				return r.recordPhaseError(ctx, machine, reasonProvisionFailed, rcResult.ErrorMessage)
 			}
-			// Only record an actual BMC observation here: the no-BMC
-			// fallback leaves this reboot to the agent's own "systemctl
-			// reboot" (dep.PowerCycle no-ops in that case), so there is
-			// nothing observed to overwrite status.poweredOn with.
-			if rcResult.PoweredOn != nil {
-				machine.Status.PoweredOn = rcResult.PoweredOn
-			}
+			// A power-cycle forces the machine on, so true is the
+			// commanded state applyObservedPower falls back to when the
+			// BMC read-back is inconclusive.
+			applyObservedPower(machine, rcResult, true)
 		}
 	}
 
@@ -451,11 +445,14 @@ func (r *MachineReconciler) reconcilePower(ctx context.Context, machine *keziov1
 }
 
 // applyObservedPower records the machine's power state after a
-// PowerOn/PowerOff call succeeds: result.PoweredOn when the deployer
-// actually read it back from the BMC (see deployer.Result.PoweredOn's
-// doc comment), or desired - the commanded state - when it did not. The
-// latter is the no-BMC fallback, where nothing observes the machine's
-// real state and the commanded state is the best available answer.
+// PowerOn/PowerOff/PowerCycle call succeeds: result.PoweredOn when the
+// deployer actually read it back from the BMC (see
+// deployer.Result.PoweredOn's doc comment), or desired - the commanded
+// state - when it did not. The latter happens when the post-action
+// GetPowerState read-back came back Unknown or failed
+// (observedPowerState in internal/deployer/agent.go): the BMC action
+// itself already succeeded, only the follow-up read was inconclusive, so
+// the commanded state is the best available answer.
 func applyObservedPower(machine *keziov1alpha1.Machine, result deployer.Result, desired bool) {
 	if result.PoweredOn != nil {
 		machine.Status.PoweredOn = result.PoweredOn
