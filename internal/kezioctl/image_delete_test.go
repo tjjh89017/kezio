@@ -65,7 +65,7 @@ func TestImageDelete_ReportsBlockingMachines(t *testing.T) {
 	machine := &keziov1alpha1.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-01", Namespace: "default"},
 		Spec: keziov1alpha1.MachineSpec{
-			BMC:            &keziov1alpha1.MachineBMC{Address: "redfish://example"},
+			BMC:            keziov1alpha1.MachineBMC{Address: "redfish://example"},
 			BootMACAddress: "aa:bb:cc:dd:ee:01",
 			ImageRef:       &keziov1alpha1.NameRef{Name: "golden"},
 		},
@@ -110,7 +110,7 @@ func TestImageDelete_DataImagesAndProvisioningStatusAlsoCount(t *testing.T) {
 	viaDataImage := &keziov1alpha1.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "via-dataimage", Namespace: "default"},
 		Spec: keziov1alpha1.MachineSpec{
-			BMC:            &keziov1alpha1.MachineBMC{Address: "redfish://example"},
+			BMC:            keziov1alpha1.MachineBMC{Address: "redfish://example"},
 			BootMACAddress: "aa:bb:cc:dd:ee:02",
 			DataImages: []keziov1alpha1.MachineDataImage{
 				{ImageRef: keziov1alpha1.NameRef{Name: "data-disk"}},
@@ -120,7 +120,7 @@ func TestImageDelete_DataImagesAndProvisioningStatusAlsoCount(t *testing.T) {
 	viaStatus := &keziov1alpha1.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "via-status", Namespace: "default"},
 		Spec: keziov1alpha1.MachineSpec{
-			BMC:            &keziov1alpha1.MachineBMC{Address: "redfish://example"},
+			BMC:            keziov1alpha1.MachineBMC{Address: "redfish://example"},
 			BootMACAddress: "aa:bb:cc:dd:ee:03",
 		},
 		Status: keziov1alpha1.MachineStatus{
@@ -132,7 +132,7 @@ func TestImageDelete_DataImagesAndProvisioningStatusAlsoCount(t *testing.T) {
 	unrelated := &keziov1alpha1.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "unrelated", Namespace: "default"},
 		Spec: keziov1alpha1.MachineSpec{
-			BMC:            &keziov1alpha1.MachineBMC{Address: "redfish://example"},
+			BMC:            keziov1alpha1.MachineBMC{Address: "redfish://example"},
 			BootMACAddress: "aa:bb:cc:dd:ee:04",
 		},
 	}
