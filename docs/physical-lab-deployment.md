@@ -197,7 +197,8 @@ doc comment).
 kezio assumes the cluster already has routed L3 connectivity to every
 site's provisioning segment, BMC network, and data network. It does
 not ship or require any particular VPN or overlay technology
-(`config/seeder/README.md`, "Cross-network baseline"). If sites are not
+(`config/seeder/README.md`, "Cross-network baseline: routed L3, not
+overlay/NAT"). If sites are not
 already connected at L3, set up a routed VPN mesh (for example
 WireGuard) between each site's gateway before deploying kezio there -
 this is the operator's own network design, and kezio only assumes it
@@ -215,7 +216,7 @@ used:
 - Every target machine's leecher must be able to reach the tracker's
   announce URL (`SEEDER_TRACKER_URL`) and every seeder's BitTorrent
   listen port (`EZIO_BT_PORT`, fixed at `16881` -
-  `config/seeder/ezio-seeder-deployment.yaml`).
+  `internal/controller/seeder_deployment.go`'s `seederBTPort`).
 - The address the tracker hands back to peers must be the seeder's
   real, reachable address. Nothing on the path may rewrite it.
 
@@ -224,25 +225,30 @@ trade-offs.
 
 ### Option 1: routed L3 to a stable cluster Service address
 
-Give the tracker and seeder a stable, routable address reachable from
-every provisioning segment over ordinary L3 routing - a
-LoadBalancer, NodePort, or hostPort in front of the tracker/seeder
-Services, with the operator responsible for provisioning-to-service
-routing.
+Give the tracker and each seeder a stable, routable address reachable
+from every provisioning segment over ordinary L3 routing - a
+LoadBalancer, NodePort, or hostPort in front of the tracker's Service,
+plus a routable address on each seeder pod itself, with the operator
+responsible for provisioning-to-service routing.
 
-As shipped, `config/seeder/ezio-seeder-service.yaml` and
-`config/seeder/opentracker-service.yaml` are both `type: ClusterIP`,
-deliberately: their own comments state this is cluster-internal
-reachability only, because a Service's ClusterIP DNATs traffic, which
-breaks the no-NAT rule for the BitTorrent data port. **kezio does not
-ship a LoadBalancer/NodePort/hostPort variant of these Services.** An
-operator choosing Option 1 must patch a further overlay that exposes
-the tracker's announce port (`6969`) and each seeder's BitTorrent port
-(`16881`) at a stable address reachable from every site, without any
-NAT rewriting that address on the path - a plain ClusterIP does not
-satisfy that; only a genuinely routable exposure (for example
-`hostNetwork`, `hostPort`, or an external L3 LoadBalancer with no
-SNAT/DNAT between it and the pod) does.
+As shipped, `config/seeder/opentracker-service.yaml` is `type:
+ClusterIP`, deliberately: its own comment states this is
+cluster-internal reachability only, because a Service's ClusterIP
+DNATs traffic, which breaks the no-NAT rule for the tracker's announce
+port. **kezio does not ship a LoadBalancer/NodePort/hostPort variant of
+this Service, and it creates no Service at all for a seeder pod.** Each
+per-Image, per-site seeder Deployment
+(`internal/controller/seeder_deployment.go`'s `buildSeederDeployment`)
+is reached only through its own `pod.Status.PodIP` on the data network
+- there is no Service to overlay for it. An operator choosing Option 1
+must patch a further overlay that exposes the tracker's announce port
+(`6969`) at a stable address reachable from every site, without any NAT
+rewriting that address on the path - a plain ClusterIP does not satisfy
+that; only a genuinely routable exposure (for example `hostNetwork`,
+`hostPort`, or an external L3 LoadBalancer with no SNAT/DNAT between it
+and the pod) does. Each seeder's BitTorrent port (`16881`) needs the
+same kind of routable exposure directly on the pod's own IP, since no
+Service exists to route around.
 
 This option centralizes routing decisions at the cluster edge and
 needs no per-site bridge attachment for the tracker/seeder pods
@@ -286,12 +292,13 @@ Whichever option is used, do not make the data-network interface the
 pod's default route. Give it specific routes scoped to the data
 network only, through the NetworkAttachmentDefinition's own routing
 configuration; leave `eth0` carrying the cluster's own pod/service
-CIDRs untouched (`config/seeder/README.md`, "Routing").
+CIDRs untouched (`config/seeder/README.md`, "The no-NAT rule").
 
 ### The tracker is not replicated per site
 
 There is exactly one tracker in a kezio deployment
-(`config/seeder/README.md`, "WAN swarm tuning"; opentracker is deployed
+(`config/seeder/README.md`'s introduction: "The tracker is the only
+always-on part of the seeding data plane"; opentracker is deployed
 once, by `config/seeder`). It must be reachable, by whichever option
 above, from every site. Seeder Deployments, by contrast, are per
 (Image, site): the operator creates and removes one on demand for each
@@ -367,7 +374,7 @@ declare it.
 | 8090 | TCP | Boot config server (`internal/bootserver`, GRUB config + live artifacts) | `config/bootserver/manager-port-patch.yaml`, `config/bootserver/service.yaml` |
 | 8091 | TCP | Agent registration server (`internal/agentserver`) | `config/agentserver/manager-port-patch.yaml`, `config/agentserver/service.yaml` |
 | 6969 | TCP+UDP | opentracker announce | `config/seeder/opentracker-deployment.yaml` (`args: -p 6969`); `config/seeder/opentracker-service.yaml` |
-| 16881 | TCP | ezio-seeder BitTorrent listen port | `config/seeder/ezio-seeder-deployment.yaml` (`EZIO_BT_PORT: "16881"`) |
+| 16881 | TCP | ezio-seeder BitTorrent listen port | `internal/controller/seeder_deployment.go` (`seederBTPort`, wired to the `EZIO_BT_PORT` env var) |
 
 This matches the port list this guide was scoped against exactly - no
 discrepancy was found between the expected list and the code.
@@ -378,7 +385,7 @@ and are worth knowing about when building firewall rules:
 | Port | Protocol | Service | Verified against |
 |---|---|---|---|
 | 80 | TCP | bootd's own reverse proxy front (`BOOTD_PROXY_ADDR`, section 2.4) - only listened on once `BOOTD_AGENT_UPSTREAM_URL` or `BOOTD_BOOT_UPSTREAM_URL` is set | `config/bootd/deployment.yaml` container port `proxy-http`; `cmd/bootd/main.go`'s `bootdConfigFromEnv` |
-| 50051 | TCP | ezio-seeder gRPC control port (cluster-internal only; the operator's `SeederReconciler` talks to it, not a booting machine) | `config/seeder/ezio-seeder-deployment.yaml` (`EZIO_GRPC_LISTEN`); `config/seeder/ezio-seeder-service.yaml` |
+| 50051 | TCP | ezio-seeder gRPC control port (pod-local only; the `seeder-register` container in the same pod dials it at `127.0.0.1:50051`, not a booting machine) | `internal/controller/seeder_deployment.go` (`EZIO_GRPC_LISTEN`, `EZIO_TARGET`) |
 
 BMC ports are not listed above because they depend on the driver
 chosen per machine (`docs/bmc.md`): `redfish://` uses whatever HTTPS
@@ -492,16 +499,16 @@ lane) with a `DHCP_SCENARIO: lease` variant remains open work.
 | Boot config server / agent server default Services are ClusterIP | `config/bootserver/service.yaml`, `config/agentserver/service.yaml` |
 | Ports 8090 / 8091 | `config/bootserver/manager-port-patch.yaml`, `config/agentserver/manager-port-patch.yaml` |
 | No-NAT rule for tracker/seeder | `config/seeder/README.md` |
-| Tracker/seeder Services are ClusterIP-only, no LoadBalancer/NodePort variant shipped | `config/seeder/ezio-seeder-service.yaml`, `config/seeder/opentracker-service.yaml` |
-| e2e lanes use Multus same-bridge attachment for tracker/seeder | `.github/workflows/e2e-kubevirt-reusable.yml` |
-| Fixed BT port 16881 | `config/seeder/ezio-seeder-deployment.yaml` |
+| Tracker Service is ClusterIP-only, no LoadBalancer/NodePort variant shipped; no Service at all exists for a seeder pod | `config/seeder/opentracker-service.yaml`, `internal/controller/seeder_deployment.go` |
+| e2e lanes use Multus same-bridge attachment for tracker/seeder | `.github/workflows/main.yaml` (`e2e-bmc` job) |
+| Fixed BT port 16881 | `internal/controller/seeder_deployment.go` (`seederBTPort`) |
 | Tracker port 6969 | `config/seeder/opentracker-deployment.yaml`, `config/seeder/opentracker-service.yaml` |
-| Tracker is singular, not replicated per site | `config/seeder/README.md` ("Per-site seeders") |
+| Tracker is singular, not replicated per site | `config/seeder/README.md`'s introduction |
 | `spec.networkSite` is descriptive only, not consumed by any controller | `api/v1alpha1/machine_types.go`; confirmed no other reference in `*.go` outside that file |
 | BMC driver selection by URL scheme; IPMI default port 623 | `docs/bmc.md`, `internal/bmc/ipmi/ipmi.go` |
 | Secure Boot chain and CI gap | `docs/secure-boot.md` |
 | `e2e-bmc` runs `DHCP_SCENARIO: no-relay`, exercising scenario 1 end to end | `.github/workflows/main.yaml`, `.github/actions/deploy-bootd/action.yml`, `.github/actions/deploy-existing-dhcp/action.yml` |
 | Scenario 1 and scenario 2 are both covered by the local packet lab's real-packet assertions; only scenario 1 also has a KubeVirt e2e lane | `internal/bootd/lab_test.go`, `internal/bootd/lab_client_test.go`, `hack/bootd-packet-lab.sh` |
 | `redfish+http://` exists and is documented as a lab/test-only scheme | `internal/bmc/redfish/redfish.go` |
-| KubeVirtBMC's Redfish Service is plain HTTP, reached via `redfish+http://` | `.github/workflows/e2e-kubevirt-reusable.yml` (`BMC_REDFISH_ADDRESS`) |
+| KubeVirtBMC's Redfish Service is plain HTTP, reached via `redfish+http://` | `.github/workflows/main.yaml` (`BMC_REDFISH_ADDRESS`) |
 | Multi-site lane's data plane is one flat pod network, not isolated per site | `docs/e2e-scale-multisite-kubevirt.md` |
