@@ -39,7 +39,7 @@ import (
 // whether - and what - dnsmasq answers with. This is what turns the
 // packet lab's dnsmasq-side assertions ("the config renders correctly",
 // "the supervisor stays up") into an end-to-end assertion on the wire:
-// scenario 1 (proxyDHCP) and scenario 3 (lease mode) both hinge on what
+// scenario 1 (proxyDHCP) and scenario 2 (lease mode) both hinge on what
 // a client actually receives, not just on what bootd renders.
 //
 // Skipped unless BOOTD_LAB_CLIENT=1, for the same reason TestDnsmasqLab
@@ -140,7 +140,7 @@ func TestDnsmasqLabClient(t *testing.T) {
 	// DHCPOFFER (scenario 1) never carries the boot filename - a real
 	// PXE ROM only receives it from a second exchange on port 4011
 	// (pxe-service), which this lab client does not replicate. Lease
-	// mode's DHCPOFFER (scenario 3) is a plain, non-proxy offer and
+	// mode's DHCPOFFER (scenario 2) is a plain, non-proxy offer and
 	// does carry it directly, so lease-mode scenarios set this.
 	if wantFile := os.Getenv("BOOTD_LAB_CLIENT_EXPECT_FILE"); wantFile != "" {
 		if offer.file != wantFile {

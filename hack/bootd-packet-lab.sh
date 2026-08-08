@@ -29,7 +29,7 @@
 #     enrolled MAC gets a proxyDHCP DHCPOFFER (yiaddr 0.0.0.0,
 #     siaddr/file naming bootd's own TFTP/GRUB chain); an unenrolled
 #     MAC gets nothing at all.
-#   - Scenario 3: bootd's own lease mode (BOOTD_LAB_LEASE_MODE=1). An
+#   - Scenario 2: bootd's own lease mode (BOOTD_LAB_LEASE_MODE=1). An
 #     enrolled MAC gets a DHCPOFFER with a real, non-zero leased
 #     address; an unenrolled MAC gets nothing at all, same as scenario
 #     1 - the MAC gate does not relax in lease mode.
@@ -215,10 +215,10 @@ run_scenario() {
 run_scenario "scenario1-proxydhcp" \
 	"52:54:00:00:00:01" "52:54:00:00:00:02" 3s ""
 
-# Scenario 3 is a real lease allocation: dnsmasq ICMP-pings the
+# Scenario 2 is a real lease allocation: dnsmasq ICMP-pings the
 # candidate address before offering it (lab-observed: ~3s), so the
 # offer-side timeout needs headroom the proxyDHCP scenario does not.
-run_scenario "scenario3-lease-mode" \
+run_scenario "scenario2-lease-mode" \
 	"52:54:00:00:00:03" "52:54:00:00:00:04" 8s \
 	"BOOTD_LAB_CLIENT_EXPECT_FILE=shimx64.efi BOOTD_LAB_CLIENT_EXPECT_LEASE=1" \
 	BOOTD_LAB_LEASE_MODE=1
@@ -227,4 +227,4 @@ if [[ $FAIL -ne 0 ]]; then
 	echo "== bootd packet lab: FAIL ==" >&2
 	exit 1
 fi
-echo "== bootd packet lab: PASS (scenario 1 proxyDHCP, scenario 3 lease mode) =="
+echo "== bootd packet lab: PASS (scenario 1 proxyDHCP, scenario 2 lease mode) =="
