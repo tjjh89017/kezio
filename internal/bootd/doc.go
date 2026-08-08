@@ -24,12 +24,9 @@ limitations under the License.
 //
 //   - Config rendering: by default bootd is proxyDHCP only and never
 //     touches lease traffic - the site's DHCP server keeps sole ownership
-//     of IP assignment. Config.RelayServerIP additionally relays lease
-//     traffic to an existing site DHCP server (dhcp-relay), for a
-//     provisioning segment with no DHCP server of its own. Config.LeaseMode
-//     instead makes bootd's dnsmasq the segment's own lease server (for a
-//     segment with none at all) - still MAC-gated exactly as in proxy mode;
-//     mutually exclusive with RelayServerIP.
+//     of IP assignment. Config.LeaseMode instead makes bootd's dnsmasq the
+//     segment's own lease server (for a segment with none at all) - still
+//     MAC-gated exactly as in proxy mode.
 //   - MAC gate (MACCache): an informer over Machine objects pushes the
 //     enrolled-MAC set into dnsmasq's dhcp-hostsfile then SIGHUPs it
 //     in-place. Fail-secure: the hostsfile starts and stays empty until the

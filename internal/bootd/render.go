@@ -54,8 +54,7 @@ func HostsfilePath(runDir string) string {
 //
 // Default is proxyDHCP (dhcp-range ...,proxy): never assigns addresses,
 // only answers the PXE portion on ports 67/4011; lease assignment stays
-// with the site's own DHCP server, optionally reached via dhcp-relay
-// (Config.RelayServerIP).
+// with the site's own DHCP server.
 //
 // Config.LeaseMode switches to a full lease-serving dhcp-range instead.
 // pxe-service requires proxyDHCP (fails UEFI secure netboot otherwise),
@@ -67,9 +66,7 @@ func HostsfilePath(runDir string) string {
 // MACs, pxe-service matches only tag:kezio, dhcp-ignore=tag:!kezio drops
 // everything else outright. Lab-verified: dhcp-ignore suppresses the
 // content-free proxy OFFER dnsmasq would otherwise still broadcast to
-// unknown MACs, on both ports 67 and 4011; dhcp-relay forwarding for a
-// denied MAC keeps working since dnsmasq relays before evaluating
-// dhcp-ignore.
+// unknown MACs, on both ports 67 and 4011.
 //
 // pxe-service names x86-64_EFI as the client architecture: lab-verified
 // as the spelling that makes dnsmasq answer an arch-7 (RFC 4578 EFI
@@ -98,11 +95,6 @@ func RenderDnsmasqConf(cfg Config, runDir string) (string, error) {
 	if len(mask) != net.IPv4len {
 		return "", fmt.Errorf("ProvisioningNet %v does not carry an IPv4 netmask", cfg.ProvisioningNet)
 	}
-	if cfg.LeaseMode && cfg.RelayServerIP != nil {
-		return "", fmt.Errorf("LeaseMode and RelayServerIP are mutually exclusive: " +
-			"bootd cannot both serve leases itself and relay to another lease server")
-	}
-
 	nextServer := cfg.NextServerIP.To4()
 	if nextServer == nil {
 		nextServer = serverIP
@@ -156,13 +148,6 @@ func RenderDnsmasqConf(cfg Config, runDir string) (string, error) {
 		// dhcp-ignore is the actual MAC gate in both modes, independent
 		// of how the boot file is selected above.
 		fmt.Fprintf(&b, "dhcp-ignore=tag:!%s\n", kezioTag)
-	}
-	if cfg.RelayServerIP != nil {
-		relayTo := cfg.RelayServerIP.To4()
-		if relayTo == nil {
-			return "", fmt.Errorf("RelayServerIP %v is not a valid IPv4 address", cfg.RelayServerIP)
-		}
-		fmt.Fprintf(&b, "dhcp-relay=%s,%s\n", serverIP, relayTo)
 	}
 	// dhcp-no-override: keep the boot file and server name in the
 	// BOOTP header fields (file/sname) instead of moving them into

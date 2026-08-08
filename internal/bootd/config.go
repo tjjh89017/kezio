@@ -39,9 +39,8 @@ type Config struct {
 
 	// ServerIP is bootd's own IPv4 address on the provisioning
 	// network: the PXE boot-server address advertised in pxe-service
-	// (unless NextServerIP overrides it) and the local relay address
-	// when RelayServerIP is set. Required - there is no meaningful
-	// default for an address that names this host.
+	// (unless NextServerIP overrides it). Required - there is no
+	// meaningful default for an address that names this host.
 	ServerIP net.IP
 
 	// NextServerIP overrides the PXE boot-server address advertised to
@@ -60,12 +59,6 @@ type Config struct {
 	// client. Empty means DefaultBootFilename.
 	BootFilename string
 
-	// RelayServerIP optionally relays every DHCP request heard on the
-	// provisioning network (dhcp-relay) to this existing site DHCP
-	// server, which owns lease assignment. Empty (default) means
-	// proxyDHCP only - bootd never touches lease traffic.
-	RelayServerIP net.IP
-
 	// TFTPDir is the local filesystem directory the in-process TFTP
 	// server (see tftp.go) serves shimx64.efi and grubx64.efi from.
 	TFTPDir string
@@ -80,9 +73,8 @@ type Config struct {
 	// LeaseMode switches dnsmasq from proxyDHCP to full DHCP leases -
 	// the segment's own DHCP authority, for a segment with no other
 	// DHCP server. Off by default, since lease assignment normally
-	// belongs to a site's existing server (directly or via
-	// RelayServerIP). The MAC gate is unchanged (still enrolled-MAC
-	// only). Mutually exclusive with RelayServerIP.
+	// belongs to a site's existing server. The MAC gate is unchanged
+	// (still enrolled-MAC only).
 	LeaseMode bool
 
 	// LeaseRangeStart and LeaseRangeEnd optionally bound the dhcp-range

@@ -92,12 +92,6 @@ func TestDnsmasqLab(t *testing.T) {
 		ProvisioningNet: cidr,
 		TFTPDir:         t.TempDir(),
 	}
-	if s := os.Getenv("BOOTD_LAB_RELAY"); s != "" {
-		cfg.RelayServerIP = net.ParseIP(s)
-		if cfg.RelayServerIP == nil {
-			t.Fatalf("BOOTD_LAB_RELAY %q is not an IP address", s)
-		}
-	}
 	cfg.LeaseMode = os.Getenv("BOOTD_LAB_LEASE_MODE") == "1"
 	if s := os.Getenv("BOOTD_LAB_LEASE_RANGE_START"); s != "" {
 		cfg.LeaseRangeStart = net.ParseIP(s)

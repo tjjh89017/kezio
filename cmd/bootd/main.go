@@ -172,7 +172,6 @@ func main() {
 		"answerAll", cfg.Server.AnswerAll,
 		"tftpDir", cfg.TFTPDir,
 		"provisioningNet", cfg.Server.ProvisioningNet.String(),
-		"relay", cfg.Server.RelayServerIP,
 		"leaseMode", cfg.Server.LeaseMode)
 	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running bootd")
@@ -209,8 +208,7 @@ type bootdConfig struct {
 //
 //   - BOOTD_SERVER_IP: bootd's own IPv4 address on the provisioning
 //     network, advertised as the PXE boot server (unless
-//     BOOTD_NEXT_SERVER_IP overrides it) and used as the relay source
-//     address when relaying is enabled. Required.
+//     BOOTD_NEXT_SERVER_IP overrides it). Required.
 //   - BOOTD_PROVISIONING_CIDR: the provisioning network's IPv4 subnet
 //     in CIDR form, for example "192.0.2.0/24" - rendered as dnsmasq's
 //     proxyDHCP dhcp-range. Required.
@@ -218,19 +216,12 @@ type bootdConfig struct {
 //     DHCP sockets to exclusively (the pod's provisioning attachment,
 //     typically "net1"). Unset means dnsmasq listens on every
 //     interface in the pod's network namespace.
-//   - BOOTD_DHCP_RELAY_SERVER: optional IPv4 address of the site's
-//     existing DHCP server. Set, bootd's dnsmasq additionally relays
-//     every DHCP request on the segment to it (dhcp-relay), so a
-//     provisioning segment without its own DHCP server still gets
-//     leases. Unset (the default): proxyDHCP only, bootd never touches
-//     lease traffic. Mutually exclusive with BOOTD_LEASE_MODE.
 //   - BOOTD_LEASE_MODE: set to "true" to make bootd's dnsmasq the
 //     segment's own DHCP lease server instead of a proxyDHCP front,
 //     for a provisioning segment with no DHCP server of its own. The
 //     MAC gate is unchanged: only enrolled MACs receive a lease, the
 //     same as they receive PXE info in proxy mode - see
-//     internal/bootd.Config.LeaseMode. Defaults to "false". Mutually
-//     exclusive with BOOTD_DHCP_RELAY_SERVER.
+//     internal/bootd.Config.LeaseMode. Defaults to "false".
 //   - BOOTD_LEASE_RANGE_START, BOOTD_LEASE_RANGE_END: optional IPv4
 //     bounds for the BOOTD_LEASE_MODE dhcp-range. Both unset (the
 //     default) auto-derives the range from BOOTD_PROVISIONING_CIDR's
@@ -346,18 +337,7 @@ func bootdConfigFromEnv() (bootdConfig, error) {
 		}
 	}
 
-	var relayServerIP net.IP
-	if s := os.Getenv("BOOTD_DHCP_RELAY_SERVER"); s != "" {
-		relayServerIP = net.ParseIP(s)
-		if relayServerIP == nil || relayServerIP.To4() == nil {
-			return bootdConfig{}, fmt.Errorf("BOOTD_DHCP_RELAY_SERVER %q is not a valid IPv4 address", s)
-		}
-	}
-
 	leaseMode := os.Getenv("BOOTD_LEASE_MODE") == "true"
-	if leaseMode && relayServerIP != nil {
-		return bootdConfig{}, fmt.Errorf("BOOTD_LEASE_MODE and BOOTD_DHCP_RELAY_SERVER are mutually exclusive")
-	}
 	var leaseRangeStart, leaseRangeEnd net.IP
 	startStr, endStr := os.Getenv("BOOTD_LEASE_RANGE_START"), os.Getenv("BOOTD_LEASE_RANGE_END")
 	if (startStr == "") != (endStr == "") {
@@ -391,7 +371,6 @@ func bootdConfigFromEnv() (bootdConfig, error) {
 			NextServerIP:    nextServerIP,
 			ProvisioningNet: provisioningNet,
 			BootFilename:    os.Getenv("BOOTD_BOOT_FILENAME"),
-			RelayServerIP:   relayServerIP,
 			TFTPDir:         tftpDir,
 			AnswerAll:       os.Getenv("BOOTD_ANSWER_ALL") == "true",
 			LeaseMode:       leaseMode,
