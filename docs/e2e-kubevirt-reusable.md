@@ -60,5 +60,5 @@ Each action's own `action.yml` documents its inputs.
 - **Long-running.** `e2e-bmc` budgets 100 minutes: cluster+addon
   installs, a real PXE boot, a real BitTorrent leech, an in-guest
   reboot, and a second BMC power cycle.
-- **BMC-driven only.** kezio never ships without a BMC driver, so the
-  scenario has only the one, KubeVirtBMC-backed shape.
+- **BMC-driven only.** A `Machine` requires a BMC, so the scenario has
+  only the one, KubeVirtBMC-backed shape.

@@ -181,16 +181,16 @@ instead. bootd's proxy is the default path, not the only one.
 
 ### 2.5 BMC network reachability
 
-Every `Machine` with a `spec.bmc.address` needs the controller-manager
-to reach that BMC endpoint over the cluster's own network path -
-`internal/bmc` picks a `redfish://`, `ipmi://`, or `ipmitool://` driver
-from the address's URL scheme (`docs/bmc.md`). Whatever L3 path
-connects the cluster to the site (see section 2.6) must also carry BMC
-traffic to every machine's board management controller. A `Machine`
-with no `spec.bmc` set has no reachable BMC at all: it still net
-boot-waits for inspection and deployment, but its power state is left
-to whoever operates it (`api/v1alpha1/machine_types.go`'s `BMC` field
-doc comment).
+`spec.bmc` is required on every `Machine` (`api/v1alpha1/machine_types.go`'s
+`BMC` field; the validating webhook rejects a `Machine` with an empty
+`spec.bmc.address`). The controller-manager needs to reach that BMC
+endpoint over the cluster's own network path - `internal/bmc` picks a
+`redfish://`, `ipmi://`, or `ipmitool://` driver from the address's URL
+scheme (`docs/bmc.md`). Whatever L3 path connects the cluster to the
+site (see section 2.6) must also carry BMC traffic to every machine's
+board management controller. A machine with no reachable BMC cannot be
+enrolled at all: kezio has no mode that inspects or deploys a machine
+without one.
 
 ### 2.6 Cluster to site L3 baseline
 
@@ -410,14 +410,15 @@ own documentation.
 5. Choose and wire one tracker/seeder connectivity option from
    section 3, per site if needed.
 6. Enroll each `Machine`: set `spec.bootMACAddress`, `spec.bmc.address`
-   (if a BMC is available), and `spec.networkSite`. `networkSite` is
-   descriptive bookkeeping for the operator (it is not read by any
-   controller to route a machine to a specific bootd instance - see
-   `api/v1alpha1/machine_types.go`'s `NetworkSite` field doc comment);
-   the machine's actual bootd instance is whichever one physically
-   answers on the segment its boot NIC is wired to.
-7. Power on the machine (through its BMC, or manually) and confirm it
-   PXE boots, registers with the agent server, and reaches Ready.
+   and `spec.bmc.credentialsSecretRef` (required - see section 2.5),
+   and `spec.networkSite`. `networkSite` is descriptive bookkeeping for
+   the operator (it is not read by any controller to route a machine to
+   a specific bootd instance - see `api/v1alpha1/machine_types.go`'s
+   `NetworkSite` field doc comment); the machine's actual bootd instance
+   is whichever one physically answers on the segment its boot NIC is
+   wired to.
+7. Let kezio power on the machine through its BMC and confirm it PXE
+   boots, registers with the agent server, and reaches Ready.
 
 ## 8. e2e lanes measured against this matrix
 
