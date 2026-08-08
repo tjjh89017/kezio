@@ -285,12 +285,15 @@ type bootdConfig struct {
 //     have (see bootd.DefaultProxyAddr). Ignored, along with both
 //     upstream URLs, when neither upstream URL is set.
 //
-// BOOTD_HTTP_BOOT_URL, BOOTD_DHCP_ADDR, and BOOTD_PXE_ADDR are not
-// supported (dnsmasq's proxyDHCP engine does not answer UEFI HTTP Boot
-// clients, and its DHCP ports are the well-known 67/4011 only); setting
-// any of them is a startup error rather than a silent no-op.
+// BOOTD_HTTP_BOOT_URL, BOOTD_DHCP_ADDR, BOOTD_PXE_ADDR, and
+// BOOTD_DHCP_RELAY_SERVER are not supported (dnsmasq's proxyDHCP engine
+// does not answer UEFI HTTP Boot clients, its DHCP ports are the
+// well-known 67/4011 only, and bootd no longer runs a DHCP relay);
+// setting any of them is a startup error rather than a silent no-op.
 func bootdConfigFromEnv() (bootdConfig, error) {
-	for _, removed := range []string{"BOOTD_HTTP_BOOT_URL", "BOOTD_DHCP_ADDR", "BOOTD_PXE_ADDR"} {
+	for _, removed := range []string{
+		"BOOTD_HTTP_BOOT_URL", "BOOTD_DHCP_ADDR", "BOOTD_PXE_ADDR", "BOOTD_DHCP_RELAY_SERVER",
+	} {
 		if os.Getenv(removed) != "" {
 			return bootdConfig{}, fmt.Errorf(
 				"%s is no longer supported (see cmd/bootd's bootdConfigFromEnv doc comment); unset it", removed)
