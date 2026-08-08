@@ -150,15 +150,12 @@ untrusted one.
 
 None of kezio's CI workflows boot with Secure Boot enabled:
 
-- `.github/workflows/e2e-kubevirt-reusable.yml` (called by `main.yaml`'s
-  `e2e-bmc` job) and `e2e-scale-multisite-kubevirt.yml` each
-  define their target VM with OVMF UEFI firmware and
-  `firmware.bootloader.efi.secureBoot: false` - no Secure Boot keys are
-  enrolled into any of these VMs' firmware, so none of them exercise
-  the shim/GRUB/kernel signature checks at all. The shim and GRUB
-  binaries these lanes boot are still the real signed artifacts
-  published by `build-live-image.yml` (there is no separate "test"
-  build) - only the firmware-side enforcement is off.
+- `.github/workflows/main.yaml`'s `e2e-bmc` job defines its target VM
+  with OVMF UEFI firmware and `firmware.bootloader.efi.secureBoot:
+  false` - no Secure Boot keys are enrolled, so it does not exercise the
+  shim/GRUB/kernel signature checks at all. The shim and GRUB binaries
+  it boots are still the real signed artifacts the `boot-artifacts` job
+  builds - only the firmware-side enforcement is off.
 - `.github/workflows/test-e2e.yml`'s boot-path lane asserts the control
   plane's behavior (proxyDHCP responses, rendered GRUB config content)
   without booting a UEFI machine at all, signed or otherwise.

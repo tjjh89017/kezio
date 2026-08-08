@@ -1,6 +1,12 @@
-# Multi-site scale e2e (`e2e-scale-multisite-kubevirt.yml`)
+# Multi-site scale e2e (historical)
 
-A `workflow_dispatch`-only, release-gated GitHub Actions lane that proves
+> **Status: removed.** `e2e-scale-multisite-kubevirt.yml` is no longer
+> part of kezio's CI. This document is kept as a historical record of
+> what the lane proved and how it worked, for anyone who needs to
+> rebuild an equivalent check later. Do not follow the "Minimal example"
+> or any `uses:` reference below - the workflow file is gone.
+
+A `workflow_dispatch`-only, release-gated GitHub Actions lane that proved
 kezio's per-site seeder topology (`config/seeder/README.md`'s "Per-site
 seeders" section) actually works end to end: two simulated sites, each
 with its own leecher VM, deploying the same Image concurrently through a

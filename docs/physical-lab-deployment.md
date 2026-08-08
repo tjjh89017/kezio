@@ -293,7 +293,7 @@ connections and tracker announce/response traffic directly, with no
 Service and no NAT in the path at all.
 
 This is the shape kezio's own end-to-end lanes use today
-(`.github/workflows/e2e-kubevirt-reusable.yml` creates
+(`.github/workflows/main.yaml`'s `e2e-bmc` job creates
 `NetworkAttachmentDefinition`s for the boot network, the tracker, and
 the seeder, all as static-IPAM Multus attachments on the same
 provisioning bridge).
@@ -443,12 +443,12 @@ own documentation.
 
 ## 8. e2e lanes measured against this matrix
 
-kezio's KubeVirt-based GitHub Actions lanes
-(`e2e-kubevirt-reusable.yml`, called by `main.yaml`'s `e2e-bmc` job, and
-`e2e-scale-multisite-kubevirt.yml`) already label their CI-only
-shortcuts in their own comments. This section restates the ones that
-matter for the scenarios above, for an operator comparing a lab run
-against a CI run.
+kezio's KubeVirt-based GitHub Actions lane (`main.yaml`'s `e2e-bmc` job)
+already labels its CI-only shortcuts in its own comments. This section
+restates the ones that matter for the scenarios above, for an operator
+comparing a lab run against a CI run. Some points below also reference
+the now-retired multi-site lane (`docs/e2e-scale-multisite-kubevirt.md`),
+kept for historical comparison.
 
 - **The lanes always exercise relay mode, on-link.** Every lane that
   simulates "the site already has a DHCP server"

@@ -104,13 +104,11 @@ See `make help` for the full list of targets.
   signature chain the network boot path relies on, the kernel-signing
   story, and what CI does and does not verify.
 - [`docs/e2e-kubevirt-reusable.md`](docs/e2e-kubevirt-reusable.md): how
-  to reuse kezio's KubeVirt BT-transfer e2e test as a `workflow_call`
-  from another repository (the ezio repository in particular), including
-  the input list and defaults.
+  another repository (the ezio repository in particular) can reuse
+  kezio's KubeVirt BT-transfer e2e steps by calling its composite
+  actions under `.github/actions/` directly.
 - [`docs/e2e-scale-multisite-kubevirt.md`](docs/e2e-scale-multisite-kubevirt.md):
-  the release-gated multi-site scale e2e lane - what it proves about the
-  per-site seeder topology, the 2-site simulation on a single runner, and
-  its honest scope/limitations.
+  historical record of the retired multi-site scale e2e lane.
 
 ## Continuous integration
 
