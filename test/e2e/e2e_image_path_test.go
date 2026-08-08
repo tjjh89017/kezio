@@ -275,6 +275,15 @@ func registerImagePathContext() {
 // for a pre-provisioned RKE2 cluster, `kind load docker-image` otherwise.
 // Neither is ever pulled from a registry.
 func buildAndImportImagePathImages() {
+	// CI sets E2E_SKIP_IMAGE_PATH_IMAGE_BUILD=true once it has already
+	// imported both images from the "images" job's artifacts (see
+	// .github/workflows/main.yaml's e2e-image-path job) - never set by a
+	// local dev run.
+	if os.Getenv("E2E_SKIP_IMAGE_PATH_IMAGE_BUILD") == "true" {
+		_, _ = fmt.Fprintf(GinkgoWriter, "E2E_SKIP_IMAGE_PATH_IMAGE_BUILD=true: reusing the already-imported images\n")
+		return
+	}
+
 	runMake("docker-build-ingest", "INGEST_IMG="+ingestImagePathImage)
 	runMake("docker-build-image-service", "IMAGE_SERVICE_IMG="+imageServiceImagePathImage)
 

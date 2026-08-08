@@ -53,6 +53,12 @@ var (
 	// were found on the cluster before this suite tried to install it, so
 	// AfterSuite only tears down an installation this suite itself made.
 	isCertManagerAlreadyInstalled = false
+
+	// skipManagerImageBuild skips building and loading/importing
+	// projectImage when CI already staged it (see .github/workflows/main.yaml's
+	// "Import the manager image" step) - it is set only by CI, never by a
+	// local dev run.
+	skipManagerImageBuild = os.Getenv("E2E_SKIP_MANAGER_IMAGE_BUILD") == "true"
 )
 
 // TestE2E runs the end-to-end (e2e) test suite for the project. These tests execute in an isolated,
@@ -80,6 +86,11 @@ var _ = BeforeSuite(func() {
 		} else {
 			_, _ = fmt.Fprintf(GinkgoWriter, "WARNING: cert-manager is already installed. Skipping installation...\n")
 		}
+	}
+
+	if skipManagerImageBuild {
+		_, _ = fmt.Fprintf(GinkgoWriter, "E2E_SKIP_MANAGER_IMAGE_BUILD=true: reusing the already-imported %s\n", projectImage)
+		return
 	}
 
 	By("building the manager(Operator) image")
