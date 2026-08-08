@@ -19,12 +19,12 @@ Every claim in this guide is checked against the code and manifests
 that implement it. Where a behavior is planned but not built yet, this
 guide says so.
 
-## 1. The three network scenarios
+## 1. The two network scenarios
 
 kezio-bootd never assigns an IP address itself. It answers only the
 PXE part of a boot exchange: which file to fetch over TFTP, and from
 which server. A separate DHCP source must always hand out the IP
-lease. The three scenarios below cover the three ways an operator can
+lease. The two scenarios below cover the two ways an operator can
 supply that DHCP source. Pick the scenario that matches each
 provisioning segment before you deploy `config/bootd` for it.
 
@@ -39,51 +39,24 @@ both services run on the segment at the same time with no conflict
 (`config/bootd/README.md`, "No IP leases: bootd coexists with
 production DHCP").
 
-Setup: do not set `BOOTD_DHCP_RELAY_SERVER`. Leave it unset. This is
-the default.
+Setup: do not set `BOOTD_LEASE_MODE`. Leave it unset. This is the
+default.
 
-This no-relay shape is exercised by the in-repo packet lab
+This shape is exercised by the in-repo packet lab
 (`internal/bootd/lab_test.go`'s `TestDnsmasqLab`, `BOOTD_LAB=1`), which
-runs the real dnsmasq supervisor against a real netns topology with
-`BOOTD_LAB_RELAY` left unset - driven end to end by
-`hack/bootd-packet-lab.sh`, which also sends a real PXE-shaped
-DHCPDISCOVER from the far end of the veth pair
+runs the real dnsmasq supervisor against a real netns topology -
+driven end to end by `hack/bootd-packet-lab.sh`, which also sends a
+real PXE-shaped DHCPDISCOVER from the far end of the veth pair
 (`internal/bootd/lab_client_test.go`'s `TestDnsmasqLabClient`) and
 asserts an enrolled MAC receives a proxyDHCP DHCPOFFER while a denied
-one receives nothing at all. kezio's KubeVirt-based GitHub Actions
-lanes do not separately exercise this no-relay shape end to end - see
-section 8 for what those lanes cover instead.
+one receives nothing at all. It is also exercised end to end by
+kezio's KubeVirt-based GitHub Actions lane - see section 8 for what
+that lane covers.
 
-### Scenario 2: existing DHCP reachable but not on the segment (relay mode)
-
-Use this scenario when the site's DHCP server exists but does not sit
-on the provisioning segment itself - for example, it lives on a
-different VLAN reachable only through routed IP.
-
-Set `BOOTD_DHCP_RELAY_SERVER` to that DHCP server's IP address. bootd's
-dnsmasq then relays every DHCP request it hears on the segment to that
-address (`dhcp-relay`), and relays the reply back to the requesting
-client (`internal/bootd/config.go`'s `RelayServerIP` field;
-`internal/bootd/render.go`'s `dhcp-relay=<local>,<remote>` line). The
-relay path is independent of bootd's MAC gate: a denied MAC's lease
-request still gets relayed, it just receives no PXE boot information
-(`config/bootd/README.md`, "DHCP relay support (optional)").
-
-`dhcp-relay` is standard DHCP relay behavior: the remote DHCP server
-does not have to be on-link, as long as normal IP routing carries the
-relayed packet to it and back. What must be true is that bootd's own
-provisioning-network interface (`BOOTD_DHCP_INTERFACE`) has a route to
-that address.
-
-Setup:
-
-- Set `BOOTD_DHCP_RELAY_SERVER=<site DHCP server IP>`.
-- Confirm bootd's provisioning interface can route to that address.
-
-### Scenario 3: isolated segment (own DHCP server mode)
+### Scenario 2: isolated segment (own DHCP server mode)
 
 Use this scenario when the provisioning segment has no DHCP server of
-its own, and no route to one - bootd itself must hand out IP leases.
+its own - bootd itself must hand out IP leases.
 
 Set `BOOTD_LEASE_MODE=true`. bootd's dnsmasq then renders a
 lease-serving `dhcp-range` (start/end host addresses, no `proxy` flag)
@@ -96,14 +69,13 @@ override it.
 
 The MAC gate does **not** relax in this mode: only enrolled MACs
 receive a lease, the same `dhcp-hostsfile`/`dhcp-ignore` pair scenario
-1 and 2 use. A device that is not an enrolled Machine gets nothing at
-all, even in an otherwise DHCP-server-less segment - it is out of
-scope for bootd to serve it, and this mode does not turn bootd into
-the segment's general-purpose DHCP server. An operator who also needs
-to hand out addresses to unenrolled devices on the same segment must
-run a separate DHCP server for them and use scenario 2 (relay) toward
-it instead; `BOOTD_LEASE_MODE` and `BOOTD_DHCP_RELAY_SERVER` are
-mutually exclusive.
+1 uses. A device that is not an enrolled Machine gets nothing at all,
+even in an otherwise DHCP-server-less segment - it is out of scope for
+bootd to serve it, and this mode does not turn bootd into the
+segment's general-purpose DHCP server. An operator who also needs to
+hand out addresses to unenrolled devices must put those devices on a
+different segment; kezio does not support mixing enrolled and
+unenrolled DHCP traffic on the same lease-mode segment.
 
 PXE delivery differs from proxy mode's `pxe-service`, which does not
 work once dnsmasq is not a proxy (it breaks UEFI secure netboot):
@@ -117,7 +89,6 @@ Setup:
 - Set `BOOTD_LEASE_MODE=true`.
 - Leave `BOOTD_LEASE_RANGE_START`/`BOOTD_LEASE_RANGE_END` unset to
   auto-derive the range, or set both to an explicit sub-range.
-- Do not set `BOOTD_DHCP_RELAY_SERVER` alongside it.
 
 This mode is exercised by the same in-repo packet lab as scenario 1
 (`internal/bootd/lab_test.go`'s `TestDnsmasqLab`, with
@@ -150,8 +121,8 @@ bootd's pod needs a second network interface on the provisioning
 segment, attached with Multus, not `hostNetwork`
 (`config/bootd/networkattachmentdefinition.example.yaml`). Reasons
 given in that file: bootd must see the exact broadcast domain the
-booting machine's NIC is on, and its unrelayed proxyDHCP replies must
-reach only that segment, not every network the node's `eth0` touches.
+booting machine's NIC is on, and its proxyDHCP replies must reach only
+that segment, not every network the node's `eth0` touches.
 
 Steps:
 
@@ -428,7 +399,7 @@ own documentation.
    `SEEDER_SERVICE_NAMESPACE`, `SEEDER_SERVICE_NAME` on the
    controller-manager Deployment.
 4. For each site: create the provisioning NAD (section 2.2), deploy
-   `config/bootd`, and choose one of the three scenarios in section 1.
+   `config/bootd`, and choose one of the two scenarios in section 1.
 5. Choose and wire one tracker/seeder connectivity option from
    section 3, per site if needed.
 6. Enroll each `Machine`: set `spec.bootMACAddress`, `spec.bmc.address`
@@ -450,19 +421,14 @@ comparing a lab run against a CI run. Some points below also reference
 the now-retired multi-site lane (`docs/e2e-scale-multisite-kubevirt.md`),
 kept for historical comparison.
 
-- **The lanes always exercise relay mode, on-link.** Every lane that
-  simulates "the site already has a DHCP server"
-  (`.github/actions/deploy-existing-dhcp`) sets
-  `BOOTD_DHCP_RELAY_SERVER` to that stand-in server's address, even
-  though the stand-in sits on the same `/24` as bootd - a shape where a
-  real deployment (scenario 1) would not need relay at all. The
-  action's own comment already states this plainly ("a plain on-link
-  unicast, since both sit on the same /24, so no host-side routing of
-  any kind is needed for the relay leg to work"), so this is a labeled
-  CI simplification, not a hidden one. What it proves is that the
-  relay code path itself works; it is not a demonstration of scenario 1
-  running without relay. Scenario 1 without relay is covered instead by
-  the in-repo packet lab (`internal/bootd/lab_test.go`).
+- **The `e2e-bmc` lane exercises scenario 1, end to end.** The job sets
+  `DHCP_SCENARIO: no-relay` (`main.yaml`'s `e2e-bmc` job). The
+  `deploy-existing-dhcp` action stands up a separate dnsmasq pod that
+  answers DHCP leases directly on the same segment, while bootd runs
+  pure proxyDHCP beside it - the same shape scenario 1 describes for a
+  real site. Scenario 2 (lease mode) uses the same tooling
+  (`DHCP_SCENARIO: lease`), but no job in `main.yaml` sets it today, so
+  a KubeVirt lane does not exercise lease mode end to end yet.
 - **The dnsmasq stand-in for the site's DHCP server is a pinned,
   third-party image, not kezio's own.** Documented in
   `.github/actions/deploy-existing-dhcp`'s own description; this is
@@ -496,32 +462,28 @@ file needed a labeling change for this review; `docs/bmc.md` gained the
 `redfish+http://` note above since that gap was in the documentation,
 not in the workflow's own comments.
 
-### Coverage note: no-relay and lease mode are packet-lab-proven, not KubeVirt-lane-proven
+### Coverage note: which scenarios are proven by the packet lab, and which by the KubeVirt lane
 
-`hack/bootd-packet-lab.sh` gives scenario 1 (no relay) and scenario 3
-(lease mode) a repeatable, real-packet assertion: a fresh netns/veth
-topology, the real dnsmasq supervisor, and a PXE-shaped client sending
-an actual DHCPDISCOVER, asserting the DHCPOFFER (or its absence for a
-denied MAC) each scenario should produce. That closes the gap this
-section used to describe as unassessed beyond a manual check.
+`hack/bootd-packet-lab.sh` gives scenario 1 (existing DHCP) and
+scenario 2 (lease mode) a repeatable, real-packet assertion: a fresh
+netns/veth topology, the real dnsmasq supervisor, and a PXE-shaped
+client sending an actual DHCPDISCOVER, asserting the DHCPOFFER (or its
+absence for a denied MAC) each scenario should produce.
 
 What it does **not** claim: this is a DHCP/PXE packet-level assertion,
 not a full boot-to-registration KubeVirt run - it stops once the
 DHCPOFFER is verified, before TFTP, GRUB, the boot config server, or
-agent registration. No KubeVirt e2e lane exercises either scenario
-end to end for that reason; both remain relay-mode-only in CI (see
-"The lanes always exercise relay mode, on-link" above). Extending an
-existing KubeVirt lane (or adding a new one) with a no-relay or
-lease-mode variant of `BOOTD_DHCP_RELAY_SERVER`/`BOOTD_LEASE_MODE`
-remains open work.
+agent registration. The `e2e-bmc` KubeVirt lane closes that gap for
+scenario 1: it runs `DHCP_SCENARIO: no-relay` end to end, from PXE
+through agent registration (see the bullet above). Scenario 2 (lease
+mode) has no KubeVirt lane today; extending `e2e-bmc` (or adding a new
+lane) with a `DHCP_SCENARIO: lease` variant remains open work.
 
 ## 9. Fact-check table
 
 | Claim | File verified against |
 |---|---|
 | bootd never assigns IP leases; every `dhcp-range` carries `proxy` | `internal/bootd/render.go` |
-| `BOOTD_DHCP_RELAY_SERVER` enables `dhcp-relay`; empty means proxyDHCP only | `internal/bootd/config.go` (`RelayServerIP`), `cmd/bootd/main.go` (`bootdConfigFromEnv`) |
-| Relay is independent of the MAC gate | `internal/bootd/render.go`'s doc comment |
 | `BOOTD_LEASE_MODE` renders a lease-serving `dhcp-range` and `dhcp-boot`/`dhcp-match` instead of `pxe-service`; the MAC gate is unchanged | `internal/bootd/config.go` (`LeaseMode`), `internal/bootd/render.go`, `internal/bootd/render_test.go` |
 | One bootd replica per segment | `config/bootd/deployment.yaml` (`replicas: 1`) |
 | bootd needs a Multus attachment, not `hostNetwork` | `config/bootd/networkattachmentdefinition.example.yaml` |
@@ -538,8 +500,8 @@ remains open work.
 | `spec.networkSite` is descriptive only, not consumed by any controller | `api/v1alpha1/machine_types.go`; confirmed no other reference in `*.go` outside that file |
 | BMC driver selection by URL scheme; IPMI default port 623 | `docs/bmc.md`, `internal/bmc/ipmi/ipmi.go` |
 | Secure Boot chain and CI gap | `docs/secure-boot.md` |
-| CI's existing-dhcp fixture always sets `BOOTD_DHCP_RELAY_SERVER`, even on-link | `.github/actions/deploy-existing-dhcp/action.yml`, `.github/workflows/e2e-kubevirt-reusable.yml` |
-| No-relay and lease-mode shapes are covered by the local packet lab's real-packet assertions, not a KubeVirt e2e lane | `internal/bootd/lab_test.go`, `internal/bootd/lab_client_test.go`, `hack/bootd-packet-lab.sh` |
+| `e2e-bmc` runs `DHCP_SCENARIO: no-relay`, exercising scenario 1 end to end | `.github/workflows/main.yaml`, `.github/actions/deploy-bootd/action.yml`, `.github/actions/deploy-existing-dhcp/action.yml` |
+| Scenario 1 and scenario 2 are both covered by the local packet lab's real-packet assertions; only scenario 1 also has a KubeVirt e2e lane | `internal/bootd/lab_test.go`, `internal/bootd/lab_client_test.go`, `hack/bootd-packet-lab.sh` |
 | `redfish+http://` exists and is documented as a lab/test-only scheme | `internal/bmc/redfish/redfish.go` |
 | KubeVirtBMC's Redfish Service is plain HTTP, reached via `redfish+http://` | `.github/workflows/e2e-kubevirt-reusable.yml` (`BMC_REDFISH_ADDRESS`) |
 | Multi-site lane's data plane is one flat pod network, not isolated per site | `docs/e2e-scale-multisite-kubevirt.md` |
