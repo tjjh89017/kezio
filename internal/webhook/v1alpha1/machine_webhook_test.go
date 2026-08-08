@@ -35,7 +35,7 @@ var _ = Describe("Machine Webhook", func() {
 
 	validSpec := func() keziov1alpha1.MachineSpec {
 		return keziov1alpha1.MachineSpec{
-			BMC: &keziov1alpha1.MachineBMC{
+			BMC: keziov1alpha1.MachineBMC{
 				Address:              "redfish://198.51.100.10/redfish/v1/Systems/1",
 				CredentialsSecretRef: keziov1alpha1.SecretReference{Name: "bmc-creds"},
 			},
@@ -119,16 +119,19 @@ var _ = Describe("Machine Webhook", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 
-		It("Should admit a spec with an empty bmc block", func() {
-			obj.Spec.BMC = &keziov1alpha1.MachineBMC{}
+		It("Should deny a spec with an empty bmc block", func() {
+			obj.Spec.BMC = keziov1alpha1.MachineBMC{}
 			_, err := validator.ValidateCreate(ctx, obj)
-			Expect(err).NotTo(HaveOccurred())
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.bmc.address is required"))
 		})
 
-		It("Should admit a spec with no bmc block at all (nil)", func() {
-			obj.Spec.BMC = nil
+		It("Should deny a spec with an empty bmc address", func() {
+			obj.Spec.BMC.Address = ""
 			_, err := validator.ValidateCreate(ctx, obj)
-			Expect(err).NotTo(HaveOccurred())
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.bmc.address is required"))
+			Expect(err.Error()).NotTo(ContainSubstring("bmc-creds"))
 		})
 
 		It("Should admit an ipmi:// bmc address", func() {

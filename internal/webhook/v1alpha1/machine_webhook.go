@@ -159,20 +159,19 @@ func validateMachine(machine *keziov1alpha1.Machine) error {
 	return validateNoDuplicateDataImageRefs(machine)
 }
 
-// validateMachineBMC rejects a spec.bmc.address this codebase already
-// knows cannot work, before it reaches a deploy attempt: unparseable,
-// missing a scheme, or naming a scheme with no driver registered in
-// internal/bmc's registry (see the blank imports above for how that
-// registry gets populated in this binary). It also requires
-// credentialsSecretRef whenever address is set, since every registered
-// driver authenticates to the BMC - an address with no way to resolve
-// credentials is certain to fail at connect time.
+// validateMachineBMC rejects a spec.bmc that this codebase already knows
+// cannot work, before it reaches a deploy attempt: a missing address,
+// an unparseable address, an address missing a scheme, or an address
+// naming a scheme with no driver registered in internal/bmc's registry
+// (see the blank imports above for how that registry gets populated in
+// this binary). It also requires credentialsSecretRef, since every
+// registered driver authenticates to the BMC - an address with no way to
+// resolve credentials is certain to fail at connect time.
 //
-// spec.bmc being absent, or its address being empty (the MachineBMC zero
-// value), means this Machine has no BMC configured at all, which is valid:
-// not every Machine's lifecycle goes through kezio-driven power control -
-// a Machine with no reachable BMC net boot-waits for manual power-on
-// instead.
+// Every Machine has a BMC: kezio drives power control through it, so a
+// Machine with no reachable BMC has no way to be deployed. spec.bmc is
+// required by the CRD schema, but its address can still arrive empty (the
+// MachineBMC zero value), so that case is rejected here explicitly.
 //
 // Every error path reports address through (*url.URL).Redacted() where
 // possible, or omits it entirely when it cannot even be parsed enough to
@@ -180,12 +179,9 @@ func validateMachine(machine *keziov1alpha1.Machine) error {
 // example "redfish://user:pass@host/...") must never see them echoed back
 // in an admission rejection message.
 func validateMachineBMC(machine *keziov1alpha1.Machine) error {
-	if machine.Spec.BMC == nil {
-		return nil
-	}
 	address := machine.Spec.BMC.Address
 	if address == "" {
-		return nil
+		return fmt.Errorf("spec.bmc.address is required")
 	}
 
 	parsed, err := url.Parse(address)
