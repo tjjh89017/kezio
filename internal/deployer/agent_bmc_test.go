@@ -25,7 +25,6 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
-	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -207,7 +206,7 @@ func bmcCredsSecret() *corev1.Secret {
 func TestAgentDeployer_Register_WithBMC_SetsOneTimePXEBootAndPowersOn(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	address := testBMCAddress(t)
-	machine.Spec.BMC = &keziov1alpha1.MachineBMC{
+	machine.Spec.BMC = keziov1alpha1.MachineBMC{
 		Address:              address,
 		CredentialsSecretRef: keziov1alpha1.SecretReference{Name: bmcCredsSecretName},
 	}
@@ -216,7 +215,7 @@ func TestAgentDeployer_Register_WithBMC_SetsOneTimePXEBootAndPowersOn(t *testing
 	key := types.NamespacedName{Namespace: "default", Name: "node-01"}
 	dep := &agentDeployer{client: c, key: key, bmcSpec: machine.Spec.BMC}
 
-	result, err := dep.Register(context.Background(), &RegisterData{BMC: machine.Spec.BMC})
+	result, err := dep.Register(context.Background(), &RegisterData{BMC: &machine.Spec.BMC})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -255,7 +254,7 @@ func TestAgentDeployer_Register_WithBMC_SetsOneTimePXEBootAndPowersOn(t *testing
 func TestAgentDeployer_Register_BMCAlreadyOn_PowerCycles(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	address := testBMCAddress(t)
-	machine.Spec.BMC = &keziov1alpha1.MachineBMC{
+	machine.Spec.BMC = keziov1alpha1.MachineBMC{
 		Address:              address,
 		CredentialsSecretRef: keziov1alpha1.SecretReference{Name: bmcCredsSecretName},
 	}
@@ -268,7 +267,7 @@ func TestAgentDeployer_Register_BMCAlreadyOn_PowerCycles(t *testing.T) {
 	fakeKey := strings.TrimPrefix(address, testBMCScheme+"://")
 	testBMCFor(fakeKey).state = bmc.PowerStateOn
 
-	result, err := dep.Register(context.Background(), &RegisterData{BMC: machine.Spec.BMC})
+	result, err := dep.Register(context.Background(), &RegisterData{BMC: &machine.Spec.BMC})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -285,58 +284,12 @@ func TestAgentDeployer_Register_BMCAlreadyOn_PowerCycles(t *testing.T) {
 	}
 }
 
-// Nil bmcSpec must leave Register's netboot-wait no-op unchanged, no BMC
-// contacted.
-func TestAgentDeployer_Register_NoBMC_FallsBackToNetbootWait(t *testing.T) {
-	machine := newTestMachine("default", "node-01")
-	c := newAgentTestClient(t, machine)
-	key := types.NamespacedName{Namespace: "default", Name: "node-01"}
-	dep := &agentDeployer{client: c, key: key}
-
-	result, err := dep.Register(context.Background(), &RegisterData{})
-	if err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-	if result.ErrorMessage != "" {
-		t.Fatalf("ErrorMessage = %q, want empty", result.ErrorMessage)
-	}
-
-	updated := &keziov1alpha1.Machine{}
-	if err := c.Get(context.Background(), key, updated); err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	cond := apimeta.FindStatusCondition(updated.Status.Conditions, keziov1alpha1.MachineConditionAgentRegistered)
-	if cond == nil || cond.Status != metav1.ConditionFalse {
-		t.Fatalf("AgentRegistered condition = %+v, want False (the pre-BMC netboot-wait reset)", cond)
-	}
-}
-
-// A non-nil bmcSpec with an empty Address must take the same no-BMC
-// fallback as a nil bmcSpec, never resolving credentials or connecting.
-func TestAgentDeployer_ConnectBMC_NonNilEmptyAddress_FallsBackToNetbootWait(t *testing.T) {
-	machine := newTestMachine("default", "node-01")
-	c := newAgentTestClient(t, machine)
-	dep := &agentDeployer{
-		client:  c,
-		key:     types.NamespacedName{Namespace: "default", Name: "node-01"},
-		bmcSpec: &keziov1alpha1.MachineBMC{},
-	}
-
-	bmcClient, err := dep.connectBMC(context.Background())
-	if err != nil {
-		t.Fatalf("connectBMC: %v", err)
-	}
-	if bmcClient != nil {
-		t.Fatalf("connectBMC returned %v, want nil (empty address must fall back to netboot-wait)", bmcClient)
-	}
-}
-
 // Missing BMC credentials Secret: Register reports a non-empty
 // ErrorMessage that never contains credential contents.
 func TestAgentDeployer_Register_BMCConnectError_RedactsCredentials(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	address := testBMCAddress(t)
-	machine.Spec.BMC = &keziov1alpha1.MachineBMC{
+	machine.Spec.BMC = keziov1alpha1.MachineBMC{
 		Address:              address,
 		CredentialsSecretRef: keziov1alpha1.SecretReference{Name: "missing-secret"},
 	}
@@ -344,7 +297,7 @@ func TestAgentDeployer_Register_BMCConnectError_RedactsCredentials(t *testing.T)
 	key := types.NamespacedName{Namespace: "default", Name: "node-01"}
 	dep := &agentDeployer{client: c, key: key, bmcSpec: machine.Spec.BMC}
 
-	result, err := dep.Register(context.Background(), &RegisterData{BMC: machine.Spec.BMC})
+	result, err := dep.Register(context.Background(), &RegisterData{BMC: &machine.Spec.BMC})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -361,7 +314,7 @@ func TestAgentDeployer_Register_BMCConnectError_RedactsCredentials(t *testing.T)
 func TestAgentDeployer_PowerOn_WithBMC_CallsThrough(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	address := testBMCAddress(t)
-	machine.Spec.BMC = &keziov1alpha1.MachineBMC{
+	machine.Spec.BMC = keziov1alpha1.MachineBMC{
 		Address:              address,
 		CredentialsSecretRef: keziov1alpha1.SecretReference{Name: bmcCredsSecretName},
 	}
@@ -385,7 +338,7 @@ func TestAgentDeployer_PowerOn_WithBMC_CallsThrough(t *testing.T) {
 func TestAgentDeployer_PowerOff_WithBMC_CallsThrough(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	address := testBMCAddress(t)
-	machine.Spec.BMC = &keziov1alpha1.MachineBMC{
+	machine.Spec.BMC = keziov1alpha1.MachineBMC{
 		Address:              address,
 		CredentialsSecretRef: keziov1alpha1.SecretReference{Name: bmcCredsSecretName},
 	}
@@ -406,35 +359,12 @@ func TestAgentDeployer_PowerOff_WithBMC_CallsThrough(t *testing.T) {
 	}
 }
 
-// No BMC configured: PowerOn/PowerOff stay a no-op (success, Dirty=true).
-func TestAgentDeployer_PowerOnOff_NoBMC_NoOp(t *testing.T) {
-	machine := newTestMachine("default", "node-01")
-	c := newAgentTestClient(t, machine)
-	dep := &agentDeployer{client: c, key: types.NamespacedName{Namespace: "default", Name: "node-01"}}
-
-	onResult, err := dep.PowerOn(context.Background())
-	if err != nil {
-		t.Fatalf("PowerOn: %v", err)
-	}
-	if onResult.ErrorMessage != "" || !onResult.Dirty {
-		t.Fatalf("PowerOn result = %+v, want a dirty success no-op", onResult)
-	}
-
-	offResult, err := dep.PowerOff(context.Background())
-	if err != nil {
-		t.Fatalf("PowerOff: %v", err)
-	}
-	if offResult.ErrorMessage != "" || !offResult.Dirty {
-		t.Fatalf("PowerOff result = %+v, want a dirty success no-op", offResult)
-	}
-}
-
 // A BMC PowerOn call itself failing (not connectBMC) must surface as
 // Result.ErrorMessage.
 func TestAgentDeployer_PowerOn_BMCPowerOnFails_ReportsError(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	address := testBMCAddress(t)
-	machine.Spec.BMC = &keziov1alpha1.MachineBMC{
+	machine.Spec.BMC = keziov1alpha1.MachineBMC{
 		Address:              address,
 		CredentialsSecretRef: keziov1alpha1.SecretReference{Name: bmcCredsSecretName},
 	}
@@ -460,7 +390,7 @@ func TestAgentDeployer_PowerOn_BMCPowerOnFails_ReportsError(t *testing.T) {
 func TestAgentDeployer_PowerOn_ObservesDriverReportedState(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	address := testBMCAddress(t)
-	machine.Spec.BMC = &keziov1alpha1.MachineBMC{
+	machine.Spec.BMC = keziov1alpha1.MachineBMC{
 		Address:              address,
 		CredentialsSecretRef: keziov1alpha1.SecretReference{Name: bmcCredsSecretName},
 	}
@@ -488,7 +418,7 @@ func TestAgentDeployer_PowerOn_ObservesDriverReportedState(t *testing.T) {
 func TestAgentDeployer_PowerOff_ObservesDriverReportedState(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	address := testBMCAddress(t)
-	machine.Spec.BMC = &keziov1alpha1.MachineBMC{
+	machine.Spec.BMC = keziov1alpha1.MachineBMC{
 		Address:              address,
 		CredentialsSecretRef: keziov1alpha1.SecretReference{Name: bmcCredsSecretName},
 	}
@@ -516,7 +446,7 @@ func TestAgentDeployer_PowerOff_ObservesDriverReportedState(t *testing.T) {
 func TestAgentDeployer_PowerOn_GetPowerStateFails_PoweredOnNil(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	address := testBMCAddress(t)
-	machine.Spec.BMC = &keziov1alpha1.MachineBMC{
+	machine.Spec.BMC = keziov1alpha1.MachineBMC{
 		Address:              address,
 		CredentialsSecretRef: keziov1alpha1.SecretReference{Name: bmcCredsSecretName},
 	}
@@ -543,7 +473,7 @@ func TestAgentDeployer_PowerOn_GetPowerStateFails_PoweredOnNil(t *testing.T) {
 func TestAgentDeployer_PowerCycle_WithBMC_CallsThrough(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	address := testBMCAddress(t)
-	machine.Spec.BMC = &keziov1alpha1.MachineBMC{
+	machine.Spec.BMC = keziov1alpha1.MachineBMC{
 		Address:              address,
 		CredentialsSecretRef: keziov1alpha1.SecretReference{Name: bmcCredsSecretName},
 	}
@@ -567,30 +497,11 @@ func TestAgentDeployer_PowerCycle_WithBMC_CallsThrough(t *testing.T) {
 	}
 }
 
-// No BMC configured: PowerCycle stays a no-op reporting success, same as
-// PowerOn/PowerOff.
-func TestAgentDeployer_PowerCycle_NoBMC_NoOp(t *testing.T) {
-	machine := newTestMachine("default", "node-01")
-	c := newAgentTestClient(t, machine)
-	dep := &agentDeployer{client: c, key: types.NamespacedName{Namespace: "default", Name: "node-01"}}
-
-	result, err := dep.PowerCycle(context.Background())
-	if err != nil {
-		t.Fatalf("PowerCycle: %v", err)
-	}
-	if result.ErrorMessage != "" || !result.Dirty {
-		t.Fatalf("PowerCycle result = %+v, want a dirty success no-op", result)
-	}
-	if result.PoweredOn != nil {
-		t.Fatalf("PoweredOn = %v, want nil (nothing observed without a BMC)", *result.PoweredOn)
-	}
-}
-
 // A BMC PowerCycle call itself failing.
 func TestAgentDeployer_PowerCycle_BMCPowerCycleFails_ReportsError(t *testing.T) {
 	machine := newTestMachine("default", "node-01")
 	address := testBMCAddress(t)
-	machine.Spec.BMC = &keziov1alpha1.MachineBMC{
+	machine.Spec.BMC = keziov1alpha1.MachineBMC{
 		Address:              address,
 		CredentialsSecretRef: keziov1alpha1.SecretReference{Name: bmcCredsSecretName},
 	}
