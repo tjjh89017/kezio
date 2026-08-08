@@ -148,7 +148,7 @@ func (r *MachineReconciler) onChange(ctx context.Context, _ ctrl.Request, machin
 func (r *MachineReconciler) reconcileEnrolling(ctx context.Context, machine *keziov1alpha1.Machine, dep deployer.Deployer) (ctrl.Result, error) {
 	result, err := dep.Register(ctx, &deployer.RegisterData{
 		BootMACAddress: machine.Spec.BootMACAddress,
-		BMC:            machine.Spec.BMC,
+		BMC:            &machine.Spec.BMC,
 	})
 	if err != nil {
 		return ctrl.Result{}, err

@@ -73,35 +73,27 @@ func (f *AgentFactory) New(machine *keziov1alpha1.Machine) (Deployer, error) {
 // triggered purely by Machine.status reaching the right state. Inspect
 // and Provision just poll the conditions that out-of-band work writes.
 //
-// Register/PowerOn/PowerOff/PowerCycle drive power and boot order through
-// internal/bmc when the Machine names one (bmcSpec non-nil, non-empty
-// Address; see connectBMC); without one they fall back to no-BMC
-// behavior documented on each method. Deprovision is always a no-op
-// regardless of BMC configuration (see its own doc comment).
+// Register/PowerOn/PowerOff/PowerCycle all drive power and boot order
+// through internal/bmc (see connectBMC); a Machine always names a BMC,
+// enforced by the API type and the admission webhook. Deprovision is
+// always a no-op (see its own doc comment).
 type agentDeployer struct {
 	client client.Client
 	key    types.NamespacedName
 
-	// bmcSpec is the Machine's spec.bmc, captured at New() time (see its
-	// doc comment). Nil (or a non-nil value with an empty Address) means
-	// no BMC is configured for this Machine.
-	bmcSpec *keziov1alpha1.MachineBMC
+	// bmcSpec is the Machine's spec.bmc, captured at New() time.
+	bmcSpec keziov1alpha1.MachineBMC
 	// bmcInsecureSkipVerify is the resolved value of
 	// keziov1alpha1.AnnotationBMCInsecureSkipVerify, captured at New()
 	// time alongside bmcSpec.
 	bmcInsecureSkipVerify bool
 }
 
-// connectBMC resolves and connects to the Machine's BMC, returning (nil,
-// nil) when bmcSpec is nil or its Address is empty - the signal every
-// caller uses to take the no-BMC fallback path. CredentialsSecretRef is
+// connectBMC resolves the Machine's BMC credentials and connects to its
+// BMC, returning a working client or an error. CredentialsSecretRef is
 // resolved from the Machine's own namespace (BMC secrets are not shared
 // across namespaces). Errors never leak secret contents or credentials.
 func (d *agentDeployer) connectBMC(ctx context.Context) (bmc.BMC, error) {
-	if d.bmcSpec == nil || d.bmcSpec.Address == "" {
-		return nil, nil
-	}
-
 	secretKey := types.NamespacedName{Namespace: d.key.Namespace, Name: d.bmcSpec.CredentialsSecretRef.Name}
 	secret := &corev1.Secret{}
 	if err := d.client.Get(ctx, secretKey, secret); err != nil {
@@ -125,15 +117,12 @@ func (d *agentDeployer) connectBMC(ctx context.Context) (bmc.BMC, error) {
 // registration from a prior cycle (e.g. a re-enrolled machine) is never
 // mistaken by Inspect for a fresh one.
 //
-// No BMC: nothing further to do - internal/bootserver serves the
-// live-boot GRUB config to any Inspecting machine (see needsNetBoot);
-// powering on and pointing at PXE is left to the operator.
-// BMC configured: connects, sets one-time PXE boot, then PowerCycles if
-// already on (forcing a reset so the running OS can't ignore the PXE
-// override) or PowerOns otherwise. Any BMC step failing reports
-// Result.ErrorMessage instead of completing, so the reconciler goes to
-// Error rather than advancing to Inspecting behind a machine never told
-// to boot.
+// It then connects to the BMC, sets one-time PXE boot, and PowerCycles if
+// the machine is already on (forcing a reset so the running OS can't
+// ignore the PXE override) or PowerOns otherwise. Any BMC step failing
+// reports Result.ErrorMessage instead of completing, so the reconciler
+// goes to Error rather than advancing to Inspecting behind a machine
+// never told to boot.
 func (d *agentDeployer) Register(ctx context.Context, _ *RegisterData) (Result, error) {
 	machine := &keziov1alpha1.Machine{}
 	if err := d.client.Get(ctx, d.key, machine); err != nil {
@@ -155,9 +144,6 @@ func (d *agentDeployer) Register(ctx context.Context, _ *RegisterData) (Result, 
 	bmcClient, err := d.connectBMC(ctx)
 	if err != nil {
 		return Result{ErrorMessage: err.Error()}, nil
-	}
-	if bmcClient == nil {
-		return Result{}, nil
 	}
 
 	if err := bmcClient.SetOneTimePXEBoot(ctx); err != nil {
@@ -253,8 +239,8 @@ func (d *agentDeployer) Provision(ctx context.Context, data *ProvisionData) (Res
 
 // Deprovision releases a deployed machine ahead of deletion (onDelete
 // calls it, then removes the finalizer on success). Always a no-op that
-// reports success, BMC or not: nothing here holds a live session/lease
-// worth releasing (powering off is not part of Deprovision - it undoes
+// reports success: nothing here holds a live session/lease worth
+// releasing (powering off is not part of Deprovision - it undoes
 // Provision, not Online), and the object is deleted immediately after
 // this succeeds, so there's nothing left to read a cleared
 // status.provisioning back from anyway.
@@ -262,18 +248,13 @@ func (d *agentDeployer) Deprovision(_ context.Context, _ *DeprovisionData) (Resu
 	return Result{Dirty: true}, nil
 }
 
-// PowerOn powers the machine on through its BMC when configured. Without
-// a BMC it's a no-op reporting success, so a Machine can settle in
-// Available/Provisioned instead of retrying power management it has no
-// way to act on. Result.PoweredOn is filled from a post-action
-// GetPowerState read (observedPowerState), not assumed from success.
+// PowerOn powers the machine on through its BMC. Result.PoweredOn is
+// filled from a post-action GetPowerState read (observedPowerState), not
+// assumed from success.
 func (d *agentDeployer) PowerOn(ctx context.Context) (Result, error) {
 	bmcClient, err := d.connectBMC(ctx)
 	if err != nil {
 		return Result{ErrorMessage: err.Error()}, nil
-	}
-	if bmcClient == nil {
-		return Result{Dirty: true}, nil
 	}
 	if err := bmcClient.PowerOn(ctx); err != nil {
 		return Result{ErrorMessage: fmt.Sprintf("agent deployer: powering on machine: %v", err)}, nil
@@ -281,17 +262,13 @@ func (d *agentDeployer) PowerOn(ctx context.Context) (Result, error) {
 	return Result{Dirty: true, PoweredOn: observedPowerState(ctx, bmcClient)}, nil
 }
 
-// PowerOff powers the machine off through its BMC when configured (see
-// PowerOn for the no-BMC fallback and Result.PoweredOn). BMC.PowerOff is
-// a graceful shutdown, equivalent to an agent-issued "systemctl
-// poweroff".
+// PowerOff powers the machine off through its BMC (see PowerOn for
+// Result.PoweredOn). BMC.PowerOff is a graceful shutdown, equivalent to
+// an agent-issued "systemctl poweroff".
 func (d *agentDeployer) PowerOff(ctx context.Context) (Result, error) {
 	bmcClient, err := d.connectBMC(ctx)
 	if err != nil {
 		return Result{ErrorMessage: err.Error()}, nil
-	}
-	if bmcClient == nil {
-		return Result{Dirty: true}, nil
 	}
 	if err := bmcClient.PowerOff(ctx); err != nil {
 		return Result{ErrorMessage: fmt.Sprintf("agent deployer: powering off machine: %v", err)}, nil
@@ -299,17 +276,13 @@ func (d *agentDeployer) PowerOff(ctx context.Context) (Result, error) {
 	return Result{Dirty: true, PoweredOn: observedPowerState(ctx, bmcClient)}, nil
 }
 
-// PowerCycle forces an immediate power-on reset through its BMC when
-// configured (see PowerOn for the no-BMC fallback). Drives
+// PowerCycle forces an immediate power-on reset through its BMC. Drives
 // reconcileProvisioning's AfterDeploy=Reboot handling and
 // reconcileInspecting's stuck-machine recovery.
 func (d *agentDeployer) PowerCycle(ctx context.Context) (Result, error) {
 	bmcClient, err := d.connectBMC(ctx)
 	if err != nil {
 		return Result{ErrorMessage: err.Error()}, nil
-	}
-	if bmcClient == nil {
-		return Result{Dirty: true}, nil
 	}
 	if err := bmcClient.PowerCycle(ctx); err != nil {
 		return Result{ErrorMessage: fmt.Sprintf("agent deployer: power-cycling machine: %v", err)}, nil
