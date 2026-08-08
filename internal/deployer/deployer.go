@@ -59,9 +59,6 @@ type RegisterData struct {
 	// BootMACAddress is the MAC address of the NIC the machine network
 	// boots from.
 	BootMACAddress string
-	// BMC identifies the board management controller that powers and
-	// boot-orders the machine.
-	BMC keziov1alpha1.MachineBMC
 }
 
 // InspectData carries what the inspect phase needs, and receives the
