@@ -37,13 +37,6 @@ on:
           - lease
         default: no-relay
 
-# A manual dispatch gets its own group (keyed by run id) so a later push
-# can't cancel a deliberately requested run; push/PR runs share a group
-# keyed by ref so a newer commit supersedes the previous run's verdict.
-concurrency:
-  group: main-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
-  cancel-in-progress: true
-
 permissions:
   contents: read
 

@@ -117,13 +117,6 @@ on:
         type: string
         default: "jpillora/dnsmasq:1.1@sha256:78a9c6711031a557d9c6a79a0b6e060c4ac09de3a8755c78d690acb55b4ccd15"
 
-# Manually dispatched runs get their own group (keyed by run id) so a
-# deliberately requested verdict - or two scenario dispatches back to
-# back - cannot cancel each other; push runs keep superseding per ref.
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
-  cancel-in-progress: true
-
 permissions:
   contents: read
 
