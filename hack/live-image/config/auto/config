@@ -17,12 +17,22 @@
 # release-gated CI build. See also config/rootfs/excludes, which drops
 # documentation/man/locale data from the squashfs at packing time - the
 # other lever against that same target.
+#
+# --parent-archive-areas duplicates --archive-areas: this is not a
+# derivative build (no --derivative flag), so the actual /etc/apt/
+# sources.list live-build writes into the chroot is built from
+# LB_PARENT_ARCHIVE_AREAS, not LB_ARCHIVE_AREAS - the latter only feeds
+# a derivative's own second source line, unused here. Without this,
+# --archive-areas alone silently leaves non-free-firmware absent from
+# the chroot's actual apt sources (verified against live-build's
+# Create_apt_sources_list).
 set -e
 
 lb config noauto \
 	--architectures amd64 \
 	--distribution sid \
 	--archive-areas "main non-free-firmware" \
+	--parent-archive-areas "main non-free-firmware" \
 	--binary-images iso-hybrid \
 	--linux-packages "linux-image" \
 	--debian-installer none \

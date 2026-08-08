@@ -1,4 +1,10 @@
 # .chroot only, no .binary counterpart - this repo is never configured
 # in the shipped image, only during the build so
 # hooks/live/0400-install-ezio.hook.chroot can install the ezio .deb.
-deb https://free.nchc.org.tw/drbl-core drbl live-sid
+#
+# Plain http, not https: live-build applies this archive before the
+# chroot has ca-certificates installed, so an https URL here fails
+# closed on a TLS trust error before apt ever gets to check the GPG
+# signature. drbl.key.chroot is what actually authenticates this repo -
+# TLS was never load-bearing.
+deb http://free.nchc.org.tw/drbl-core drbl live-sid
