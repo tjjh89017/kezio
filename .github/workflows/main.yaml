@@ -711,8 +711,8 @@ jobs:
     # real partclone/BitTorrent deploy, KubeVirtBMC's own control plane
     # and webhook, plus an extra power cycle) - see the reusable
     # workflow's own timeout-minutes for the budget.
-    name: Run BMC-driven KubeVirt e2e (KubeVirtBMC + KubeVirt VM)
-    needs: [lint, test, boot-artifacts]
+    name: BMC e2e
+    needs: [lint, test, boot-artifacts, e2e-fast, e2e-image-path, e2e-boot-path]
     # needs.boot-artifacts.result == 'success' is explicit, not implicit:
     # a skipped job (e.g. workflow_dispatch with run_boot_artifacts=false)
     # still satisfies the default success() check GitHub Actions uses for
