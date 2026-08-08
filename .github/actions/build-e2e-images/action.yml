@@ -6,11 +6,11 @@ description: >-
   ingest/seeder/image-service trio through `docker buildx build` with
   GitHub Actions layer caching (shared with publish.yml's scope names),
   the manager and bootd images through their own `make docker-build*`
-  targets, kezioctl, and - when build-boot-artifacts is set - the live
-  boot image and kezio-boot-artifacts image built from this checkout's
-  own cmd/agent, the only way this job boots an agent built from the
-  commit under test rather than build-live-image.yml's last published
-  one. RKE2 is installed in a later, separate step (it owns the
+  targets, kezioctl, and the kezio-boot-artifacts image, packaged either
+  from a freshly built live boot image (build-boot-artifacts) or from a
+  same-run artifact download the calling job already staged at dist/live/
+  (boot-artifacts-downloaded) - see those two inputs below for the
+  precedence. RKE2 is installed in a later, separate step (it owns the
   containerd these images get imported into), so importing them happens
   later too, in its own step - not here.
 
@@ -24,9 +24,20 @@ inputs:
   build-boot-artifacts:
     description: >-
       Mirrors the reusable workflow's own build_boot_artifacts input:
-      when true, also builds the live boot image and kezio-boot-artifacts
-      image from this checkout.
+      when true, also builds the live boot image (hack/live-image/build.sh)
+      from this checkout before packaging it into the kezio-boot-artifacts
+      image. Ignored when boot-artifacts-downloaded is true - dist/live/
+      is already populated in that case.
     required: true
+  boot-artifacts-downloaded:
+    description: >-
+      Mirrors the reusable workflow's own boot_artifacts_artifact input
+      (as a boolean): true when the calling job already downloaded a
+      same-run artifact into dist/live/, so this action packages that
+      into the kezio-boot-artifacts image without running
+      hack/live-image/build.sh itself.
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -76,14 +87,24 @@ runs:
         set -euo pipefail
         make build-kezioctl
 
-    - name: Build the live boot image and kezio-boot-artifacts image
+    - name: Build the live boot image
       # AGENT_COMMIT is written into manifest.json and must match what the
       # "Assert the boot artifacts agent commit" step later reads back.
-      if: ${{ inputs.build-boot-artifacts == 'true' }}
+      # Skipped when boot-artifacts-downloaded is true: the calling job
+      # already staged dist/live/ from a same-run artifact download, with
+      # its own manifest.json already carrying the upstream build's
+      # AGENT_COMMIT (that job's checkout is the same commit, so the two
+      # agree without this step re-running the build).
+      if: ${{ inputs.build-boot-artifacts == 'true' && inputs.boot-artifacts-downloaded != 'true' }}
       shell: bash
       env:
         AGENT_COMMIT: ${{ github.sha }}
-      run: |
-        set -euo pipefail
-        hack/live-image/build.sh
-        make docker-build-boot-artifacts BOOT_ARTIFACTS_IMG="${BOOT_ARTIFACTS_IMG}"
+      run: hack/live-image/build.sh
+
+    - name: Build the kezio-boot-artifacts image
+      # Packages whatever is already at dist/live/ - either just built by
+      # the step above, or downloaded by the calling job's own "Download
+      # the boot-artifacts hand-off" step.
+      if: ${{ inputs.build-boot-artifacts == 'true' || inputs.boot-artifacts-downloaded == 'true' }}
+      shell: bash
+      run: make docker-build-boot-artifacts BOOT_ARTIFACTS_IMG="${BOOT_ARTIFACTS_IMG}"

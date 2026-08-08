@@ -1,13 +1,12 @@
 name: E2E Full Deploy (KubeVirt VM) - reusable
 
 # The BT-transfer/full-deploy scenario, callable via `workflow_call` - by
-# kezio's own `e2e-bmc-kubevirt.yml` (a thin `workflow_dispatch` wrapper
-# adding a KubeVirtBMC-release gate - see that file's header), and by the
-# upstream ezio repository, which owns the BitTorrent engine this
-# scenario seeds and leeches through. ezio ships build-only CI and no
-# test suite of its own; calling this workflow gives it a real
-# integration test for each ezio change, by overriding `ezio_ref` with
-# the revision under test.
+# kezio's own `main.yaml` (the `e2e-bmc` job, part of the single
+# needs-graph every push and pull request runs), and by the upstream
+# ezio repository, which owns the BitTorrent engine this scenario seeds
+# and leeches through. ezio ships build-only CI and no test suite of its
+# own; calling this workflow gives it a real integration test for each
+# ezio change, by overriding `ezio_ref` with the revision under test.
 #
 # What this job proves end to end: KubeVirt + Multus stand up a target VM
 # and a provisioning network; a real Image is ingested (qemu-img +
@@ -61,27 +60,48 @@ on:
         default: "v2.0.29"
       boot_artifacts_image:
         description: >-
-          kezio-boot-artifacts OCI image to boot (see .github/workflows/
-          build-live-image.yml, which builds and pushes it). Ignored when
-          build_boot_artifacts is true. Defaults to the published
-          "latest" tag - the kubelet pulls it directly inside the
-          cluster, same as any other image reference.
+          kezio-boot-artifacts OCI image to boot - a published ghcr tag,
+          pulled by the kubelet directly inside the cluster, same as any
+          other image reference. Ignored when boot_artifacts_artifact is
+          set or build_boot_artifacts is true (see both below for the
+          precedence). Defaults to the published "latest" tag.
         required: false
         type: string
         default: "ghcr.io/tjjh89017/kezio-boot-artifacts:latest"
+      boot_artifacts_artifact:
+        description: >-
+          Name of a workflow artifact - produced by an upstream job in
+          the SAME workflow run (for example kezio's own main.yaml
+          "Boot artifacts" job) with actions/upload-artifact, holding
+          dist/live/{vmlinuz,initrd.img,filesystem.squashfs,shimx64.efi,
+          grubx64.efi,manifest.json,sha256sums} - to download and package
+          into the kezio-boot-artifacts image this job boots, instead of
+          building it in-lane or pulling a published image. This is the
+          preferred mode for kezio's own main.yaml graph: it builds the
+          live boot image exactly once (in the "Boot artifacts" job) and
+          every e2e job downstream reuses that same build, rather than
+          each e2e job repeating the many-minutes `lb build` or falling
+          back to a possibly-stale published ghcr image. Empty (the
+          default) disables this mode. Precedence when more than one
+          boot-artifacts input is set: boot_artifacts_artifact wins over
+          build_boot_artifacts, which wins over boot_artifacts_image.
+        required: false
+        type: string
+        default: ""
       build_boot_artifacts:
         description: >-
           Build the live boot image (hack/live-image/build.sh, which
           cross-compiles cmd/agent from this checkout) and the
-          kezio-boot-artifacts image from it, instead of pulling
-          boot_artifacts_image. This is the only way this job boots a
-          kezio-agent built from the commit under test rather than
-          whatever build-live-image.yml last published - set it when
-          cmd/agent or internal/agent changed and the change needs an
-          actual boot to prove it. Costs roughly the same many-minutes
-          budget build-live-image.yml itself reserves for the identical
+          kezio-boot-artifacts image from it, instead of consuming
+          boot_artifacts_artifact or pulling boot_artifacts_image (see
+          both above for the precedence). This is the only way this job
+          boots a kezio-agent built from the commit under test without a
+          prior job's artifact to hand off - set it when cmd/agent or
+          internal/agent changed and no upstream "Boot artifacts" job
+          ran in this same workflow. Costs roughly the same many-minutes
+          budget that upstream job itself reserves for the identical
           script (see this job's own timeout-minutes), so it is opt-in,
-          not the default.
+          not the default. Ignored when boot_artifacts_artifact is set.
         required: false
         type: boolean
         default: false
@@ -267,11 +287,19 @@ env:
   EZIO_REF: ${{ inputs.ezio_ref }}
   MANAGER_IMG: ${{ inputs.manager_image }}
   BOOTD_IMG: ${{ inputs.bootd_image }}
-  # When build_boot_artifacts is set, the live-image build step below
-  # builds and locally imports this exact tag; otherwise this is
-  # boot_artifacts_image, pulled by the kubelet from ghcr with no local
-  # build or import at all.
-  BOOT_ARTIFACTS_IMG: ${{ inputs.build_boot_artifacts && 'example.com/kezio-boot-artifacts:e2e-deploy' || inputs.boot_artifacts_image }}
+  # When boot_artifacts_artifact or build_boot_artifacts is set, this job
+  # builds and locally imports this exact tag from either the downloaded
+  # artifact or an in-lane hack/live-image/build.sh run (see
+  # BOOT_ARTIFACTS_LOCAL below); otherwise this is boot_artifacts_image,
+  # pulled by the kubelet from ghcr with no local build or import at all.
+  BOOT_ARTIFACTS_IMG: ${{ (inputs.boot_artifacts_artifact != '' || inputs.build_boot_artifacts) && 'example.com/kezio-boot-artifacts:e2e-deploy' || inputs.boot_artifacts_image }}
+  # "true" when this job builds and locally imports its own
+  # kezio-boot-artifacts image (from a downloaded artifact or an in-lane
+  # build) rather than relying on the kubelet to pull boot_artifacts_image
+  # from ghcr. Centralizes the precedence check (boot_artifacts_artifact
+  # over build_boot_artifacts) so every later step tests one flag instead
+  # of repeating the same two-input expression.
+  BOOT_ARTIFACTS_LOCAL: ${{ inputs.boot_artifacts_artifact != '' || inputs.build_boot_artifacts }}
   INGEST_IMG: ${{ inputs.ingest_image }}
   SEEDER_IMG: ${{ inputs.seeder_image }}
   IMAGE_SERVICE_IMG: ${{ inputs.image_service_image }}
@@ -300,6 +328,10 @@ jobs:
     # an in-guest reboot, a second PXE cycle back to firmware, the
     # deployed OS booting far enough for qemu-guest-agent to connect, and
     # a second BMC power cycle with its own guest-agent reconnect wait.
+    # boot_artifacts_artifact costs about the same as the plain-pull
+    # baseline (a download plus a cheap `docker build` repackage, not a
+    # from-source `lb build`), so it stays at the 100-minute floor rather
+    # than build_boot_artifacts' 190.
     timeout-minutes: ${{ inputs.build_boot_artifacts && 190 || 100 }}
     steps:
       - name: Clone the code
@@ -309,6 +341,37 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+
+      - name: Download the boot-artifacts hand-off
+        # Only source that needs no network pull and no in-lane `lb
+        # build`: an upstream job in this same workflow run (kezio's own
+        # main.yaml "Boot artifacts" job) already produced these files -
+        # see boot_artifacts_artifact's own input description for the
+        # full precedence. actions/download-artifact resolves a bare
+        # `name:` against the current run, so no run-id/token plumbing is
+        # needed for a same-run, same-workflow hand-off like this one.
+        if: ${{ inputs.boot_artifacts_artifact != '' }}
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ inputs.boot_artifacts_artifact }}
+          path: dist/live
+
+      - name: Fail fast if the downloaded boot artifacts are empty
+        # Catches a bad artifact name or an upstream job that uploaded
+        # nothing, before the many-minutes KVM/cluster setup below ever
+        # starts - the same "check early" reasoning as the image-exists
+        # check further down.
+        if: ${{ inputs.boot_artifacts_artifact != '' }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for f in vmlinuz initrd.img filesystem.squashfs shimx64.efi grubx64.efi manifest.json; do
+            [ -s "dist/live/${f}" ] || missing+=("${f}")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::boot_artifacts_artifact '${{ inputs.boot_artifacts_artifact }}' downloaded but is missing or empty: ${missing[*]} - the upstream job's artifact hand-off produced nothing usable." >&2
+            exit 1
+          fi
 
       - name: Fail fast unless /dev/kvm is usable
         run: |
@@ -328,13 +391,14 @@ jobs:
         # 20+ minutes of KVM/cluster/image-build setup - a missing image
         # would otherwise surface only as ImagePullBackOff and a rollout
         # timeout well after that setup cost was already paid. Check here
-        # instead. Skipped when build_boot_artifacts is set: that mode
-        # builds and locally imports its own tag, which no registry has.
-        if: ${{ !inputs.build_boot_artifacts }}
+        # instead. Skipped whenever BOOT_ARTIFACTS_LOCAL is set: that mode
+        # builds and locally imports its own tag (from either a
+        # downloaded artifact or an in-lane build), which no registry has.
+        if: ${{ env.BOOT_ARTIFACTS_LOCAL != 'true' }}
         run: |
           set -euo pipefail
           if ! docker manifest inspect "${BOOT_ARTIFACTS_IMG}" >/dev/null; then
-            echo "::error::No boot-artifacts image at ${BOOT_ARTIFACTS_IMG}. Publish one first: push a \"v*\" tag, or dispatch build-live-image.yml with publish=true (see that workflow's own header comment) - a plain workflow_dispatch of build-live-image.yml without publish=true only validates the build and skips both publishing steps." >&2
+            echo "::error::No boot-artifacts image at ${BOOT_ARTIFACTS_IMG}. Publish one first by pushing a \"v*\" tag - release.yaml builds and publishes kezio-boot-artifacts on every such tag (see that workflow's own header comment)." >&2
             exit 1
           fi
 
@@ -420,6 +484,7 @@ jobs:
         uses: ./.github/actions/build-e2e-images
         with:
           build-boot-artifacts: ${{ inputs.build_boot_artifacts }}
+          boot-artifacts-downloaded: ${{ inputs.boot_artifacts_artifact != '' }}
 
       - name: Install RKE2 with Multus enabled
         # Shared with e2e-boot-path-kubevirt.yml and
@@ -457,11 +522,12 @@ jobs:
         run: |
           set -euo pipefail
           images=("${MANAGER_IMG}" "${BOOTD_IMG}" "${INGEST_IMG}" "${SEEDER_IMG}" "${IMAGE_SERVICE_IMG}")
-          # BOOT_ARTIFACTS_IMG only needs a local import when
-          # build_boot_artifacts built it locally above - the default
+          # BOOT_ARTIFACTS_IMG only needs a local import when this job
+          # built it locally above (from a downloaded artifact or an
+          # in-lane build - see BOOT_ARTIFACTS_LOCAL) - the default
           # (published ghcr) tag is left for the kubelet to pull itself
           # inside the cluster, exactly like a real deployment.
-          if [ "${{ inputs.build_boot_artifacts }}" = "true" ]; then
+          if [ "${BOOT_ARTIFACTS_LOCAL}" = "true" ]; then
             images+=("${BOOT_ARTIFACTS_IMG}")
           fi
           for img in "${images[@]}"; do
@@ -670,14 +736,16 @@ jobs:
 
       - name: Assert the boot artifacts agent commit
         # This step proves the agent booted was built from this commit
-        # (build_boot_artifacts), or states exactly which commit it
-        # actually booted instead - so a lane can never go green while
-        # silently booting a stale kezio-agent.
+        # (BOOT_ARTIFACTS_LOCAL: either a downloaded same-run artifact or
+        # an in-lane build_boot_artifacts build, both built from
+        # expected-commit), or states exactly which commit it actually
+        # booted instead - so a lane can never go green while silently
+        # booting a stale kezio-agent.
         uses: ./.github/actions/assert-boot-artifacts-agent-commit
         with:
           bootd-ip: ${{ env.PROVISIONING_BOOTD_NET1_IP }}
           expected-commit: ${{ github.sha }}
-          build-boot-artifacts: ${{ inputs.build_boot_artifacts }}
+          build-boot-artifacts: ${{ env.BOOT_ARTIFACTS_LOCAL }}
 
       - name: Ingest the marker-customized Ubuntu image through kezioctl
         run: |
