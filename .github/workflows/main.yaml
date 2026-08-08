@@ -181,6 +181,20 @@ jobs:
             dist/live/sha256sums
           if-no-files-found: error
 
+  # One stable check the branch ruleset can require in place of every
+  # per-image matrix cell plus the boot-artifacts build, so adding or
+  # dropping an image never touches branch protection.
+  build-required:
+    name: Build
+    needs: [images, boot-artifacts]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: All build outputs passed
+        run: |
+          [ "${{ needs.images.result }}" = "success" ] && \
+            [ "${{ needs.boot-artifacts.result }}" = "success" ]
+
   e2e-fast:
     name: Run against RKE2
     needs: [lint, test, images]
@@ -811,3 +825,16 @@ jobs:
             ${{ runner.temp }}/events.txt
           if-no-files-found: ignore
           retention-days: 14
+
+  # One stable check for the whole e2e stage. e2e-bmc already needs
+  # e2e-fast, e2e-image-path and e2e-boot-path (plus lint/test/boot-artifacts/
+  # images), so gating on it alone transitively covers every other job in
+  # this workflow.
+  e2e-required:
+    name: E2E
+    needs: e2e-bmc
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: All e2e stages passed
+        run: '[ "${{ needs.e2e-bmc.result }}" = "success" ]'
