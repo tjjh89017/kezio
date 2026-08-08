@@ -35,35 +35,20 @@ renders the configuration for, supervises, and feeds the MAC allowlist
 to (see `internal/bootd`'s package doc comment); TFTP stays served by
 bootd itself.
 
-## DHCP relay support (optional)
-
-When the boot segment has no DHCP server of its own, set
-`BOOTD_DHCP_RELAY_SERVER` to the site's existing DHCP server address:
-bootd's dnsmasq then also relays every DHCP request heard on the
-segment to that server (`dhcp-relay`), whose replies are relayed back
-to the client. The relay path is independent of the MAC gate below -
-denied MACs still get their leases relayed, they just receive no PXE
-boot information. Leave it unset (the default) for proxyDHCP only:
-bootd never touches lease traffic, and the site must make its DHCP
-server reachable on the segment by other means.
-
 ## Own DHCP server mode (optional, isolated segments)
 
-When the boot segment has no DHCP server at all - not even one
-reachable via relay - set `BOOTD_LEASE_MODE=true`: bootd's dnsmasq then
-becomes the segment's own DHCP lease authority, rendering a
-lease-serving `dhcp-range` instead of the proxyDHCP one. The lease
-range defaults to the provisioning subnet's first and last host
-addresses; set `BOOTD_LEASE_RANGE_START` and `BOOTD_LEASE_RANGE_END`
-together to override it. Mutually exclusive with
-`BOOTD_DHCP_RELAY_SERVER`.
+When the boot segment has no DHCP server at all, set
+`BOOTD_LEASE_MODE=true`: bootd's dnsmasq then becomes the segment's own
+DHCP lease authority, rendering a lease-serving `dhcp-range` instead of
+the proxyDHCP one. The lease range defaults to the provisioning
+subnet's first and last host addresses; set `BOOTD_LEASE_RANGE_START`
+and `BOOTD_LEASE_RANGE_END` together to override it.
 
 The MAC gate below is unchanged: only enrolled MACs receive a lease.
 This mode does not turn bootd into a general-purpose DHCP server for
 the segment - a device that is not an enrolled Machine still gets
 nothing, and a site that also needs to serve unenrolled devices runs
-its own DHCP server for them and reaches it via `BOOTD_DHCP_RELAY_SERVER`
-on a different bootd instance instead.
+its own DHCP server for them on a different segment instead.
 
 ## Before applying
 
@@ -190,8 +175,7 @@ watch's first sync completes, and stays empty forever if the sync never
 completes (API server unreachable at startup) - restart bootd once
 connectivity is restored. See `internal/bootd/maccache.go`'s doc
 comment for the full reasoning. A denied MAC receives nothing from
-bootd on either DHCP port; if relaying is enabled, its lease traffic is
-still relayed.
+bootd on either DHCP port.
 
 ## Capabilities and Pod Security Admission
 

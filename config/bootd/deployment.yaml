@@ -90,11 +90,6 @@ spec:
             # to this interface.
             - name: BOOTD_DHCP_INTERFACE
               value: net1
-            # Optional: site's existing DHCP server IPv4 address. Set it to
-            # have dnsmasq also relay lease traffic (dhcp-relay); leave unset
-            # for proxyDHCP only.
-            # - name: BOOTD_DHCP_RELAY_SERVER
-            #   value: "REPLACE_WITH_SITE_DHCP_SERVER_IP"
             # SITE-SPECIFIC: URL a netbooting machine fetches its per-MAC GRUB
             # config from. With the reverse proxy enabled below, this is
             # bootd's own address (BOOTD_SERVER_IP + BOOTD_PROXY_ADDR's port),
