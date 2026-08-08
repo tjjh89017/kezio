@@ -4,9 +4,9 @@ description: >-
   Synthesizes a real GPT+ext4 raw disk with a given number of partitions,
   uploads it through image-service, and polls Image.status until it
   reaches Ready or a deadline passes, printing a "t+Ns" timeline and a
-  final "RESULT <name> ready_in_seconds=<n>" line. Used by
-  probe-partition-ingest.yml to time the per-partition-PVC/publish path
-  at several partition counts against the same cluster, so a timing
+  final "RESULT <name> ready_in_seconds=<n>" line. Compose it from a
+  PR-triggered check to time the per-partition-PVC/publish path at
+  several partition counts against the same cluster, so a timing
   difference reflects partition count, not cluster variance between runs.
 
 inputs:
