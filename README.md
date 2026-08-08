@@ -5,10 +5,10 @@ It uses [ezio](https://github.com/tjjh89017/ezio) as the deploy engine.
 ezio writes disk partitions over BitTorrent, with partclone images as
 payload.
 
-kezio drives each machine's BMC over Redfish. The operator powers the
-machine on, boots it into the network agent, and power-cycles it into
-the deployed disk. BMC control is the only supported mode. kezio does
-not ship a no-BMC mode.
+kezio drives each machine's BMC. The operator powers the machine on,
+boots it into the network agent, and power-cycles it into the deployed
+disk. A `Machine` requires a BMC address and credentials; kezio has no
+mode that deploys a machine without one.
 
 ## How a deploy works
 
