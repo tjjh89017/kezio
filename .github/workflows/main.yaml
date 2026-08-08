@@ -516,10 +516,6 @@ jobs:
   e2e-bmc:
     name: BMC e2e
     needs: [lint, test, boot-artifacts, images, e2e-fast, e2e-image-path, e2e-boot-path]
-    # A skipped needs-job still satisfies the default success() gate -
-    # boot-artifacts can skip via run_boot_artifacts=false, so guard it
-    # explicitly; images never self-skips.
-    if: needs.boot-artifacts.result == 'success'
     runs-on: ubuntu-latest
     # Non-build-boot-artifacts budget: KVM setup, cluster+addon installs, a
     # full live PXE boot through a real BMC power-on, a cloud image
@@ -813,7 +809,6 @@ jobs:
         with:
           bootd-ip: ${{ env.PROVISIONING_BOOTD_NET1_IP }}
           expected-commit: ${{ github.sha }}
-          build-boot-artifacts: "true"
 
       - name: Ingest the marker-customized Ubuntu image through kezioctl
         run: |
