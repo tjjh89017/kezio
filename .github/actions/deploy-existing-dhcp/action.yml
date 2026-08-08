@@ -4,13 +4,11 @@ description: >-
   precedent this e2e topology follows: a pinned, deliberately
   NOT-kezio-owned dnsmasq image, static-Multus-attached to the same
   provisioning bridge bootd's net1 lives on, answering leases directly on
-  the segment. bootd's own dnsmasq (BOOTD_DHCP_RELAY_SERVER, set by the
-  caller) relays every DHCP request it hears to this pod's static
-  address - a plain on-link unicast, since both sit on the same /24, so
-  no host-side routing of any kind is needed for the relay leg to work.
-  Shared by e2e-kubevirt-reusable.yml, e2e-boot-path-kubevirt.yml, and
-  e2e-scale-multisite-kubevirt.yml (once per site) so the manifest shape
-  lives in one place.
+  the segment while bootd itself runs pure proxyDHCP beside it (see
+  deploy-bootd's DHCP_SCENARIO handling for the lease-mode alternative,
+  where this pod isn't deployed at all). Shared by e2e-kubevirt-reusable.yml,
+  e2e-boot-path-kubevirt.yml, and e2e-scale-multisite-kubevirt.yml (once per
+  site) so the manifest shape lives in one place.
 
 inputs:
   namespace:
