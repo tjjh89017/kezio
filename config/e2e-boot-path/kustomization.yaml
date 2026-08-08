@@ -1,8 +1,16 @@
-# Overlay for the e2e boot-path stage (test/e2e's "Boot path (control-plane
-# wiring)" Context, gated by E2E_BOOT_PATH=true). Aggregates the base
-# deployment plus the standalone-Service pieces config/bootserver and
-# config/agentserver each normally leave for a cluster operator to opt into,
-# mirroring config/e2e-image-path's shape for image-service/seeder.
+# Overlay wiring the boot config and agent registration Services into the
+# base deployment, for e2e stages that need bootd/the agent to reach the
+# controller-manager. Aggregates the base deployment plus the
+# standalone-Service pieces config/bootserver and config/agentserver each
+# normally leave for a cluster operator to opt into, mirroring
+# config/e2e-image-path's shape for image-service/seeder.
+#
+# config/e2e-deploy-path keeps local copies of this directory's
+# Service/patch manifests rather than composing it directly (see that
+# directory's own comment for why), and the BMC e2e lane's
+# deploy-e2e-deploy-path-stack action applies
+# boot-artifacts-init-patch.yaml from here by file path. Keep those
+# copies in sync with the originals here.
 #
 # Does not compose config/bootserver or config/agentserver directly: both
 # already list ../default as a resource, and kustomize cannot merge two

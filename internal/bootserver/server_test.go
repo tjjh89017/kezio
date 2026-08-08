@@ -91,10 +91,10 @@ func newTestMachine(state string) *keziov1alpha1.Machine {
 }
 
 // TestServer_NeedLeaderElectionIsFalse guards against a regression that
-// broke the boot-path e2e: since config/manager never releases a lease on
-// termination, a Server gated on leader election would leave
-// GET /boot/grub.cfg-<mac> unanswered for a whole rolling update, past
-// the readiness probe passing.
+// broke boot config serving during a rolling update: since config/manager
+// never releases a lease on termination, a Server gated on leader
+// election would leave GET /boot/grub.cfg-<mac> unanswered for a whole
+// rolling update, past the readiness probe passing.
 func TestServer_NeedLeaderElectionIsFalse(t *testing.T) {
 	s, _ := newTestServer(t, "")
 	if s.NeedLeaderElection() {

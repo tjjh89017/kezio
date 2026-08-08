@@ -5,14 +5,11 @@ description: >-
   RKE2 - cert-manager, KubeVirt (with the KubevirtSeccompProfile feature
   gate patch the "restricted"-adjacent kezio-system namespace needs),
   virtctl, and CDI - then waits for RKE2's own rke2-multus HelmChart addon
-  to publish the Multus NetworkAttachmentDefinition CRD. Byte-identical
-  command sequence across e2e-kubevirt-reusable.yml,
-  e2e-boot-path-kubevirt.yml, and e2e-scale-multisite-kubevirt.yml before
-  this action existed - three copies of the same KubeVirt/CDI
-  CRD-registration race and the same Multus-HelmChart-lag wait, which is
-  exactly the kind of triplicated fix this action exists to prevent
-  happening a fourth time. Run after install-rke2 (needs a Ready node) and
-  before creating any NetworkAttachmentDefinition or VirtualMachine.
+  to publish the Multus NetworkAttachmentDefinition CRD. Consolidates what
+  used to be several near-identical copies of the same KubeVirt/CDI
+  CRD-registration race and the same Multus-HelmChart-lag wait into one
+  place. Run after install-rke2 (needs a Ready node) and before creating
+  any NetworkAttachmentDefinition or VirtualMachine.
 
 inputs:
   kubevirt-version:

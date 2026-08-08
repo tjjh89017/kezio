@@ -156,9 +156,6 @@ None of kezio's CI workflows boot with Secure Boot enabled:
   shim/GRUB/kernel signature checks at all. The shim and GRUB binaries
   it boots are still the real signed artifacts the `boot-artifacts` job
   builds - only the firmware-side enforcement is off.
-- `.github/workflows/test-e2e.yml`'s boot-path lane asserts the control
-  plane's behavior (proxyDHCP responses, rendered GRUB config content)
-  without booting a UEFI machine at all, signed or otherwise.
 
 This is a deliberate, documented gap, not a silent one: a real
 end-to-end Secure Boot test needs enrolled Secure Boot keys in the test

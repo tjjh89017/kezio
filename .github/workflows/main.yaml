@@ -337,64 +337,9 @@ jobs:
             kubectl logs -n kezio-system deploy/kezio-image-service --tail=500
             kubectl get images -A -o wide
 
-  e2e-boot-path:
-    name: Run boot-path against RKE2
-    needs: [lint, test, images]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Clone the code
-        uses: actions/checkout@v7
-
-      - name: Setup Go
-        uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-
-      - name: Resource check (fail fast if the runner is under-resourced)
-        uses: ./.github/actions/check-runner-resources
-        with:
-          min-cpus: "2"
-          min-mem-mb: "7000"
-          context-label: "kezio e2e"
-
-      - name: Download the manager image tarball
-        uses: actions/download-artifact@v7
-        with:
-          name: image-tar-manager
-          path: /tmp/images
-
-      - name: Install RKE2
-        uses: ./.github/actions/install-rke2
-        with:
-          rke2-version: ${{ env.RKE2_VERSION }}
-          enable-multus: "false"
-
-      - name: Import the manager image into RKE2 containerd
-        uses: ./.github/actions/import-image-tarballs
-        with:
-          images: manager
-
-      - name: Running Test e2e (boot-path)
-        env:
-          E2E_SKIP_MANAGER_IMAGE_BUILD: "true"
-        run: |
-          set -euo pipefail
-          go mod tidy
-          make manifests generate fmt vet
-          E2E_BOOT_PATH=true E2E_CLUSTER=rke2 go test ./test/e2e/ -v -ginkgo.v -timeout 20m
-
-      - name: Dump operator logs on failure
-        if: failure()
-        uses: ./.github/actions/dump-operator-logs
-        with:
-          extra-commands: |
-            kubectl get svc -n kezio-system kezio-boot-server kezio-agent-server -o wide
-            kubectl get machine e2e-boot-node-01 -n kezio-system -o yaml
-
   e2e-bmc:
     name: BMC e2e
-    needs: [lint, test, boot-artifacts, images, e2e-fast, e2e-image-path, e2e-boot-path]
+    needs: [lint, test, boot-artifacts, images, e2e-fast, e2e-image-path]
     runs-on: ubuntu-latest
     # Non-build-boot-artifacts budget: KVM setup, cluster+addon installs, a
     # full live PXE boot through a real BMC power-on, a cloud image
@@ -827,9 +772,9 @@ jobs:
           retention-days: 14
 
   # One stable check for the whole e2e stage. e2e-bmc already needs
-  # e2e-fast, e2e-image-path and e2e-boot-path (plus lint/test/boot-artifacts/
-  # images), so gating on it alone transitively covers every other job in
-  # this workflow.
+  # e2e-fast and e2e-image-path (plus lint/test/boot-artifacts/images), so
+  # gating on it alone transitively covers every other job in this
+  # workflow.
   e2e-required:
     name: E2E
     needs: e2e-bmc

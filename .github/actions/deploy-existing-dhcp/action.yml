@@ -6,9 +6,8 @@ description: >-
   provisioning bridge bootd's net1 lives on, answering leases directly on
   the segment while bootd itself runs pure proxyDHCP beside it (see
   deploy-bootd's DHCP_SCENARIO handling for the lease-mode alternative,
-  where this pod isn't deployed at all). Shared by e2e-kubevirt-reusable.yml,
-  e2e-boot-path-kubevirt.yml, and e2e-scale-multisite-kubevirt.yml (once per
-  site) so the manifest shape lives in one place.
+  where this pod isn't deployed at all). Used by the BMC e2e lane
+  (once per site) so the manifest shape lives in one place.
 
 inputs:
   namespace:
