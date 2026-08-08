@@ -23,6 +23,19 @@ on:
         required: false
         type: boolean
         default: true
+      run_bmc_e2e:
+        description: "Run the BMC-driven KubeVirt e2e lane (e2e-bmc)."
+        required: false
+        type: boolean
+        default: true
+      bmc_dhcp_scenario:
+        description: "Which DHCP scenario the e2e-bmc lane drives (see e2e-kubevirt-reusable.yml's dhcp_scenario input)."
+        required: false
+        type: choice
+        options:
+          - no-relay
+          - lease
+        default: no-relay
 
 # A manual dispatch gets its own group (keyed by run id) so a later push
 # can't cancel a deliberately requested run; push/PR runs share a group
@@ -197,8 +210,11 @@ jobs:
     # Builds the kezio live boot image (kernel + initrd + squashfs) plus
     # the signed shimx64.efi/grubx64.efi kezio-bootd serves over TFTP,
     # with hack/live-image/build.sh, and uploads the result as an
-    # ephemeral workflow artifact for inspection. No ghcr publish here -
-    # see release.yaml, which builds the same artifacts on a "v*" tag and
+    # ephemeral workflow artifact for inspection AND for the e2e-bmc
+    # job below to download (via its boot_artifacts_artifact input) -
+    # built here exactly once and handed off, never rebuilt in-lane and
+    # never pulled from ghcr by that job. No ghcr publish here - see
+    # release.yaml, which builds the same artifacts on a "v*" tag and
     # publishes them to both a GitHub Release and the
     # kezio-boot-artifacts ghcr image.
     name: Boot artifacts
@@ -581,11 +597,10 @@ jobs:
     # an actual PXE boot. It does NOT start a VM, does NOT touch
     # kezio-bootd's proxyDHCP/TFTP responder, and does NOT fetch a real
     # kernel/initrd/squashfs: those need a NIC on a real L2 broadcast
-    # domain and a UEFI firmware actually executing GRUB, which a
-    # GitHub-hosted runner's pod network cannot provide - see
-    # e2e-bmc-kubevirt.yml (workflow_dispatch only, not run here) for
-    # that heavier, separable stage and the realism assessment behind
-    # keeping it out of this always-on lane.
+    # domain and a UEFI firmware actually executing GRUB, which a plain
+    # RKE2-on-canal job's pod network cannot provide - see the e2e-bmc
+    # job below (a real KVM-backed KubeVirt VM, Multus, and a BMC-driven
+    # PXE boot) for that heavier, separable stage.
     name: Run boot-path against RKE2
     needs: [lint, test]
     if: github.event_name != 'workflow_dispatch' || inputs.run_e2e
@@ -687,3 +702,50 @@ jobs:
           kubectl get machine e2e-boot-node-01 -n kezio-system -o yaml
           echo "===== events ====="
           kubectl get events -n kezio-system --sort-by=.lastTimestamp
+
+  e2e-bmc:
+    # kezio's production-representative acceptance lane: a real KVM-backed
+    # KubeVirt VM, powered on and PXE-booted through a real KubeVirtBMC/
+    # Redfish endpoint (kezio never ships without a BMC driver), leeching
+    # a real Image over BitTorrent and writing it to disk - see
+    # e2e-kubevirt-reusable.yml's own header comment for the full flow.
+    # Consumes the boot-artifacts job's own workflow artifact
+    # (boot_artifacts_artifact) instead of rebuilding the live boot image
+    # in-lane or pulling the published ghcr image - the artifact hand-off
+    # this file exists to wire up, so this lane always exercises the
+    # exact boot image built from this commit. Heaviest job in this
+    # graph (KVM setup, cluster+addon installs, a full live PXE boot, a
+    # real partclone/BitTorrent deploy, KubeVirtBMC's own control plane
+    # and webhook, plus an extra power cycle) - see the reusable
+    # workflow's own timeout-minutes for the budget.
+    name: Run BMC-driven KubeVirt e2e (KubeVirtBMC + KubeVirt VM)
+    needs: [lint, test, boot-artifacts]
+    # needs.boot-artifacts.result == 'success' is explicit, not implicit:
+    # a skipped job (e.g. workflow_dispatch with run_boot_artifacts=false)
+    # still satisfies the default success() check GitHub Actions uses for
+    # a needs gate, which would otherwise let this job run with no
+    # artifact to download.
+    if: (github.event_name != 'workflow_dispatch' || inputs.run_bmc_e2e) && needs.boot-artifacts.result == 'success'
+    uses: ./.github/workflows/e2e-kubevirt-reusable.yml
+    permissions:
+      contents: read
+    with:
+      boot_artifacts_artifact: kezio-live-image
+      # Only a workflow_dispatch run can select "lease" - a push/pull_request
+      # run always drives the default "no-relay" scenario, one scenario per
+      # push (see e2e-kubevirt-reusable.yml's dhcp_scenario input for what
+      # each scenario proves).
+      dhcp_scenario: ${{ github.event_name == 'workflow_dispatch' && inputs.bmc_dhcp_scenario || 'no-relay' }}
+      manager_image: "example.com/kezio:e2e-bmc"
+      bootd_image: "example.com/kezio-bootd:e2e-bmc"
+      ingest_image: "example.com/kezio-ingest:e2e-bmc"
+      seeder_image: "example.com/kezio-seeder:e2e-bmc"
+      image_service_image: "example.com/kezio-image-service:e2e-bmc"
+      target_vm_name: "e2e-bmc-vm"
+      target_vm_mac: "52:54:00:be:ef:03"
+      target_vm_disk_serial: "KEZIOE2EBMCDISK1"
+      image_name: "e2e-bmc-ubuntu"
+      image_service_token: "kezio-e2e-bmc-token"
+      # ezio_ref, kubevirtbmc_version, and opentracker_image are left at
+      # the reusable workflow's own defaults, which are kezio's current
+      # values - this graph needs no overrides.
