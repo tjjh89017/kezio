@@ -171,7 +171,17 @@ cd /work
 # there is no resume to preserve - always start from a clean state.
 lb clean --purge
 lb config
-lb build
+lb build || {
+	echo "=== DEBUG: lb build failed, dumping chroot apt state ==="
+	cat chroot/etc/apt/sources.list 2>&1 || true
+	for f in chroot/etc/apt/sources.list.d/*; do
+		echo "--- ${f} ---"
+		cat "${f}" 2>&1 || true
+	done
+	echo "=== DEBUG: apt-cache policy for firmware-linux ==="
+	chroot chroot apt-cache policy firmware-linux 2>&1 || true
+	exit 1
+}
 INNER
 	chmod +x "${live_dir}/.build-in-container.sh"
 
