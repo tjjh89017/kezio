@@ -1,3 +1,5 @@
+# spec.bmc is required. Every Machine needs a BMC address and a
+# credentialsSecretRef; see kezio_v1alpha1_machine_bmc_secret.yaml.
 apiVersion: kezio.kojuro.date/v1alpha1
 kind: Machine
 metadata:
