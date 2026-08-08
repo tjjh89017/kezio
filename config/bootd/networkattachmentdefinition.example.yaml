@@ -12,7 +12,7 @@
 #
 # === Why Multus, not hostNetwork ===
 # bootd must see the exact broadcast domain a booting machine's NIC is on
-# and broadcast unrelayed proxyDHCP replies (255.255.255.255:68 - see
+# and broadcast proxyDHCP replies (255.255.255.255:68 - see
 # internal/bootd's destinationFor) onto only that segment. hostNetwork would
 # work but ties the pod to one node's NIC and fights over ports 67/69/4011;
 # a Multus secondary interface (net1) gets the same L2 visibility without
@@ -22,9 +22,7 @@
 # === Routing ===
 # Unlike config/seeder's data network, this attachment needs no routes onto
 # other subnets: proxyDHCP/TFTP traffic here is directly-connected L2
-# traffic, except a DHCP relay agent's giaddr, which is reached via the
-# cluster's normal eth0 routing, not net1 (see internal/bootd's package doc
-# comment on relay awareness).
+# traffic.
 #
 # === IPAM ===
 # BOOTD_SERVER_IP (deployment.yaml) must match whatever address this NAD
