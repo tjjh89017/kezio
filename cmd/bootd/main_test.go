@@ -19,7 +19,7 @@ package main
 import "testing"
 
 // clearBootdEnv unsets every environment variable bootdConfigFromEnv
-// reads (plus the three explicitly-rejected legacy names), so each test
+// reads (plus the four explicitly-rejected legacy names), so each test
 // starts from a clean slate regardless of what the process environment
 // or an earlier test in this file happens to carry.
 func clearBootdEnv(t *testing.T) {
@@ -30,7 +30,7 @@ func clearBootdEnv(t *testing.T) {
 		"BOOTD_TFTP_ADDR", "BOOTD_BOOT_CONFIG_URL", "BOOTD_BOOT_FILENAME",
 		"BOOTD_RUN_DIR", "BOOTD_DNSMASQ_PATH", "BOOTD_ANSWER_ALL",
 		"BOOTD_AGENT_UPSTREAM_URL", "BOOTD_BOOT_UPSTREAM_URL", "BOOTD_PROXY_ADDR",
-		"BOOTD_HTTP_BOOT_URL", "BOOTD_DHCP_ADDR", "BOOTD_PXE_ADDR",
+		"BOOTD_HTTP_BOOT_URL", "BOOTD_DHCP_ADDR", "BOOTD_PXE_ADDR", "BOOTD_DHCP_RELAY_SERVER",
 	} {
 		t.Setenv(key, "")
 	}
