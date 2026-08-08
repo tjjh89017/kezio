@@ -215,7 +215,7 @@ func TestAgentDeployer_Register_WithBMC_SetsOneTimePXEBootAndPowersOn(t *testing
 	key := types.NamespacedName{Namespace: "default", Name: "node-01"}
 	dep := &agentDeployer{client: c, key: key, bmcSpec: machine.Spec.BMC}
 
-	result, err := dep.Register(context.Background(), &RegisterData{BMC: machine.Spec.BMC})
+	result, err := dep.Register(context.Background(), &RegisterData{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -267,7 +267,7 @@ func TestAgentDeployer_Register_BMCAlreadyOn_PowerCycles(t *testing.T) {
 	fakeKey := strings.TrimPrefix(address, testBMCScheme+"://")
 	testBMCFor(fakeKey).state = bmc.PowerStateOn
 
-	result, err := dep.Register(context.Background(), &RegisterData{BMC: machine.Spec.BMC})
+	result, err := dep.Register(context.Background(), &RegisterData{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -297,7 +297,7 @@ func TestAgentDeployer_Register_BMCConnectError_RedactsCredentials(t *testing.T)
 	key := types.NamespacedName{Namespace: "default", Name: "node-01"}
 	dep := &agentDeployer{client: c, key: key, bmcSpec: machine.Spec.BMC}
 
-	result, err := dep.Register(context.Background(), &RegisterData{BMC: machine.Spec.BMC})
+	result, err := dep.Register(context.Background(), &RegisterData{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}

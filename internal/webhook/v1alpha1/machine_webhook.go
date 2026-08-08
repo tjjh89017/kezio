@@ -199,7 +199,7 @@ func validateMachineBMC(machine *keziov1alpha1.Machine) error {
 	}
 
 	if machine.Spec.BMC.CredentialsSecretRef.Name == "" {
-		return fmt.Errorf("spec.bmc.credentialsSecretRef is required when spec.bmc.address %q is set", parsed.Redacted())
+		return fmt.Errorf("spec.bmc.credentialsSecretRef is required for spec.bmc.address %q", parsed.Redacted())
 	}
 	return nil
 }
