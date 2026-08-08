@@ -25,10 +25,10 @@
 # It exercises the two scenarios documented in
 # docs/physical-lab-deployment.md:
 #
-#   - Scenario 1: proxyDHCP alongside an on-segment DHCP server, no
-#     relay (BOOTD_LAB_RELAY left unset). An enrolled MAC gets a
-#     proxyDHCP DHCPOFFER (yiaddr 0.0.0.0, siaddr/file naming bootd's
-#     own TFTP/GRUB chain); an unenrolled MAC gets nothing at all.
+#   - Scenario 1: proxyDHCP alongside an on-segment DHCP server. An
+#     enrolled MAC gets a proxyDHCP DHCPOFFER (yiaddr 0.0.0.0,
+#     siaddr/file naming bootd's own TFTP/GRUB chain); an unenrolled
+#     MAC gets nothing at all.
 #   - Scenario 3: bootd's own lease mode (BOOTD_LAB_LEASE_MODE=1). An
 #     enrolled MAC gets a DHCPOFFER with a real, non-zero leased
 #     address; an unenrolled MAC gets nothing at all, same as scenario
@@ -212,12 +212,12 @@ run_scenario() {
 # check for conflicts), so a short timeout is enough. Its offer carries
 # no boot filename - see TestDnsmasqLabClient's own comment on
 # BOOTD_LAB_CLIENT_EXPECT_FILE - so client_expect_extra stays empty.
-run_scenario "scenario1-no-relay" \
+run_scenario "scenario1-proxydhcp" \
 	"52:54:00:00:00:01" "52:54:00:00:00:02" 3s ""
 
 # Scenario 3 is a real lease allocation: dnsmasq ICMP-pings the
 # candidate address before offering it (lab-observed: ~3s), so the
-# offer-side timeout needs headroom the no-relay scenario does not.
+# offer-side timeout needs headroom the proxyDHCP scenario does not.
 run_scenario "scenario3-lease-mode" \
 	"52:54:00:00:00:03" "52:54:00:00:00:04" 8s \
 	"BOOTD_LAB_CLIENT_EXPECT_FILE=shimx64.efi BOOTD_LAB_CLIENT_EXPECT_LEASE=1" \
@@ -227,4 +227,4 @@ if [[ $FAIL -ne 0 ]]; then
 	echo "== bootd packet lab: FAIL ==" >&2
 	exit 1
 fi
-echo "== bootd packet lab: PASS (scenario 1 no-relay, scenario 3 lease mode) =="
+echo "== bootd packet lab: PASS (scenario 1 proxyDHCP, scenario 3 lease mode) =="

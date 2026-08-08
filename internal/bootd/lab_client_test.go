@@ -39,7 +39,7 @@ import (
 // whether - and what - dnsmasq answers with. This is what turns the
 // packet lab's dnsmasq-side assertions ("the config renders correctly",
 // "the supervisor stays up") into an end-to-end assertion on the wire:
-// scenario 1 (no relay) and scenario 3 (lease mode) both hinge on what
+// scenario 1 (proxyDHCP) and scenario 3 (lease mode) both hinge on what
 // a client actually receives, not just on what bootd renders.
 //
 // Skipped unless BOOTD_LAB_CLIENT=1, for the same reason TestDnsmasqLab
