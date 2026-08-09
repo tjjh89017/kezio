@@ -339,7 +339,9 @@ jobs:
 
   e2e-bmc:
     name: BMC e2e
-    needs: [lint, test, boot-artifacts, images, e2e-fast, e2e-image-path]
+    # build-required stands in for images + boot-artifacts, so adding or
+    # dropping a build output never touches this list.
+    needs: [build-required, e2e-fast, e2e-image-path]
     runs-on: ubuntu-latest
     # Non-build-boot-artifacts budget: KVM setup, cluster+addon installs, a
     # full live PXE boot through a real BMC power-on, a cloud image
@@ -773,9 +775,8 @@ jobs:
           retention-days: 14
 
   # One stable check for the whole e2e stage. e2e-bmc already needs
-  # e2e-fast and e2e-image-path (plus lint/test/boot-artifacts/images), so
-  # gating on it alone transitively covers every other job in this
-  # workflow.
+  # e2e-fast, e2e-image-path and build-required, so gating on it alone
+  # transitively covers every other job in this workflow.
   e2e-required:
     name: E2E
     needs: e2e-bmc
