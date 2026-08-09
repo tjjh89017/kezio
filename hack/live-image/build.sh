@@ -205,6 +205,13 @@ collect_artifacts() {
 	# config/rootfs/excludes drops /boot from the squashfs.
 	cp "${live_dir}"/chroot/boot/config-* "${dist_dir}/kernel.config"
 
+	# Without it the image PXE-boots and panics with no root filesystem,
+	# so fail here rather than ship it.
+	if ! grep -q '^CONFIG_SQUASHFS_ZSTD=[ym]$' "${dist_dir}/kernel.config"; then
+		log "kernel lacks CONFIG_SQUASHFS_ZSTD; it cannot mount the zstd squashfs this build produced"
+		return 1
+	fi
+
 	# hooks/live/9900-package-size-report.hook.chroot's report. Not part
 	# of manifest.json/sha256sums - the CI step summary reads it directly.
 	cp "${live_dir}/chroot/tmp/package-sizes.txt" "${dist_dir}/package-sizes.txt"
