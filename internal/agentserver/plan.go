@@ -31,6 +31,7 @@ import (
 	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 	"github.com/tjjh89017/kezio/internal/seederdeploy"
+	"github.com/tjjh89017/kezio/internal/sitederive"
 )
 
 // buildDeployPlan builds machine's DeployPlan, or reports that it is not
@@ -64,12 +65,26 @@ func buildDeployPlan(ctx context.Context, c client.Client, cfg Config, machine *
 	}
 	plan.Ezio = keziov1alpha1.MergeEzioTuning(cfg.EzioDefaults, machine.Spec.Ezio)
 
+	// Resolved once through sitederive.Resolve, the single choke point
+	// also used by internal/controller's seeder demand counting
+	// (seeder_deployment.go's seederDemandBySite), so the site string
+	// this plan's torrent URLs resolve against can never diverge from
+	// the one that determines which seeder Deployment exists. A
+	// dangling subnetRef or siteRef is a real misconfiguration, not a
+	// "not ready yet" state, so it is reported as an error rather than
+	// silently producing a plan with an empty site.
+	res, err := sitederive.Resolve(ctx, c, machine)
+	if err != nil {
+		return nil, fmt.Errorf("resolving site for machine %s/%s: %w", machine.Namespace, machine.Name, err)
+	}
+	site := res.SiteName
+
 	var osImage *keziov1alpha1.Image
 	if machine.Spec.ImageRef != nil {
 		if provisioning.Image == nil || provisioning.Image.TargetDisk == "" {
 			return nil, nil
 		}
-		osPlan, image, ready, err := buildImagePlan(ctx, c, machine.Namespace, provisioning.Image.ImageRef, provisioning.Image.TargetDisk, machine.Spec.NetworkSite)
+		osPlan, image, ready, err := buildImagePlan(ctx, c, machine.Namespace, provisioning.Image.ImageRef, provisioning.Image.TargetDisk, site)
 		if err != nil {
 			return nil, fmt.Errorf("building OS image plan: %w", err)
 		}
@@ -90,7 +105,7 @@ func buildDeployPlan(ctx context.Context, c client.Client, cfg Config, machine *
 		if rec.ImageRef != dataImage.ImageRef || rec.TargetDisk == "" {
 			return nil, nil
 		}
-		dataPlan, _, ready, err := buildImagePlan(ctx, c, machine.Namespace, rec.ImageRef, rec.TargetDisk, machine.Spec.NetworkSite)
+		dataPlan, _, ready, err := buildImagePlan(ctx, c, machine.Namespace, rec.ImageRef, rec.TargetDisk, site)
 		if err != nil {
 			return nil, fmt.Errorf("building dataImages[%d] plan: %w", i, err)
 		}
@@ -139,7 +154,8 @@ func buildDeployPlan(ctx context.Context, c client.Client, cfg Config, machine *
 // buildImagePlan also returns the fetched Image object itself (nil when
 // ready is false), so buildDeployPlan can read the OS image's own
 // spec.postHookRefs/spec.params for hook resolution without a second
-// fetch of the same object. site is the Machine's spec.networkSite,
+// fetch of the same object. site is the Machine's Site, resolved once
+// by buildDeployPlan through sitederive.Resolve and passed down here,
 // needed to resolve each content partition's seeder URL (see
 // buildPlanPartition) - a Machine deploys against exactly one site, so
 // every partition across every image plan it builds resolves against

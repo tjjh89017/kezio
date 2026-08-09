@@ -4,4 +4,6 @@ resources:
 - kezio_v1alpha1_posthook.yaml
 - kezio_v1alpha1_machine.yaml
 - kezio_v1alpha1_machine_bmc_secret.yaml
+- kezio_v1alpha1_site.yaml
+- kezio_v1alpha1_subnet.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

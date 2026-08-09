@@ -1,19 +1,21 @@
 name: Deploy kezio-bootd on the provisioning bridge
 
 description: >-
-  Applies config/bootd with the calling job's bootd/boot-artifacts image
-  tags, wires the site-specific env values config/bootd/deployment.yaml
-  leaves as placeholders (server IP, provisioning CIDR, the DHCP_SCENARIO
-  scenario's lease-mode variables, and the reverse-proxy upstream URLs),
-  attaches it to the provisioning bridge, and proves both the reverse
-  proxy and the Multus attachment actually came up before returning - see
-  this action's own inline comments for the full "why" behind each piece.
-  Every value comes from the calling job's own env (BOOTD_IMG,
-  BOOT_ARTIFACTS_IMG, DHCP_SCENARIO, PROVISIONING_BOOTD_NET1_IP,
-  PROVISIONING_CIDR, PROVISIONING_LEASE_RANGE_START/END), not declared
-  inputs - composite action steps run as part of the calling job, so that
-  env is already in scope. Sets BOOTD_POD_NAME in $GITHUB_ENV for later
-  steps.
+  Applies config/bootd's RBAC (the bootd ServiceAccount and the
+  ClusterRole/ClusterRoleBinding it binds to), then declares a Site and a
+  Subnet CR for the provisioning bridge so SubnetReconciler builds the
+  bootd Deployment itself - image, NAD attachment, and DHCP_SCENARIO's
+  lease-mode env all come from the Subnet/Site spec and the
+  controller-manager's own BOOTD_DEPLOYMENT_* env (wired by
+  deploy-e2e-deploy-path-stack), not a hand patch here. Waits for the
+  Deployment to roll out, then proves both the reverse proxy and the
+  Multus attachment actually came up before returning - see this action's
+  own inline comments for the full "why" behind each piece. Every value
+  comes from the calling job's own env (DHCP_SCENARIO,
+  PROVISIONING_BOOTD_NET1_IP, PROVISIONING_CIDR,
+  PROVISIONING_LEASE_RANGE_START/END), not declared inputs - composite
+  action steps run as part of the calling job, so that env is already in
+  scope. Sets BOOTD_POD_NAME in $GITHUB_ENV for later steps.
 
 runs:
   using: composite
@@ -22,62 +24,86 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        cd config/bootd
-        ../../bin/kustomize edit set image bootd="${BOOTD_IMG}"
-        ../../bin/kustomize edit set image kezio-boot-artifacts="${BOOT_ARTIFACTS_IMG}"
-        cd ../..
         kubectl apply -k config/bootd
-        # Site-specific values config/bootd/deployment.yaml leaves as
-        # placeholders:
-        #   - BOOTD_SERVER_IP: bootd's own net1 static address, the PXE
-        #     next-server so firmware TFTPs straight to the pod.
-        #   - BOOTD_PROVISIONING_CIDR: rendered as dnsmasq's proxyDHCP dhcp-range.
-        #   - BOOTD_LEASE_MODE / BOOTD_LEASE_RANGE_START/END (lease
-        #     scenario only, see internal/bootd.Config's LeaseMode doc):
-        #     makes bootd's dnsmasq the DHCP lease authority. The range is
-        #     pinned rather than auto-derived from the CIDR, since
-        #     auto-derivation would collide with the statically assigned
-        #     PROVISIONING_HOST_IP/PROVISIONING_BOOTD_NET1_IP (.1/.2). In
-        #     no-relay, neither variable is set: bootd runs pure proxyDHCP
-        #     beside the existing-dhcp pod, which answers the lease directly.
-        #   - BOOTD_BOOT_CONFIG_URL: bootd's own address; its reverse proxy
-        #     answers /boot/grub.cfg-<mac>, forwarding to kezio-boot-server.
-        #   - BOOTD_AGENT_UPSTREAM_URL / BOOTD_BOOT_UPSTREAM_URL: the
-        #     in-cluster ClusterIP Services the target VM (raw bridge, no
-        #     cluster DNS, no ClusterIP route) cannot reach directly but
-        #     bootd can, via its other (eth0) interface - these turn on
-        #     bootd's reverse proxy so the VM only ever needs bootd's address.
-        scenario_env=()
+
+        # DHCP_SCENARIO maps onto Subnet.spec.dhcp.mode: no-relay keeps
+        # the existing-dhcp pod as lease authority and bootd stays pure
+        # proxyDHCP (SubnetDHCPModeProxy); lease makes bootd's own
+        # dnsmasq the segment's lease authority instead
+        # (SubnetDHCPModeLease), in the pinned range below - see
+        # config/bootd/README.md's "Own DHCP server mode".
         case "${DHCP_SCENARIO}" in
-          no-relay)
-            # Pure proxyDHCP; the existing-dhcp pod answers the lease directly.
-            ;;
-          lease)
-            scenario_env+=(
-              BOOTD_LEASE_MODE=true
-              BOOTD_LEASE_RANGE_START="${PROVISIONING_LEASE_RANGE_START}"
-              BOOTD_LEASE_RANGE_END="${PROVISIONING_LEASE_RANGE_END}"
-            )
-            ;;
+          no-relay) dhcp_mode=proxy ;;
+          lease) dhcp_mode=lease ;;
           *)
             echo "::error::unknown dhcp_scenario '${DHCP_SCENARIO}' (expected no-relay or lease)" >&2
             exit 1
             ;;
         esac
-        kubectl -n kezio-system set env deployment/kezio-bootd \
-          BOOTD_SERVER_IP="${PROVISIONING_BOOTD_NET1_IP%%/*}" \
-          BOOTD_PROVISIONING_CIDR="${PROVISIONING_CIDR}" \
-          BOOTD_BOOT_CONFIG_URL="http://${PROVISIONING_BOOTD_NET1_IP%%/*}:80" \
-          BOOTD_AGENT_UPSTREAM_URL="http://kezio-agent-server.kezio-system.svc.cluster.local:8091" \
-          BOOTD_BOOT_UPSTREAM_URL="http://kezio-boot-server.kezio-system.svc.cluster.local:8090" \
-          "${scenario_env[@]}"
-        # Strategic-merge, not --type=json: a JSON Patch "add" here would
-        # replace the whole annotations map wholesale on any later patch
-        # to this same path; strategic-merge merges by key instead.
-        kubectl -n kezio-system patch deployment/kezio-bootd --type=strategic -p='{
-          "spec":{"template":{"metadata":{"annotations":{"k8s.v1.cni.cncf.io/networks":"kezio-boot-network"}}}}
-        }'
-        kubectl rollout status deployment/kezio-bootd -n kezio-system --timeout=180s
+
+        # kezio-system already carries both bootd prerequisites this
+        # Subnet's namespace needs (config/bootd/README.md's "RBAC scope"
+        # and "Capabilities and Pod Security Admission"): the bootd
+        # ServiceAccount config/bootd/rbac.yaml just provisioned, and the
+        # privileged PSA label deploy-kezio-controller already applied to
+        # it. Reusing it here, rather than a dedicated namespace, is what
+        # keeps this single-subnet lane from having to stand up and label
+        # a second namespace just to satisfy them.
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha1
+        kind: Site
+        metadata:
+          name: e2e-bmc
+          namespace: kezio-system
+        spec:
+          seederSubnetRef:
+            name: e2e-bmc
+        EOF
+
+        subnet_yaml="$(cat <<EOF
+        apiVersion: kezio.kojuro.date/v1alpha1
+        kind: Subnet
+        metadata:
+          name: e2e-bmc
+          namespace: kezio-system
+        spec:
+          siteRef:
+            name: e2e-bmc
+          cidr: "${PROVISIONING_CIDR}"
+          bootdServerIP: "${PROVISIONING_BOOTD_NET1_IP%%/*}"
+          bootdNetworkRef:
+            name: kezio-boot-network
+          seederNetworkRef:
+            name: kezio-seeder-network
+          dhcp:
+            mode: ${dhcp_mode}
+        EOF
+        )"
+        if [ "${dhcp_mode}" = lease ]; then
+          subnet_yaml+=$'\n    leaseRangeStart: '"${PROVISIONING_LEASE_RANGE_START}"
+          subnet_yaml+=$'\n    leaseRangeEnd: '"${PROVISIONING_LEASE_RANGE_END}"
+        fi
+        echo "${subnet_yaml}" | kubectl apply -f -
+
+        # SubnetReconciler builds kezio-bootd-e2e-bmc asynchronously after
+        # observing the Subnet above - it does not exist the instant apply
+        # returns. `rollout status` on a Deployment that isn't there yet
+        # exits immediately with NotFound instead of waiting, so poll for
+        # its existence first and only then hand off to `rollout status`
+        # for the real readiness wait.
+        deadline=$(( $(date +%s) + 120 ))
+        until kubectl get deployment/kezio-bootd-e2e-bmc -n kezio-system >/dev/null 2>&1; do
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::kezio-bootd-e2e-bmc Deployment did not appear within 120s - the Subnet controller either hasn't reconciled yet or is withholding the Deployment; dumping Subnet/Site status and controller-manager logs to tell the two apart" >&2
+            kubectl get subnet e2e-bmc -n kezio-system -o yaml || true
+            kubectl get site e2e-bmc -n kezio-system -o yaml || true
+            kubectl logs -n kezio-system deploy/kezio-controller-manager --tail=100 || true
+            exit 1
+          fi
+          sleep 5
+        done
+
+        kubectl rollout status deployment/kezio-bootd-e2e-bmc -n kezio-system --timeout=180s
 
         # Proves bootd's reverse proxy reaches the boot config server, over
         # the same L2 path the VM will use. Split into a connect step and a

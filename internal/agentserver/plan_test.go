@@ -18,7 +18,9 @@ package agentserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -31,14 +33,42 @@ import (
 
 	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
 	"github.com/tjjh89017/kezio/internal/seederdeploy"
+	"github.com/tjjh89017/kezio/internal/sitederive"
 	"github.com/tjjh89017/kezio/internal/store"
 )
 
 const testTrackerURL = "http://tracker.example/announce"
 
-// newPlanTestClient builds a fake client seeded with objs, using a
-// scheme that knows about both kezio's own types (Machine, Image) and
-// core/v1 (ConfigMap).
+// testSiteName is the Site every plan-test Machine resolves to via
+// spec.subnetRef; fixtures must seed both objects siteFixture returns.
+const testSiteName = "site-a"
+
+// testSiteIdentity is sitederive.Resolve's namespace-qualified SiteName
+// for testSiteName in ns "default" - the identity seederdeploy.Name uses,
+// not the bare Site name.
+const testSiteIdentity = "default/" + testSiteName
+
+// siteFixture builds a Subnet and its Site, both in ns, resolving via
+// sitederive.Resolve to ns + "/" + testSiteName.
+func siteFixture(ns string) (*keziov1alpha1.Subnet, *keziov1alpha1.Site, keziov1alpha1.NameRef) {
+	subnetName := testSiteName + "-subnet"
+	subnet := &keziov1alpha1.Subnet{
+		ObjectMeta: metav1.ObjectMeta{Name: subnetName, Namespace: ns},
+		Spec: keziov1alpha1.SubnetSpec{
+			SiteRef:         keziov1alpha1.NameRef{Name: testSiteName},
+			CIDR:            "192.0.2.0/24",
+			BootdServerIP:   "192.0.2.2",
+			BootdNetworkRef: keziov1alpha1.NameRef{Name: "bootd-nad"},
+			DHCP:            keziov1alpha1.SubnetDHCP{Mode: keziov1alpha1.SubnetDHCPModeProxy},
+		},
+	}
+	site := &keziov1alpha1.Site{
+		ObjectMeta: metav1.ObjectMeta{Name: testSiteName, Namespace: ns},
+	}
+	return subnet, site, keziov1alpha1.NameRef{Name: subnetName}
+}
+
+// newPlanTestClient builds a fake client seeded with objs.
 func newPlanTestClient(t *testing.T, objs ...client.Object) client.Client {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -56,12 +86,8 @@ func newPlanTestClient(t *testing.T, objs ...client.Object) client.Client {
 		Build()
 }
 
-// fixtureTorrentInfo mints a well-formed info hash the way a real
-// ingest would derive one from a partition's torrent.info, so tests get
-// a realistic InfoHash string without needing torrent.info bytes
-// themselves - a partition's content (and its .torrent) lives in its own
-// PVC now, never inline in status (see ImagePartitionStatus.InfoHash's
-// doc comment), so nothing here needs to produce or carry that file.
+// fixtureTorrentInfo mints a well-formed InfoHash without needing actual
+// torrent.info bytes, which live in the partition's own PVC, not status.
 func fixtureTorrentInfo(t *testing.T) store.InfoHash {
 	t.Helper()
 
@@ -78,10 +104,8 @@ func fixtureTorrentInfo(t *testing.T) store.InfoHash {
 	return hash
 }
 
-// readyImage builds a Ready Image object named name, with an ImageLayout
-// named name+"-cm" holding sfdiskJSON, and the given partitions. It
-// returns the Image and the ImageLayout, both ready to seed a fake
-// client with.
+// readyImage builds a Ready Image named name and its ImageLayout
+// (name+"-cm") holding sfdiskJSON and the given partitions.
 func readyImage(name, sfdiskJSON string, partitions []keziov1alpha1.ImagePartitionStatus) (*keziov1alpha1.Image, *keziov1alpha1.ImageLayout) {
 	layoutName := name + "-cm"
 	image := &keziov1alpha1.Image{
@@ -105,19 +129,13 @@ func readyImage(name, sfdiskJSON string, partitions []keziov1alpha1.ImagePartiti
 	return image, layout
 }
 
-// testSeederPodIP is the fixture PodIP seederPodFixture's pod carries -
-// buildPlanPartition builds a content partition's TorrentURL straight
-// from this, so every test that expects a resolved URL checks against
-// it (see expectedTorrentURL).
+// testSeederPodIP is the PodIP seederPodFixture's pod carries; see
+// expectedTorrentURL.
 const testSeederPodIP = "10.0.0.5"
 
-// seederPodFixture builds the per-Image, per-site seeder Deployment and
-// one Ready pod behind it that buildPlanPartition needs to resolve a
-// content partition's TorrentURL: the Deployment named exactly as
-// internal/controller's own reconciler would name it
-// (seederdeploy.Name), carrying a pod selector, and a pod matching that
-// selector with PodIP set. site "" matches every fixture Machine's
-// default (empty) spec.networkSite unless a test overrides it.
+// seederPodFixture builds the per-Image, per-site seeder Deployment
+// (named via seederdeploy.Name, as the real reconciler names it) and one
+// Ready pod matching its selector, with PodIP set.
 func seederPodFixture(ns, imageName, site string) (*appsv1.Deployment, *corev1.Pod) {
 	labels := map[string]string{"app": imageName + "-seeder"}
 	dep := &appsv1.Deployment{
@@ -134,8 +152,7 @@ func seederPodFixture(ns, imageName, site string) (*appsv1.Deployment, *corev1.P
 	return dep, pod
 }
 
-// expectedTorrentURL is the URL buildPlanPartition should resolve hash
-// to, given a seederPodFixture-shaped pod at testSeederPodIP.
+// expectedTorrentURL is the URL buildPlanPartition should resolve hash to.
 func expectedTorrentURL(hash string) string {
 	return fmt.Sprintf("http://%s:8080/torrents/%s", testSeederPodIP, hash)
 }
@@ -149,13 +166,15 @@ func TestBuildDeployPlan_OSImageWithContentSwapAndBlankPartitions(t *testing.T) 
 		{Number: 3, Role: keziov1alpha1.PartitionRoleData, FSType: "ext4"}, // blank: no infoHash, no uuid
 	}
 	image, cm := readyImage("os-image", `{"partitiontable":{"label":"gpt"}}`, partitions)
-	seederDep, seederPod := seederPodFixture("default", "os-image", "")
+	seederDep, seederPod := seederPodFixture("default", "os-image", testSiteIdentity)
+	subnet, site, subnetRef := siteFixture("default")
 
 	ezio := &keziov1alpha1.MachineEzioTuning{CacheSizeMB: int32Ptr(256)}
 	machine := &keziov1alpha1.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-01", Namespace: "default"},
 		Spec: keziov1alpha1.MachineSpec{
 			ImageRef:    &keziov1alpha1.NameRef{Name: "os-image"},
+			SubnetRef:   subnetRef,
 			Ezio:        ezio,
 			AfterDeploy: keziov1alpha1.AfterDeployPowerOff,
 		},
@@ -170,7 +189,7 @@ func TestBuildDeployPlan_OSImageWithContentSwapAndBlankPartitions(t *testing.T) 
 		},
 	}
 
-	c := newPlanTestClient(t, image, cm, machine, seederDep, seederPod)
+	c := newPlanTestClient(t, image, cm, machine, seederDep, seederPod, subnet, site)
 	cfg := Config{TrackerURL: testTrackerURL}
 
 	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
@@ -249,9 +268,11 @@ func TestBuildDeployPlan_MultiDataImageUsesNonNVMeDeviceNaming(t *testing.T) {
 		{Number: 1, Role: keziov1alpha1.PartitionRoleData, FSType: "xfs"},
 	})
 
+	subnet, site, subnetRef := siteFixture("default")
 	machine := &keziov1alpha1.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-02", Namespace: "default"},
 		Spec: keziov1alpha1.MachineSpec{
+			SubnetRef: subnetRef,
 			DataImages: []keziov1alpha1.MachineDataImage{
 				{ImageRef: keziov1alpha1.NameRef{Name: "data-1"}},
 				{ImageRef: keziov1alpha1.NameRef{Name: "data-2"}},
@@ -268,7 +289,7 @@ func TestBuildDeployPlan_MultiDataImageUsesNonNVMeDeviceNaming(t *testing.T) {
 		},
 	}
 
-	c := newPlanTestClient(t, image1, cm1, image2, cm2, machine)
+	c := newPlanTestClient(t, image1, cm1, image2, cm2, machine, subnet, site)
 	cfg := Config{TrackerURL: testTrackerURL}
 
 	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
@@ -300,11 +321,13 @@ func TestBuildDeployPlan_NotReadyCases(t *testing.T) {
 		{Number: 1, Role: keziov1alpha1.PartitionRoleData, FSType: "ext4"},
 	})
 
+	_, _, subnetRef := siteFixture("default")
 	baseMachine := func() *keziov1alpha1.Machine {
 		return &keziov1alpha1.Machine{
 			ObjectMeta: metav1.ObjectMeta{Name: "node-01", Namespace: "default"},
 			Spec: keziov1alpha1.MachineSpec{
-				ImageRef: &keziov1alpha1.NameRef{Name: "os-image"},
+				ImageRef:  &keziov1alpha1.NameRef{Name: "os-image"},
+				SubnetRef: subnetRef,
 			},
 			Status: keziov1alpha1.MachineStatus{
 				State: keziov1alpha1.MachineStateProvisioning,
@@ -331,7 +354,8 @@ func TestBuildDeployPlan_NotReadyCases(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			machine := baseMachine()
 			tc.modify(machine)
-			c := newPlanTestClient(t, image, cm, machine)
+			subnet, site, _ := siteFixture("default")
+			c := newPlanTestClient(t, image, cm, machine, subnet, site)
 			cfg := Config{TrackerURL: testTrackerURL}
 
 			plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
@@ -349,9 +373,10 @@ func TestBuildDeployPlan_ImageNotReadyIsNotAnError(t *testing.T) {
 	image, cm := readyImage("os-image", "{}", nil)
 	image.Status.State = keziov1alpha1.ImageStateIngesting
 
+	subnet, site, subnetRef := siteFixture("default")
 	machine := &keziov1alpha1.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-01", Namespace: "default"},
-		Spec:       keziov1alpha1.MachineSpec{ImageRef: &keziov1alpha1.NameRef{Name: "os-image"}},
+		Spec:       keziov1alpha1.MachineSpec{ImageRef: &keziov1alpha1.NameRef{Name: "os-image"}, SubnetRef: subnetRef},
 		Status: keziov1alpha1.MachineStatus{
 			State: keziov1alpha1.MachineStateProvisioning,
 			Provisioning: &keziov1alpha1.MachineProvisioningStatus{
@@ -363,7 +388,7 @@ func TestBuildDeployPlan_ImageNotReadyIsNotAnError(t *testing.T) {
 		},
 	}
 
-	c := newPlanTestClient(t, image, cm, machine)
+	c := newPlanTestClient(t, image, cm, machine, subnet, site)
 	cfg := Config{TrackerURL: testTrackerURL}
 
 	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
@@ -375,23 +400,17 @@ func TestBuildDeployPlan_ImageNotReadyIsNotAnError(t *testing.T) {
 	}
 }
 
-// TestBuildDeployPlan_ImageFailedIsNotThePlanBuildersJob characterizes
-// buildImagePlan's handling of an Image in ImageStateFailed (the state a
-// checksum mismatch or a failed ingest job drives an Image to): it is
-// treated exactly like ImageStateIngesting - "not ready yet", answered
-// with a nil plan and a nil error, never a plan-building error. Detecting
-// that an Image has permanently failed and moving the Machine to
-// MachineStateError is the controller's job (see
-// MachineReconciler.checkReferencedImagesFailed in
-// internal/controller/machine_controller.go), which runs before a Machine
-// referencing a failed Image is ever polled through this path again.
+// ImageStateFailed is treated like ImageStateIngesting here - nil plan,
+// nil error. Flagging the permanent failure and moving the Machine to
+// MachineStateError is MachineReconciler.checkReferencedImagesFailed's job.
 func TestBuildDeployPlan_ImageFailedIsNotThePlanBuildersJob(t *testing.T) {
 	image, cm := readyImage("os-image", "{}", nil)
 	image.Status.State = keziov1alpha1.ImageStateFailed
 
+	subnet, site, subnetRef := siteFixture("default")
 	machine := &keziov1alpha1.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-01", Namespace: "default"},
-		Spec:       keziov1alpha1.MachineSpec{ImageRef: &keziov1alpha1.NameRef{Name: "os-image"}},
+		Spec:       keziov1alpha1.MachineSpec{ImageRef: &keziov1alpha1.NameRef{Name: "os-image"}, SubnetRef: subnetRef},
 		Status: keziov1alpha1.MachineStatus{
 			State: keziov1alpha1.MachineStateProvisioning,
 			Provisioning: &keziov1alpha1.MachineProvisioningStatus{
@@ -403,7 +422,7 @@ func TestBuildDeployPlan_ImageFailedIsNotThePlanBuildersJob(t *testing.T) {
 		},
 	}
 
-	c := newPlanTestClient(t, image, cm, machine)
+	c := newPlanTestClient(t, image, cm, machine, subnet, site)
 	cfg := Config{TrackerURL: testTrackerURL}
 
 	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
@@ -416,11 +435,12 @@ func TestBuildDeployPlan_ImageFailedIsNotThePlanBuildersJob(t *testing.T) {
 }
 
 func TestBuildDeployPlan_MissingImageLayoutIsAnError(t *testing.T) {
-	image, _ := readyImage("os-image", "{}", nil) // ImageLayout deliberately not seeded
+	image, _ := readyImage("os-image", "{}", nil) // ImageLayout not seeded
 
+	subnet, site, subnetRef := siteFixture("default")
 	machine := &keziov1alpha1.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-01", Namespace: "default"},
-		Spec:       keziov1alpha1.MachineSpec{ImageRef: &keziov1alpha1.NameRef{Name: "os-image"}},
+		Spec:       keziov1alpha1.MachineSpec{ImageRef: &keziov1alpha1.NameRef{Name: "os-image"}, SubnetRef: subnetRef},
 		Status: keziov1alpha1.MachineStatus{
 			State: keziov1alpha1.MachineStateProvisioning,
 			Provisioning: &keziov1alpha1.MachineProvisioningStatus{
@@ -432,16 +452,80 @@ func TestBuildDeployPlan_MissingImageLayoutIsAnError(t *testing.T) {
 		},
 	}
 
-	c := newPlanTestClient(t, image, machine)
+	c := newPlanTestClient(t, image, machine, subnet, site)
 	cfg := Config{TrackerURL: testTrackerURL}
 
 	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
 	if err == nil {
 		t.Fatal("buildDeployPlan: want an error for a missing ImageLayout")
 	}
+	if !strings.Contains(err.Error(), "get imagelayout") {
+		t.Fatalf("err = %v, want it naming the missing ImageLayout (get imagelayout), not some other failure (e.g. a dangling subnetRef)", err)
+	}
 	if plan != nil {
 		t.Fatalf("plan = %+v, want nil alongside the error", plan)
 	}
+}
+
+// A dangling subnetRef or siteRef is a misconfiguration, reported as an
+// error - not folded into the "not ready yet" (nil, nil) path.
+func TestBuildDeployPlan_DanglingSiteReferenceIsAnError(t *testing.T) {
+	baseMachine := func(subnetRef keziov1alpha1.NameRef) *keziov1alpha1.Machine {
+		return &keziov1alpha1.Machine{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-01", Namespace: "default"},
+			Spec: keziov1alpha1.MachineSpec{
+				ImageRef:  &keziov1alpha1.NameRef{Name: "os-image"},
+				SubnetRef: subnetRef,
+			},
+			Status: keziov1alpha1.MachineStatus{
+				State: keziov1alpha1.MachineStateProvisioning,
+				Provisioning: &keziov1alpha1.MachineProvisioningStatus{
+					Image: &keziov1alpha1.MachineProvisionedImage{
+						ImageRef:   keziov1alpha1.NameRef{Name: "os-image"},
+						TargetDisk: "/dev/nvme0n1",
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("dangling subnetRef", func(t *testing.T) {
+		machine := baseMachine(keziov1alpha1.NameRef{Name: "ghost-subnet"})
+		c := newPlanTestClient(t, machine)
+		cfg := Config{TrackerURL: testTrackerURL}
+
+		plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
+		if !errors.Is(err, sitederive.ErrSubnetNotFound) {
+			t.Fatalf("err = %v, want wrapping sitederive.ErrSubnetNotFound", err)
+		}
+		if plan != nil {
+			t.Fatalf("plan = %+v, want nil alongside the error", plan)
+		}
+	})
+
+	t.Run("dangling siteRef", func(t *testing.T) {
+		subnet := &keziov1alpha1.Subnet{
+			ObjectMeta: metav1.ObjectMeta{Name: "sub1", Namespace: "default"},
+			Spec: keziov1alpha1.SubnetSpec{
+				SiteRef:         keziov1alpha1.NameRef{Name: "ghost-site"},
+				CIDR:            "192.0.2.0/24",
+				BootdServerIP:   "192.0.2.2",
+				BootdNetworkRef: keziov1alpha1.NameRef{Name: "bootd-nad"},
+				DHCP:            keziov1alpha1.SubnetDHCP{Mode: keziov1alpha1.SubnetDHCPModeProxy},
+			},
+		}
+		machine := baseMachine(keziov1alpha1.NameRef{Name: "sub1"})
+		c := newPlanTestClient(t, machine, subnet)
+		cfg := Config{TrackerURL: testTrackerURL}
+
+		plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
+		if !errors.Is(err, sitederive.ErrSiteNotFound) {
+			t.Fatalf("err = %v, want wrapping sitederive.ErrSiteNotFound", err)
+		}
+		if plan != nil {
+			t.Fatalf("plan = %+v, want nil alongside the error", plan)
+		}
+	})
 }
 
 func TestBuildDeployPlan_ImageRefResolvesToRefNamespaceNotMachineNamespace(t *testing.T) {
@@ -453,12 +537,14 @@ func TestBuildDeployPlan_ImageRefResolvesToRefNamespaceNotMachineNamespace(t *te
 	image, cm := readyImage("os-image", `{"partitiontable":{"label":"gpt"}}`, partitions)
 	image.Namespace = "images-ns"
 	cm.Namespace = "images-ns"
-	seederDep, seederPod := seederPodFixture("images-ns", "os-image", "")
+	seederDep, seederPod := seederPodFixture("images-ns", "os-image", testSiteIdentity)
+	subnet, site, subnetRef := siteFixture("default")
 
 	machine := &keziov1alpha1.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-01", Namespace: "default"},
 		Spec: keziov1alpha1.MachineSpec{
-			ImageRef: &keziov1alpha1.NameRef{Name: "os-image", Namespace: "images-ns"},
+			ImageRef:  &keziov1alpha1.NameRef{Name: "os-image", Namespace: "images-ns"},
+			SubnetRef: subnetRef,
 		},
 		Status: keziov1alpha1.MachineStatus{
 			State: keziov1alpha1.MachineStateProvisioning,
@@ -471,7 +557,7 @@ func TestBuildDeployPlan_ImageRefResolvesToRefNamespaceNotMachineNamespace(t *te
 		},
 	}
 
-	c := newPlanTestClient(t, image, cm, machine, seederDep, seederPod)
+	c := newPlanTestClient(t, image, cm, machine, seederDep, seederPod, subnet, site)
 	cfg := Config{TrackerURL: testTrackerURL}
 
 	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
@@ -492,23 +578,20 @@ func TestBuildDeployPlan_ImageRefResolvesToRefNamespaceNotMachineNamespace(t *te
 	}
 }
 
-// TestBuildDeployPlan_NoSeederDeploymentForInfoHashIsAnError checks that
-// a content partition fails plan building loudly when no per-Image
-// seeder Deployment exists yet for the Machine's site: buildPlanPartition
-// must never emit a content partition with an empty TorrentURL (see
-// agentapi.PlanPartition.TorrentURL's doc comment), since that would
-// classify as BLANK on the agent side and mkfs over real content.
+// buildPlanPartition must never emit a content partition with an empty
+// TorrentURL: the agent classifies that as BLANK and mkfs's over real content.
 func TestBuildDeployPlan_NoSeederDeploymentForInfoHashIsAnError(t *testing.T) {
-	hash := fixtureTorrentInfo(t) // only used to mint a well-formed InfoHash
+	hash := fixtureTorrentInfo(t)
 
 	partitions := []keziov1alpha1.ImagePartitionStatus{
 		{Number: 1, Role: keziov1alpha1.PartitionRoleESP, FSType: "vfat", InfoHash: hash.String()},
 	}
 	image, cm := readyImage("os-image", `{"partitiontable":{"label":"gpt"}}`, partitions)
+	subnet, site, subnetRef := siteFixture("default")
 
 	machine := &keziov1alpha1.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-01", Namespace: "default"},
-		Spec:       keziov1alpha1.MachineSpec{ImageRef: &keziov1alpha1.NameRef{Name: "os-image"}},
+		Spec:       keziov1alpha1.MachineSpec{ImageRef: &keziov1alpha1.NameRef{Name: "os-image"}, SubnetRef: subnetRef},
 		Status: keziov1alpha1.MachineStatus{
 			State: keziov1alpha1.MachineStateProvisioning,
 			Provisioning: &keziov1alpha1.MachineProvisioningStatus{
@@ -520,24 +603,21 @@ func TestBuildDeployPlan_NoSeederDeploymentForInfoHashIsAnError(t *testing.T) {
 		},
 	}
 
-	// Deliberately no seeder Deployment or pod seeded into the client:
-	// this is the "not ready yet" state a fresh Image, or a seeder
-	// Deployment still starting, leaves buildPlanPartition in.
-	c := newPlanTestClient(t, image, cm, machine)
+	c := newPlanTestClient(t, image, cm, machine, subnet, site)
 	cfg := Config{TrackerURL: testTrackerURL}
 
 	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
 	if err == nil {
 		t.Fatal("buildDeployPlan: want an error when no seeder deployment exists yet for this site")
 	}
+	if !strings.Contains(err.Error(), "no seeder deployment for site") {
+		t.Fatalf("err = %v, want it naming the missing seeder deployment, not some other failure (e.g. a dangling subnetRef)", err)
+	}
 	if plan != nil {
 		t.Fatalf("plan = %+v, want nil alongside the error", plan)
 	}
 }
 
-// TestBuildDeployPlan_NoReadySeederPodForInfoHashIsAnError is the other
-// half of the same guard: a seeder Deployment exists for the site, but
-// none of its pods has reported a PodIP yet.
 func TestBuildDeployPlan_NoReadySeederPodForInfoHashIsAnError(t *testing.T) {
 	hash := fixtureTorrentInfo(t)
 
@@ -545,10 +625,11 @@ func TestBuildDeployPlan_NoReadySeederPodForInfoHashIsAnError(t *testing.T) {
 		{Number: 1, Role: keziov1alpha1.PartitionRoleESP, FSType: "vfat", InfoHash: hash.String()},
 	}
 	image, cm := readyImage("os-image", `{"partitiontable":{"label":"gpt"}}`, partitions)
+	subnet, site, subnetRef := siteFixture("default")
 
 	machine := &keziov1alpha1.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-01", Namespace: "default"},
-		Spec:       keziov1alpha1.MachineSpec{ImageRef: &keziov1alpha1.NameRef{Name: "os-image"}},
+		Spec:       keziov1alpha1.MachineSpec{ImageRef: &keziov1alpha1.NameRef{Name: "os-image"}, SubnetRef: subnetRef},
 		Status: keziov1alpha1.MachineStatus{
 			State: keziov1alpha1.MachineStateProvisioning,
 			Provisioning: &keziov1alpha1.MachineProvisioningStatus{
@@ -560,15 +641,18 @@ func TestBuildDeployPlan_NoReadySeederPodForInfoHashIsAnError(t *testing.T) {
 		},
 	}
 
-	seederDep, seederPod := seederPodFixture("default", "os-image", "")
+	seederDep, seederPod := seederPodFixture("default", "os-image", testSiteIdentity)
 	seederPod.Status.PodIP = "" // not Ready yet
 
-	c := newPlanTestClient(t, image, cm, machine, seederDep, seederPod)
+	c := newPlanTestClient(t, image, cm, machine, seederDep, seederPod, subnet, site)
 	cfg := Config{TrackerURL: testTrackerURL}
 
 	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)
 	if err == nil {
 		t.Fatal("buildDeployPlan: want an error when the seeder deployment has no pod with a PodIP yet")
+	}
+	if !strings.Contains(err.Error(), "no ready seeder pod yet") {
+		t.Fatalf("err = %v, want it naming the not-yet-ready seeder pod, not some other failure (e.g. a dangling subnetRef)", err)
 	}
 	if plan != nil {
 		t.Fatalf("plan = %+v, want nil alongside the error", plan)
@@ -577,15 +661,17 @@ func TestBuildDeployPlan_NoReadySeederPodForInfoHashIsAnError(t *testing.T) {
 
 func TestBuildDeployPlan_NoOSImageOrDataImagesReturnsNilPlan(t *testing.T) {
 
+	subnet, site, subnetRef := siteFixture("default")
 	machine := &keziov1alpha1.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-01", Namespace: "default"},
+		Spec:       keziov1alpha1.MachineSpec{SubnetRef: subnetRef},
 		Status: keziov1alpha1.MachineStatus{
 			State:        keziov1alpha1.MachineStateProvisioning,
 			Provisioning: &keziov1alpha1.MachineProvisioningStatus{},
 		},
 	}
 
-	c := newPlanTestClient(t, machine)
+	c := newPlanTestClient(t, machine, subnet, site)
 	cfg := Config{TrackerURL: testTrackerURL}
 
 	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)

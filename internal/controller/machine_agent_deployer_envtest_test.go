@@ -198,6 +198,30 @@ func registerAndReachAvailable(t *testing.T, env agentWalkEnv, name string) (typ
 		t.Fatalf("creating BMC credentials secret: %v", err)
 	}
 
+	// spec.subnetRef (name+"-subnet", from newTestMachineSpec) must
+	// resolve to a real Site once reconcileProvisioning checks it
+	// (checkSiteUnresolved), same requirement the Ginkgo suite's
+	// createMachineTestSite meets for its own tests.
+	site := &keziov1alpha1.Site{
+		ObjectMeta: metav1.ObjectMeta{Name: name + "-site", Namespace: "default"},
+	}
+	if err := env.rawClient.Create(ctx, site); err != nil {
+		t.Fatalf("creating Site: %v", err)
+	}
+	subnet := &keziov1alpha1.Subnet{
+		ObjectMeta: metav1.ObjectMeta{Name: name + "-subnet", Namespace: "default"},
+		Spec: keziov1alpha1.SubnetSpec{
+			SiteRef:         keziov1alpha1.NameRef{Name: site.Name},
+			CIDR:            "192.0.2.0/24",
+			BootdServerIP:   "192.0.2.2",
+			BootdNetworkRef: keziov1alpha1.NameRef{Name: "boot-nad"},
+			DHCP:            keziov1alpha1.SubnetDHCP{Mode: keziov1alpha1.SubnetDHCPModeProxy},
+		},
+	}
+	if err := env.rawClient.Create(ctx, subnet); err != nil {
+		t.Fatalf("creating Subnet: %v", err)
+	}
+
 	machine := &keziov1alpha1.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec:       spec,
@@ -271,15 +295,18 @@ func registerAndReachAvailable(t *testing.T, env agentWalkEnv, name string) (typ
 	return key, sessionToken
 }
 
-// deployedImageName is the (deliberately nonexistent) Image name every
-// walk below requests: Provision never reads the Image CR itself - only
-// agentserver's GET .../next handler needs a real, Ready Image, and
-// nothing in this test ever exercises that endpoint - so a name that
-// resolves to nothing is enough to drive Available -> Provisioning.
-const deployedImageName = "does-not-need-to-exist-for-this-assertion"
+// deployedImageName is the Image name every walk below requests.
+// Provision never reads the Image CR itself, and nothing in this test
+// ever exercises agentserver's GET .../next handler (the only consumer
+// that needs the Image Ready) - but reconcileProvisioning's
+// checkReferencedImagesFailed does require the Image to exist at all, so
+// requestDeploymentAndResolveDisk creates a bare (never-Ready) one under
+// this name before referencing it.
+const deployedImageName = "agent-walk-deployed-image"
 
-// requestDeploymentAndResolveDisk sets spec.imageRef, driving
-// Available -> Provisioning, and reconciles until reconcileProvisioning
+// requestDeploymentAndResolveDisk creates the (bare, never-Ready) Image
+// deployedImageName names, sets spec.imageRef to it - driving
+// Available -> Provisioning - and reconciles until reconcileProvisioning
 // has resolved the OS image's target disk against the single reported
 // disk (no targetDisk hints on this spec, one disk in inventory -
 // diskmatch.Match's unambiguous default) and recorded it in
@@ -289,6 +316,16 @@ const deployedImageName = "does-not-need-to-exist-for-this-assertion"
 func requestDeploymentAndResolveDisk(t *testing.T, env agentWalkEnv, key types.NamespacedName) string {
 	t.Helper()
 	ctx := env.ctx
+
+	image := &keziov1alpha1.Image{
+		ObjectMeta: metav1.ObjectMeta{Name: deployedImageName, Namespace: "default"},
+		Spec: keziov1alpha1.ImageSpec{
+			Source: keziov1alpha1.ImageSource{Format: keziov1alpha1.ImageFormatQCOW2},
+		},
+	}
+	if err := env.rawClient.Create(ctx, image); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("creating deployed Image: %v", err)
+	}
 
 	// Same cached-read/direct-write skew as registerAndReachAvailable's
 	// token seeding: retry against a fresh Get instead of failing

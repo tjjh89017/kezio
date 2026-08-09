@@ -1,13 +1,17 @@
-# Standalone kustomization for kezio-bootd (proxyDHCP + TFTP), deliberately
-# not composed into config/default: bootd is not part of the
-# controller-manager process, runs one replica per boot L2 segment, and
-# needs its own Multus attachment. Deploy as an addition once config/default
-# is applied:
+# RBAC prerequisite for kezio-bootd (proxyDHCP + TFTP). bootd is not part
+# of the controller-manager process, but its Deployment is no longer
+# something this kustomization applies: SubnetReconciler creates one bootd
+# Deployment per Subnet, in that Subnet's own namespace, from the shape
+# deployment.yaml documents (see that file's header and README.md's "Who
+# creates the bootd Deployment"). What is still applied here is the
+# ClusterRole every Subnet's bootd ServiceAccount needs:
 #
 #   kustomize build config/bootd | kubectl apply -f -
 #
-# Read README.md first - the BOOTD_SERVER_IP placeholder, TFTP artifacts
-# volume, and Multus attachment all need manual setup a plain apply can't do.
+# Read README.md first - a bootd pod also needs a ServiceAccount, a PSA
+# label, and a NAD in its own Subnet's namespace, none of which this
+# kustomization provisions (see "What you still provide, per Subnet" and
+# "RBAC scope").
 namespace: kezio-system
 namePrefix: kezio-
 
@@ -18,16 +22,7 @@ labels:
 
 resources:
   - rbac.yaml
-  - deployment.yaml
-  # networkattachmentdefinition.example.yaml is NOT listed here on
-  # purpose - see that file's header comment.
-
-images:
-  - name: bootd
-    newName: ghcr.io/tjjh89017/kezio-bootd
-    newTag: latest
-  # Named by deployment.yaml's fetch-boot-artifacts initContainer; override
-  # with `kustomize edit set image kezio-boot-artifacts=...` to pin a version.
-  - name: kezio-boot-artifacts
-    newName: ghcr.io/tjjh89017/kezio-boot-artifacts
-    newTag: latest
+  # deployment.yaml is NOT listed here - it is a reference for what
+  # SubnetReconciler builds per Subnet, not something this kustomization
+  # applies. networkattachmentdefinition.example.yaml is NOT listed here
+  # either - see that file's header comment.

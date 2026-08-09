@@ -37,6 +37,14 @@ import (
 // volume, at a glance in `kubectl get pvc`.
 const partitionPVCNamePrefix = "kezio-part-"
 
+// AppNameLabel and AppNameValue are the app.kubernetes.io/name label
+// key and its fixed value on every kezio-managed workload this package
+// builds, shared for the same reason AppComponentLabel is.
+const (
+	AppNameLabel = "app.kubernetes.io/name"
+	AppNameValue = "kezio"
+)
+
 // AppComponentLabel is the app.kubernetes.io/component label key,
 // shared across every kezio-managed workload this package builds
 // (ingest, publish, and per-Image seeder Deployment pods, and partition
@@ -156,8 +164,8 @@ func (r *ImageReconciler) buildPartitionPVC(image *keziov1alpha1.Image, p keziov
 			Name:      partitionPVCName(image.Name, p.Number),
 			Namespace: image.Namespace,
 			Labels: map[string]string{
-				"app.kubernetes.io/name": "kezio",
-				AppComponentLabel:        "partition-content",
+				AppNameLabel:      AppNameValue,
+				AppComponentLabel: "partition-content",
 			},
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{

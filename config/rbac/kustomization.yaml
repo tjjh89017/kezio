@@ -23,4 +23,10 @@ resources:
 - image_admin_role.yaml
 - image_editor_role.yaml
 - image_viewer_role.yaml
+- site_admin_role.yaml
+- site_editor_role.yaml
+- site_viewer_role.yaml
+- subnet_admin_role.yaml
+- subnet_editor_role.yaml
+- subnet_viewer_role.yaml
 

@@ -1,0 +1,259 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: subnets.kezio.kojuro.date
+spec:
+  group: kezio.kojuro.date
+  names:
+    kind: Subnet
+    listKind: SubnetList
+    plural: subnets
+    shortNames:
+    - ezn
+    - subnet
+    singular: subnet
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.siteRef.name
+      name: Site
+      type: string
+    - jsonPath: .spec.cidr
+      name: CIDR
+      type: string
+    - jsonPath: .spec.bootdServerIP
+      name: BootdServerIP
+      type: string
+    - jsonPath: .spec.dhcp.mode
+      name: DHCPMode
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Subnet is the Schema for the subnets API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              SubnetSpec defines the desired state of Subnet.
+
+              A Subnet denotes one broadcast domain on the boot/provisioning plane:
+              bootd binds to it directly (BootdNetworkRef), and BootdServerIP is the
+              address firmware caches mid-boot as its PXE next-server/TFTP target on
+              that segment. The data plane - the routed, cross-subnet network
+              BitTorrent seeding needs - is a distinct concern expressed through
+              SeederNetworkRef and resolved at the Site level, not the Subnet level.
+
+              BootdServerIP is explicit and pinned, never allocated by an IPAM
+              plugin: it must stay stable for the pod's whole lifetime, unlike a
+              seeder pod's address, which BitTorrent's tracker-based peer discovery
+              tolerates changing between seeder Deployments.
+            properties:
+              bootdNetworkRef:
+                description: |-
+                  BootdNetworkRef names the NetworkAttachmentDefinition the bootd
+                  Deployment for this Subnet attaches through. Its namespace must
+                  carry pod-security.kubernetes.io/enforce=privileged, since bootd
+                  needs NET_ADMIN.
+                properties:
+                  name:
+                    description: |-
+                      Post-mutation admission always re-serialises this struct, so a
+                      zero-value Name would otherwise satisfy "required"; MinLength closes
+                      that gap.
+                    minLength: 1
+                    type: string
+                  namespace:
+                    type: string
+                required:
+                - name
+                type: object
+              bootdServerIP:
+                description: |-
+                  BootdServerIP is bootd's own IPv4 address on this Subnet - the
+                  address firmware reads back as the PXE boot server and (absent an
+                  override) the TFTP next-server. Explicit and pinned, never
+                  IPAM-allocated.
+                pattern: ^(\d{1,3}\.){3}\d{1,3}$
+                type: string
+              cidr:
+                description: CIDR is this Subnet's IPv4 network, for example "192.0.2.0/24".
+                pattern: ^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$
+                type: string
+              dhcp:
+                description: DHCP configures bootd's DHCP behavior on this Subnet.
+                properties:
+                  leaseRangeEnd:
+                    pattern: ^(\d{1,3}\.){3}\d{1,3}$
+                    type: string
+                  leaseRangeStart:
+                    description: |-
+                      LeaseRangeStart and LeaseRangeEnd optionally bound the DHCP lease
+                      range rendered in SubnetDHCPModeLease. Leaving both unset
+                      auto-derives the range from CIDR (its first and last host
+                      addresses). Ignored unless Mode is SubnetDHCPModeLease.
+                    pattern: ^(\d{1,3}\.){3}\d{1,3}$
+                    type: string
+                  mode:
+                    description: |-
+                      Mode selects proxyDHCP (defer to an existing DHCP server on the
+                      segment) or lease (bootd's dnsmasq becomes the segment's own DHCP
+                      authority).
+                    enum:
+                    - proxy
+                    - lease
+                    type: string
+                required:
+                - mode
+                type: object
+                x-kubernetes-validations:
+                - message: leaseRangeStart and leaseRangeEnd must be set together
+                  rule: has(self.leaseRangeStart) == has(self.leaseRangeEnd)
+              nodeSelector:
+                additionalProperties:
+                  type: string
+                description: |-
+                  NodeSelector constrains bootd (and, when this Subnet hosts
+                  seeders, seeder) pods onto nodes actually attached to this
+                  broadcast domain. Empty means unconstrained - correct for a
+                  single-node lab, where every node is on every segment.
+                type: object
+              seederNetworkRef:
+                description: |-
+                  SeederNetworkRef names the NetworkAttachmentDefinition seeder pods
+                  attach through when this Subnet is a Site's designated seeder
+                  Subnet (SiteSpec.SeederSubnetRef). Optional: absent means this
+                  Subnet does not host seeders. It may name the same NAD as
+                  BootdNetworkRef, but BootdServerIP must never fall inside that
+                  NAD's IPAM range.
+                properties:
+                  name:
+                    description: |-
+                      Post-mutation admission always re-serialises this struct, so a
+                      zero-value Name would otherwise satisfy "required"; MinLength closes
+                      that gap.
+                    minLength: 1
+                    type: string
+                  namespace:
+                    type: string
+                required:
+                - name
+                type: object
+              siteRef:
+                description: |-
+                  SiteRef names the Site this Subnet belongs to. The referenced Site
+                  must in fact be able to route to this Subnet for the reference to
+                  be meaningful. A dangling reference does not withhold this
+                  Subnet's own bootd Deployment, but it does block Site-scoped
+                  features that need the Site to exist.
+                properties:
+                  name:
+                    description: |-
+                      Post-mutation admission always re-serialises this struct, so a
+                      zero-value Name would otherwise satisfy "required"; MinLength closes
+                      that gap.
+                    minLength: 1
+                    type: string
+                  namespace:
+                    type: string
+                required:
+                - name
+                type: object
+            required:
+            - bootdNetworkRef
+            - bootdServerIP
+            - cidr
+            - dhcp
+            - siteRef
+            type: object
+          status:
+            description: SubnetStatus defines the observed state of Subnet.
+            properties:
+              conditions:
+                description: |-
+                  Conditions report the current state of the Subnet, including
+                  ConditionReady, which reflects whether this Subnet's bootd
+                  Deployment has become available.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

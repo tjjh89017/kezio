@@ -1,0 +1,23 @@
+# Not used by kezio itself; a helper for cluster admins delegating
+# permissions. Grants full ('*') access over sites.
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: kezio
+    app.kubernetes.io/managed-by: kustomize
+  name: site-admin-role
+rules:
+- apiGroups:
+  - kezio.kojuro.date
+  resources:
+  - sites
+  verbs:
+  - '*'
+- apiGroups:
+  - kezio.kojuro.date
+  resources:
+  - sites/status
+  verbs:
+  - get

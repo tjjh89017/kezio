@@ -26,6 +26,14 @@ import "net"
 // first.
 const DefaultBootFilename = "shimx64.efi"
 
+// DefaultHealthProbePort is the controller-runtime health probe port
+// cmd/bootd's manager listens on by default (its
+// "health-probe-bind-address" flag default) and the port
+// internal/controller's buildBootdDeployment targets with the bootd
+// container's readinessProbe: the two must name the same port, since
+// nothing else connects them.
+const DefaultHealthProbePort = 8081
+
 // Config configures the dnsmasq instance bootd renders and supervises
 // (see RenderDnsmasqConf / Dnsmasq) and the in-process TFTP server.
 type Config struct {

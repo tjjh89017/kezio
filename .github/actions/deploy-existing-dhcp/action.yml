@@ -65,11 +65,6 @@ runs:
         set -euo pipefail
         nad_name="${NAME}-network"
 
-        # Same "bridge + tuning(rp_filter=0)" plugin chain as bootd's
-        # kezio-boot-network NAD: this pod answers the VM's broadcast
-        # DISCOVER directly too, so its net1 needs the same loose
-        # reverse-path filter (a source-0.0.0.0 broadcast can otherwise
-        # be rejected depending on kernel version/inherited sysctls).
         cat <<EOF | kubectl apply -f -
         apiVersion: k8s.cni.cncf.io/v1
         kind: NetworkAttachmentDefinition
@@ -90,12 +85,6 @@ runs:
                     "addresses": [
                       {"address": "${STATIC_CIDR}"}
                     ]
-                  }
-                },
-                {
-                  "type": "tuning",
-                  "sysctl": {
-                    "net.ipv4.conf.IFNAME.rp_filter": "0"
                   }
                 }
               ]

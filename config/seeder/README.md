@@ -71,15 +71,26 @@ Set these on the `controller-manager` Deployment's environment
 - `SEEDER_DEPLOYMENT_GRACE_PERIOD` - optional (a Go duration string,
   for example `5m`); how long an idle Deployment is kept before
   deletion. A default applies when unset.
-- `SEEDER_DEPLOYMENT_NETWORK` - optional; names a Multus
-  `NetworkAttachmentDefinition` that replaces each seeder pod's default
-  network attachment, making it single-homed on the provisioning
-  network (see the no-NAT rule below and
-  `controller.SeederDeploymentConfig.Network`'s doc comment). Leaving
-  this unset puts the pod on the ordinary cluster network only.
 - `SEEDER_MAX_UPLOADS` / `SEEDER_MAX_CONNECTIONS` - optional, override
   the cluster-wide default per-torrent tuning (see "WAN swarm tuning"
   below).
+
+There is no cluster-wide `SEEDER_DEPLOYMENT_NETWORK` any more: a seeder
+pod's Multus default-network annotation is derived per site, from the
+Site's designated seeder Subnet (`SiteSpec.SeederSubnetRef`) and that
+Subnet's own `SeederNetworkRef` (`seederPodAnnotations`,
+`internal/controller/seeder_deployment.go`). A Site whose seeder Subnet
+carries no `SeederNetworkRef` still gets its seeder Deployment, just
+with its pods on the ordinary cluster network only - the same "no
+annotation" fallback the old unset env var produced, now decided per
+Site instead of once for the whole cluster. A Site with no
+`SeederSubnetRef` at all gets no seeder Deployment created for it: any
+Image with torrent content needs its deploying Site to have its own
+seeder Subnet, since the deploy-plan path only ever resolves a seeder at
+the Machine's own Site (`ImageConditionSeederDegraded`'s
+`SeederSubnetRefUnset` Reason surfaces this on the Image). See
+`config/samples/kezio_v1alpha1_site.yaml` and
+`config/samples/kezio_v1alpha1_subnet.yaml`.
 
 ## The agent registration server needs no store mount
 
@@ -108,10 +119,11 @@ IP:port == reachable IP:port, no NAT/SNAT anywhere on that path.**
 Concretely:
 
 - Both a per-Image seeder pod and `opentracker` attach a routable
-  data-network interface as a Multus secondary NIC when configured
-  (`SEEDER_DEPLOYMENT_NETWORK` for the seeder; a commented-out
-  annotation on `opentracker-deployment.yaml`), separate from the
-  cluster's own `eth0`. `eth0` stays for cluster-internal traffic only
+  data-network interface as a Multus secondary NIC when configured (the
+  seeder Subnet's `SeederNetworkRef` for the seeder, resolved per Site -
+  see "Wiring the operator side" above; a commented-out annotation on
+  `opentracker-deployment.yaml`), separate from the cluster's own
+  `eth0`. `eth0` stays for cluster-internal traffic only
   (kube-apiserver, kubelet); the data network carries BitTorrent peer
   connections and tracker announce/response traffic.
 - `opentracker-service.yaml` is ClusterIP, cluster-internal only.
@@ -134,15 +146,29 @@ comments on IPAM choice (static vs. `whereabouts`, and why not DHCP).
 
 ## Provisioning-segment address pool
 
-**Hard prerequisite:** the provisioning network `SEEDER_DEPLOYMENT_NETWORK`
-names must carry enough addresses for every per-Image seeder Deployment
-a site can have running at once, not just one. Each seeder pod is
-single-homed on this network - the Multus default-network annotation
-replaces its whole default attachment - so `pod.Status.PodIP` is the
-one address that Deployment's pod uses. One (Image, site) pair holds
+**Hard prerequisite:** the provisioning network a Site's seeder Subnet
+names through `SeederNetworkRef` must carry enough addresses for every
+per-Image seeder Deployment that Site can have running at once, not just
+one. Each seeder pod is single-homed on this network - the Multus
+default-network annotation replaces its whole default attachment - so
+`pod.Status.PodIP` is the one address that Deployment's pod uses. One
+(Image, site) pair holds
 one seeder Deployment (see "Per-Image, on-demand seeding" above); a
 site where several Images can be deploying at the same time therefore
 needs an address for each one of them, concurrently.
+
+**Exclude the Subnet's `bootdServerIP` from the pool.** bootd and the
+seeder share one L2 segment on this Subnet, whether or not they attach
+through the same NAD. `bootdServerIP` doubles as the PXE next-server
+and TFTP target that firmware caches mid-boot (see
+`api/v1alpha1/subnet_types.go`'s `SubnetSpec` doc comment). A pool that
+can hand `bootdServerIP` to a seeder pod collides with bootd's own
+pinned address. Bound or size the pool so it never includes
+`bootdServerIP`. Sharing one NAD between bootd and the seeder is still
+allowed - only address overlap is forbidden. The controller checks this
+and raises a `SeederOverlapValid` condition on the Subnet when it finds
+an overlap, but treat that as a safety net. Fix the pool's bounds
+before the address ever gets handed out.
 
 **Sizing rule:**
 
@@ -163,15 +189,28 @@ yet been reclaimed. Size generously: an address in a dedicated
 provisioning-segment pool is cheap relative to a seeder Deployment that
 fails to start because the pool ran dry.
 
-Two example NADs cover this:
+Two example NADs cover this - **which one a site needs is that site's
+own choice, driven by how many Images it deploys concurrently**, not a
+fixed rule:
 
 - `networkattachmentdefinition.example.yaml` - a single static address.
-  Correct only for a site where at most one Image is ever deploying at
-  a time (a lab, a small single-Image site).
+  Every attaching pod gets the same address, which is only safe while
+  the site runs at most one Image at a time - a lab, or a small
+  single-Image site.
 - `networkattachmentdefinition-whereabouts.example.yaml` - a
-  range-based `whereabouts` pool. **RECOMMENDED for any real site**,
-  since it is the only one of the two that scales past one concurrently
-  active Image.
+  range-based `whereabouts` pool, sized for the site's concurrency (see
+  the sizing rule above). Needed once a site can have more than one
+  Image deploying at once, since each concurrent (Image, site) seeder
+  Deployment then needs its own address from the pool.
+
+Choosing static ipam for a site that later grows past one concurrent
+Image is not rejected outright - the controller instead raises an
+Advisory `SeederStaticMultiImage` condition on the seeder Subnet
+(reason `SeederStaticIPAMMultiImage`,
+`nadvalidate.CheckSeederStaticMultiImage`) once more than one Image is
+deploying concurrently at that Subnet's Site while its `SeederNetworkRef`
+still resolves to static ipam. Treat that condition as the signal to
+move to a range-based pool, not a hard failure to work around.
 
 **With `whereabouts`, the `ip-reconciler` CronJob is required, not
 optional.** `whereabouts` leaks allocations on ungraceful pod deletion,
@@ -191,17 +230,19 @@ endpoint's port `8080` (`seederdeploy.TorrentHTTPPort`), which the
 agent fetches a partition's `.torrent` from directly at
 `http://<PodIP>:8080/torrents/<infohash>`.
 
-**Namespace-qualified `SEEDER_DEPLOYMENT_NETWORK`:** Multus resolves an
+**Namespace-qualified `SeederNetworkRef`:** Multus resolves an
 unqualified `default-network` annotation value in its own system
 namespace (`kube-system`), not the pod's namespace the way the ordinary
 `k8s.v1.cni.cncf.io/networks` annotation is resolved. A bare NAD name
-set on `SEEDER_DEPLOYMENT_NETWORK` would therefore silently point at a
-NAD that does not exist there. The operator already accounts for this:
-`seederPodAnnotations` qualifies a bare name with the seeder
-Deployment's own namespace (`<namespace>/<name>`) before stamping the
-annotation, so `SEEDER_DEPLOYMENT_NETWORK` can be set to either a bare
-name (qualified automatically) or an already-qualified
-`<namespace>/<name>` value.
+would therefore silently point at a NAD that does not exist there.
+`seederPodAnnotations` (`internal/controller/seeder_deployment.go`)
+accounts for this: it qualifies `SeederNetworkRef` with the seeder
+Subnet's own namespace (`<namespace>/<name>`), not the seeder
+Deployment's namespace (the Image's own) - the NAD lives wherever its
+Subnet lives, the same way bootd's NAD and Deployment share a namespace.
+`SeederNetworkRef` itself can still be set to either a bare name
+(qualified automatically) or an already-qualified `<namespace>/<name>`
+value (`NameRef`'s own optional `Namespace` field).
 
 ## Cross-network baseline: routed L3, not overlay/NAT
 

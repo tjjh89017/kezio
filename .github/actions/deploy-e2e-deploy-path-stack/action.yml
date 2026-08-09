@@ -5,10 +5,11 @@ description: >-
   kustomize images at the calling job's built/imported tags, applies
   config/e2e-deploy-path (image-service + its store PVC + seeder +
   opentracker), attaches opentracker to the provisioning bridge, wires the
-  controller-manager's real ingest/seeder/boot/agent env, wires the
-  fetch-boot-artifacts initContainer, waits for every affected Deployment
-  to roll out, and proves opentracker is both Multus-attached and
-  reachable on the bridge before returning.
+  controller-manager's real ingest/seeder/boot/agent env - including the
+  BOOTD_DEPLOYMENT_* variables SubnetReconciler needs to build a Subnet's
+  bootd Deployment - wires the fetch-boot-artifacts initContainer, waits
+  for every affected Deployment to roll out, and proves opentracker is
+  both Multus-attached and reachable on the bridge before returning.
 
 inputs:
   manager-image:
@@ -25,6 +26,9 @@ inputs:
     required: true
   boot-artifacts-image:
     description: kezio-boot-artifacts image reference the fetch-boot-artifacts initContainer is pointed at.
+    required: true
+  bootd-image:
+    description: kezio-bootd image reference, wired to the controller-manager's BOOTD_DEPLOYMENT_IMAGE.
     required: true
   ingest-image:
     description: kezio-ingest image reference.
@@ -53,6 +57,7 @@ runs:
         SEEDER_IMG: ${{ inputs.seeder-image }}
         OPENTRACKER_IMG: ${{ inputs.opentracker-image }}
         BOOT_ARTIFACTS_IMG: ${{ inputs.boot-artifacts-image }}
+        BOOTD_IMG: ${{ inputs.bootd-image }}
         INGEST_IMG: ${{ inputs.ingest-image }}
         PROVISIONING_TRACKER_NET1_IP: ${{ inputs.tracker-ip }}
         PROVISIONING_BOOTD_NET1_IP: ${{ inputs.bootd-ip }}
@@ -85,13 +90,17 @@ runs:
           SEEDER_TRACKER_URL="http://${PROVISIONING_TRACKER_NET1_IP%%/*}:6969/announce" \
           SEEDER_DEPLOYMENT_IMAGE="${SEEDER_IMG}" \
           SEEDER_DEPLOYMENT_GRACE_PERIOD=45s \
-          SEEDER_DEPLOYMENT_NETWORK=kezio-seeder-network \
           BOOT_SERVER_ADDR=:8090 \
           BOOT_ARTIFACTS_DIR=/boot-artifacts \
           BOOT_SERVER_URL="http://${PROVISIONING_BOOTD_NET1_IP%%/*}:80" \
           AGENT_SERVER_ADDR=:8091 \
           BOOT_AGENT_SERVER_URL="http://${PROVISIONING_BOOTD_NET1_IP%%/*}:80" \
-          DEPLOYER=agent
+          DEPLOYER=agent \
+          BOOTD_DEPLOYMENT_IMAGE="${BOOTD_IMG}" \
+          BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE="${BOOT_ARTIFACTS_IMG}" \
+          BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL="http://kezio-agent-server.kezio-system.svc.cluster.local:8091" \
+          BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL="http://kezio-boot-server.kezio-system.svc.cluster.local:8090" \
+          BOOTD_DEPLOYMENT_SERVICE_ACCOUNT=kezio-bootd
 
         kubectl -n kezio-system patch deployment/kezio-controller-manager --type=json \
           --patch-file=config/e2e-boot-path/boot-artifacts-init-patch.yaml

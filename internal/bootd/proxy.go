@@ -47,11 +47,20 @@ func init() {
 	}
 }
 
-// DefaultProxyAddr is ProxyServer.Addr's default: port 80 on whatever
-// address the caller binds it to. Firmware and a live-booted agent both
-// already carry an explicit "http://<host>:<port>" URL (BOOTD_BOOT_CONFIG_URL
-// / kezio.server=), so the default only saves inventing a port.
-const DefaultProxyAddr = ":80"
+// DefaultProxyPort is DefaultProxyAddr's port, exported as an int (not
+// just baked into that address string) so internal/controller's bootd
+// Deployment builder can reuse the same number for the "proxy-http"
+// ContainerPort and BOOTD_BOOT_CONFIG_URL instead of hardcoding its own
+// copy - bootdEnv never sets BOOTD_PROXY_ADDR, so DefaultProxyAddr is
+// always the port bootd actually listens on.
+const DefaultProxyPort = 80
+
+// DefaultProxyAddr is ProxyServer.Addr's default: DefaultProxyPort on
+// whatever address the caller binds it to. Firmware and a live-booted
+// agent both already carry an explicit "http://<host>:<port>" URL
+// (BOOTD_BOOT_CONFIG_URL / kezio.server=), so the default only saves
+// inventing a port.
+var DefaultProxyAddr = fmt.Sprintf(":%d", DefaultProxyPort)
 
 // bootRoutePrefix mirrors internal/bootserver's routes (all under
 // "/boot/") without importing that package, avoiding a dependency on its

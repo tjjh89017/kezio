@@ -74,7 +74,14 @@ var _ = BeforeSuite(func() {
 
 	By("bootstrapping test environment")
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
+		// The second path installs a minimal stand-in for Multus's own
+		// NetworkAttachmentDefinition CRD (see that directory's own
+		// comment) so SubnetReconciler's nadvalidate wiring can be
+		// exercised against real NAD objects.
+		CRDDirectoryPaths: []string{
+			filepath.Join("..", "..", "config", "crd", "bases"),
+			filepath.Join("testdata", "multus-crds"),
+		},
 		ErrorIfCRDPathMissing: true,
 
 		// Installing the real webhooks (not just their handler methods,

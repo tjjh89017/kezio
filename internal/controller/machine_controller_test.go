@@ -38,17 +38,10 @@ import (
 
 // signalDeployer wraps a fake deployer.Deployer, overriding only
 // Provision to poll MachineConditionProvisioningProgress instead of
-// completing immediately: the same signal internal/agentserver's
-// progress handler sets from an agent's own whole-plan step reports
-// (agentapi.DeployStep* - see agentapi.DeployStepRebootingToDisk's doc
-// comment for why that particular Reason means the deploy succeeded).
-// This models the seam a later work item's real, agent-driven Provision
-// implementation fills in (internal/deployer/agent.go's Provision doc
-// comment), so this package's reconcileProvisioning logic - which is
-// what actually sets status.provisioning.image and drives
-// Provisioning -> Provisioned - is exercised the same way it will be
-// once that real implementation lands, without this test depending on
-// not-yet-implemented production code.
+// completing immediately - the same signal a real agent-driven
+// Provision will set from the agent's step reports, so
+// reconcileProvisioning is exercised the same way it will be once that
+// implementation lands.
 type signalDeployer struct {
 	deployer.Deployer
 	client ctrlclient.Client
@@ -72,12 +65,10 @@ func (d *signalDeployer) Provision(ctx context.Context, data *deployer.Provision
 	return deployer.Result{Dirty: true}, nil
 }
 
-// stallingInspectDeployer wraps a fake deployer.Deployer, overriding only
-// Inspect to always ask the reconciler to poll again instead of ever
-// completing - the same seam pattern signalDeployer gives Provision,
-// applied to Inspect so a test can exercise reconcileInspecting's
-// stuck-detection (pollInspecting) without a real registration ever
-// landing.
+// stallingInspectDeployer wraps a fake deployer.Deployer, overriding
+// Inspect to always ask for another poll instead of ever completing, so
+// a test can exercise reconcileInspecting's stuck-detection
+// (pollInspecting).
 type stallingInspectDeployer struct {
 	deployer.Deployer
 }
@@ -86,11 +77,10 @@ func (d *stallingInspectDeployer) Inspect(context.Context, *deployer.InspectData
 	return deployer.Result{RequeueAfter: time.Millisecond}, nil
 }
 
-// powerOnMismatchDeployer wraps a fake deployer.Deployer, overriding only
-// PowerOn to report success while observing the machine as still off -
+// powerOnMismatchDeployer wraps a fake deployer.Deployer, overriding
+// PowerOn to report success while observing the machine as still off,
 // simulating a BMC whose PowerOn command is acknowledged but never
-// actually lands (see deployer.Result.PoweredOn's doc comment for what a
-// real agentDeployer does with GetPowerState's read-back in this case).
+// actually lands.
 type powerOnMismatchDeployer struct {
 	deployer.Deployer
 }
@@ -100,14 +90,11 @@ func (d *powerOnMismatchDeployer) PowerOn(context.Context) (deployer.Result, err
 	return deployer.Result{Dirty: true, PoweredOn: &off}, nil
 }
 
-// laggingPowerOffDeployer wraps a fake deployer.Deployer, simulating a BMC
-// whose PowerOff is a graceful shutdown still in progress: the first call
-// observes the machine as still on, and every call after that observes it
-// correctly off - the same shape a real BMC's GetPowerState read-back
-// takes once an orderly shutdown actually completes. It also counts
-// PowerOn calls, so a test can assert PowerOn still fires once
-// spec.online flips back to true instead of being skipped by the first
-// call's stale observation.
+// laggingPowerOffDeployer wraps a fake deployer.Deployer, simulating a
+// graceful shutdown still in progress: the first PowerOff call observes
+// the machine still on, every call after observes it off. It also
+// counts PowerOn calls, so a test can assert PowerOn still fires once
+// spec.online flips back to true.
 type laggingPowerOffDeployer struct {
 	deployer.Deployer
 	powerOffCalls *int
@@ -127,15 +114,12 @@ func (d *laggingPowerOffDeployer) PowerOn(context.Context) (deployer.Result, err
 }
 
 // racingRegisterDeployer wraps a fake deployer.Deployer, overriding
-// Register to mimic agentDeployer.Register's real shape (internal/
-// deployer/agent.go): it fetches and writes the Machine's status through
-// its own, separate Get/Update - clearing stale registration state -
-// before doing anything else, so the reconciler's own copy of the
-// Machine goes stale (a lower resourceVersion than what this write just
-// committed) the moment Register returns success. That is exactly the
-// race reconcileEnrolling's re-fetch-before-advance guards against (see
-// its doc comment); this deployer also counts calls, so a test can
-// assert Register never runs a second time despite the race.
+// Register to write the Machine's status through its own, separate
+// Get/Update before returning - mimicking agentDeployer.Register's real
+// shape and making the reconciler's own copy of the Machine go stale the
+// moment Register returns, the race reconcileEnrolling's
+// re-fetch-before-advance guards against. It also counts calls, so a
+// test can assert Register never runs twice.
 type racingRegisterDeployer struct {
 	deployer.Deployer
 	client        ctrlclient.Client
@@ -173,14 +157,40 @@ func newTestMachineSpec(name string) keziov1alpha1.MachineSpec {
 			CredentialsSecretRef: keziov1alpha1.SecretReference{Name: name + "-bmc"},
 		},
 		BootMACAddress: "aa:bb:cc:dd:ee:01",
+		SubnetRef:      keziov1alpha1.NameRef{Name: name + "-subnet"},
 	}
+}
+
+// createMachineTestSite creates the Site and Subnet newTestMachineSpec's
+// SubnetRef resolves against, in namespace "default", so
+// reconcileProvisioning's site resolution does not stall a Machine that
+// reaches Provisioning. Registers DeferCleanup for both.
+func createMachineTestSite(ctx context.Context, name string) {
+	const namespace = "default"
+	site := &keziov1alpha1.Site{
+		ObjectMeta: metav1.ObjectMeta{Name: name + "-site", Namespace: namespace},
+	}
+	Expect(k8sClient.Create(ctx, site)).To(Succeed())
+	DeferCleanup(func() { Expect(k8sClient.Delete(ctx, site)).To(Succeed()) })
+
+	subnet := &keziov1alpha1.Subnet{
+		ObjectMeta: metav1.ObjectMeta{Name: name + "-subnet", Namespace: namespace},
+		Spec: keziov1alpha1.SubnetSpec{
+			SiteRef:         keziov1alpha1.NameRef{Name: site.Name},
+			CIDR:            "192.0.2.0/24",
+			BootdServerIP:   "192.0.2.2",
+			BootdNetworkRef: keziov1alpha1.NameRef{Name: "boot-nad"},
+			DHCP:            keziov1alpha1.SubnetDHCP{Mode: keziov1alpha1.SubnetDHCPModeProxy},
+		},
+	}
+	Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
+	DeferCleanup(func() { Expect(k8sClient.Delete(ctx, subnet)).To(Succeed()) })
 }
 
 // reconcileUntil calls Reconcile repeatedly (bounded by maxSteps) until
 // check reports true, and returns the last error Reconcile returned.
-// Reconcile results carry backoff/poll delays as ctrl.Result.RequeueAfter,
-// which envtest does not act on by itself, so tests drive the loop
-// directly instead of waiting on the manager.
+// envtest does not act on ctrl.Result.RequeueAfter itself, so tests
+// must drive the loop directly instead of waiting on the manager.
 func reconcileUntil(ctx context.Context, r *MachineReconciler, key types.NamespacedName, maxSteps int, check func(m *keziov1alpha1.Machine) bool) (*keziov1alpha1.Machine, error) {
 	machine := &keziov1alpha1.Machine{}
 	var lastErr error
@@ -207,6 +217,7 @@ var _ = Describe("Machine Controller", func() {
 			const resourceName = "walk-machine"
 			namespace := "default"
 			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+			createMachineTestSite(ctx, resourceName)
 
 			By("creating the target Image")
 			image := &keziov1alpha1.Image{
@@ -298,6 +309,7 @@ var _ = Describe("Machine Controller", func() {
 			const resourceName = "reprovision-machine"
 			namespace := "default"
 			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+			createMachineTestSite(ctx, resourceName)
 
 			By("creating the original and replacement target Images")
 			image := &keziov1alpha1.Image{
@@ -527,6 +539,7 @@ var _ = Describe("Machine Controller", func() {
 			namespace := "default"
 			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
 			nn := types.NamespacedName{Namespace: namespace, Name: resourceName}
+			createMachineTestSite(ctx, resourceName)
 
 			image := &keziov1alpha1.Image{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-image", Namespace: namespace},
@@ -554,11 +567,9 @@ var _ = Describe("Machine Controller", func() {
 				}
 			})
 
-			// Provision itself is made to fail (an unrelated, injected
-			// failure) so the reconcile stops right after resolution,
-			// letting the test observe status.provisioning.targetDisk
-			// independent of whether the deploy action it names ever
-			// succeeds.
+			// Provision is made to fail so the reconcile stops right
+			// after resolution, letting the test observe targetDisk
+			// independent of whether Provision itself succeeds.
 			provisionFails := true
 			factory := deployer.NewFactory()
 			factory.Fail = func(m types.NamespacedName, phase deployer.Phase) string {
@@ -608,6 +619,7 @@ var _ = Describe("Machine Controller", func() {
 			const resourceName = "diskmatch-conflict-machine"
 			namespace := "default"
 			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+			createMachineTestSite(ctx, resourceName)
 
 			image := &keziov1alpha1.Image{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-image", Namespace: namespace},
@@ -620,9 +632,7 @@ var _ = Describe("Machine Controller", func() {
 
 			spec := newTestMachineSpec(resourceName)
 			spec.ImageRef = &keziov1alpha1.NameRef{Name: image.Name}
-			// No hint at all: with two reported disks this is ambiguous
-			// on its own, exercising the "no hint, multiple disks" rule
-			// as well as the general ambiguous-match error path.
+			// No hint: with two reported disks, resolution is ambiguous.
 			machine := &keziov1alpha1.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
 				Spec:       spec,
@@ -671,6 +681,7 @@ var _ = Describe("Machine Controller", func() {
 			const resourceName = "image-failed-machine"
 			namespace := "default"
 			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+			createMachineTestSite(ctx, resourceName)
 
 			image := &keziov1alpha1.Image{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-image", Namespace: namespace},
@@ -733,6 +744,204 @@ var _ = Describe("Machine Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.Status.State).To(Equal(keziov1alpha1.MachineStateProvisioned))
 		})
+
+		It("moves to Error naming the Image when spec.imageRef names an Image that does not exist, then resumes once it is created", func() {
+			const resourceName = "image-missing-machine"
+			namespace := "default"
+			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+			createMachineTestSite(ctx, resourceName)
+
+			spec := newTestMachineSpec(resourceName)
+			spec.ImageRef = &keziov1alpha1.NameRef{Name: resourceName + "-image"}
+			machine := &keziov1alpha1.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec:       spec,
+			}
+			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+			DeferCleanup(func() {
+				m := &keziov1alpha1.Machine{}
+				if err := k8sClient.Get(ctx, key, m); err == nil {
+					Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+				}
+			})
+
+			r := &MachineReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				DeployerFactory: deployer.NewFactory().New,
+			}
+
+			By("reconciling into Provisioning, which stalls forever on the dangling imageRef without this check")
+			result, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateError
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Status.State).To(Equal(keziov1alpha1.MachineStateError))
+			Expect(result.Status.ErrorMessage).To(ContainSubstring(spec.ImageRef.Name))
+			Expect(result.Status.ErrorMessage).To(ContainSubstring("not found"))
+			Expect(result.Status.ErrorCount).To(BeNumerically(">=", 1))
+			readyCond := apimeta.FindStatusCondition(result.Status.Conditions, keziov1alpha1.ConditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Reason).To(Equal(reasonProvisionFailed))
+
+			By("creating the referenced Image Ready, so the existing Error-state retry path can proceed")
+			image := &keziov1alpha1.Image{
+				ObjectMeta: metav1.ObjectMeta{Name: spec.ImageRef.Name, Namespace: namespace},
+				Spec: keziov1alpha1.ImageSpec{
+					Source: keziov1alpha1.ImageSource{Format: keziov1alpha1.ImageFormatQCOW2},
+				},
+			}
+			Expect(k8sClient.Create(ctx, image)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, image)).To(Succeed()) })
+			image.Status.State = keziov1alpha1.ImageStateReady
+			Expect(k8sClient.Status().Update(ctx, image)).To(Succeed())
+
+			result, err = reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateProvisioned
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Status.State).To(Equal(keziov1alpha1.MachineStateProvisioned))
+		})
+
+		It("moves to Error naming the Subnet when spec.subnetRef names a Subnet that does not exist, then resumes once it is created", func() {
+			const resourceName = "subnet-missing-machine"
+			namespace := "default"
+			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+
+			image := &keziov1alpha1.Image{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-image", Namespace: namespace},
+				Spec: keziov1alpha1.ImageSpec{
+					Source: keziov1alpha1.ImageSource{Format: keziov1alpha1.ImageFormatQCOW2},
+				},
+			}
+			Expect(k8sClient.Create(ctx, image)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, image)).To(Succeed()) })
+			image.Status.State = keziov1alpha1.ImageStateReady
+			Expect(k8sClient.Status().Update(ctx, image)).To(Succeed())
+
+			spec := newTestMachineSpec(resourceName)
+			spec.ImageRef = &keziov1alpha1.NameRef{Name: image.Name}
+			// spec.subnetRef is left dangling: no Subnet or Site is
+			// created here, unlike other tests' createMachineTestSite call.
+			machine := &keziov1alpha1.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec:       spec,
+			}
+			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+			DeferCleanup(func() {
+				m := &keziov1alpha1.Machine{}
+				if err := k8sClient.Get(ctx, key, m); err == nil {
+					Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+				}
+			})
+
+			r := &MachineReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				DeployerFactory: deployer.NewFactory().New,
+			}
+
+			By("reconciling into Provisioning, which stalls forever on the dangling subnetRef without this check")
+			result, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateError
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Status.State).To(Equal(keziov1alpha1.MachineStateError))
+			Expect(result.Status.ErrorMessage).To(ContainSubstring(spec.SubnetRef.Name))
+			Expect(result.Status.ErrorMessage).To(ContainSubstring("subnet not found"))
+			Expect(result.Status.ErrorCount).To(BeNumerically(">=", 1))
+			readyCond := apimeta.FindStatusCondition(result.Status.Conditions, keziov1alpha1.ConditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Reason).To(Equal(reasonProvisionFailed))
+
+			By("creating the referenced Subnet and Site, so the existing Error-state retry path can proceed")
+			createMachineTestSite(ctx, resourceName)
+
+			result, err = reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateProvisioned
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Status.State).To(Equal(keziov1alpha1.MachineStateProvisioned))
+		})
+
+		It("moves to Error naming the Site when the Subnet's spec.siteRef names a Site that does not exist, then resumes once it is created", func() {
+			const resourceName = "site-missing-machine"
+			namespace := "default"
+			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+
+			image := &keziov1alpha1.Image{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-image", Namespace: namespace},
+				Spec: keziov1alpha1.ImageSpec{
+					Source: keziov1alpha1.ImageSource{Format: keziov1alpha1.ImageFormatQCOW2},
+				},
+			}
+			Expect(k8sClient.Create(ctx, image)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, image)).To(Succeed()) })
+			image.Status.State = keziov1alpha1.ImageStateReady
+			Expect(k8sClient.Status().Update(ctx, image)).To(Succeed())
+
+			// Unlike createMachineTestSite, spec.siteRef is left dangling
+			// here, so Resolve fails past the Subnet lookup with
+			// ErrSiteNotFound instead of ErrSubnetNotFound.
+			subnet := &keziov1alpha1.Subnet{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-subnet", Namespace: namespace},
+				Spec: keziov1alpha1.SubnetSpec{
+					SiteRef:         keziov1alpha1.NameRef{Name: resourceName + "-site"},
+					CIDR:            "192.0.2.0/24",
+					BootdServerIP:   "192.0.2.2",
+					BootdNetworkRef: keziov1alpha1.NameRef{Name: "boot-nad"},
+					DHCP:            keziov1alpha1.SubnetDHCP{Mode: keziov1alpha1.SubnetDHCPModeProxy},
+				},
+			}
+			Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, subnet)).To(Succeed()) })
+
+			spec := newTestMachineSpec(resourceName)
+			spec.ImageRef = &keziov1alpha1.NameRef{Name: image.Name}
+			machine := &keziov1alpha1.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec:       spec,
+			}
+			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+			DeferCleanup(func() {
+				m := &keziov1alpha1.Machine{}
+				if err := k8sClient.Get(ctx, key, m); err == nil {
+					Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+				}
+			})
+
+			r := &MachineReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				DeployerFactory: deployer.NewFactory().New,
+			}
+
+			By("reconciling into Provisioning, which stalls forever on the dangling siteRef without this check")
+			result, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateError
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Status.State).To(Equal(keziov1alpha1.MachineStateError))
+			Expect(result.Status.ErrorMessage).To(ContainSubstring(subnet.Spec.SiteRef.Name))
+			Expect(result.Status.ErrorMessage).To(ContainSubstring("site not found"))
+			Expect(result.Status.ErrorCount).To(BeNumerically(">=", 1))
+			readyCond := apimeta.FindStatusCondition(result.Status.Conditions, keziov1alpha1.ConditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Reason).To(Equal(reasonProvisionFailed))
+
+			By("creating the referenced Site, so the existing Error-state retry path can proceed")
+			site := &keziov1alpha1.Site{
+				ObjectMeta: metav1.ObjectMeta{Name: subnet.Spec.SiteRef.Name, Namespace: namespace},
+			}
+			Expect(k8sClient.Create(ctx, site)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, site)).To(Succeed()) })
+
+			result, err = reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateProvisioned
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.Status.State).To(Equal(keziov1alpha1.MachineStateProvisioned))
+		})
 	})
 
 	Context("reacting to an agent-reported deploy success", func() {
@@ -740,6 +949,7 @@ var _ = Describe("Machine Controller", func() {
 			const resourceName = "agent-signal-machine"
 			namespace := "default"
 			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+			createMachineTestSite(ctx, resourceName)
 
 			image := &keziov1alpha1.Image{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-image", Namespace: namespace},
@@ -811,11 +1021,9 @@ var _ = Describe("Machine Controller", func() {
 	})
 
 	Context("managing power state", func() {
-		// newPowerOnlyMachineSpec builds a Machine spec with no ImageRef
-		// and no DataImages, so needsProvisioning is always false and the
-		// machine reaches Available directly, letting reconcilePower run
-		// on the very first Available reconcile instead of being
-		// preceded by a deployment.
+		// newPowerOnlyMachineSpec builds a spec with no ImageRef or
+		// DataImages, so the machine reaches Available directly and
+		// reconcilePower runs on the first Available reconcile.
 		newPowerOnlyMachineSpec := func(name string, online bool) keziov1alpha1.MachineSpec {
 			spec := newTestMachineSpec(name)
 			spec.Online = &online
@@ -919,12 +1127,6 @@ var _ = Describe("Machine Controller", func() {
 		})
 
 		It("requeues at backoffBaseDelay when PowerOff succeeds but the machine has not actually gone off yet, then still calls PowerOn once it does", func() {
-			// Regression test for a stale post-PowerOff observation
-			// (for example a graceful shutdown that is still in
-			// progress when GetPowerState is read back) getting cached
-			// into status.poweredOn as if it were confirmed, then
-			// wrongly matching a later spec.online=true and causing
-			// reconcilePower to skip PowerOn entirely.
 			const resourceName = "power-off-lagging-machine"
 			namespace := "default"
 			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
@@ -1099,6 +1301,7 @@ var _ = Describe("Machine Controller", func() {
 			namespace := "default"
 			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
 			nn := types.NamespacedName{Namespace: namespace, Name: resourceName}
+			createMachineTestSite(ctx, resourceName)
 
 			dataImage := &keziov1alpha1.Image{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-data-image", Namespace: namespace},
@@ -1165,6 +1368,7 @@ var _ = Describe("Machine Controller", func() {
 			namespace := "default"
 			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
 			nn := types.NamespacedName{Namespace: namespace, Name: resourceName}
+			createMachineTestSite(ctx, resourceName)
 
 			dataImage := &keziov1alpha1.Image{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-data-image", Namespace: namespace},
@@ -1229,6 +1433,7 @@ var _ = Describe("Machine Controller", func() {
 			namespace := "default"
 			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
 			nn := types.NamespacedName{Namespace: namespace, Name: resourceName}
+			createMachineTestSite(ctx, resourceName)
 
 			dataImage := &keziov1alpha1.Image{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-data-image", Namespace: namespace},
@@ -1287,6 +1492,7 @@ var _ = Describe("Machine Controller", func() {
 			namespace := "default"
 			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
 			nn := types.NamespacedName{Namespace: namespace, Name: resourceName}
+			createMachineTestSite(ctx, resourceName)
 
 			dataImage := &keziov1alpha1.Image{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-data-image", Namespace: namespace},
@@ -1342,11 +1548,6 @@ var _ = Describe("Machine Controller", func() {
 	})
 
 	Context("detecting a stuck inspection", func() {
-		// stallingInspectDeployer wraps a fake deployer.Deployer,
-		// overriding Inspect to always ask the reconciler to poll again
-		// instead of ever completing, so a test can exercise
-		// reconcileInspecting's stuck-detection (pollInspecting) without
-		// a real registration ever landing.
 		newStallingInspectFactory := func(base *deployer.FakeFactory) deployer.Factory {
 			return func(m *keziov1alpha1.Machine) (deployer.Deployer, error) {
 				fake, err := base.New(m)
@@ -1397,20 +1598,11 @@ var _ = Describe("Machine Controller", func() {
 		})
 
 		It("moves to Error, without taking any power action, once inspectingStuckThreshold has elapsed", func() {
-			// Regression test: reconcileInspecting used to force a BMC
-			// power-cycle once a machine sat in Inspecting past
-			// inspectingStuckThreshold, on the theory that this could
-			// recover a machine whose PXE boot silently failed. In
-			// practice nothing observable at this layer can tell that
-			// case apart from kezio-agent being alive and still working
-			// (for example, still fetching the live environment's
-			// squashfs over a slow link) - so the power-cycle was just as
-			// likely to interrupt real progress, and since interrupting
-			// it does not make the next attempt any more likely to
-			// register in time, it could repeat forever. pollInspecting
-			// must instead report the failure through recordPhaseError
-			// and take no automatic recovery action, leaving it to a
-			// human who can see what the machine is actually doing.
+			// pollInspecting deliberately takes no automatic recovery
+			// action: nothing observable at this layer can tell a
+			// genuinely stuck machine apart from one still alive and
+			// working, so a power-cycle is as likely to interrupt real
+			// progress as to help.
 			const resourceName = "stuck-inspect-error-machine"
 			namespace := "default"
 			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
@@ -1559,10 +1751,8 @@ var _ = Describe("Machine Controller", func() {
 
 // setProvisioningProgressReasonForTest sets key's
 // MachineConditionProvisioningProgress condition to (reason, message),
-// the same shape internal/agentserver's setProvisioningProgressCondition
-// writes from a real agent's progress report - standing in for that
-// out-of-band HTTP call so this test can drive the reconciler's reaction
-// to it without spinning up an agentserver.Server.
+// standing in for a real agent's progress report so tests can drive the
+// reconciler's reaction without an agentserver.Server.
 func setProvisioningProgressReasonForTest(ctx context.Context, key types.NamespacedName, reason, message string) error {
 	m := &keziov1alpha1.Machine{}
 	if err := k8sClient.Get(ctx, key, m); err != nil {

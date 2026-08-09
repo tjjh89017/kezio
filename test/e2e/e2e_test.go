@@ -46,9 +46,22 @@ const metricsRoleBindingName = "kezio-metrics-binding"
 // the "Image and Machine lifecycle" context. They are declared here (rather
 // than local to that Context) so AfterAll can clean them up regardless of
 // which spec, if any, failed.
+//
+// e2eSiteName and e2eSubnetName back the Machine's now-required
+// spec.subnetRef (Machine.Spec.NetworkSite is gone; subnetRef is
+// mandatory). The referenced NAD (e2eBootNADName) is never created: with
+// BOOTD_DEPLOYMENT_IMAGE unset in this lane, SubnetReconciler never
+// attempts a bootd Deployment, and a missing NAD only ever yields an
+// Indeterminate condition on the Subnet, never blocking the Machine's own
+// lifecycle under the fake deployer.
 const (
-	e2eImageName   = "e2e-golden"
-	e2eMachineName = "e2e-node-01"
+	e2eImageName    = "e2e-golden"
+	e2eMachineName  = "e2e-node-01"
+	e2eSiteName     = "e2e-site"
+	e2eSubnetName   = "e2e-subnet"
+	e2eBootNADName  = "e2e-boot-net"
+	e2eSubnetCIDR   = "192.0.2.0/24"
+	e2eSubnetBootIP = "192.0.2.10"
 )
 
 var _ = Describe("Manager", Ordered, func() {
@@ -99,6 +112,10 @@ var _ = Describe("Manager", Ordered, func() {
 		By("deleting the e2e Machine and Image before undeploying the controller-manager")
 		deleteAndWait("machine", e2eMachineName, time.Minute)
 		deleteAndWait("image", e2eImageName, 2*time.Minute)
+
+		By("deleting the e2e Subnet and Site")
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "subnet", e2eSubnetName, "-n", namespace, "--ignore-not-found"))
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "site", e2eSiteName, "-n", namespace, "--ignore-not-found"))
 
 		By("undeploying the controller-manager")
 		cmd = exec.Command("make", "undeploy")
@@ -312,6 +329,31 @@ spec:
 		})
 
 		It("creates a Machine referencing the Image and drives it through the state machine to Provisioned", func() {
+			By("creating the Site and Subnet the Machine's spec.subnetRef requires")
+			applyManifest(fmt.Sprintf(`
+apiVersion: kezio.kojuro.date/v1alpha1
+kind: Site
+metadata:
+  name: %s
+  namespace: %s
+`, e2eSiteName, namespace))
+			applyManifest(fmt.Sprintf(`
+apiVersion: kezio.kojuro.date/v1alpha1
+kind: Subnet
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  siteRef:
+    name: %s
+  cidr: "%s"
+  bootdServerIP: "%s"
+  bootdNetworkRef:
+    name: %s
+  dhcp:
+    mode: proxy
+`, e2eSubnetName, namespace, e2eSiteName, e2eSubnetCIDR, e2eSubnetBootIP, e2eBootNADName))
+
 			By("creating the Machine")
 			applyManifest(fmt.Sprintf(`
 apiVersion: kezio.kojuro.date/v1alpha1
@@ -326,9 +368,11 @@ spec:
       name: %s-bmc
   bootMACAddress: "aa:bb:cc:dd:ee:02"
   online: true
+  subnetRef:
+    name: %s
   imageRef:
     name: %s
-`, machineName, namespace, machineName, imageName))
+`, machineName, namespace, machineName, e2eSubnetName, imageName))
 
 			By("waiting for the Machine to reach state Provisioned")
 			Eventually(func(g Gomega) {
@@ -379,6 +423,13 @@ spec:
 	if imagePathEnabled {
 		registerImagePathContext()
 	}
+
+	// registerSiteSubnetContext (e2e_sitesubnet_test.go) adds the
+	// "Site/Subnet network model" Context as a further sibling, for the
+	// same reason and under the same nesting rule as
+	// registerImagePathContext above - it is not gated by an env var, so
+	// it always runs.
+	registerSiteSubnetContext()
 })
 
 // serviceAccountToken returns a token for the specified service account in the given namespace.

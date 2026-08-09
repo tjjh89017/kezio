@@ -50,7 +50,9 @@ const namePrefix = "kezio-seeder-"
 const maxNameLength = 63
 
 // Name returns the deterministic Deployment name for imageName's seeder
-// at site: deterministic so internal/controller's reconciler stays
+// at site (site's namespace-qualified identity, sitederive.Resolve's
+// SiteName - never a bare Site name, which is not unique across
+// namespaces): deterministic so internal/controller's reconciler stays
 // idempotent, and hash-suffixed so two sites of the same Image never
 // collide on one name. internal/agentserver recomputes this exact name
 // (rather than list-and-filter) to Get the Deployment directly.

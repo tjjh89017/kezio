@@ -354,6 +354,8 @@ runs:
             credentialsSecretRef:
               name: ${BMC_CREDS_SECRET}
           bootMACAddress: "${TARGET_VM_MAC}"
+          subnetRef:
+            name: e2e-bmc
           online: true
           targetDisk:
             serialNumber: "${TARGET_VM_DISK_SERIAL}"

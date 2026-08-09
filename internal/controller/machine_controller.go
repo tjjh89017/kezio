@@ -34,6 +34,7 @@ import (
 	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
 	"github.com/tjjh89017/kezio/internal/deployer"
 	"github.com/tjjh89017/kezio/internal/diskmatch"
+	"github.com/tjjh89017/kezio/internal/sitederive"
 )
 
 // Ready condition reasons used while a Machine progresses through its
@@ -56,15 +57,13 @@ const (
 
 // inspectingStuckThreshold is how long a machine may sit in Inspecting
 // before reconcileInspecting reports it as failed (see pollInspecting).
-// It is comfortably longer than the poll cadence, so a machine still
-// legitimately net-booting is never mistaken for stuck.
+// Comfortably longer than the poll cadence, so a legitimately
+// net-booting machine is never mistaken for stuck.
 //
-// No automatic recovery (for example a BMC power-cycle) is attempted
-// once this trips: nothing observable at this layer distinguishes "the
-// live environment never booted" from "kezio-agent is still working", so
-// an unconditional power action could interrupt real progress and repeat
-// forever. Reporting the failure and stopping is the safer default; a
-// human decides whether a power-cycle is the right recovery.
+// No automatic recovery (e.g. a BMC power-cycle) is attempted once this
+// trips: nothing observable here distinguishes "never booted" from
+// "kezio-agent is still working", so an unconditional power action could
+// interrupt real progress. A human decides the right recovery instead.
 const inspectingStuckThreshold = 10 * time.Minute
 
 // MachineReconciler reconciles a Machine object
@@ -159,15 +158,12 @@ func (r *MachineReconciler) reconcileEnrolling(ctx context.Context, machine *kez
 		return ctrl.Result{RequeueAfter: result.RequeueAfter}, nil
 	}
 
-	// Register (internal/deployer/agent.go) writes Machine status itself,
-	// through a separate Get/Update, so this reconcile's copy is stale by
-	// the time Register returns: advancing from it would conflict on
-	// Status().Update, and the resulting requeue would re-enter
-	// reconcileEnrolling and call Register again, re-arming the BMC's
-	// one-time PXE boot against a machine already mid-boot from the
-	// first call. Re-fetching first avoids racing Register's own write,
-	// so a successful Register is only ever acted on once per Machine
-	// generation.
+	// Register (internal/deployer/agent.go) writes Machine status itself
+	// through a separate Get/Update, so this reconcile's copy is stale:
+	// advancing from it would conflict on Status().Update and the
+	// resulting requeue would call Register again, re-arming the BMC's
+	// one-time PXE boot against a machine already mid-boot. Re-fetch
+	// first to avoid racing Register's own write.
 	if err := r.Get(ctx, client.ObjectKeyFromObject(machine), machine); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -204,15 +200,13 @@ func (r *MachineReconciler) reconcileInspecting(ctx context.Context, machine *ke
 // unless the machine has spent longer than inspectingStuckThreshold
 // waiting for kezio-agent to register (status.inspectingSince, set in
 // reconcileEnrolling), in which case it reports the failure through
-// recordPhaseError. See inspectingStuckThreshold's doc comment for why
-// no automatic recovery is attempted.
+// recordPhaseError.
 //
 // Reporting the failure also restarts inspectingSince to now: the Error
-// transition triggers an immediate re-reconcile straight back into
-// reconcileInspecting (via reconcileError), and without resetting the
-// clock that retry - and every one after it - would see the same
-// already-elapsed timestamp and re-trip this branch on every single
-// reconcile instead of once per inspectingStuckThreshold window.
+// transition re-reconciles straight back into reconcileInspecting (via
+// reconcileError), and without resetting the clock every subsequent
+// reconcile would re-trip this branch instead of once per
+// inspectingStuckThreshold window.
 func (r *MachineReconciler) pollInspecting(ctx context.Context, machine *keziov1alpha1.Machine, requeueAfter time.Duration) (ctrl.Result, error) {
 	since := machine.Status.InspectingSince
 	if since == nil || time.Since(since.Time) < inspectingStuckThreshold {
@@ -246,14 +240,16 @@ func (r *MachineReconciler) reconcileAvailable(ctx context.Context, machine *kez
 // Reboot handoff: AfterDeploy only applies when the deployment carries no
 // OS image (see EffectiveAfterDeploy's doc comment) - a deployment that
 // does carry one always reboots into it via the agent's own
-// "systemctl reboot", never through this method. For the no-OS-image
-// case, AfterDeployReboot/AfterDeployPowerOff are handled here through
-// dep.PowerCycle/dep.PowerOff, the same Deployer methods reconcilePower
-// uses: BMC-driven (forced reset / graceful shutdown) through the
-// Machine's required spec.bmc. This never races the agent's own reboot,
-// since it only fires for the no-OS-image path that reboot never
-// touches.
+// "systemctl reboot" instead. The no-OS-image case is handled here via
+// dep.PowerCycle/dep.PowerOff (BMC-driven), which never races the
+// agent's own reboot since the two paths are mutually exclusive.
 func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *keziov1alpha1.Machine, dep deployer.Deployer) (ctrl.Result, error) {
+	if message, err := r.checkSiteUnresolved(ctx, machine); err != nil {
+		return ctrl.Result{}, err
+	} else if message != "" {
+		return r.recordPhaseError(ctx, machine, reasonProvisionFailed, message)
+	}
+
 	if message, err := r.checkReferencedImagesFailed(ctx, machine); err != nil {
 		return ctrl.Result{}, err
 	} else if message != "" {
@@ -420,18 +416,13 @@ func (r *MachineReconciler) reconcilePower(ctx context.Context, machine *keziov1
 	}
 
 	// A BMC power command can succeed before the machine actually reaches
-	// the desired state: PowerOff requests a graceful, orderly shutdown
-	// (see internal/bmc/redfish's PowerOff doc comment) that can take
-	// much longer than this read-back, and PowerOn can equally race a
-	// BMC that has not yet reported the machine on. Recording that
-	// mismatched observation (applyObservedPower above) without a retry
-	// would let it sit as status.poweredOn until the next unrelated
-	// change, where it would wrongly look like a *confirmed* state to
-	// compare a later spec.online flip against - the trap that let a
-	// stale "still on" reading after a graceful PowerOff cause a
-	// subsequent PowerOn to be skipped as a no-op. Requeuing here instead
-	// keeps polling GetPowerState (via this same idempotent
-	// PowerOn/PowerOff call) until the observation agrees with desired.
+	// the desired state: PowerOff requests a graceful shutdown that can
+	// take much longer than this read-back, and PowerOn can race a BMC
+	// that has not yet reported the machine on. Leaving a mismatched
+	// observation in status.poweredOn without a retry would look like a
+	// confirmed state and could cause a later PowerOn to be skipped as a
+	// no-op; requeuing here keeps polling until the observation agrees
+	// with desired.
 	if result.PoweredOn != nil && *result.PoweredOn != desired {
 		log.Info("BMC power command accepted but machine has not reached the desired state yet, retrying",
 			"machine", machine.Name, "desiredOnline", desired, "observedPoweredOn", *result.PoweredOn)
@@ -445,13 +436,9 @@ func (r *MachineReconciler) reconcilePower(ctx context.Context, machine *keziov1
 
 // applyObservedPower records the machine's power state after a
 // PowerOn/PowerOff/PowerCycle call succeeds: result.PoweredOn when the
-// deployer actually read it back from the BMC (see
-// deployer.Result.PoweredOn's doc comment), or desired - the commanded
-// state - when it did not. The latter happens when the post-action
-// GetPowerState read-back came back Unknown or failed
-// (observedPowerState in internal/deployer/agent.go): the BMC action
-// itself already succeeded, only the follow-up read was inconclusive, so
-// the commanded state is the best available answer.
+// deployer actually read it back from the BMC, or desired - the
+// commanded state - when the read-back was inconclusive (Unknown or
+// failed), since the BMC action itself already succeeded.
 func applyObservedPower(machine *keziov1alpha1.Machine, result deployer.Result, desired bool) {
 	if result.PoweredOn != nil {
 		machine.Status.PoweredOn = result.PoweredOn
@@ -493,16 +480,12 @@ func (r *MachineReconciler) needsProvisioning(machine *keziov1alpha1.Machine) bo
 }
 
 // checkReferencedImagesFailed reports whether the OS image or any
-// dataImages entry the machine references has reached ImageStateFailed -
-// the terminal state a checksum mismatch or a failed ingest job drives an
-// Image to (see ImageReconciler's handleIngestJobSucceeded and
-// handleIngestJobFailed). The agent-facing plan builder treats a failed
-// Image the same as one that is simply not Ready yet (see
-// agentserver.buildImagePlan's doc comment), so it never hands the agent
-// anything to report failure on; without this check a machine referencing
-// a failed Image would poll Provision forever instead of ever reaching
-// Error. A missing Image is left alone here - the target-disk resolution
-// and deploy-plan paths already surface that case on their own.
+// dataImages entry the machine references is unusable: either it does
+// not exist, or it has reached ImageStateFailed. The agent-facing plan
+// builder treats both cases as "Image still ingesting" and keeps the
+// agent waiting, so without this check a machine referencing a missing
+// or failed Image would poll Provision forever instead of reaching
+// Error.
 func (r *MachineReconciler) checkReferencedImagesFailed(ctx context.Context, machine *keziov1alpha1.Machine) (string, error) {
 	refs := make([]keziov1alpha1.NameRef, 0, 1+len(machine.Spec.DataImages))
 	if machine.Spec.ImageRef != nil {
@@ -517,7 +500,7 @@ func (r *MachineReconciler) checkReferencedImagesFailed(ctx context.Context, mac
 		image := &keziov1alpha1.Image{}
 		if err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: ref.Name}, image); err != nil {
 			if apierrors.IsNotFound(err) {
-				continue
+				return fmt.Sprintf("referenced image %s/%s not found", ns, ref.Name), nil
 			}
 			return "", fmt.Errorf("get image %s/%s: %w", ns, ref.Name, err)
 		}
@@ -529,18 +512,36 @@ func (r *MachineReconciler) checkReferencedImagesFailed(ctx context.Context, mac
 	return "", nil
 }
 
+// checkSiteUnresolved reports whether machine's spec.subnetRef cannot be
+// resolved to a Site (a dangling subnetRef, or a Subnet with a dangling
+// siteRef). This is Machine-visible: buildDeployPlan
+// (internal/agentserver) hits the same failure but only logs it
+// server-side and answers ActionWait, so nothing would otherwise land on
+// the Machine object.
+//
+// Any other Get failure is transient, not a misconfiguration, and the
+// caller treats a non-nil error as retryable.
+func (r *MachineReconciler) checkSiteUnresolved(ctx context.Context, machine *keziov1alpha1.Machine) (string, error) {
+	_, err := sitederive.Resolve(ctx, r.Client, machine)
+	if err == nil {
+		return "", nil
+	}
+	if errors.Is(err, sitederive.ErrSubnetNotFound) || errors.Is(err, sitederive.ErrSiteNotFound) {
+		return err.Error(), nil
+	}
+	return "", err
+}
+
 // resolveTargetDisks matches the machine's reported hardware inventory
 // against the OS image's targetDisk hints and every dataImages[] entry's
 // own hints, requires every resolved disk to be distinct, and records the
-// result into status.provisioning before any deploy action is attempted
-// (before dep.Provision is called). A match or distinct-disk error stops
-// the deployment here; the caller moves the machine to the Error state
-// with the returned message.
+// result into status.provisioning before dep.Provision is called. A
+// match or distinct-disk error stops the deployment here; the caller
+// moves the machine to the Error state with the returned message.
 //
-// It is idempotent: once status.provisioning already names the same image
-// references the spec currently asks for, it does nothing, so repeated
-// polls of an in-progress Provision do not re-resolve or rewrite status on
-// every reconcile.
+// Idempotent: once status.provisioning already names the same image
+// references the spec asks for, it does nothing, so repeated polls of an
+// in-progress Provision do not re-resolve or rewrite status.
 func (r *MachineReconciler) resolveTargetDisks(ctx context.Context, machine *keziov1alpha1.Machine) error {
 	if r.provisioningStatusResolved(machine) {
 		return nil
@@ -596,12 +597,11 @@ func (r *MachineReconciler) resolveTargetDisks(ctx context.Context, machine *kez
 }
 
 // provisioningStatusResolved reports whether machine.Status.Provisioning
-// already names the same OS image reference and the same set of
-// dataImages references the spec currently asks for. It does not check
-// the recorded target disks themselves: the hints and the inventory that
-// produced them do not change while a machine sits in Provisioning, so a
-// matching set of image references is enough to know resolution already
-// ran for this deployment attempt.
+// already names the same OS image reference and set of dataImages
+// references the spec currently asks for. It does not check the recorded
+// target disks themselves: the hints and inventory that produced them do
+// not change while a machine sits in Provisioning, so matching image
+// references are enough to know resolution already ran.
 func (r *MachineReconciler) provisioningStatusResolved(machine *keziov1alpha1.Machine) bool {
 	status := machine.Status.Provisioning
 	if status == nil {

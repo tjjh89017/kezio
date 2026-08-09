@@ -1,0 +1,25 @@
+# Not used by kezio itself; a helper granting read-only access to subnets
+# for monitoring/limited-visibility users.
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: kezio
+    app.kubernetes.io/managed-by: kustomize
+  name: subnet-viewer-role
+rules:
+- apiGroups:
+  - kezio.kojuro.date
+  resources:
+  - subnets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - kezio.kojuro.date
+  resources:
+  - subnets/status
+  verbs:
+  - get

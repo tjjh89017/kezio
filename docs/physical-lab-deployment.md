@@ -100,19 +100,81 @@ a KubeVirt e2e lane - see section 8 for what those lanes cover instead.
 
 ## 2. Network prerequisites the operator owns
 
-### 2.1 Provisioning L2 per site
+kezio models the network as two Kubernetes objects, `Site` and
+`Subnet` (`api/v1alpha1/site_types.go`, `api/v1alpha1/subnet_types.go`).
+Read their meaning before working through the rest of this section -
+every prerequisite below is a consequence of it.
 
-Each site needs one provisioning L2 segment (a VLAN or a dedicated
-switch/bridge) that every target machine's boot NIC is a member of.
-Deploy exactly one `config/bootd` instance per segment
-(`config/bootd/deployment.yaml` is pinned to `replicas: 1` - two bootd
-pods answering the same broadcast domain would both reply to every
-DHCPDISCOVER, and firmware cannot prefer one answer over the other).
+**A Site is a maximal routable domain.** Every Subnet inside one Site
+is mutually routable. Anything separated by a VRF, firewall, or other
+barrier that breaks reachability is, by definition, a different Site.
+A Subnet is one broadcast domain - the provisioning L2 segment a group
+of target machines' boot NICs share - and names its Site through
+`Subnet.spec.siteRef`.
 
-A production deployment with more than one site or VLAN runs one
-`config/bootd` overlay per segment, each with its own
-`BOOTD_SERVER_IP` / `BOOTD_PROVISIONING_CIDR` / Multus attachment, all
-proxying to the same cluster-wide agent and boot config servers
+This split follows directly from what each service needs:
+
+- **bootd binds to a broadcast domain.** proxyDHCP and TFTP only work
+  on the segment they answer on, so `SubnetReconciler`
+  (`internal/controller/subnet_controller.go`) creates one bootd
+  Deployment per Subnet, in that Subnet's own namespace.
+- **The seeder binds to locality and bandwidth**, not a broadcast
+  domain - dragging image content across a WAN link defeats the point
+  of a local seeder. kezio instead runs one seeder Deployment per
+  (Image, Site) (`config/seeder/README.md`, "Per-Image, on-demand
+  seeding"); every Subnet inside that Site routes to it.
+
+A machine's Site is never hand-entered; it is derived:
+`Machine.spec.subnetRef -> Subnet.spec.siteRef -> Site`
+(`internal/sitederive`). This closes a class of silent
+misconfiguration that a hand-entered site field would otherwise allow:
+a machine could physically boot from one segment's bootd while
+declaring a different site, and leech from a distant seeder instead of
+the one right beside it on its own segment. Under this model that
+mismatch cannot happen - a machine's Site always follows from which
+Subnet its boot NIC is actually wired to.
+
+**Reassigning a Subnet to a different Site re-resolves the seeder for
+every machine on that segment.** Treat this as accepted behavior, not
+something to guard against: a Subnet's Site is what decides which
+seeder its machines reach, so changing `Subnet.spec.siteRef` changes
+that resolution immediately, for every Machine referencing the Subnet.
+
+**bootd's address is pinned; the seeder's need not be.**
+`Subnet.spec.bootdServerIP` is explicit and never IPAM-allocated: it
+doubles as the PXE next-server and TFTP target address firmware caches
+mid-boot, so a reallocation on pod restart would strand an in-flight
+GRUB/TFTP fetch. A seeder pod's address carries no such constraint -
+BitTorrent's tracker-based peer discovery tolerates it changing between
+seeder Deployments - so the seeder Subnet's `spec.seederNetworkRef` is
+free to use an IPAM plugin that reallocates.
+
+A Site with no seeder Subnet of its own (`Site.spec.seederSubnetRef`
+unset) is fine for a Site whose Images carry no torrent content - it
+simply runs no local seeder. A Site whose Images do carry torrent
+content needs its own seeder Subnet: leeching across a routed link from
+another Site's seeder is not currently supported by the deploy-plan
+path, so a Machine at such a Site would otherwise wait forever
+(`internal/controller/seeder_deployment.go`'s `ImageConditionSeederDegraded`
+surfaces this with Reason `SeederSubnetRefUnset`).
+
+### 2.1 Provisioning L2 per Subnet
+
+Each broadcast domain a group of target machines' boot NICs share (a
+VLAN or a dedicated switch/bridge) needs its own `Subnet` object.
+`SubnetReconciler` creates and keeps current exactly one bootd
+Deployment per Subnet, in that Subnet's own namespace, pinned to
+`replicas: 1` - two bootd pods answering the same broadcast domain
+would both reply to every DHCPDISCOVER, and firmware cannot prefer one
+answer over the other (`config/bootd/README.md`, "One replica per boot
+segment").
+
+A production deployment with more than one site or VLAN creates one
+Subnet per segment, each carrying its own `bootdServerIP` / `cidr` /
+`bootdNetworkRef`. Every Subnet's bootd Deployment proxies to the same
+cluster-wide agent and boot config servers, once
+`BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL` and
+`BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL` are set on the controller-manager
 (`config/bootd/README.md`, "Per-site addressing").
 
 ### 2.2 Multus NAD wiring for bootd
@@ -124,32 +186,47 @@ given in that file: bootd must see the exact broadcast domain the
 booting machine's NIC is on, and its proxyDHCP replies must reach only
 that segment, not every network the node's `eth0` touches.
 
-Steps:
+Steps, per Subnet:
 
 1. Copy `config/bootd/networkattachmentdefinition.example.yaml`, strip
-   the `.example` suffix, and fill in the site's real CNI plugin
-   (macvlan, ipvlan, or a bridge onto a VLAN-tagged host interface).
-2. Add it to `config/bootd/kustomization.yaml`'s `resources`.
-3. Uncomment the `k8s.v1.cni.cncf.io/networks` annotation on
-   `deployment.yaml`'s pod template.
-4. Set `BOOTD_SERVER_IP` and `BOOTD_PROVISIONING_CIDR` to that
-   segment's real address and subnet.
-5. Set `BOOTD_DHCP_INTERFACE` to the Multus interface name (`net1` in
-   the shipped manifest).
+   the `.example` suffix, fill in the segment's real CNI plugin
+   (macvlan, ipvlan, or a bridge onto a VLAN-tagged host interface),
+   and apply it in the Subnet's own namespace under its final name.
+2. Point `Subnet.spec.bootdNetworkRef` at that name. The controller
+   stamps the `k8s.v1.cni.cncf.io/networks` annotation for you from
+   this field - there is no `deployment.yaml` to hand-edit or
+   uncomment anything on.
+3. Set `Subnet.spec.bootdServerIP` and `spec.cidr` to that segment's
+   real address and subnet; the controller derives
+   `BOOTD_SERVER_IP`/`BOOTD_PROVISIONING_CIDR` from these fields.
+   `BOOTD_DHCP_INTERFACE` needs no per-Subnet setting - it is a
+   controller default (`net1`).
 
 Target machines attach only to this provisioning bridge - they must
 not share it with unrelated cluster or data-plane traffic.
 
-### 2.3 The namespace needs privileged Pod Security Admission
+### 2.3 Per-Subnet namespace prerequisites: ServiceAccount and Pod Security Admission
 
-dnsmasq refuses to serve DHCP without `NET_ADMIN` and `NET_RAW`. Those
-capabilities are outside both the `restricted` and `baseline` Pod
-Security Admission profiles, so the namespace bootd deploys into must
-carry the label `pod-security.kubernetes.io/enforce=privileged`
-(`config/bootd/README.md`, "Capabilities and Pod Security Admission").
-This relaxes admission-time enforcement only; the bootd pod itself
-still grants nothing beyond those three capabilities plus root, with
-every other capability dropped.
+Every namespace that holds a Subnet needs two things the controller
+does not create for you, alongside the NAD from 2.2:
+
+- **The `pod-security.kubernetes.io/enforce=privileged` label.**
+  dnsmasq refuses to serve DHCP without `NET_ADMIN` and `NET_RAW`.
+  Those capabilities are outside both the `restricted` and `baseline`
+  Pod Security Admission profiles, so a namespace missing this label
+  admission-rejects the bootd pod outright (`config/bootd/README.md`,
+  "Capabilities and Pod Security Admission"). This relaxes
+  admission-time enforcement only; the bootd pod itself still grants
+  nothing beyond those three capabilities plus root, with every other
+  capability dropped.
+- **A `bootd` ServiceAccount, bound to `rbac.yaml`'s ClusterRole.**
+  `config/bootd/rbac.yaml` provisions this ServiceAccount in
+  `kezio-system` only, and every bootd Deployment stamps
+  `serviceAccountName: bootd` unconditionally without creating it. A
+  Subnet namespace other than `kezio-system` needs its own `bootd`
+  ServiceAccount, bound to the same ClusterRole (a subject on
+  `rbac.yaml`'s ClusterRoleBinding, or its own RoleBinding), before its
+  bootd pod can start (`config/bootd/README.md`, "RBAC scope").
 
 ### 2.4 Reverse-proxying the agent and boot APIs (recommended)
 
@@ -263,11 +340,18 @@ Multus secondary interface, the same way `config/bootd` attaches its
 own provisioning interface
 (`config/seeder/networkattachmentdefinition.example.yaml`,
 `config/seeder/networkattachmentdefinition-whereabouts.example.yaml`).
-`SEEDER_DEPLOYMENT_NETWORK` names the NAD a seeder pod's whole default
-network attachment is replaced with, so `eth0` stays for
+A seeder pod's whole default network attachment is derived per Site,
+not set through one cluster-wide variable: `Site.spec.seederSubnetRef`
+names the Subnet seeder pods attach to, and that Subnet's own
+`spec.seederNetworkRef` names the NAD (`seederPodAnnotations`,
+`internal/controller/seeder_deployment.go`). `eth0` stays for
 cluster-internal traffic only; the data network carries BitTorrent peer
 connections and tracker announce/response traffic directly, with no
-Service and no NAT in the path at all.
+Service and no NAT in the path at all. A Site whose seeder Subnet
+carries no `seederNetworkRef` still gets its seeder Deployment, just
+with pods on the ordinary cluster network only. A Site with no
+`seederSubnetRef` at all gets no seeder Deployment created for it (see
+section 2's network prerequisites above).
 
 This is the shape kezio's own end-to-end lanes use today
 (`.github/workflows/main.yaml`'s `e2e-bmc` job creates
@@ -401,23 +485,32 @@ own documentation.
    `BOOT_SERVER_ADDR`, `AGENT_SERVER_ADDR`, `BOOT_SERVER_URL`,
    `BOOT_AGENT_SERVER_URL`, and `DEPLOYER=agent` on the
    controller-manager Deployment (see their READMEs).
-3. Deploy `config/seeder` (opentracker + ezio-seeder); set
-   `SEEDER_TRACKER_URL`, `SEEDER_STORE_ROOT`,
-   `SEEDER_SERVICE_NAMESPACE`, `SEEDER_SERVICE_NAME` on the
-   controller-manager Deployment.
-4. For each site: create the provisioning NAD (section 2.2), deploy
-   `config/bootd`, and choose one of the two scenarios in section 1.
-5. Choose and wire one tracker/seeder connectivity option from
-   section 3, per site if needed.
-6. Enroll each `Machine`: set `spec.bootMACAddress`, `spec.bmc.address`
+3. Deploy `config/seeder` (opentracker); set `SEEDER_DEPLOYMENT_IMAGE`
+   and `SEEDER_TRACKER_URL` on the controller-manager Deployment to
+   enable per-Image seeder Deployments (`config/seeder/README.md`,
+   "Wiring the operator side").
+4. Set `BOOTD_DEPLOYMENT_IMAGE` and
+   `BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE` on the controller-manager
+   Deployment to enable bootd Deployment reconciliation
+   (`config/bootd/README.md`, "Who creates the bootd Deployment").
+5. Create a `Site` object for each maximal routable domain (section 2
+   above defines what makes two segments the same Site).
+6. For each provisioning L2 segment: create its NAD (section 2.2), its
+   `bootd` ServiceAccount and PSA label (section 2.3), and a `Subnet`
+   object referencing its Site - choosing one of the two DHCP scenarios
+   in section 1 through `spec.dhcp.mode`.
+7. Choose and wire one tracker/seeder connectivity option from section
+   3, per Site if needed. To give a Site its own local seeder, set
+   `Site.spec.seederSubnetRef` to one of its Subnets, and that Subnet's
+   own `spec.seederNetworkRef` to the data-network NAD.
+8. Enroll each `Machine`: set `spec.bootMACAddress`, `spec.bmc.address`
    and `spec.bmc.credentialsSecretRef` (required - see section 2.5),
-   and `spec.networkSite`. `networkSite` is descriptive bookkeeping for
-   the operator (it is not read by any controller to route a machine to
-   a specific bootd instance - see `api/v1alpha1/machine_types.go`'s
-   `NetworkSite` field doc comment); the machine's actual bootd instance
-   is whichever one physically answers on the segment its boot NIC is
-   wired to.
-7. Let kezio power on the machine through its BMC and confirm it PXE
+   and `spec.subnetRef`, naming the Subnet whose segment the machine's
+   boot NIC is physically wired to. The machine's Site is derived from
+   this reference (`Machine.spec.subnetRef -> Subnet.spec.siteRef ->
+   Site`, `internal/sitederive`), never set directly - see section 2's
+   introduction.
+9. Let kezio power on the machine through its BMC and confirm it PXE
    boots, registers with the agent server, and reaches Ready.
 
 ## 8. e2e lanes measured against this matrix
@@ -505,7 +598,7 @@ lane) with a `DHCP_SCENARIO: lease` variant remains open work.
 | Fixed BT port 16881 | `internal/controller/seeder_deployment.go` (`seederBTPort`) |
 | Tracker port 6969 | `config/seeder/opentracker-deployment.yaml`, `config/seeder/opentracker-service.yaml` |
 | Tracker is singular, not replicated per site | `config/seeder/README.md`'s introduction |
-| `spec.networkSite` is descriptive only, not consumed by any controller | `api/v1alpha1/machine_types.go`; confirmed no other reference in `*.go` outside that file |
+| A Machine's Site is derived (`spec.subnetRef` -> `Subnet.spec.siteRef` -> `Site`), never set directly; `spec.networkSite` does not exist | `internal/sitederive/sitederive.go`; `api/v1alpha1/machine_types.go` (no `networkSite` field) |
 | BMC driver selection by URL scheme; IPMI default port 623 | `docs/bmc.md`, `internal/bmc/ipmi/ipmi.go` |
 | Secure Boot chain and CI gap | `docs/secure-boot.md` |
 | `e2e-bmc` runs `DHCP_SCENARIO: no-relay`, exercising scenario 1 end to end | `.github/workflows/main.yaml`, `.github/actions/deploy-bootd/action.yml`, `.github/actions/deploy-existing-dhcp/action.yml` |
