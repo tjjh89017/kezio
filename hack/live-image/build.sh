@@ -170,7 +170,14 @@ cd /work
 # This container is thrown away when the script exits either way, so
 # there is no resume to preserve - always start from a clean state.
 lb clean --purge
-lb config
+# lb only reads auto/config from the build directory's root, and says
+# nothing when it is missing - every flag would silently fall back to a
+# live-build default.
+lb config 2>&1 | tee /tmp/lb-config.log
+grep -q 'Executing auto/config script' /tmp/lb-config.log || {
+	echo "lb config did not execute auto/config; the image would be built from live-build defaults, not this repository's configuration." >&2
+	exit 1
+}
 lb build || {
 	echo "=== DEBUG: lb build failed, dumping chroot apt state ==="
 	cat chroot/etc/apt/sources.list 2>&1 || true

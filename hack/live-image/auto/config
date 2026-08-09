@@ -6,6 +6,11 @@
 # runs `lb config` with no extra flags of its own for that reason - this
 # file is the single source of truth.
 #
+# Path is load-bearing: lb looks for auto/config in the build directory's
+# root and silently ignores it anywhere else, so every flag below reverts
+# to a live-build default. `lb config` prints "Executing auto/config
+# script." when it found this file.
+#
 # zstd needs CONFIG_SQUASHFS_ZSTD in the booted kernel; build.sh asserts
 # it. Levels at or above 15 pack slower than the xz they replace.
 #
