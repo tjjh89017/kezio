@@ -5,13 +5,17 @@
 #
 # === Why a pool, not one static address ===
 # The operator creates one seeder Deployment per (Image, site) while a
-# Machine there is deploying that Image (SEEDER_DEPLOYMENT_NETWORK - see
-# README.md's "Wiring the operator side"). Each seeder pod is single-homed
-# on this network, so pod.Status.PodIP is what leechers reach directly - one
-# address per pod, not per site. A site with several Images deploying
-# concurrently needs one address per concurrently active (Image, site)
-# Deployment at once; a single static address only covers a site where at
-# most one Image ever deploys at a time.
+# Machine there is deploying that Image (this Site's SeederSubnetRef and
+# that Subnet's own SeederNetworkRef - see README.md's "Wiring the
+# operator side"). Each seeder pod is single-homed on this network, so
+# pod.Status.PodIP is what leechers reach directly - one address per pod,
+# not per site. A site with several Images deploying concurrently needs
+# one address per concurrently active (Image, site) Deployment at once; a
+# single static address only covers a site where at most one Image ever
+# deploys at a time - the site's own choice, not a mandate (see
+# README.md's "Provisioning-segment address pool"; a site that outgrows
+# static ipam gets an Advisory SeederStaticMultiImage condition on its
+# seeder Subnet, not a rejection).
 #
 # whereabouts (https://github.com/k8snetworkplumbingwg/whereabouts) hands
 # out one address per pod from a shared range and releases it on pod
@@ -21,6 +25,14 @@
 # === Sizing the pool ===
 # pool size >= (max concurrently active Images at this site) x replicas,
 # PLUS HEADROOM.
+#
+# The pool's range must exclude the Subnet's bootdServerIP. bootd and the
+# seeder share one L2 segment on this Subnet, whether or not they attach
+# through the same NAD (sharing one NAD is fine; only an address overlap
+# is not). bootdServerIP doubles as the PXE next-server/TFTP target
+# firmware caches mid-boot, so whereabouts handing it to a seeder pod
+# collides with bootd's own pinned address. Bound REPLACE_WITH_POOL_CIDR
+# so it does not contain bootdServerIP.
 #
 # "Concurrently active Images" is the largest number of distinct Images any
 # Machine at this site is deploying (or retrying via

@@ -30,8 +30,8 @@ spec:
     - jsonPath: .spec.bootMACAddress
       name: BootMAC
       type: string
-    - jsonPath: .spec.networkSite
-      name: NetworkSite
+    - jsonPath: .spec.subnetRef.name
+      name: Subnet
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -122,6 +122,11 @@ spec:
                         gets a boot entry.
                       properties:
                         name:
+                          description: |-
+                            Post-mutation admission always re-serialises this struct, so a
+                            zero-value Name would otherwise satisfy "required"; MinLength closes
+                            that gap.
+                          minLength: 1
                           type: string
                         namespace:
                           type: string
@@ -247,23 +252,17 @@ spec:
                   DataImages and keeps its existing OS.
                 properties:
                   name:
+                    description: |-
+                      Post-mutation admission always re-serialises this struct, so a
+                      zero-value Name would otherwise satisfy "required"; MinLength closes
+                      that gap.
+                    minLength: 1
                     type: string
                   namespace:
                     type: string
                 required:
                 - name
                 type: object
-              networkSite:
-                description: |-
-                  NetworkSite selects the network zone (the kezio-bootd instance) this
-                  machine network boots through. It does not select a seeder: the
-                  deploy plan always announces at the single central tracker
-                  (SEEDER_TRACKER_URL), and BitTorrent's own peer discovery through
-                  that shared tracker is what lets this machine's leecher find a
-                  site-local seeder when one is deployed - no per-site routing field
-                  or lookup is needed for that. See config/seeder/README.md's
-                  "Per-site seeders" section.
-                type: string
               online:
                 default: true
                 description: |-
@@ -296,6 +295,11 @@ spec:
                     lists of NameRef end in "Refs".
                   properties:
                     name:
+                      description: |-
+                        Post-mutation admission always re-serialises this struct, so a
+                        zero-value Name would otherwise satisfy "required"; MinLength closes
+                        that gap.
+                      minLength: 1
                       type: string
                     namespace:
                       type: string
@@ -303,6 +307,36 @@ spec:
                   - name
                   type: object
                 type: array
+              subnetRef:
+                description: |-
+                  SubnetRef names the Subnet this machine network boots through - the
+                  broadcast domain whose bootd instance answers this machine's PXE
+                  boot. The Subnet's own SiteRef derives which Site the machine
+                  belongs to (that Site's namespace/name is its stable identity -
+                  see Site's doc comment); this field never names a Site directly, so
+                  there is no way for a machine to declare a site inconsistent with
+                  the segment it actually boots from. It does not select a seeder:
+                  the deploy plan always announces at the single central tracker
+                  (SEEDER_TRACKER_URL), and BitTorrent's own peer discovery through
+                  that shared tracker is what lets this machine's leecher find a
+                  site-local seeder when one is deployed - no per-site routing field
+                  or lookup is needed for that. See config/seeder/README.md's
+                  "Per-site seeders" section.
+
+                  Required: a Machine with no Subnet cannot be network-booted.
+                properties:
+                  name:
+                    description: |-
+                      Post-mutation admission always re-serialises this struct, so a
+                      zero-value Name would otherwise satisfy "required"; MinLength closes
+                      that gap.
+                    minLength: 1
+                    type: string
+                  namespace:
+                    type: string
+                required:
+                - name
+                type: object
               targetDisk:
                 description: |-
                   TargetDisk selects the disk the OS image deploys to. Ignored when
@@ -365,6 +399,7 @@ spec:
             required:
             - bmc
             - bootMACAddress
+            - subnetRef
             type: object
           status:
             description: MachineStatus defines the observed state of Machine.
@@ -578,6 +613,11 @@ spec:
                           description: ImageRef names the Image being deployed.
                           properties:
                             name:
+                              description: |-
+                                Post-mutation admission always re-serialises this struct, so a
+                                zero-value Name would otherwise satisfy "required"; MinLength closes
+                                that gap.
+                              minLength: 1
                               type: string
                             namespace:
                               type: string
@@ -600,6 +640,11 @@ spec:
                         description: ImageRef names the Image being deployed.
                         properties:
                           name:
+                            description: |-
+                              Post-mutation admission always re-serialises this struct, so a
+                              zero-value Name would otherwise satisfy "required"; MinLength closes
+                              that gap.
+                            minLength: 1
                             type: string
                           namespace:
                             type: string

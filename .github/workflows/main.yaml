@@ -505,6 +505,7 @@ jobs:
           seeder-image: ${{ env.SEEDER_IMG }}
           opentracker-image: ${{ env.OPENTRACKER_IMG }}
           boot-artifacts-image: ${{ env.BOOT_ARTIFACTS_IMG }}
+          bootd-image: ${{ env.BOOTD_IMG }}
           ingest-image: ${{ env.INGEST_IMG }}
           tracker-ip: ${{ env.PROVISIONING_TRACKER_NET1_IP }}
           bootd-ip: ${{ env.PROVISIONING_BOOTD_NET1_IP }}

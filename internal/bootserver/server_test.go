@@ -83,6 +83,7 @@ func newTestMachine(state string) *keziov1alpha1.Machine {
 				CredentialsSecretRef: keziov1alpha1.SecretReference{Name: name + "-bmc"},
 			},
 			BootMACAddress: testMAC,
+			SubnetRef:      keziov1alpha1.NameRef{Name: name + "-subnet"},
 		},
 		Status: keziov1alpha1.MachineStatus{
 			State: state,

@@ -254,9 +254,10 @@ type ImagePartitionStatus struct {
 // "still up with zero demand, about to drain" stays visible here rather
 // than disappearing the instant the count changes.
 type ImageSeederSiteStatus struct {
-	// Site is the Machine's spec.networkSite value this count applies to
-	// (the empty string is itself a valid, distinct site: every Machine
-	// that never sets networkSite).
+	// Site is the namespace-qualified identity ("namespace/name", Site's
+	// doc comment) of the Site object this count applies to, derived
+	// from the demanding Machines' spec.subnetRef (through that Subnet's
+	// own spec.siteRef) rather than set directly on the Machine.
 	Site string `json:"site"`
 	// MachineCount is how many Machines at Site currently hold a seeder
 	// reference to this Image.
@@ -287,6 +288,20 @@ type ImageStatus struct {
 	// +optional
 	Seeders []ImageSeederSiteStatus `json:"seeders,omitempty"`
 }
+
+// ImageConditionSeederDegraded is the Condition Type reconcileSeederDeployments
+// sets to True when at least one site with active demand for this Image
+// cannot be served the way current demand needs: an already-existing seeder
+// Deployment has lost its resolvable seeder Subnet, a Deployment at the
+// expected name is not controller-owned by this Image, an existing seeder
+// pod has reported no available replicas past the grace period, or the site
+// has no resolvable seeder Subnet at all so no Deployment was ever created
+// for it (see updateSeederStatus for the full cause list and their Reasons).
+// This condition is the only signal for each of those - the reconciler
+// deliberately leaves the affected Deployment (or lack of one) alone rather
+// than guessing - so a human can see a Site needs attention. Absent, or
+// False once every affected site's cause clears.
+const ImageConditionSeederDegraded = "SeederDegraded"
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status

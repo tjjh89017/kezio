@@ -1,0 +1,24 @@
+# spec.bootdNetworkRef and spec.seederNetworkRef name
+# NetworkAttachmentDefinitions expected to already exist in this Subnet's
+# namespace; see config/bootd/networkattachmentdefinition.example.yaml and
+# config/seeder/networkattachmentdefinition.example.yaml. This namespace
+# must also carry pod-security.kubernetes.io/enforce=privileged, since the
+# bootd Deployment this Subnet backs needs NET_ADMIN.
+apiVersion: kezio.kojuro.date/v1alpha1
+kind: Subnet
+metadata:
+  labels:
+    app.kubernetes.io/name: kezio
+    app.kubernetes.io/managed-by: kustomize
+  name: floor-2-vlan-101
+spec:
+  siteRef:
+    name: hq
+  cidr: 192.0.2.0/24
+  bootdServerIP: 192.0.2.2
+  bootdNetworkRef:
+    name: boot-vlan-101
+  seederNetworkRef:
+    name: seeder-vlan-101
+  dhcp:
+    mode: proxy

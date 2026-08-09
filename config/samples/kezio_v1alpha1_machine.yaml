@@ -18,7 +18,8 @@ spec:
     name: image-sample
   targetDisk:
     serialNumber: S6XANJ0T123456
-  networkSite: site-a
+  subnetRef:
+    name: floor-2-vlan-101
   postHookRefs:
     - name: posthook-sample
   params:

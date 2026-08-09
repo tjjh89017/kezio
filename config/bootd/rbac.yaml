@@ -1,3 +1,10 @@
+# This ServiceAccount (kustomized to "kezio-bootd" by this directory's
+# namePrefix) only covers kezio-system. Every Subnet's bootd Deployment
+# stamps serviceAccountName: kezio-bootd unconditionally
+# (bootdDefaultServiceAccountName, internal/controller/bootd_deployment.go)
+# without creating it - so a kezio-bootd ServiceAccount, bound to the
+# ClusterRole below, must also exist in every OTHER namespace that will
+# hold a Subnet. See README.md's "RBAC scope".
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -43,3 +50,7 @@ subjects:
   - kind: ServiceAccount
     name: bootd
     namespace: system
+  # Add one subject per additional Subnet namespace here, or bind that
+  # namespace's own bootd ServiceAccount to this ClusterRole with a
+  # separate RoleBinding - either way, do not skip it: a Subnet namespace
+  # with no bound bootd ServiceAccount never gets a running bootd pod.

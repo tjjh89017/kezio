@@ -303,11 +303,13 @@ func TestBuildDeployPlan_HooksResolvedFromImageAndMachine(t *testing.T) {
 		{Number: 1, Role: keziov1alpha1.PartitionRoleData, FSType: "ext4"},
 	})
 	image.Spec.PostHookRefs = []keziov1alpha1.NameRef{{Name: "image-hook"}}
+	subnet, site, subnetRef := siteFixture("default")
 
 	machine := &keziov1alpha1.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-01", Namespace: "default"},
 		Spec: keziov1alpha1.MachineSpec{
 			ImageRef:     &keziov1alpha1.NameRef{Name: "os-image"},
+			SubnetRef:    subnetRef,
 			PostHookRefs: []keziov1alpha1.NameRef{{Name: "machine-hook"}},
 		},
 		Status: keziov1alpha1.MachineStatus{
@@ -321,7 +323,7 @@ func TestBuildDeployPlan_HooksResolvedFromImageAndMachine(t *testing.T) {
 		},
 	}
 
-	c := newPlanTestClient(t, image, cm, imageHook, machineHook, machine)
+	c := newPlanTestClient(t, image, cm, imageHook, machineHook, machine, subnet, site)
 	cfg := Config{TrackerURL: testTrackerURL}
 
 	plan, err := buildDeployPlan(context.Background(), c, cfg, machine)

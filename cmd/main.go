@@ -49,10 +49,8 @@ import (
 	"github.com/tjjh89017/kezio/internal/agentserver"
 	"github.com/tjjh89017/kezio/internal/bootserver"
 
-	// Blank-imported for their init() side effect: each registers its
-	// URL scheme with internal/bmc's driver registry (see
-	// internal/bmc/registry.go's Register), which deployerFactoryFromEnv's
-	// AgentFactory path resolves Machine.spec.bmc.address against.
+	// Blank-imported to register their URL scheme with internal/bmc's
+	// driver registry (internal/bmc/registry.go's Register).
 	_ "github.com/tjjh89017/kezio/internal/bmc/ipmi"
 	_ "github.com/tjjh89017/kezio/internal/bmc/ipmitool"
 	_ "github.com/tjjh89017/kezio/internal/bmc/redfish"
@@ -205,10 +203,7 @@ func main() {
 		setupLog.Error(err, "invalid ingest configuration")
 		os.Exit(1)
 	}
-	// Computed before seederDeploymentConfigFromEnv and
-	// agentServerConfigFromEnv below, which both reuse it - one tracker
-	// URL and one tuning default serve every consumer that builds a
-	// .torrent, not a separate set per consumer.
+	// Shared by seederDeploymentConfigFromEnv and agentServerConfigFromEnv below.
 	tracker, err := trackerConfigFromEnv()
 	if err != nil {
 		setupLog.Error(err, "invalid tracker configuration")
@@ -241,6 +236,19 @@ func main() {
 		DeployerFactory: deployerFactoryFromEnv(mgr.GetClient()),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Machine")
+		os.Exit(1)
+	}
+	bootdDeploymentConfig, err := bootdDeploymentConfigFromEnv()
+	if err != nil {
+		setupLog.Error(err, "invalid bootd deployment configuration")
+		os.Exit(1)
+	}
+	if err := (&controller.SubnetReconciler{
+		Client:          mgr.GetClient(),
+		Scheme:          mgr.GetScheme(),
+		BootdDeployment: bootdDeploymentConfig,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "Subnet")
 		os.Exit(1)
 	}
 	if webhooksEnabled() {
@@ -335,27 +343,12 @@ func webhooksEnabled() bool {
 	return os.Getenv("ENABLE_WEBHOOKS") != "false"
 }
 
-// ingestConfigFromEnv builds the Image reconciler's IngestConfig from
-// the environment. Leaving INGEST_IMAGE unset (the default for every
-// existing deployment and the e2e suite) yields the zero IngestConfig,
-// which keeps the Image reconciler on its stub fast path - no ingest
-// Job is ever created, and no scratch or staging volume is required.
-// Setting INGEST_IMAGE opts into the real ingest pipeline: the
-// reconciler creates a fresh per-Image scratch PVC and, once ingest
-// succeeds, one PVC per partition (see IngestConfig's own doc comment).
-// INGEST_SCRATCH_STORAGE_CLASS and INGEST_PARTITION_STORAGE_CLASS
-// optionally pick each's StorageClass (empty uses the cluster/namespace
-// default). INGEST_PARTITION_ACCESS_MODES optionally overrides the
-// per-partition PVCs' access modes as a comma-separated list (for
-// example "ReadWriteMany"); left unset, ReadWriteOnce applies, correct
-// for a single-node cluster but not for a per-Image seeder Deployment
-// that must schedule across more than one node (see
-// IngestConfig.PartitionStorageClassName's doc comment).
-// INGEST_SCRATCH_STORAGE_SIZE optionally overrides the ingest scratch
-// PVC's requested capacity (a Kubernetes quantity, for example "20Gi");
-// left unset, IngestConfig's own default applies. INGEST_STAGING_PVC
-// is optional (only needed to ingest kezio-staged:// sources);
-// INGEST_SERVICE_ACCOUNT is optional.
+// ingestConfigFromEnv builds the Image reconciler's IngestConfig from the
+// environment. Leaving INGEST_IMAGE unset yields the zero IngestConfig,
+// which keeps the Image reconciler on its stub fast path (no ingest Job,
+// no scratch/staging volume). INGEST_PARTITION_ACCESS_MODES defaults to
+// ReadWriteOnce, correct for a single-node cluster but not for a
+// per-Image seeder Deployment scheduled across nodes.
 func ingestConfigFromEnv() (controller.IngestConfig, error) {
 	image := os.Getenv("INGEST_IMAGE")
 	if image == "" {
@@ -389,31 +382,17 @@ func ingestConfigFromEnv() (controller.IngestConfig, error) {
 }
 
 // trackerConfig carries the tracker URL and cluster-wide default
-// AddTorrent tuning every consumer that builds a .torrent shares - the
-// per-Image seeder Deployment (seederDeploymentConfigFromEnv) and the
-// agent registration server (agentServerConfigFromEnv) - so
-// SEEDER_TRACKER_URL/SEEDER_MAX_UPLOADS/SEEDER_MAX_CONNECTIONS are read
-// once rather than once per consumer.
+// AddTorrent tuning shared by seederDeploymentConfigFromEnv and
+// agentServerConfigFromEnv, read once rather than once per consumer.
 type trackerConfig struct {
 	URL    string
 	Tuning *keziov1alpha1.MachineEzioTuning
 }
 
 // trackerConfigFromEnv reads trackerConfig from the environment. Leaving
-// SEEDER_TRACKER_URL unset (the default for every existing deployment
-// and the e2e suite) yields the zero trackerConfig: per-Image seeder
-// Deployments are still created and torn down by their reference count,
-// and the agent registration server still starts - only the
-// content-adding/torrent-building half of each is skipped (see
-// SeederDeploymentConfig.TrackerURL's doc comment).
-//
-//   - SEEDER_TRACKER_URL is inserted as every built .torrent's announce
-//     URL (see internal/store.BuildTorrentFile).
-//   - SEEDER_MAX_UPLOADS / SEEDER_MAX_CONNECTIONS optionally override
-//     the cluster-wide default per-torrent AddTorrent tuning applied to
-//     every content torrent added (see config/seeder/README.md's "WAN
-//     swarm tuning" section). Unset leaves
-//     seeder.DefaultMaxUploads/DefaultMaxConnections in effect.
+// SEEDER_TRACKER_URL unset yields the zero trackerConfig: per-Image
+// seeder Deployments and the agent server still run, only the
+// content-adding/torrent-building half is skipped.
 func trackerConfigFromEnv() (trackerConfig, error) {
 	trackerURL := os.Getenv("SEEDER_TRACKER_URL")
 	if trackerURL == "" {
@@ -428,32 +407,11 @@ func trackerConfigFromEnv() (trackerConfig, error) {
 
 // seederDeploymentConfigFromEnv builds the Image reconciler's
 // SeederDeploymentConfig from the environment. Leaving
-// SEEDER_DEPLOYMENT_IMAGE unset (the default for every existing
-// deployment and the e2e suite) yields the zero SeederDeploymentConfig,
-// which disables per-Image seeder Deployments entirely - no Deployment
-// is ever created. Setting SEEDER_DEPLOYMENT_IMAGE opts in. There is no
-// store PVC to name here any more: each Deployment mounts exactly its
-// own Image's partition PVCs, which the Image reconciler already
-// creates during publishing (see IngestConfig and partitionPVCName).
-// SEEDER_DEPLOYMENT_GRACE_PERIOD is optional (a Go duration string, for
-// example "5m"); left unset, the reconciler's own default applies (see
-// SeederDeploymentConfig.gracePeriod). SEEDER_DEPLOYMENT_NETWORK is
-// optional: it names a Multus NetworkAttachmentDefinition (see
-// controller.SeederDeploymentConfig.Network's doc comment) that makes
-// each seeder pod single-homed on the provisioning network instead of
-// the ordinary cluster network. Left unset, no pod annotation is added -
-// the behavior every existing deployment and the envtest suite already
-// exercise.
-//
-// tracker carries the tracker URL a per-Image Deployment's pod is
-// actually seeded through (SeederDeploymentConfig.TrackerURL), reused
-// verbatim rather than introducing a second, parallel
-// SEEDER_DEPLOYMENT_TRACKER_URL naming the same tracker - the identical
-// reasoning agentServerConfigFromEnv gives for reusing trackerConfig
-// itself. Leaving SEEDER_TRACKER_URL unset still lets per-Image
-// Deployments be created and torn down by their reference count; it
-// just means nothing ever adds content to them (see
-// SeederDeploymentConfig.contentEnabled).
+// SEEDER_DEPLOYMENT_IMAGE unset yields the zero SeederDeploymentConfig,
+// disabling per-Image seeder Deployments entirely. The Multus
+// default-network annotation is no longer sourced from the environment:
+// it is derived per-site from the Site's own seeder Subnet (see
+// controller.seederPodAnnotations).
 func seederDeploymentConfigFromEnv(tracker trackerConfig) (controller.SeederDeploymentConfig, error) {
 	image := os.Getenv("SEEDER_DEPLOYMENT_IMAGE")
 	if image == "" {
@@ -464,7 +422,6 @@ func seederDeploymentConfigFromEnv(tracker trackerConfig) (controller.SeederDepl
 		Image:      image,
 		TrackerURL: tracker.URL,
 		EzioTuning: tracker.Tuning,
-		Network:    os.Getenv("SEEDER_DEPLOYMENT_NETWORK"),
 	}
 	if raw := os.Getenv("SEEDER_DEPLOYMENT_GRACE_PERIOD"); raw != "" {
 		gracePeriod, err := time.ParseDuration(raw)
@@ -476,13 +433,38 @@ func seederDeploymentConfigFromEnv(tracker trackerConfig) (controller.SeederDepl
 	return cfg, nil
 }
 
+// bootdDeploymentConfigFromEnv builds the Subnet reconciler's
+// BootdDeploymentConfig from the environment. Leaving
+// BOOTD_DEPLOYMENT_IMAGE unset yields the zero BootdDeploymentConfig, and
+// SubnetReconciler creates no bootd Deployment. These BOOTD_* variables
+// configure the controller-manager, distinct from cmd/bootd's
+// identically-prefixed variables which configure the bootd process
+// itself and are never read here.
+func bootdDeploymentConfigFromEnv() (controller.BootdDeploymentConfig, error) {
+	image := os.Getenv("BOOTD_DEPLOYMENT_IMAGE")
+	if image == "" {
+		return controller.BootdDeploymentConfig{}, nil
+	}
+
+	bootArtifactsImage := os.Getenv("BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE")
+	if bootArtifactsImage == "" {
+		return controller.BootdDeploymentConfig{}, fmt.Errorf(
+			"BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE is required when BOOTD_DEPLOYMENT_IMAGE is set")
+	}
+
+	return controller.BootdDeploymentConfig{
+		Image:              image,
+		BootArtifactsImage: bootArtifactsImage,
+		ServiceAccountName: os.Getenv("BOOTD_DEPLOYMENT_SERVICE_ACCOUNT"),
+		AgentUpstreamURL:   os.Getenv("BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL"),
+		BootUpstreamURL:    os.Getenv("BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL"),
+	}, nil
+}
+
 // ezioTuningFromEnv reads a cluster-wide default MaxUploads/MaxConnections
 // override from the two named environment variables, returning nil when
-// neither is set (meaning "no cluster-wide override; fall back further",
-// exactly like an absent Machine.spec.ezio field - see
-// keziov1alpha1.MergeEzioTuning and internal/seeder's
-// ResolveMaxUploads/ResolveMaxConnections). An unparsable non-empty
-// value is a startup-time configuration error, not silently ignored.
+// neither is set (like an absent Machine.spec.ezio field; see
+// keziov1alpha1.MergeEzioTuning).
 func ezioTuningFromEnv(maxUploadsVar, maxConnectionsVar string) (*keziov1alpha1.MachineEzioTuning, error) {
 	var tuning keziov1alpha1.MachineEzioTuning
 	var set bool
@@ -512,44 +494,13 @@ func ezioTuningFromEnv(maxUploadsVar, maxConnectionsVar string) (*keziov1alpha1.
 
 // bootServerConfigFromEnv builds the boot config server's
 // bootserver.Config from the environment. Leaving BOOT_SERVER_ADDR unset
-// (the default for every existing deployment and the e2e suite) returns
-// a nil Config, and main does not add the server to the manager at all -
-// the same inert-by-default gating shape INGEST_IMAGE and
-// SEEDER_TRACKER_URL use. Setting BOOT_SERVER_ADDR opts in;
-// BOOT_ARTIFACTS_DIR and BOOT_SERVER_URL must then also be set:
-//
-//   - BOOT_SERVER_ADDR is the address the boot HTTP server listens on,
-//     for example ":8090".
-//   - BOOT_ARTIFACTS_DIR is the local filesystem directory GET
-//     /boot/artifacts/... serves from - a volume mounted into the
-//     manager container out of band (see config/bootserver's README).
-//   - BOOT_SERVER_URL is this server's own externally reachable base
-//     URL, for example "http://10.0.0.5:8090": GRUB and the live
-//     environment's initrd both need to reach it from the target
-//     machine's network to fetch the kernel/initrd/squashfs, which is
-//     never something this process can discover on its own.
-//   - BOOT_AGENT_SERVER_URL is internal/agentserver's own externally
-//     reachable base URL, for example "http://10.0.0.5:8091" - see
-//     bootserver.Config.AgentServerURL's doc comment for why this is
-//     ordinarily a different address from BOOT_SERVER_URL (a different
-//     Service, on a different container port, fronting the same
-//     controller-manager Pod), and why leaving it unset to silently fall
-//     back to BOOT_SERVER_URL is only correct when both servers truly
-//     share one address. A deployment that sets AGENT_SERVER_ADDR (see
-//     agentServerConfigFromEnv) should set this too.
-//   - BOOT_KERNEL_PATH / BOOT_INITRD_PATH optionally override the
-//     artifact file names under BOOT_ARTIFACTS_DIR (default "vmlinuz" /
-//     "initrd.img").
-//   - BOOT_TOKEN_TTL optionally overrides how long a minted boot token
-//     is accepted (a Go duration string, for example "30m"; default
-//     bootserver.DefaultTokenTTL).
-//   - BOOT_EFI_DIR optionally overrides the directory GET
-//     /boot/http/<name> serves the signed shim/grub EFI binaries from,
-//     for UEFI HTTP Boot (see internal/bootd's Config.HTTPBootURL).
-//     Empty means BOOT_ARTIFACTS_DIR: the same volume already used for
-//     the kernel/initrd/squashfs is the natural place to also stage
-//     shimx64.efi/grubx64.efi, so this only needs setting if those live
-//     somewhere else.
+// returns a nil Config, and main does not add the server to the manager.
+// Setting it opts in; BOOT_ARTIFACTS_DIR and BOOT_SERVER_URL must then
+// also be set. BOOT_AGENT_SERVER_URL is ordinarily a different address
+// from BOOT_SERVER_URL (a different Service/port fronting the same Pod);
+// left unset it falls back to BOOT_SERVER_URL, correct only when both
+// servers truly share one address - a deployment setting AGENT_SERVER_ADDR
+// should set this too. BOOT_EFI_DIR defaults to BOOT_ARTIFACTS_DIR.
 func bootServerConfigFromEnv() (*bootserver.Config, error) {
 	addr := os.Getenv("BOOT_SERVER_ADDR")
 	if addr == "" {
@@ -586,34 +537,14 @@ func bootServerConfigFromEnv() (*bootserver.Config, error) {
 
 // agentServerConfigFromEnv builds the agent registration server's
 // agentserver.Config from the environment, mirroring
-// bootServerConfigFromEnv's inert-by-default shape: leaving
-// AGENT_SERVER_ADDR unset returns a nil Config, and main does not add
-// the server to the manager at all. Setting AGENT_SERVER_ADDR (for
-// example ":8091") opts in.
-//
-// Building a DeployPlan needs a tracker URL to bencode into every
-// .torrent it builds (see agentserver.buildPartitionTorrent) - the same
-// one seederConfigFromEnv's SeederConfig already carries, reused
-// verbatim rather than introducing a second, parallel
-// AGENT_TRACKER_URL naming the same tracker. It needs no store mount:
-// a partition's torrent.info now rides inline on
-// ImagePartitionStatus.TorrentInfo, so this server reads it straight
-// from the Image object. A deployment that sets AGENT_SERVER_ADDR
-// without also setting SEEDER_TRACKER_URL still starts - GET .../next
-// then never has enough to build a plan for an Image with a content
-// partition, and answers ActionWait forever instead of failing
-// outright, the same graceful degradation buildDeployPlan gives an
-// unexpected build error.
-//
-// EZIO_DEFAULT_MAX_UPLOADS / EZIO_DEFAULT_MAX_CONNECTIONS optionally set
-// the cluster-wide default per-torrent AddTorrent tuning applied to
-// every DeployPlan this server builds, before any Machine.spec.ezio
-// override (see keziov1alpha1.MergeEzioTuning). These are intentionally
-// separate from SEEDER_MAX_UPLOADS/SEEDER_MAX_CONNECTIONS: the seeder
-// pods and each machine's leecher can reasonably want different
-// defaults (a seeder serves every site at once; a leecher serves only
-// itself), so this reuses trackerConfig for the tracker setting alone,
-// not its tuning.
+// bootServerConfigFromEnv's inert-by-default shape. A deployment that
+// sets AGENT_SERVER_ADDR without SEEDER_TRACKER_URL still starts: GET
+// .../next then answers ActionWait forever instead of failing, for any
+// Image with a content partition. EZIO_DEFAULT_MAX_UPLOADS /
+// EZIO_DEFAULT_MAX_CONNECTIONS are intentionally separate from
+// SEEDER_MAX_UPLOADS/SEEDER_MAX_CONNECTIONS: a seeder serving every site
+// and a leecher serving only itself can reasonably want different
+// defaults.
 func agentServerConfigFromEnv(tracker trackerConfig) (*agentserver.Config, error) {
 	addr := os.Getenv("AGENT_SERVER_ADDR")
 	if addr == "" {
@@ -631,14 +562,10 @@ func agentServerConfigFromEnv(tracker trackerConfig) (*agentserver.Config, error
 }
 
 // deployerFactoryFromEnv selects the Deployer implementation the Machine
-// reconciler drives, controlled by DEPLOYER: "agent" wires
-// deployer.AgentFactory (registration- and inspection-driven, backed by
-// the real kezio-agent flow); anything else, including unset, wires
-// deployer.FakeFactory, which fabricates plausible results for every
-// phase so the state machine runs end to end with no live hardware or
-// agent - the existing default, kept as the default so every existing
-// deployment and the fast-lane e2e suite are unaffected by this
-// function's addition.
+// reconciler drives. DEPLOYER=agent wires deployer.AgentFactory (the real
+// kezio-agent flow); anything else, including unset, wires
+// deployer.FakeFactory, which fabricates results for every phase with no
+// live hardware or agent.
 func deployerFactoryFromEnv(c client.Client) deployer.Factory {
 	if os.Getenv("DEPLOYER") == "agent" {
 		return deployer.NewAgentFactory(c).New

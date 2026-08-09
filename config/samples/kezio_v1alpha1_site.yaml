@@ -1,0 +1,10 @@
+apiVersion: kezio.kojuro.date/v1alpha1
+kind: Site
+metadata:
+  labels:
+    app.kubernetes.io/name: kezio
+    app.kubernetes.io/managed-by: kustomize
+  name: hq
+spec:
+  seederSubnetRef:
+    name: floor-2-vlan-101

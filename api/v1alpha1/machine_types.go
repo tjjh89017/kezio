@@ -199,16 +199,22 @@ type MachineSpec struct {
 	// ImageRef is absent.
 	// +optional
 	TargetDisk *TargetDiskHints `json:"targetDisk,omitempty"`
-	// NetworkSite selects the network zone (the kezio-bootd instance) this
-	// machine network boots through. It does not select a seeder: the
-	// deploy plan always announces at the single central tracker
+	// SubnetRef names the Subnet this machine network boots through - the
+	// broadcast domain whose bootd instance answers this machine's PXE
+	// boot. The Subnet's own SiteRef derives which Site the machine
+	// belongs to (that Site's namespace/name is its stable identity -
+	// see Site's doc comment); this field never names a Site directly, so
+	// there is no way for a machine to declare a site inconsistent with
+	// the segment it actually boots from. It does not select a seeder:
+	// the deploy plan always announces at the single central tracker
 	// (SEEDER_TRACKER_URL), and BitTorrent's own peer discovery through
 	// that shared tracker is what lets this machine's leecher find a
 	// site-local seeder when one is deployed - no per-site routing field
 	// or lookup is needed for that. See config/seeder/README.md's
 	// "Per-site seeders" section.
-	// +optional
-	NetworkSite string `json:"networkSite,omitempty"`
+	//
+	// Required: a Machine with no Subnet cannot be network-booted.
+	SubnetRef NameRef `json:"subnetRef"`
 	// PostHookRefs is an ordered list of PostHook resources attached to
 	// this machine. Execution order: the attached Image's own
 	// postHookRefs run first, then this list; within this list, the given
@@ -551,7 +557,7 @@ type MachineStatus struct {
 // +kubebuilder:printcolumn:name="Online",type=boolean,JSONPath=`.spec.online`
 // +kubebuilder:printcolumn:name="PoweredOn",type=boolean,JSONPath=`.status.poweredOn`
 // +kubebuilder:printcolumn:name="BootMAC",type=string,JSONPath=`.spec.bootMACAddress`
-// +kubebuilder:printcolumn:name="NetworkSite",type=string,JSONPath=`.spec.networkSite`
+// +kubebuilder:printcolumn:name="Subnet",type=string,JSONPath=`.spec.subnetRef.name`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // Machine is the Schema for the machines API.

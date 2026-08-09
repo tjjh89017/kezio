@@ -365,6 +365,8 @@ func TestHandleNext_ProvisioningReadyReturnsDeployPlan(t *testing.T) {
 	imageRef := keziov1alpha1.NameRef{Namespace: "default", Name: "os-image"}
 	machine := newTestMachineWithSession(now)
 	machine.Spec.ImageRef = &imageRef
+	subnet, site, subnetRef := siteFixture(machine.Namespace)
+	machine.Spec.SubnetRef = subnetRef
 	machine.Status.State = keziov1alpha1.MachineStateProvisioning
 	machine.Status.Provisioning = &keziov1alpha1.MachineProvisioningStatus{
 		Image: &keziov1alpha1.MachineProvisionedImage{
@@ -378,7 +380,7 @@ func TestHandleNext_ProvisioningReadyReturnsDeployPlan(t *testing.T) {
 	// newTestServer's fake client needs a scheme that also knows
 	// ImageLayout; build this test's client directly instead of going
 	// through newTestServer.
-	c := newPlanTestClient(t, machine, image, cm)
+	c := newPlanTestClient(t, machine, image, cm, subnet, site)
 	s := New(c, Config{TrackerURL: testTrackerURL})
 	s.Now = func() time.Time { return now }
 
@@ -422,6 +424,8 @@ func provisioningReadyMachineAndClient(t *testing.T, now time.Time) (client.Clie
 	imageRef := keziov1alpha1.NameRef{Namespace: "default", Name: "os-image"}
 	machine := newTestMachineWithSession(now)
 	machine.Spec.ImageRef = &imageRef
+	subnet, site, subnetRef := siteFixture(machine.Namespace)
+	machine.Spec.SubnetRef = subnetRef
 	machine.Status.State = keziov1alpha1.MachineStateProvisioning
 	machine.Status.Provisioning = &keziov1alpha1.MachineProvisioningStatus{
 		Image: &keziov1alpha1.MachineProvisionedImage{
@@ -432,7 +436,7 @@ func provisioningReadyMachineAndClient(t *testing.T, now time.Time) (client.Clie
 	image, cm := readyImage("os-image", "{}", []keziov1alpha1.ImagePartitionStatus{
 		{Number: 1, Role: keziov1alpha1.PartitionRoleData, FSType: "ext4"},
 	})
-	c := newPlanTestClient(t, machine, image, cm)
+	c := newPlanTestClient(t, machine, image, cm, subnet, site)
 	s := New(c, Config{TrackerURL: testTrackerURL})
 	s.Now = func() time.Time { return now }
 	return c, s

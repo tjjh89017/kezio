@@ -5,9 +5,8 @@ description: >-
   e2e-kubevirt-reusable.yml's "deploy-kubevirt" job (and
   e2e-scale-multisite-kubevirt.yml) attaches bootd, the opentracker/
   ezio-seeder swarm, and the target VM to on the provisioning bridge -
-  see this action's own inline comments for why each NAD's ipam/tuning
-  shape differs (static vs. empty ipam, the tuning-plugin rp_filter
-  override on bootd's own attachment only). A fifth NAD,
+  see this action's own inline comments for why each NAD's ipam shape
+  differs (static vs. empty ipam). A fifth NAD,
   kezio-existing-dhcp-network, is created separately by
   .github/actions/deploy-existing-dhcp, travelling with the pod it
   belongs to instead of living here. Every address comes from the
@@ -36,10 +35,6 @@ runs:
       #   hijacking real PXE DHCP (observed: a rogue in-pod server
       #   answered DISCOVER before bootd and PXE died with PXE-E16).
       #   Empty ipam lets the guest do real DHCP on the wire instead.
-      # The "tuning" plugin on bootd's attachment forces net1's rp_filter
-      # to 0: a DHCPDISCOVER's source 0.0.0.0/dest 255.255.255.255 can
-      # otherwise be rejected by a strict/loose reverse-path check
-      # depending on kernel version and inherited sysctl defaults.
       shell: bash
       run: |
         cat <<EOF | kubectl apply -f -
@@ -62,12 +57,6 @@ runs:
                     "addresses": [
                       {"address": "${PROVISIONING_BOOTD_NET1_IP}"}
                     ]
-                  }
-                },
-                {
-                  "type": "tuning",
-                  "sysctl": {
-                    "net.ipv4.conf.IFNAME.rp_filter": "0"
                   }
                 }
               ]
@@ -106,8 +95,6 @@ runs:
             }
         EOF
         done
-        # No tuning chain here: the VM's traffic is bridged at L2 straight
-        # through, so the pod netns's IP-layer rp_filter never sees it.
         cat <<EOF | kubectl apply -f -
         apiVersion: k8s.cni.cncf.io/v1
         kind: NetworkAttachmentDefinition

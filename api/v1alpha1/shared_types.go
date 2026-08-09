@@ -23,7 +23,11 @@ package v1alpha1
 type NameRef struct {
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
-	Name      string `json:"name"`
+	// +kubebuilder:validation:MinLength=1
+	// Post-mutation admission always re-serialises this struct, so a
+	// zero-value Name would otherwise satisfy "required"; MinLength closes
+	// that gap.
+	Name string `json:"name"`
 }
 
 // SecretKeyRef references a specific key in a Secret.

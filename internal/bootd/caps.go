@@ -17,6 +17,8 @@ limitations under the License.
 package bootd
 
 import (
+	"fmt"
+
 	"github.com/go-logr/logr"
 	"golang.org/x/sys/unix"
 )
@@ -42,6 +44,37 @@ var dnsmasqCaps = []int{
 	unix.CAP_NET_BIND_SERVICE,
 	unix.CAP_NET_ADMIN,
 	unix.CAP_NET_RAW,
+}
+
+// capKubeNames maps a unix.CAP_* value to the capability name
+// Kubernetes' SecurityContext.Capabilities.Add expects - a fixed Linux
+// ABI fact (the kernel's own capability numbering), not a bootd-specific
+// requirement, so it carries no risk of drifting from what dnsmasq
+// actually needs.
+var capKubeNames = map[int]string{
+	unix.CAP_NET_BIND_SERVICE: "NET_BIND_SERVICE",
+	unix.CAP_NET_ADMIN:        "NET_ADMIN",
+	unix.CAP_NET_RAW:          "NET_RAW",
+}
+
+// DnsmasqCapabilities is dnsmasqCaps expressed as the capability names
+// Kubernetes' SecurityContext.Capabilities.Add expects, so callers
+// outside this package (internal/controller's buildBootdDeployment) can
+// build a pod's Capabilities.Add from the same list this package itself
+// raises, instead of a hand-spelled copy that can silently drop an
+// entry.
+var DnsmasqCapabilities = dnsmasqCapabilityNames()
+
+func dnsmasqCapabilityNames() []string {
+	names := make([]string, len(dnsmasqCaps))
+	for i, c := range dnsmasqCaps {
+		name, ok := capKubeNames[c]
+		if !ok {
+			panic(fmt.Sprintf("bootd: no Kubernetes capability name registered for unix cap %d", c))
+		}
+		names[i] = name
+	}
+	return names
 }
 
 // raiseAmbientCaps copies each of dnsmasqCaps this process holds in its

@@ -1,3 +1,12 @@
+# REFERENCE ONLY - not applied by this kustomization. SubnetReconciler
+# (internal/controller/subnet_controller.go) creates a Deployment shaped
+# like this one per Subnet object, in that Subnet's own namespace, via
+# buildBootdDeployment (internal/controller/bootd_deployment.go), filling
+# in the SITE-SPECIFIC values below from the Subnet's spec instead of a
+# hand edit here. Keep this file in sync with buildBootdDeployment when
+# either changes; it exists so an operator can read the actual pod shape
+# without tracing Go code, not to be copied or kubectl apply'd. See
+# README.md's "Who creates the bootd Deployment".
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -35,7 +44,7 @@ spec:
         # NAD. Create it first, then uncomment and point this at its name.
         # k8s.v1.cni.cncf.io/networks: kezio-boot-network
     spec:
-      serviceAccountName: bootd
+      serviceAccountName: kezio-bootd
       securityContext:
         # No pod-level runAsNonRoot: the containers disagree, so each states
         # its own - fetch-boot-artifacts runs non-root, bootd must run as
@@ -90,14 +99,16 @@ spec:
             # to this interface.
             - name: BOOTD_DHCP_INTERFACE
               value: net1
-            # SITE-SPECIFIC: URL a netbooting machine fetches its per-MAC GRUB
-            # config from. With the reverse proxy enabled below, this is
-            # bootd's own address (BOOTD_SERVER_IP + BOOTD_PROXY_ADDR's port),
-            # since bootd's proxy answers /boot/grub.cfg-<mac> by forwarding
-            # to config/bootserver. Without it set, a netbooting machine loads
-            # GRUB and stops at the grub> prompt.
+            # URL a netbooting machine fetches its per-MAC GRUB config from.
+            # buildBootdDeployment derives this automatically once
+            # BOOTD_BOOT_UPSTREAM_URL is set below - it is always
+            # bootd's own address (BOOTD_SERVER_IP + BOOTD_PROXY_ADDR's
+            # port), since bootd's own proxy answers /boot/grub.cfg-<mac> by
+            # forwarding to config/bootserver. Nothing to fill in here.
+            # Without a boot upstream URL configured, this stays unset and a
+            # netbooting machine loads GRUB and stops at the grub> prompt.
             # - name: BOOTD_BOOT_CONFIG_URL
-            #   value: "REPLACE_WITH_BOOTD_OWN_URL"
+            #   value: "http://REPLACE_WITH_BOOTD_BOOT_NETWORK_IP:80"
             # Optional, SITE-SPECIFIC once set: in-cluster base URLs of
             # internal/agentserver and internal/bootserver. Setting either
             # turns on bootd's reverse proxy (BOOTD_PROXY_ADDR below): every
@@ -116,6 +127,20 @@ spec:
             #   value: "REPLACE_WITH_BOOTD_BOOT_NETWORK_IP:80"
             - name: BOOTD_TFTP_DIR
               value: /tftp
+            # Whether dnsmasq answers DHCPDISCOVER itself (lease mode) or
+            # only the proxyDHCP/PXE fields alongside another DHCP server
+            # (proxy mode, the default). Always set - buildBootdDeployment
+            # emits it unconditionally, one or the other, from the
+            # Subnet's own DHCP.Mode.
+            - name: BOOTD_LEASE_MODE
+              value: "false"
+            # Optional, SITE-SPECIFIC once set: IPv4 bounds for the
+            # BOOTD_LEASE_MODE dhcp-range. Only emitted when the Subnet is
+            # in lease mode and sets them; ignored by bootd otherwise.
+            # - name: BOOTD_LEASE_RANGE_START
+            #   value: "REPLACE_WITH_LEASE_RANGE_START"
+            # - name: BOOTD_LEASE_RANGE_END
+            #   value: "REPLACE_WITH_LEASE_RANGE_END"
           ports:
             - name: proxydhcp
               containerPort: 67

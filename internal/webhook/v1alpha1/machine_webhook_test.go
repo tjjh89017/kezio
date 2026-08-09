@@ -216,3 +216,39 @@ var _ = Describe("Machine Webhook", func() {
 		})
 	})
 })
+
+// These specs submit Machines through k8sClient.Create against the real
+// envtest apiserver, with both the mutating and validating webhooks
+// installed. subnetRef is required, but the mutating webhook's admission
+// patch round-trips the Go zero value for any field it doesn't touch; only
+// real admission (schema validation running after the patch) proves an
+// empty subnetRef.name is still rejected.
+var _ = Describe("Machine CRD validation", func() {
+	newMachine := func(subnetRef keziov1alpha1.NameRef) *keziov1alpha1.Machine {
+		return &keziov1alpha1.Machine{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: "machine-", Namespace: "default"},
+			Spec: keziov1alpha1.MachineSpec{
+				BMC: keziov1alpha1.MachineBMC{
+					Address:              "redfish://198.51.100.10/redfish/v1/Systems/1",
+					CredentialsSecretRef: keziov1alpha1.SecretReference{Name: "bmc-creds"},
+				},
+				BootMACAddress: "aa:bb:cc:dd:ee:02",
+				SubnetRef:      subnetRef,
+			},
+		}
+	}
+
+	Context("subnetRef.name minimum length", func() {
+		It("Should deny a Machine with subnetRef.name empty", func() {
+			err := k8sClient.Create(ctx, newMachine(keziov1alpha1.NameRef{Name: ""}))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.subnetRef.name"))
+		})
+
+		It("Should admit a Machine with a non-empty subnetRef.name", func() {
+			created := newMachine(keziov1alpha1.NameRef{Name: "subnet-a"})
+			Expect(k8sClient.Create(ctx, created)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, created)).To(Succeed()) })
+		})
+	})
+})

@@ -257,6 +257,7 @@ var _ = Describe("Image Controller", func() {
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:02",
 					ImageRef:       &keziov1alpha1.NameRef{Name: resourceName},
+					SubnetRef:      keziov1alpha1.NameRef{Name: "inuse-machine-subnet"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
@@ -321,6 +322,7 @@ var _ = Describe("Image Controller", func() {
 						CredentialsSecretRef: keziov1alpha1.SecretReference{Name: "provisioned-machine-bmc"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:03",
+					SubnetRef:      keziov1alpha1.NameRef{Name: "provisioned-machine-subnet"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
@@ -393,6 +395,7 @@ var _ = Describe("Image Controller", func() {
 						CredentialsSecretRef: keziov1alpha1.SecretReference{Name: "datarefd-machine-bmc"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:05",
+					SubnetRef:      keziov1alpha1.NameRef{Name: "datarefd-machine-subnet"},
 					DataImages: []keziov1alpha1.MachineDataImage{
 						{ImageRef: keziov1alpha1.NameRef{Name: resourceName}},
 					},
@@ -466,6 +469,7 @@ var _ = Describe("Image Controller", func() {
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:04",
 					ImageRef:       &keziov1alpha1.NameRef{Name: resourceName, Namespace: imageNamespace},
+					SubnetRef:      keziov1alpha1.NameRef{Name: "cross-ns-machine-subnet"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, machine)).To(Succeed())

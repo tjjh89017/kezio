@@ -139,6 +139,11 @@ spec:
                     lists of NameRef end in "Refs".
                   properties:
                     name:
+                      description: |-
+                        Post-mutation admission always re-serialises this struct, so a
+                        zero-value Name would otherwise satisfy "required"; MinLength closes
+                        that gap.
+                      minLength: 1
                       type: string
                     namespace:
                       type: string
@@ -257,6 +262,11 @@ spec:
                       this Image's own namespace.
                     properties:
                       name:
+                        description: |-
+                          Post-mutation admission always re-serialises this struct, so a
+                          zero-value Name would otherwise satisfy "required"; MinLength closes
+                          that gap.
+                        minLength: 1
                         type: string
                       namespace:
                         type: string
@@ -356,9 +366,10 @@ spec:
                       type: integer
                     site:
                       description: |-
-                        Site is the Machine's spec.networkSite value this count applies to
-                        (the empty string is itself a valid, distinct site: every Machine
-                        that never sets networkSite).
+                        Site is the namespace-qualified identity ("namespace/name", Site's
+                        doc comment) of the Site object this count applies to, derived
+                        from the demanding Machines' spec.subnetRef (through that Subnet's
+                        own spec.siteRef) rather than set directly on the Machine.
                       type: string
                   required:
                   - machineCount

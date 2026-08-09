@@ -5,6 +5,18 @@
 > what the lane proved and how it worked, for anyone who needs to
 > rebuild an equivalent check later. Do not follow the "Minimal example"
 > or any `uses:` reference below - the workflow file is gone.
+>
+> **The mechanism this document describes predates the current network
+> model.** `SeederReconciler` and its "every Ready endpoint of one
+> Service" sync path no longer exist; a seeder today is one Deployment
+> per (Image, Site), created by the Image reconciler in
+> `internal/controller/seeder_deployment.go`
+> (`config/seeder/README.md`, "Per-Image, on-demand seeding"), and a
+> Site is a `Site`/`Subnet` object pair (`docs/physical-lab-deployment.md`,
+> section 2), not an env-var-selected network. Read this document only
+> for what the two-bridge, two-`kezio-bootd` simulation technique
+> proved about isolated broadcast domains - not for how seeders are
+> built or configured today.
 
 A `workflow_dispatch`-only, release-gated GitHub Actions lane that proved
 kezio's per-site seeder topology (`config/seeder/README.md`'s "Per-site

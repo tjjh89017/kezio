@@ -1,7 +1,10 @@
 # EXAMPLE / PLACEHOLDER - not applied by this kustomization. Copy this file,
-# strip the ".example" suffix, fill in the site-specific values below, add it
-# to kustomization.yaml's resources, then uncomment the
-# k8s.v1.cni.cncf.io/networks annotation on deployment.yaml's pod template.
+# strip the ".example" suffix, fill in the site-specific values below, and
+# apply it directly in the Subnet's own namespace under its final name.
+# Point that Subnet's spec.bootdNetworkRef at the name - the controller
+# stamps the k8s.v1.cni.cncf.io/networks annotation on its bootd Deployment
+# for you (bootdPodAnnotations, internal/controller/bootd_deployment.go),
+# so there is no kustomization.yaml entry to add or annotation to uncomment.
 #
 # Requires the Multus CNI meta-plugin
 # (https://github.com/k8snetworkplumbingwg/multus-cni) and its
@@ -22,19 +25,24 @@
 # === Routing ===
 # Unlike config/seeder's data network, this attachment needs no routes onto
 # other subnets: proxyDHCP/TFTP traffic here is directly-connected L2
-# traffic.
+# traffic. If a future site relays DHCP onto this segment from elsewhere
+# (source address the relay's own, not 0.0.0.0), check net1's rp_filter
+# before assuming a dropped request is something else - a relayed or
+# renewal packet is not the zeronet-source broadcast this segment carries
+# today, and Linux's reverse-path check does apply to it.
 #
 # === IPAM ===
-# BOOTD_SERVER_IP (deployment.yaml) must match whatever address this NAD
-# assigns net1 - static or a cluster-wide allocator such as whereabouts both
-# work; see config/seeder's NAD example for the tradeoffs.
-#
-# === Reverse-path filtering ===
-# A DHCPDISCOVER arrives on net1 from 0.0.0.0 to 255.255.255.255 - a pair
-# some kernels' reverse-path filter silently drops before bootd's socket
-# ever sees it. The chained "tuning" plugin below forces net1's own
-# rp_filter to 0 for this attachment only (a fresh network namespace does
-# not inherit the host's sysctl values, so a host-wide sysctl would not help).
+# bootdServerIP (Subnet spec, stamped as BOOTD_SERVER_IP on the
+# Deployment) requires static ipam that pins that exact address - a
+# dynamic allocator such as whereabouts cannot satisfy this: the
+# controller's CheckBootdAddress raises a BootdIPAMNotStatic Violation
+# on any non-static ipam recognised on this NAD (internal/nadvalidate),
+# and dynamic allocation is a chicken-and-egg with a value that must be
+# known up front regardless. Contrast config/seeder's README, where
+# dynamic (whereabouts) ipam is the legitimate choice on the data
+# network - bootd's own address is pinned precisely because firmware
+# caches it mid-boot as the PXE next-server/TFTP target, which the data
+# network's address has no equivalent constraint for.
 apiVersion: k8s.cni.cncf.io/v1
 kind: NetworkAttachmentDefinition
 metadata:
@@ -43,8 +51,6 @@ metadata:
 spec:
   # SITE-SPECIFIC: replace the "macvlan" plugin entry with whatever CNI
   # plugin this cluster's boot L2 segment uses; it is illustrative only.
-  # Keep the "tuning" plugin entry (see "Reverse-path filtering" above)
-  # unless this cluster's CNI bundle lacks the "tuning" binary.
   config: |
     {
       "cniVersion": "0.3.1",
@@ -61,12 +67,6 @@ spec:
                 "address": "REPLACE_WITH_STATIC_CIDR/32"
               }
             ]
-          }
-        },
-        {
-          "type": "tuning",
-          "sysctl": {
-            "net.ipv4.conf.IFNAME.rp_filter": "0"
           }
         }
       ]
