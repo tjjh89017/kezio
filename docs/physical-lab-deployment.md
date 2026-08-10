@@ -5,6 +5,12 @@ with no CI and no GitHub Actions. It lists the network shapes kezio
 supports today, the prerequisites the operator must set up, and the
 full set of ports and addresses the operator must open and verify.
 
+For a lab, read `docs/lab-proxmox-rke2.md` first: it makes one choice at
+every point this guide gives options for, and walks through a full
+bring-up on Proxmox VE - RKE2, a Redfish shim in front of the Proxmox
+API, and a first deployed machine. Come back here for the reasoning
+behind a step, or when your site does not match that shape.
+
 Read this guide together with:
 
 - `config/bootd/README.md` - the full bootd option list.

@@ -93,6 +93,10 @@ See `make help` for the full list of targets.
 
 ## Documentation
 
+- [`docs/lab-proxmox-rke2.md`](docs/lab-proxmox-rke2.md): a step-by-step
+  walkthrough that builds one working lab, from an empty Proxmox VE host
+  through RKE2, a Redfish shim in front of the Proxmox API, and a first
+  deployed machine.
 - [`docs/physical-lab-deployment.md`](docs/physical-lab-deployment.md):
   the manual guide for building a kezio lab on bare metal, including
   network and DHCP setup.
