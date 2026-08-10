@@ -6,7 +6,8 @@ applied alongside it (`config/bootd`, `config/bootserver`,
 `config/agentserver`, `config/seeder`, `config/image-service`). Each of
 those has its own README with its own setup steps. See
 `docs/physical-lab-deployment.md` for the bring-up order across all of
-them on real hardware.
+them on real hardware, and `docs/lab-proxmox-rke2.md` for a
+step-by-step walkthrough of that order on a Proxmox VE lab.
 
 ## Image boot-entry contract
 
