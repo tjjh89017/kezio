@@ -14,6 +14,12 @@ when your site does not match the shape below.
 The lab is one Site with one Subnet. The steps scale to more sites
 without change; see `config/bootd/README.md`'s "Per-site addressing".
 
+`docs/lab-all-in-one.yaml` holds everything sections 5, 6, and 8 create,
+in one file. Read this guide first: that file assumes the cluster from
+sections 2 to 4 already exists, and every address, image tag, and
+credential in it needs editing before it works. Sections 5 and 6 stay
+the explanation of what it contains.
+
 ## 1. What the lab looks like
 
 Three parts run on one Proxmox VE host:
@@ -276,7 +282,7 @@ The release workflow publishes every image to `ghcr.io/tjjh89017`. Pin
 one released version and use it everywhere:
 
 ```sh
-export KEZIO_VERSION=v0.1.0     # or "main" for the branch build
+export KEZIO_VERSION=v0.1.7     # or "main" for the branch build
 export MANAGER_IMG=ghcr.io/tjjh89017/kezio:${KEZIO_VERSION}
 export IMAGE_SERVICE_IMG=ghcr.io/tjjh89017/kezio-image-service:${KEZIO_VERSION}
 export INGEST_IMG=ghcr.io/tjjh89017/kezio-ingest:${KEZIO_VERSION}
@@ -305,6 +311,16 @@ make build-kezioctl        # writes bin/kezioctl
 ## 5. Deploy kezio
 
 ### 5.1 CRDs and the controller-manager
+
+`config/default` includes the validating webhook and a cert-manager
+`Certificate` that serves it, so cert-manager must be installed first:
+
+```sh
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml
+kubectl -n cert-manager rollout status deployment/cert-manager-webhook --timeout=180s
+```
+
+Then deploy kezio itself:
 
 ```sh
 make install
