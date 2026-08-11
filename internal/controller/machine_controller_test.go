@@ -1361,6 +1361,63 @@ var _ = Describe("Machine Controller", func() {
 			Expect(result.Status.PoweredOn).NotTo(BeNil())
 			Expect(*result.Status.PoweredOn).To(BeFalse())
 			Expect(powerOffCalls).To(Equal(1))
+
+			By("clearing spec.online so reconcilePower does not power it back on")
+			Expect(result.Spec.EffectiveOnline()).To(BeFalse())
+		})
+
+		It("clears spec.online after an OS-image deploy too, where the agent is what powers the machine off", func() {
+			const resourceName = "os-image-poweroff-machine"
+			namespace := "default"
+			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+			createMachineTestSite(ctx, resourceName)
+
+			osImage := &keziov1alpha1.Image{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-os-image", Namespace: namespace},
+				Spec: keziov1alpha1.ImageSpec{
+					Source: keziov1alpha1.ImageSource{Format: keziov1alpha1.ImageFormatQCOW2},
+				},
+			}
+			Expect(k8sClient.Create(ctx, osImage)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, osImage)).To(Succeed()) })
+
+			spec := newTestMachineSpec(resourceName)
+			spec.ImageRef = &keziov1alpha1.NameRef{Name: osImage.Name}
+			spec.AfterDeploy = keziov1alpha1.AfterDeployPowerOff
+			machine := &keziov1alpha1.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec:       spec,
+			}
+			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+			DeferCleanup(func() {
+				m := &keziov1alpha1.Machine{}
+				if err := k8sClient.Get(ctx, key, m); err == nil {
+					Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+				}
+			})
+
+			r := &MachineReconciler{
+				Client:          k8sClient,
+				Scheme:          k8sClient.Scheme(),
+				DeployerFactory: deployer.NewFactory().New,
+			}
+
+			By("reconciling through to Provisioned")
+			result, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateProvisioned
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// With an OS image the controller takes no power action of its
+			// own - the agent shuts the machine down in-guest - so nothing
+			// here would stop reconcilePower from powering it straight back
+			// on while spec.online stayed true.
+			By("clearing spec.online even though the controller issued no power command")
+			Expect(result.Spec.EffectiveOnline()).To(BeFalse())
+
+			By("keeping the status this reconcile built rather than losing it to the spec write")
+			Expect(result.Status.Provisioning).NotTo(BeNil())
+			Expect(result.Status.Provisioning.Image).NotTo(BeNil())
 		})
 
 		It("power-cycles the machine instead of leaving it to the agent when AfterDeploy is Reboot", func() {

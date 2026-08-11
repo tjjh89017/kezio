@@ -305,12 +305,20 @@ func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *
 		}
 	}
 
+	// Status first, spec second. Update() decodes the API server's response
+	// back into machine, so a spec write here would replace the status this
+	// function has been building in memory - status.provisioning and the
+	// power observation above - with the not-yet-written stored copy, and
+	// advance would then persist that emptied status.
+	advanced, err := r.advance(ctx, machine, keziov1alpha1.MachineStateProvisioned, reasonProvisioned,
+		"Deployment complete")
+	if err != nil {
+		return advanced, err
+	}
 	if err := r.clearOnlineAfterPowerOff(ctx, machine); err != nil {
 		return ctrl.Result{}, err
 	}
-
-	return r.advance(ctx, machine, keziov1alpha1.MachineStateProvisioned, reasonProvisioned,
-		"Deployment complete")
+	return advanced, nil
 }
 
 // clearOnlineAfterPowerOff writes spec.online=false when the finished
