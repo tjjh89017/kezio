@@ -108,14 +108,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Derive image metadata
+        # Same tag spec as the images job, so every kezio image carries the
+        # same version tag. semver strips the "v": tag v1.2.3 pushes 1.2.3.
+        # metadata-action's default "latest=auto" adds the "latest" tag every
+        # fetch-boot-artifacts initContainer pulls.
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/kezio-boot-artifacts
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
       - name: Push kezio-boot-artifacts to ghcr
-        # "latest" is the default every fetch-boot-artifacts initContainer pulls.
         uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/boot-artifacts/Dockerfile
           platforms: linux/amd64
           push: true
-          tags: |
-            ghcr.io/tjjh89017/kezio-boot-artifacts:${{ github.ref_name }}
-            ghcr.io/tjjh89017/kezio-boot-artifacts:latest
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
