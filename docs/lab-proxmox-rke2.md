@@ -422,18 +422,24 @@ it: `accessModes` is immutable after binding.
 
 ### 5.3 The boot config and agent registration Services
 
-Both servers run inside the controller-manager process. Their
-kustomizations compose `config/default` (they patch the manager
-Deployment), so apply them instead of, not beside, it:
+Both servers run inside the controller-manager process. This overlay
+turns on both, and composes `config/default`, so apply it instead of,
+not beside, `config/default`:
 
 ```sh
-bin/kustomize build config/bootserver  | kubectl apply -f -
-bin/kustomize build config/agentserver | kubectl apply -f -
+bin/kustomize build config/boot-agent-server | kubectl apply -f -
 ```
 
-Do this before section 5.4. Both builds re-apply the manager
-Deployment, so applying them again later drops the environment that
-section sets, and you must repeat it.
+Do not apply `config/bootserver` and `config/agentserver` one after the
+other. Each one renders a complete manager Deployment carrying only its
+own patch, so the second apply removes the first one's containerPort and
+the `fetch-boot-artifacts` initContainer - and every command still
+reports success. You find out much later, when the target machine's GRUB
+cannot reach the boot server.
+
+Do this before section 5.4. The build re-applies the manager Deployment,
+so applying it again later drops the environment that section sets, and
+you must repeat it.
 
 ### 5.4 Wire the controller-manager
 

@@ -1,0 +1,35 @@
+# Runs the boot config server and the agent registration server together,
+# the ordinary shape for a cluster that deploys machines: a machine cannot
+# register through the agent server if it never net boots through the boot
+# server. Apply this instead of, not beside, config/bootserver and
+# config/agentserver:
+#
+#   kustomize build config/boot-agent-server | kubectl apply -f -
+#
+# Applying config/bootserver and config/agentserver one after the other
+# does NOT give the same result, and fails silently. Each of those two
+# lists ../default as a resource, so each renders a complete
+# controller-manager Deployment carrying only its own patch. The second
+# `kubectl apply` therefore removes the first one's containerPort and, for
+# config/bootserver, the fetch-boot-artifacts initContainer - while every
+# command still reports success. The failure surfaces much later, as a
+# refused connection to a Service whose pods no longer expose that port.
+#
+# This overlay takes config/bootserver as its base, so ../default is pulled
+# in exactly once, and adds the agent server's Service and containerPort on
+# top. The two agent-server files here are copies of config/agentserver's,
+# because kustomize's LoadRestrictionsRootOnly forbids naming a plain YAML
+# file outside this kustomization's own root - see issue #30, which tracks
+# replacing every such copy in this tree with a shared component.
+#
+# Read config/bootserver/README.md and config/agentserver/README.md for the
+# BOOT_* and AGENT_* variables this still leaves for the operator to set.
+resources:
+  - ../bootserver
+  - agent-server-service.yaml
+
+patches:
+  - path: manager-agent-port-patch.yaml
+    target:
+      kind: Deployment
+      name: kezio-controller-manager

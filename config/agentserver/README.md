@@ -21,6 +21,13 @@ creates:
 kustomize build config/agentserver | kubectl apply -f -
 ```
 
+Use this only when the agent registration server is the sole server you
+turn on. To run it together with the boot config server - the ordinary
+case - apply `config/boot-agent-server` instead. Applying this
+kustomization and `config/bootserver` one after the other silently keeps
+only the second one's patch: each renders a whole `controller-manager`
+Deployment, so the second apply removes the first one's containerPort.
+
 ## Before applying
 
 1. **Turn the server on.** It is inert until `AGENT_SERVER_ADDR` is set

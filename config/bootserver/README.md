@@ -21,6 +21,15 @@ patch the `controller-manager` Deployment `config/default` creates:
 kustomize build config/bootserver | kubectl apply -f -
 ```
 
+Use this only when the boot config server is the sole server you turn
+on. To run it together with the agent registration server - the
+ordinary case, since a machine cannot register if it never net boots -
+apply `config/boot-agent-server` instead. Applying this kustomization
+and `config/agentserver` one after the other silently keeps only the
+second one's patch: each renders a whole `controller-manager`
+Deployment, so the second apply removes this one's `boot-http`
+containerPort and `fetch-boot-artifacts` initContainer.
+
 ## Before applying
 
 1. **Turn the server on.** It is inert until `BOOT_SERVER_ADDR` is set
