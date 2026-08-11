@@ -40,10 +40,14 @@
 #
 # Then review these, which carry working defaults from the guide:
 #
-#   - Image tags. Every kezio image is pinned to v0.1.7, in the images of
+#   - Image tags. Every kezio image is pinned to 0.1.7, in the images of
 #     the two Deployments, the fetch-boot-artifacts initContainer, and the
 #     INGEST_IMAGE / SEEDER_DEPLOYMENT_IMAGE / BOOTD_DEPLOYMENT_IMAGE /
-#     BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE environment variables.
+#     BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE environment variables. The
+#     image tag has no "v", but the git tag it comes from does. For
+#     releases up to and including v0.1.7, kezio-boot-artifacts is the
+#     one exception: it kept the "v", so change those two references to
+#     v0.1.7 if you stay on such a release.
 #   - Addresses. The provisioning segment is 192.0.2.0/24: bootd at
 #     192.0.2.2, opentracker at 192.0.2.4, the seeder at 192.0.2.5, and a
 #     lease range of 192.0.2.10-192.0.2.100. They appear in the three
@@ -2714,7 +2718,7 @@ spec:
         - /manager
         env:
         - name: INGEST_IMAGE
-          value: ghcr.io/tjjh89017/kezio-ingest:v0.1.7
+          value: ghcr.io/tjjh89017/kezio-ingest:0.1.7
         - name: INGEST_STAGING_PVC
           value: kezio-image-service-staging
         - name: INGEST_SERVICE_ACCOUNT
@@ -2722,7 +2726,7 @@ spec:
         - name: SEEDER_TRACKER_URL
           value: http://192.0.2.4:6969/announce
         - name: SEEDER_DEPLOYMENT_IMAGE
-          value: ghcr.io/tjjh89017/kezio-seeder:v0.1.7
+          value: ghcr.io/tjjh89017/kezio-seeder:0.1.7
         - name: BOOT_SERVER_ADDR
           value: :8090
         - name: BOOT_SERVER_URL
@@ -2734,9 +2738,9 @@ spec:
         - name: DEPLOYER
           value: agent
         - name: BOOTD_DEPLOYMENT_IMAGE
-          value: ghcr.io/tjjh89017/kezio-bootd:v0.1.7
+          value: ghcr.io/tjjh89017/kezio-bootd:0.1.7
         - name: BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE
-          value: ghcr.io/tjjh89017/kezio-boot-artifacts:v0.1.7
+          value: ghcr.io/tjjh89017/kezio-boot-artifacts:0.1.7
         - name: BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL
           value: http://kezio-agent-server.kezio-system.svc.cluster.local:8091
         - name: BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL
@@ -2745,7 +2749,7 @@ spec:
           value: kezio-bootd
         - name: BOOT_ARTIFACTS_DIR
           value: /boot-artifacts
-        image: ghcr.io/tjjh89017/kezio:v0.1.7
+        image: ghcr.io/tjjh89017/kezio:0.1.7
         livenessProbe:
           httpGet:
             path: /healthz
@@ -2799,7 +2803,7 @@ spec:
         - /boot-artifacts/grubx64.efi
         - /boot-artifacts/manifest.json
         - /dest
-        image: ghcr.io/tjjh89017/kezio-boot-artifacts:v0.1.7
+        image: ghcr.io/tjjh89017/kezio-boot-artifacts:0.1.7
         imagePullPolicy: IfNotPresent
         name: fetch-boot-artifacts
         securityContext:

@@ -282,7 +282,7 @@ The release workflow publishes every image to `ghcr.io/tjjh89017`. Pin
 one released version and use it everywhere:
 
 ```sh
-export KEZIO_VERSION=v0.1.7     # or "main" for the branch build
+export KEZIO_VERSION=0.1.7      # or "main" for the branch build
 export MANAGER_IMG=ghcr.io/tjjh89017/kezio:${KEZIO_VERSION}
 export IMAGE_SERVICE_IMG=ghcr.io/tjjh89017/kezio-image-service:${KEZIO_VERSION}
 export INGEST_IMG=ghcr.io/tjjh89017/kezio-ingest:${KEZIO_VERSION}
@@ -290,6 +290,15 @@ export SEEDER_IMG=ghcr.io/tjjh89017/kezio-seeder:${KEZIO_VERSION}
 export BOOTD_IMG=ghcr.io/tjjh89017/kezio-bootd:${KEZIO_VERSION}
 export BOOT_ARTIFACTS_IMG=ghcr.io/tjjh89017/kezio-boot-artifacts:${KEZIO_VERSION}
 ```
+
+The image tag has no `v`, but the git tag it comes from does: git tag
+`v0.1.7` publishes image tag `0.1.7`. A `v` in `KEZIO_VERSION` makes
+every pull fail with `not found`.
+
+Releases up to and including `v0.1.7` are an exception for one image:
+`kezio-boot-artifacts` kept the `v` in those releases, so for them use
+`ghcr.io/tjjh89017/kezio-boot-artifacts:v${KEZIO_VERSION}` instead. All
+later releases use the same tag as the other images.
 
 To run your own build instead, clone the repository on the node and use
 the `docker-build-*` / `docker-push-*` targets (`make help` lists them).

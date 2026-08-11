@@ -34,12 +34,14 @@ kustomize build config/bootserver | kubectl apply -f -
      an emptyDir there, populated at pod startup by a
      `fetch-boot-artifacts` initContainer that `cp`s the files straight
      out of the `kezio-boot-artifacts` OCI image (see
-     `.github/workflows/build-live-image.yml`, which builds and pushes
-     it, and `boot-artifacts-init-patch.yaml`) - no manual volume setup
-     needed. By default it pulls the image's `latest` tag; pin a
-     specific published version with `kustomize edit set image
-     kezio-boot-artifacts=ghcr.io/tjjh89017/kezio-boot-artifacts:v0.1.0`
-     (or a further kustomize patch) instead.
+     `.github/workflows/release.yaml`'s `boot-artifacts` job, which
+     builds and pushes it, and `boot-artifacts-init-patch.yaml`) - no
+     manual volume setup needed. By default it pulls the image's
+     `latest` tag; pin a specific published version with `kustomize edit
+     set image
+     kezio-boot-artifacts=ghcr.io/tjjh89017/kezio-boot-artifacts:0.1.7`,
+     or a further kustomize patch, instead. The image tag has no "v",
+     although the git tag it comes from does.
    - `BOOT_SERVER_URL` - this server's own externally reachable base
      URL, for example `http://10.0.0.5:8090`. GRUB and the live
      environment's initrd both fetch the kernel/initrd/squashfs from it
