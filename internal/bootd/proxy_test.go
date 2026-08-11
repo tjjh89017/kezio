@@ -442,3 +442,46 @@ func TestProxyServer_StartReturnsErrorOnBindFailure(t *testing.T) {
 		t.Error("Ready() = true after a failed bind, want false")
 	}
 }
+
+// TestHTTPBootURL pins the URL an HTTP Boot client is handed: this pod's
+// own proxy address, the /boot/http/<name> route, and port 80 left
+// unspelled - some firmware compares the URL's host against the DHCP
+// server that offered it.
+func TestHTTPBootURL(t *testing.T) {
+	tests := []struct {
+		name         string
+		proxyAddr    string
+		fallbackHost string
+		want         string
+	}{
+		{"default port", "192.0.2.2:80", "192.0.2.2", "http://192.0.2.2/boot/http/shimx64.efi"},
+		{"non-default port", "192.0.2.2:8080", "192.0.2.2", "http://192.0.2.2:8080/boot/http/shimx64.efi"},
+		{"wildcard bind falls back to the server address", ":80", "192.0.2.2", "http://192.0.2.2/boot/http/shimx64.efi"},
+		{"0.0.0.0 bind falls back too", "0.0.0.0:8080", "192.0.2.2", "http://192.0.2.2:8080/boot/http/shimx64.efi"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := HTTPBootURL(tc.proxyAddr, tc.fallbackHost, DefaultBootFilename)
+			if err != nil {
+				t.Fatalf("HTTPBootURL(%q, %q): %v", tc.proxyAddr, tc.fallbackHost, err)
+			}
+			if got != tc.want {
+				t.Errorf("HTTPBootURL(%q, %q) = %q, want %q", tc.proxyAddr, tc.fallbackHost, got, tc.want)
+			}
+			// Whatever this builds must survive the renderer's own
+			// check, or a valid deployment fails at startup.
+			cfg := Config{
+				ServerIP:        net.ParseIP("192.0.2.2"),
+				ProvisioningNet: &net.IPNet{IP: net.ParseIP("192.0.2.0"), Mask: net.CIDRMask(24, 32)},
+				HTTPBootURL:     got,
+			}
+			if _, err := RenderDnsmasqConf(cfg, "/run/bootd"); err != nil {
+				t.Errorf("RenderDnsmasqConf rejected the derived URL %q: %v", got, err)
+			}
+		})
+	}
+
+	if _, err := HTTPBootURL("192.0.2.2", "192.0.2.2", DefaultBootFilename); err == nil {
+		t.Error("HTTPBootURL accepted a proxy address with no port")
+	}
+}

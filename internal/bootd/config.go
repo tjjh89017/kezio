@@ -71,6 +71,19 @@ type Config struct {
 	// server (see tftp.go) serves shimx64.efi and grubx64.efi from.
 	TFTPDir string
 
+	// HTTPBootURL is the absolute URL handed to a UEFI HTTP Boot client
+	// (DHCP client architecture 16) in place of the TFTP filename plus
+	// next-server a PXE client receives - typically bootd's own reverse
+	// proxy in front of internal/bootserver's GET /boot/http/<name>
+	// route, e.g. "http://192.0.2.2/boot/http/shimx64.efi". Firmware
+	// that fails a PXE exchange walks its BootOrder forward into HTTP
+	// Boot and asks again as an HTTP Boot client; it discards an answer
+	// naming a bare filename and DISCOVERs again indefinitely, never
+	// walking the BootOrder back, so leaving this empty turns one lost
+	// PXE exchange into a machine that waits for a power cycle. Empty
+	// leaves HTTP Boot clients unanswered.
+	HTTPBootURL string
+
 	// AnswerAll disables the MAC gate (dhcp-ignore is omitted, tag:kezio
 	// guard dropped), answering every PXE client regardless of
 	// enrollment. Off by default; trades the fail-secure default for a

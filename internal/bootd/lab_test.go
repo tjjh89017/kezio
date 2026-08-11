@@ -49,6 +49,9 @@ import (
 //   - BOOTD_LAB_LEASE_RANGE_START, BOOTD_LAB_LEASE_RANGE_END: optional
 //     explicit lease range bounds; both unset auto-derives from
 //     BOOTD_LAB_CIDR.
+//   - BOOTD_LAB_HTTP_BOOT_URL: optional Config.HTTPBootURL - the URL a
+//     UEFI HTTP Boot client is answered with. Unset leaves HTTP Boot
+//     unanswered, as a deployment with no boot server to proxy does.
 //   - BOOTD_LAB_RUN_DIR: writable run directory.
 //   - BOOTD_DNSMASQ_PATH: dnsmasq binary path.
 //   - BOOTD_LAB_CTRL: path of a FIFO carrying one command per line:
@@ -88,6 +91,7 @@ func TestDnsmasqLab(t *testing.T) {
 		ServerIP:        serverIP,
 		ProvisioningNet: cidr,
 		TFTPDir:         t.TempDir(),
+		HTTPBootURL:     os.Getenv("BOOTD_LAB_HTTP_BOOT_URL"),
 	}
 	cfg.LeaseMode = os.Getenv("BOOTD_LAB_LEASE_MODE") == "1"
 	if s := os.Getenv("BOOTD_LAB_LEASE_RANGE_START"); s != "" {

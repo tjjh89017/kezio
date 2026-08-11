@@ -42,11 +42,16 @@ limitations under the License.
 // including path traversal - dnsmasq's TFTP would serve anything under its
 // tftp-root.
 //
-// UEFI HTTP Boot (DHCP option 60 "HTTPClient") is not supported: dnsmasq's
-// proxyDHCP engine only engages for PXEClient requests (lab-verified), so
-// sites needing HTTP Boot must configure their production DHCP server to
-// hand out the boot URL; internal/bootserver's GET /boot/http/<name> still
-// serves the artifacts.
+// UEFI HTTP Boot (DHCP option 60 "HTTPClient") is answered alongside PXE
+// in both modes, keyed on client architecture 16, with the URL of
+// internal/bootserver's GET /boot/http/<name> route as bootd's own proxy
+// exposes it (Config.HTTPBootURL). It is the path firmware takes after a
+// PXE exchange fails, and firmware never walks its BootOrder back, so an
+// unanswered HTTP Boot client DISCOVERs until it is power-cycled.
+// proxyDHCP needs dhcp-pxe-vendor widened past its PXEClient-only default
+// to engage for such a client at all - see render.go, and
+// hack/bootd-packet-lab.sh's scenarios 3 and 4 for the packet-level
+// verification of both modes.
 //
 // Capabilities: dnsmasq requires CAP_NET_ADMIN, CAP_NET_RAW, and
 // CAP_NET_BIND_SERVICE (checked at its own startup). The pod runs bootd as

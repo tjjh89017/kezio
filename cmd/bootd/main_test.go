@@ -19,7 +19,7 @@ package main
 import "testing"
 
 // clearBootdEnv unsets every environment variable bootdConfigFromEnv
-// reads (plus the four explicitly-rejected legacy names), so each test
+// reads (plus the three explicitly-rejected legacy names), so each test
 // starts from a clean slate regardless of what the process environment
 // or an earlier test in this file happens to carry.
 func clearBootdEnv(t *testing.T) {
@@ -127,5 +127,82 @@ func TestBootdConfigFromEnv_ProxyBothUpstreams(t *testing.T) {
 	}
 	if cfg.Proxy.BootUpstreamURL != "http://boot.example:8090" {
 		t.Errorf("Proxy.BootUpstreamURL = %q", cfg.Proxy.BootUpstreamURL)
+	}
+}
+
+// TestBootdConfigFromEnv_HTTPBootURLDerivedFromProxy proves a deployment
+// that already proxies the boot server gets the UEFI HTTP Boot answer
+// without setting anything new: the URL points back at this bootd's own
+// proxy address, which is the only address a machine on the provisioning
+// segment is guaranteed to reach.
+func TestBootdConfigFromEnv_HTTPBootURLDerivedFromProxy(t *testing.T) {
+	clearBootdEnv(t)
+	requiredBootdEnv(t)
+	t.Setenv("BOOTD_BOOT_UPSTREAM_URL", "http://kezio-boot-server.kezio-system.svc:8090")
+
+	cfg, err := bootdConfigFromEnv()
+	if err != nil {
+		t.Fatalf("bootdConfigFromEnv: %v", err)
+	}
+	const want = "http://192.0.2.2/boot/http/shimx64.efi"
+	if cfg.Server.HTTPBootURL != want {
+		t.Errorf("Server.HTTPBootURL = %q, want %q", cfg.Server.HTTPBootURL, want)
+	}
+}
+
+// TestBootdConfigFromEnv_HTTPBootURLNeedsABootUpstream: with no boot
+// server behind it, /boot/http/<name> is not proxied at all, so
+// advertising the URL would send firmware to a 404 - worse than the PXE
+// answer it already has.
+func TestBootdConfigFromEnv_HTTPBootURLNeedsABootUpstream(t *testing.T) {
+	clearBootdEnv(t)
+	requiredBootdEnv(t)
+	t.Setenv("BOOTD_AGENT_UPSTREAM_URL", "http://kezio-agent-server.kezio-system.svc:8091")
+
+	cfg, err := bootdConfigFromEnv()
+	if err != nil {
+		t.Fatalf("bootdConfigFromEnv: %v", err)
+	}
+	if cfg.Server.HTTPBootURL != "" {
+		t.Errorf("Server.HTTPBootURL = %q with no boot upstream, want empty", cfg.Server.HTTPBootURL)
+	}
+}
+
+// TestBootdConfigFromEnv_HTTPBootURLExplicitOverride covers the site
+// whose EFI binaries are fronted somewhere other than this pod.
+func TestBootdConfigFromEnv_HTTPBootURLExplicitOverride(t *testing.T) {
+	clearBootdEnv(t)
+	requiredBootdEnv(t)
+	t.Setenv("BOOTD_BOOT_UPSTREAM_URL", "http://kezio-boot-server.kezio-system.svc:8090")
+	t.Setenv("BOOTD_HTTP_BOOT_URL", "http://192.0.2.9:8090/boot/http/shimx64.efi")
+
+	cfg, err := bootdConfigFromEnv()
+	if err != nil {
+		t.Fatalf("bootdConfigFromEnv: %v", err)
+	}
+	if cfg.Server.HTTPBootURL != "http://192.0.2.9:8090/boot/http/shimx64.efi" {
+		t.Errorf("Server.HTTPBootURL = %q, want the explicit override", cfg.Server.HTTPBootURL)
+	}
+}
+
+// TestBootdConfigFromEnv_HTTPBootURLFollowsBootFilename: the derived URL
+// must name the same file the PXE answer does, or the two paths boot
+// different binaries.
+func TestBootdConfigFromEnv_HTTPBootURLFollowsBootFilename(t *testing.T) {
+	clearBootdEnv(t)
+	requiredBootdEnv(t)
+	t.Setenv("BOOTD_BOOT_UPSTREAM_URL", "http://kezio-boot-server.kezio-system.svc:8090")
+	t.Setenv("BOOTD_BOOT_FILENAME", "other.efi")
+
+	cfg, err := bootdConfigFromEnv()
+	if err != nil {
+		t.Fatalf("bootdConfigFromEnv: %v", err)
+	}
+	if cfg.Server.BootFilename != "other.efi" {
+		t.Errorf("Server.BootFilename = %q, want %q", cfg.Server.BootFilename, "other.efi")
+	}
+	const want = "http://192.0.2.2/boot/http/other.efi"
+	if cfg.Server.HTTPBootURL != want {
+		t.Errorf("Server.HTTPBootURL = %q, want %q", cfg.Server.HTTPBootURL, want)
 	}
 }

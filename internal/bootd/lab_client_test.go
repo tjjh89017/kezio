@@ -24,6 +24,7 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -71,6 +72,15 @@ import (
 //     real, non-zero lease address rather than proxyDHCP's 0.0.0.0.
 //     Omitted (the default) asserts yiaddr is 0.0.0.0, proxyDHCP's
 //     shape.
+//   - BOOTD_LAB_CLIENT_HTTP_BOOT=1: send the UEFI HTTP Boot shape
+//     (vendor class "HTTPClient:Arch:00016:UNDI:003001", client
+//     architecture 16) instead of the PXE one - what firmware sends
+//     after it walks past PXE in its BootOrder.
+//   - BOOTD_LAB_CLIENT_EXPECT_VENDOR_CLASS: optional, asserts the
+//     reply's option 60 starts with this value. Set to "HTTPClient" for
+//     an HTTP Boot assertion: EDK2 ignores the boot URI in an offer
+//     whose option 60 says anything else, so an offer that carries the
+//     URL but not this is still a boot loop.
 func TestDnsmasqLabClient(t *testing.T) {
 	if os.Getenv("BOOTD_LAB_CLIENT") != "1" {
 		t.Skip("BOOTD_LAB_CLIENT not set; this is the containerized packet lab's client entry point, not a CI test")
@@ -104,7 +114,7 @@ func TestDnsmasqLabClient(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 
 	xid := rand.Uint32()
-	discover := buildDHCPDiscover(xid, mac)
+	discover := buildDHCPDiscover(xid, mac, os.Getenv("BOOTD_LAB_CLIENT_HTTP_BOOT") == "1")
 	if _, err := conn.WriteToUDP(discover, &net.UDPAddr{IP: net.IPv4bcast, Port: 67}); err != nil {
 		t.Fatalf("sending DHCPDISCOVER: %v", err)
 	}
@@ -147,12 +157,18 @@ func TestDnsmasqLabClient(t *testing.T) {
 			t.Fatalf("boot filename mismatch: want %q, got %q", wantFile, offer.file)
 		}
 	}
+	if wantVendor := os.Getenv("BOOTD_LAB_CLIENT_EXPECT_VENDOR_CLASS"); wantVendor != "" {
+		if !strings.HasPrefix(offer.vendorClass, wantVendor) {
+			t.Fatalf("vendor class (option 60) mismatch: want prefix %q, got %q", wantVendor, offer.vendorClass)
+		}
+	}
 	wantLease := os.Getenv("BOOTD_LAB_CLIENT_EXPECT_LEASE") == "1"
 	gotLease := !offer.yiaddr.Equal(net.IPv4zero)
 	if wantLease != gotLease {
 		t.Fatalf("lease-address expectation mismatch: want non-zero yiaddr=%v, got yiaddr %s", wantLease, offer.yiaddr)
 	}
-	t.Logf("received DHCPOFFER: yiaddr=%s siaddr=%s file=%q", offer.yiaddr, offer.siaddr, offer.file)
+	t.Logf("received DHCPOFFER: yiaddr=%s siaddr=%s file=%q vendorClass=%q",
+		offer.yiaddr, offer.siaddr, offer.file, offer.vendorClass)
 }
 
 // dialBroadcastDHCP opens a UDP socket bound to port 68 (the DHCP
@@ -194,11 +210,18 @@ const (
 // dhcpOffer is the subset of a received DHCP reply this lab client
 // checks.
 type dhcpOffer struct {
-	msgType byte
-	yiaddr  net.IP
-	siaddr  net.IP
-	file    string
+	msgType     byte
+	yiaddr      net.IP
+	siaddr      net.IP
+	file        string
+	vendorClass string
 }
+
+// httpBootVendorClassID is the option 60 value an OVMF machine that
+// walked past PXE into UEFI HTTP Boot sends, copied verbatim from a lab
+// capture: architecture 16 (x64 UEFI HTTP) with the UNDI version its
+// firmware reports.
+const httpBootVendorClassID = "HTTPClient:Arch:00016:UNDI:003001"
 
 // buildDHCPDiscover renders a minimal BOOTP/DHCP DISCOVER packet
 // carrying the PXE options a UEFI x86-64 NIC ROM sends: vendor class
@@ -208,7 +231,12 @@ type dhcpOffer struct {
 // documents both. Padded to BOOTP's traditional 300-byte minimum, the
 // same size real PXE firmware sends, since some DHCP servers silently
 // ignore anything shorter.
-func buildDHCPDiscover(xid uint32, mac net.HardwareAddr) []byte {
+//
+// httpBoot sends the UEFI HTTP Boot shape instead - vendor class
+// httpBootVendorClassID, architecture 16, and option 60 added to the
+// parameter request list, since firmware needs the offer's own vendor
+// class back to recognize it as an HTTP Boot answer.
+func buildDHCPDiscover(xid uint32, mac net.HardwareAddr, httpBoot bool) []byte {
 	buf := make([]byte, 236)
 	buf[0] = 1 // op: BOOTREQUEST
 	buf[1] = 1 // htype: Ethernet
@@ -230,10 +258,16 @@ func buildDHCPDiscover(xid uint32, mac net.HardwareAddr) []byte {
 		b.Write(data)
 	}
 	writeOpt(53, []byte{dhcpMsgTypeDiscover})
-	writeOpt(55, []byte{1, 3, 6, 15, 66, 67}) // parameter request list
-	writeOpt(60, []byte("PXEClient"))
-	writeOpt(93, []byte{0x00, 0x07}) // client system architecture: EFI x86-64
-	b.WriteByte(255)                 // end
+	if httpBoot {
+		writeOpt(55, []byte{1, 3, 6, 15, 60, 66, 67}) // parameter request list
+		writeOpt(60, []byte(httpBootVendorClassID))
+		writeOpt(93, []byte{0x00, 0x10}) // client system architecture: x64 UEFI HTTP
+	} else {
+		writeOpt(55, []byte{1, 3, 6, 15, 66, 67}) // parameter request list
+		writeOpt(60, []byte("PXEClient"))
+		writeOpt(93, []byte{0x00, 0x07}) // client system architecture: EFI x86-64
+	}
+	b.WriteByte(255) // end
 
 	pkt := b.Bytes()
 	if len(pkt) < 300 {
@@ -290,6 +324,7 @@ func parseDHCPReply(pkt []byte) (offer *dhcpOffer, xid uint32, ok bool) {
 	file := nullTerminated(pkt[108:236])
 
 	var msgType byte
+	var vendorClass string
 	opts := pkt[240:]
 	for len(opts) > 0 {
 		code := opts[0]
@@ -311,14 +346,18 @@ func parseDHCPReply(pkt []byte) (offer *dhcpOffer, xid uint32, ok bool) {
 		if code == 53 && l == 1 {
 			msgType = data[0]
 		}
+		if code == 60 {
+			vendorClass = nullTerminated(data)
+		}
 		opts = opts[2+l:]
 	}
 
 	return &dhcpOffer{
-		msgType: msgType,
-		yiaddr:  yiaddr,
-		siaddr:  siaddr,
-		file:    file,
+		msgType:     msgType,
+		yiaddr:      yiaddr,
+		siaddr:      siaddr,
+		file:        file,
+		vendorClass: vendorClass,
 	}, xid, true
 }
 

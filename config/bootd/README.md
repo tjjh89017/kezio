@@ -179,16 +179,49 @@ therefore: create its Subnet object (with its own `cidr`,
 `kezio-bootd` ServiceAccount - see "What you still provide, per Subnet"
 above.
 
-## UEFI HTTP Boot is not supported
+## UEFI HTTP Boot: the fallback firmware takes when PXE fails
 
-dnsmasq's proxyDHCP engine only answers `PXEClient` requests; a
-firmware asking for UEFI HTTP Boot (option 60 `HTTPClient`) receives no
-proxy answer from bootd at all. A site that needs HTTP Boot must
-configure its production DHCP server to hand out the boot URL;
-`internal/bootserver`'s `GET /boot/http/<name>` route still serves the
-signed `shimx64.efi`/`grubx64.efi` artifacts themselves. The former
-`BOOTD_HTTP_BOOT_URL` variable is rejected at startup rather than
-silently ignored.
+A machine whose PXE exchange does not complete does not retry it. UEFI
+firmware walks its BootOrder forward, and the next entries are usually
+HTTPv4/HTTPv6, so the machine asks again as a **UEFI HTTP Boot** client
+(vendor class `HTTPClient:Arch:00016:UNDI:003001`, DHCP client
+architecture 16). Such a client cannot use a TFTP next-server and a bare
+file name - it needs a URL - and firmware never walks the BootOrder
+back, so an unanswerable fallback is not a slow boot but a machine that
+DHCPDISCOVERs forever until someone power-cycles it.
+
+bootd therefore answers both client types from the one dnsmasq, keyed on
+client architecture: architecture 7 gets the PXE filename plus
+next-server exactly as before, architecture 16 gets
+`http://<bootd address>/boot/http/shimx64.efi` - bootd's own reverse
+proxy in front of `internal/bootserver`'s `GET /boot/http/<name>` route,
+which serves the same signed shim the TFTP path does. Both DHCP modes
+are covered, lab-verified with real packets by
+`hack/bootd-packet-lab.sh` (scenarios 3 and 4):
+
+- **Lease mode** adds a `dhcp-boot` for the URL and forces option 60
+  `HTTPClient` on that answer. Firmware ignores a boot URL in an offer
+  whose vendor class says anything else, so the forced option 60 is what
+  makes the answer usable rather than merely present.
+- **Proxy mode** also works, which the previous note here said it could
+  not: dnsmasq's proxyDHCP engine ignores a client whose vendor class is
+  not in `dhcp-pxe-vendor`, and that list defaults to `PXEClient` alone.
+  The rendered config widens it to `PXEClient,HTTPClient`; dnsmasq then
+  echoes the matched class back as the offer's own option 60, so
+  ordinary PXE clients still see `PXEClient` and are unaffected.
+
+Only architecture 16 (x64 UEFI HTTP) is answered. Architecture 15 is its
+32-bit counterpart, which cannot load the x86-64 shim bootd hands out;
+answering it would trade a boot loop for a load failure.
+
+This needs no configuration: bootd derives the URL from its own proxy
+address whenever `BOOTD_BOOT_UPSTREAM_URL` is set (see
+"Reverse-proxying the agent and boot config servers" above), since that
+is what makes `/boot/http/<name>` reachable at that address in the first
+place. With no boot upstream, HTTP Boot stays unanswered - there would
+be nothing behind the URL. `BOOTD_HTTP_BOOT_URL` overrides the derived
+value, for a site that fronts the EFI binaries somewhere other than this
+pod.
 
 ## Replies stay on the boot network, even with a second pod interface
 

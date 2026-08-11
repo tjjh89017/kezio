@@ -34,6 +34,16 @@
 #     address; an unenrolled MAC gets nothing at all, same as scenario
 #     1 - the MAC gate does not relax in lease mode.
 #
+# It also covers the client firmware sends after it walks past PXE in
+# its BootOrder, which is the one that used to loop forever:
+#
+#   - Scenario 3: a UEFI HTTP Boot client in lease mode. Its DHCPOFFER
+#     must carry the boot URL in the file field and "HTTPClient" as its
+#     option 60 - firmware ignores the URL without that vendor class.
+#   - Scenario 4: the same client against proxyDHCP, which answers it
+#     only because the rendered config widens dhcp-pxe-vendor past
+#     dnsmasq's PXEClient-only default.
+#
 # Usage (from the repository root, as root, with dnsmasq and iproute2
 # installed):
 #
@@ -91,12 +101,17 @@ go test -c -o "$TESTBIN" "$REPO_ROOT/internal/bootd"
 # reusing one, so a stuck dnsmasq or leftover route from a previous
 # scenario can never leak into the next assertion.
 run_scenario() {
-	local name=$1 enrolled_mac=$2 denied_mac=$3 offer_timeout=$4 client_expect_extra=$5
-	shift 5
+	local name=$1 enrolled_mac=$2 denied_mac=$3 offer_timeout=$4 client_expect_extra=$5 client_shape=$6
+	shift 6
 	local extra_env=("$@")
-	local client_extra=()
+	local client_extra=() shape_env=()
 	# shellcheck disable=SC2206 # word-splitting is intentional: each element is one KEY=VAL assignment with no embedded spaces
 	[[ -n $client_expect_extra ]] && client_extra=($client_expect_extra)
+	# client_shape describes what the client sends rather than what it
+	# expects back, so it applies to the denied run too: the MAC gate
+	# must drop an HTTP Boot client exactly as it drops a PXE one.
+	# shellcheck disable=SC2206 # same as above
+	[[ -n $client_shape ]] && shape_env=($client_shape)
 
 	NS_SRV="kezio-lab-srv-$$" NS_CLI="kezio-lab-cli-$$"
 	local veth_srv="veth-srv" veth_cli="veth-cli"
@@ -175,6 +190,7 @@ run_scenario() {
 		BOOTD_LAB_CLIENT_EXPECT=offer \
 		BOOTD_LAB_CLIENT_EXPECT_SIADDR=192.0.2.2 \
 		BOOTD_LAB_CLIENT_TIMEOUT="$offer_timeout" \
+		"${shape_env[@]}" \
 		"${client_extra[@]}" \
 		"$TESTBIN" -test.run TestDnsmasqLabClient -test.v; then
 		echo "[$name] enrolled-MAC assertion FAILED" >&2
@@ -190,6 +206,7 @@ run_scenario() {
 		BOOTD_LAB_CLIENT_IFACE="$veth_cli" \
 		BOOTD_LAB_CLIENT_MAC="$denied_mac" \
 		BOOTD_LAB_CLIENT_EXPECT=none \
+		"${shape_env[@]}" \
 		"$TESTBIN" -test.run TestDnsmasqLabClient -test.v; then
 		echo "[$name] denied-MAC assertion FAILED" >&2
 		FAIL=1
@@ -213,18 +230,37 @@ run_scenario() {
 # no boot filename - see TestDnsmasqLabClient's own comment on
 # BOOTD_LAB_CLIENT_EXPECT_FILE - so client_expect_extra stays empty.
 run_scenario "scenario1-proxydhcp" \
-	"52:54:00:00:00:01" "52:54:00:00:00:02" 3s ""
+	"52:54:00:00:00:01" "52:54:00:00:00:02" 3s "" ""
 
 # Scenario 2 is a real lease allocation: dnsmasq ICMP-pings the
 # candidate address before offering it (lab-observed: ~3s), so the
 # offer-side timeout needs headroom the proxyDHCP scenario does not.
 run_scenario "scenario2-lease-mode" \
 	"52:54:00:00:00:03" "52:54:00:00:00:04" 8s \
-	"BOOTD_LAB_CLIENT_EXPECT_FILE=shimx64.efi BOOTD_LAB_CLIENT_EXPECT_LEASE=1" \
+	"BOOTD_LAB_CLIENT_EXPECT_FILE=shimx64.efi BOOTD_LAB_CLIENT_EXPECT_LEASE=1" "" \
 	BOOTD_LAB_LEASE_MODE=1
+
+# Scenarios 3 and 4 assert on the whole HTTP Boot answer, not just the
+# URL: an offer whose option 60 is not "HTTPClient" is discarded by
+# firmware even when the URL in it is correct, which is the loop this
+# support exists to end.
+HTTP_BOOT_URL=http://192.0.2.2/boot/http/shimx64.efi
+run_scenario "scenario3-http-boot-lease-mode" \
+	"52:54:00:00:00:05" "52:54:00:00:00:06" 8s \
+	"BOOTD_LAB_CLIENT_EXPECT_FILE=$HTTP_BOOT_URL BOOTD_LAB_CLIENT_EXPECT_LEASE=1 BOOTD_LAB_CLIENT_EXPECT_VENDOR_CLASS=HTTPClient" \
+	"BOOTD_LAB_CLIENT_HTTP_BOOT=1" \
+	BOOTD_LAB_LEASE_MODE=1 BOOTD_LAB_HTTP_BOOT_URL="$HTTP_BOOT_URL"
+
+# In proxy mode the answer is a proxyDHCP offer (yiaddr 0.0.0.0), which
+# firmware combines with the site DHCP server's own address offer.
+run_scenario "scenario4-http-boot-proxydhcp" \
+	"52:54:00:00:00:07" "52:54:00:00:00:08" 3s \
+	"BOOTD_LAB_CLIENT_EXPECT_FILE=$HTTP_BOOT_URL BOOTD_LAB_CLIENT_EXPECT_VENDOR_CLASS=HTTPClient" \
+	"BOOTD_LAB_CLIENT_HTTP_BOOT=1" \
+	BOOTD_LAB_HTTP_BOOT_URL="$HTTP_BOOT_URL"
 
 if [[ $FAIL -ne 0 ]]; then
 	echo "== bootd packet lab: FAIL ==" >&2
 	exit 1
 fi
-echo "== bootd packet lab: PASS (scenario 1 proxyDHCP, scenario 2 lease mode) =="
+echo "== bootd packet lab: PASS (scenario 1 proxyDHCP, scenario 2 lease mode, scenarios 3-4 UEFI HTTP Boot) =="

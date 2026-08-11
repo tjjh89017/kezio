@@ -192,6 +192,121 @@ func TestRenderDnsmasqConf_LeaseModeMACGateUnchanged(t *testing.T) {
 	}
 }
 
+// TestRenderDnsmasqConf_LeaseModeHTTPBoot: an HTTP Boot client (client
+// architecture 16) must be answered with the URL, carrying option 60
+// HTTPClient so firmware recognizes the offer as an HTTP Boot one, while
+// the PXE client's own filename/next-server answer stays exactly as it
+// was.
+func TestRenderDnsmasqConf_LeaseModeHTTPBoot(t *testing.T) {
+	cfg := testConfig()
+	cfg.LeaseMode = true
+	cfg.HTTPBootURL = "http://192.0.2.2/boot/http/shimx64.efi"
+	conf, err := RenderDnsmasqConf(cfg, "/run/bootd")
+	if err != nil {
+		t.Fatalf("RenderDnsmasqConf: %v", err)
+	}
+
+	for _, want := range []string{
+		"dhcp-match=set:httpclient,option:client-arch,16\n",
+		"dhcp-option-force=tag:httpclient,60,HTTPClient\n",
+		"dhcp-boot=tag:httpclient,http://192.0.2.2/boot/http/shimx64.efi\n",
+		"dhcp-match=set:efi-x86_64,option:client-arch,7\n",
+		"dhcp-boot=tag:efi-x86_64,shimx64.efi,,192.0.2.2\n",
+		"dhcp-boot=shimx64.efi,,192.0.2.2\n",
+		"dhcp-ignore=tag:!kezio\n",
+	} {
+		if !strings.Contains(conf, want) {
+			t.Errorf("lease-mode HTTP Boot config missing %q:\n%s", want, conf)
+		}
+	}
+	// Architecture 15 is 32-bit x86 UEFI HTTP, which cannot load the
+	// x86-64 shim this hands out.
+	if strings.Contains(conf, "option:client-arch,15") {
+		t.Errorf("config answers client architecture 15 with an x86-64 boot file:\n%s", conf)
+	}
+}
+
+// TestRenderDnsmasqConf_ProxyModeHTTPBoot: proxy mode needs
+// dhcp-pxe-vendor to make dnsmasq's proxyDHCP engine engage for an
+// HTTPClient request at all (it only answers PXEClient by default), and
+// must keep PXEClient in that same list so ordinary PXE clients are still
+// answered.
+func TestRenderDnsmasqConf_ProxyModeHTTPBoot(t *testing.T) {
+	cfg := testConfig()
+	cfg.HTTPBootURL = "http://192.0.2.2/boot/http/shimx64.efi"
+	conf, err := RenderDnsmasqConf(cfg, "/run/bootd")
+	if err != nil {
+		t.Fatalf("RenderDnsmasqConf: %v", err)
+	}
+
+	for _, want := range []string{
+		"dhcp-pxe-vendor=PXEClient,HTTPClient\n",
+		"dhcp-match=set:httpclient,option:client-arch,16\n",
+		"dhcp-boot=tag:httpclient,http://192.0.2.2/boot/http/shimx64.efi\n",
+		`pxe-service=tag:kezio,x86-64_EFI,"kezio network boot",shimx64.efi,192.0.2.2` + "\n",
+		"dhcp-range=192.0.2.0,proxy,255.255.255.0\n",
+		"dhcp-ignore=tag:!kezio\n",
+	} {
+		if !strings.Contains(conf, want) {
+			t.Errorf("proxy-mode HTTP Boot config missing %q:\n%s", want, conf)
+		}
+	}
+	// The proxy path echoes the matched vendor class back as option 60
+	// itself (dnsmasq's pxe_misc), so forcing it would be a second,
+	// conflicting copy.
+	if strings.Contains(conf, "dhcp-option-force=tag:httpclient,60") {
+		t.Errorf("proxy-mode config forces option 60, which the proxy path already sets:\n%s", conf)
+	}
+	// An untagged dhcp-boot in proxy mode would hand every PXE client the
+	// HTTP Boot answer through find_boot's untagged fallback.
+	if strings.Contains(conf, "dhcp-boot=http") {
+		t.Errorf("proxy-mode config renders an untagged dhcp-boot:\n%s", conf)
+	}
+}
+
+// TestRenderDnsmasqConf_NoHTTPBootURL proves an unset HTTPBootURL leaves
+// both modes byte-identical to what they rendered before HTTP Boot
+// existed - a deployment with no boot server to serve the artifacts must
+// not advertise a URL that would 404.
+func TestRenderDnsmasqConf_NoHTTPBootURL(t *testing.T) {
+	for _, leaseMode := range []bool{false, true} {
+		cfg := testConfig()
+		cfg.LeaseMode = leaseMode
+		conf, err := RenderDnsmasqConf(cfg, "/run/bootd")
+		if err != nil {
+			t.Fatalf("RenderDnsmasqConf(LeaseMode=%v): %v", leaseMode, err)
+		}
+		for _, unwanted := range []string{"httpclient", "HTTPClient", "dhcp-pxe-vendor"} {
+			if strings.Contains(conf, unwanted) {
+				t.Errorf("config with no HTTPBootURL (LeaseMode=%v) still carries %q:\n%s", leaseMode, unwanted, conf)
+			}
+		}
+	}
+}
+
+// TestRenderDnsmasqConf_RejectsUnusableHTTPBootURL: dnsmasq copies the
+// value straight into the offer's file field, so anything firmware cannot
+// fetch fails here rather than as the same silent DISCOVER loop HTTP Boot
+// support exists to end.
+func TestRenderDnsmasqConf_RejectsUnusableHTTPBootURL(t *testing.T) {
+	for _, rawURL := range []string{
+		"shimx64.efi",
+		"/boot/http/shimx64.efi",
+		"tftp://192.0.2.2/shimx64.efi",
+		"http:///boot/http/shimx64.efi",
+		"://not a url",
+	} {
+		for _, leaseMode := range []bool{false, true} {
+			cfg := testConfig()
+			cfg.LeaseMode = leaseMode
+			cfg.HTTPBootURL = rawURL
+			if got, err := RenderDnsmasqConf(cfg, "/run/bootd"); err == nil {
+				t.Errorf("RenderDnsmasqConf accepted HTTPBootURL %q (LeaseMode=%v):\n%s", rawURL, leaseMode, got)
+			}
+		}
+	}
+}
+
 func TestRenderDnsmasqConf_LeaseModeRejectsOneSidedRange(t *testing.T) {
 	cfg := testConfig()
 	cfg.LeaseMode = true

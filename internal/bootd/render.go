@@ -20,6 +20,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -31,6 +32,35 @@ import (
 // sets it per allowed MAC (see RenderHostsfile) and the rendered config
 // only hands out PXE boot info to requests carrying it.
 const kezioTag = "kezio"
+
+// httpClientTag is the dnsmasq tag the UEFI HTTP Boot answer pivots on,
+// set by a dhcp-match on client architecture archX64UEFIHTTP.
+//
+// Only architecture 16 is matched. The IANA processor architecture list
+// (RFC 4578 and its updates) gives 15 to x86 UEFI HTTP and 16 to x64 UEFI
+// HTTP; a machine sending 15 is 32-bit firmware, which cannot load the
+// x86-64 shim this hands out, so answering it would trade a boot loop for
+// a load failure.
+const (
+	httpClientTag   = "httpclient"
+	archX64UEFIHTTP = 16
+)
+
+// httpBootVendorClass is the DHCP option 60 value UEFI firmware requires
+// an HTTP Boot answer to carry: EDK2 classifies an offer as an HTTP Boot
+// offer only when option 60 starts with "HTTPClient"
+// (HttpBootParseDhcp4Packet, NetworkPkg/HttpBootDxe), and treats anything
+// else - even one carrying a perfectly good URL - as a plain DHCP offer
+// with no boot method, which is where the DISCOVER loop comes from. It is
+// also the vendor class the client itself sends, as
+// "HTTPClient:Arch:00016:UNDI:003001".
+const httpBootVendorClass = "HTTPClient"
+
+// pxeVendorClass is dnsmasq's own default dhcp-pxe-vendor value. Naming
+// it explicitly matters because setting dhcp-pxe-vendor at all replaces
+// that default: dropping PXEClient from the list would stop dnsmasq's
+// proxyDHCP engine answering ordinary PXE clients.
+const pxeVendorClass = "PXEClient"
 
 // HostsfileName and leasefileName are the file names RenderDnsmasqConf
 // points dnsmasq at inside the run directory. The hostsfile is the one
@@ -74,11 +104,22 @@ func HostsfilePath(runDir string) string {
 // in the BOOTP file field. BC_EFI or numeric 9 instead produce a PXE
 // boot menu UEFI firmware does not process.
 //
+// Config.HTTPBootURL adds a second, parallel answer for UEFI HTTP Boot
+// clients in both modes, keyed on client architecture 16 - see that
+// field's doc comment for the boot loop its absence produces, and the
+// two branches below for what each mode needs to make dnsmasq answer.
+//
 // TFTP stays deliberately absent (no enable-tftp): artifact serving is
 // the in-process server (tftp.go), a fixed allowlist rejecting path
 // traversal - dnsmasq's TFTP would serve anything under tftp-root.
 func RenderDnsmasqConf(cfg Config, runDir string) (string, error) {
 	cfg = cfg.withDefaults()
+
+	if cfg.HTTPBootURL != "" {
+		if err := validateHTTPBootURL(cfg.HTTPBootURL); err != nil {
+			return "", err
+		}
+	}
 
 	serverIP := cfg.ServerIP.To4()
 	if serverIP == nil {
@@ -137,12 +178,46 @@ func RenderDnsmasqConf(cfg Config, runDir string) (string, error) {
 		fmt.Fprintf(&b, "dhcp-boot=%s,,%s\n", cfg.BootFilename, nextServer)
 		fmt.Fprintf(&b, "dhcp-match=set:efi-x86_64,option:client-arch,7\n")
 		fmt.Fprintf(&b, "dhcp-boot=tag:efi-x86_64,%s,,%s\n", cfg.BootFilename, nextServer)
+		if cfg.HTTPBootURL != "" {
+			fmt.Fprintf(&b, "dhcp-match=set:%s,option:client-arch,%d\n", httpClientTag, archX64UEFIHTTP)
+			// Lease mode never takes dnsmasq's PXE paths (no
+			// pxe-service means enable_pxe stays off, so pxe_misc never
+			// runs), and those are the only paths that put option 60 in
+			// a reply on their own. Forced rather than plain
+			// dhcp-option, so firmware that leaves 60 out of its
+			// parameter request list still receives it.
+			fmt.Fprintf(&b, "dhcp-option-force=tag:%s,60,%s\n", httpClientTag, httpBootVendorClass)
+			// A tag-matched dhcp-boot outranks the untagged default
+			// above (dnsmasq's find_boot tries tagged entries first), so
+			// an architecture-16 client gets the URL rather than the
+			// bare TFTP filename every other client gets.
+			fmt.Fprintf(&b, "dhcp-boot=tag:%s,%s\n", httpClientTag, cfg.HTTPBootURL)
+		}
 	} else if cfg.AnswerAll {
 		// No tag guard: every PXE client is answered - see
 		// Config.AnswerAll for when that trade is acceptable.
 		fmt.Fprintf(&b, "pxe-service=x86-64_EFI,\"kezio network boot\",%s,%s\n", cfg.BootFilename, nextServer)
 	} else {
 		fmt.Fprintf(&b, "pxe-service=tag:%s,x86-64_EFI,\"kezio network boot\",%s,%s\n", kezioTag, cfg.BootFilename, nextServer)
+	}
+	if !cfg.LeaseMode && cfg.HTTPBootURL != "" {
+		// dnsmasq's proxyDHCP engine only engages for a client whose
+		// vendor class is one of dhcp-pxe-vendor's (is_pxe_client), and
+		// that list defaults to PXEClient alone - which is why an HTTP
+		// Boot client used to receive nothing here at all. The matched
+		// vendor is what dnsmasq echoes back as the offer's option 60
+		// (pxe_misc), so an HTTPClient client is answered with the
+		// option 60 EDK2 requires, and a PXEClient one still with
+		// PXEClient; proxy mode therefore needs no dhcp-option-force.
+		fmt.Fprintf(&b, "dhcp-pxe-vendor=%s,%s\n", pxeVendorClass, httpBootVendorClass)
+		fmt.Fprintf(&b, "dhcp-match=set:%s,option:client-arch,%d\n", httpClientTag, archX64UEFIHTTP)
+		// pxe-service cannot express a URL, and only answers the one
+		// architecture it names, so an architecture-16 client falls
+		// through to dhcp-boot - which dnsmasq's proxy path does consult
+		// (find_boot), even though the PXE side of dhcp-boot above is
+		// lease mode only. Tagged, so a PXE client finds no dhcp-boot at
+		// all and keeps taking the pxe-service path unchanged.
+		fmt.Fprintf(&b, "dhcp-boot=tag:%s,%s\n", httpClientTag, cfg.HTTPBootURL)
 	}
 	if !cfg.AnswerAll {
 		// dhcp-ignore is the actual MAC gate in both modes, independent
@@ -154,6 +229,28 @@ func RenderDnsmasqConf(cfg Config, runDir string) (string, error) {
 	// options 67/66 - the header fields are what PXE firmware reads.
 	b.WriteString("dhcp-no-override\n")
 	return b.String(), nil
+}
+
+// validateHTTPBootURL rejects a Config.HTTPBootURL firmware could not
+// fetch. It is checked at render time rather than left to the client:
+// dnsmasq copies whatever it is given into the offer's file field, so a
+// relative path or a stray tftp:// URL would surface only as the same
+// silent DISCOVER loop HTTPBootURL exists to end. https is allowed - UEFI
+// HTTPS Boot exists, on firmware carrying the matching certificate -
+// though bootd's own proxy in front of internal/bootserver serves plain
+// http.
+func validateHTTPBootURL(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("HTTPBootURL %q is not a valid URL: %w", rawURL, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("HTTPBootURL %q must be an http or https URL, firmware fetches nothing else", rawURL)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("HTTPBootURL %q names no host", rawURL)
+	}
+	return nil
 }
 
 // leaseRange resolves the dhcp-range bounds LeaseMode renders: explicit

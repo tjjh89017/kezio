@@ -279,6 +279,15 @@ type bootdConfig struct {
 //     download) to this upstream, the same way
 //     BOOTD_AGENT_UPSTREAM_URL does for /agent/.... Unset (the
 //     default): bootd proxies nothing under /boot/.
+//   - BOOTD_HTTP_BOOT_URL: optional, the absolute URL handed to a UEFI
+//     HTTP Boot client instead of the TFTP filename a PXE client gets
+//     (see internal/bootd.Config.HTTPBootURL for the boot loop this
+//     answers). Unset with BOOTD_BOOT_UPSTREAM_URL set, it is derived
+//     from BOOTD_PROXY_ADDR as this bootd's own
+//     "/boot/http/<boot filename>" route - the address a machine on this
+//     segment already reaches. Unset with no boot upstream, HTTP Boot
+//     stays unanswered: there would be nothing behind the URL. Set it
+//     only when the artifacts are fronted somewhere other than this pod.
 //   - BOOTD_PROXY_ADDR: optional, the address the reverse proxy above
 //     listens on when at least one of the two upstream URLs is set.
 //     Defaults to BOOTD_SERVER_IP with port 80 - the provisioning
@@ -286,14 +295,13 @@ type bootdConfig struct {
 //     have (see bootd.DefaultProxyAddr). Ignored, along with both
 //     upstream URLs, when neither upstream URL is set.
 //
-// BOOTD_HTTP_BOOT_URL, BOOTD_DHCP_ADDR, BOOTD_PXE_ADDR, and
-// BOOTD_DHCP_RELAY_SERVER are not supported (dnsmasq's proxyDHCP engine
-// does not answer UEFI HTTP Boot clients, its DHCP ports are the
-// well-known 67/4011 only, and bootd no longer runs a DHCP relay);
-// setting any of them is a startup error rather than a silent no-op.
+// BOOTD_DHCP_ADDR, BOOTD_PXE_ADDR, and BOOTD_DHCP_RELAY_SERVER are not
+// supported (dnsmasq's DHCP ports are the well-known 67/4011 only, and
+// bootd no longer runs a DHCP relay); setting any of them is a startup
+// error rather than a silent no-op.
 func bootdConfigFromEnv() (bootdConfig, error) {
 	for _, removed := range []string{
-		"BOOTD_HTTP_BOOT_URL", "BOOTD_DHCP_ADDR", "BOOTD_PXE_ADDR", "BOOTD_DHCP_RELAY_SERVER",
+		"BOOTD_DHCP_ADDR", "BOOTD_PXE_ADDR", "BOOTD_DHCP_RELAY_SERVER",
 	} {
 		if os.Getenv(removed) != "" {
 			return bootdConfig{}, fmt.Errorf(
@@ -368,14 +376,33 @@ func bootdConfigFromEnv() (bootdConfig, error) {
 		proxyCfg.Addr = fmt.Sprintf("%s:80", serverIP.String())
 	}
 
+	bootFilename := os.Getenv("BOOTD_BOOT_FILENAME")
+	if bootFilename == "" {
+		bootFilename = bootd.DefaultBootFilename
+	}
+	// The HTTP Boot URL is derived rather than configured, because the
+	// only address that works is one this bootd already answers on: it
+	// points back at this pod's own proxy, whose /boot/http/<name> route
+	// exists only when there is a boot server upstream to forward to.
+	// Deriving it means a lease-mode Subnet stops losing every machine
+	// whose firmware falls past PXE without anything new to fill in.
+	httpBootURL := os.Getenv("BOOTD_HTTP_BOOT_URL")
+	if httpBootURL == "" && proxyCfg.BootUpstreamURL != "" {
+		httpBootURL, err = bootd.HTTPBootURL(proxyCfg.Addr, serverIP.String(), bootFilename)
+		if err != nil {
+			return bootdConfig{}, fmt.Errorf("deriving the UEFI HTTP Boot URL: %w", err)
+		}
+	}
+
 	return bootdConfig{
 		Server: bootd.Config{
 			Interface:       os.Getenv("BOOTD_DHCP_INTERFACE"),
 			ServerIP:        serverIP,
 			NextServerIP:    nextServerIP,
 			ProvisioningNet: provisioningNet,
-			BootFilename:    os.Getenv("BOOTD_BOOT_FILENAME"),
+			BootFilename:    bootFilename,
 			TFTPDir:         tftpDir,
+			HTTPBootURL:     httpBootURL,
 			AnswerAll:       os.Getenv("BOOTD_ANSWER_ALL") == "true",
 			LeaseMode:       leaseMode,
 			LeaseRangeStart: leaseRangeStart,

@@ -71,6 +71,39 @@ const bootRoutePrefix = "/boot/"
 // same rationale as bootRoutePrefix.
 const agentRoutePrefix = "/agent/"
 
+// httpBootRoutePrefix mirrors internal/bootserver's GET /boot/http/<name>
+// route, the one this proxy hands a UEFI HTTP Boot client (see
+// HTTPBootURL). It is a subtree of bootRoutePrefix, so nothing extra is
+// routed for it.
+const httpBootRoutePrefix = bootRoutePrefix + "http/"
+
+// HTTPBootURL builds the Config.HTTPBootURL value for bootFilename served
+// through this proxy: proxyAddr is where the proxy listens
+// (ProxyConfig.Addr), fallbackHost the address to publish when that
+// listen address names no host - ":80" binds every interface but tells a
+// client nothing, and a URL is only useful if a machine on the
+// provisioning segment can dial it. Port 80 is left out of the URL rather
+// than spelled, since some firmware compares the host against the DHCP
+// server's own address.
+//
+// Returns an error only for an unparseable proxyAddr; a caller that has
+// no boot upstream to proxy should not call this at all, since the URL
+// would 404 for every client that followed it.
+func HTTPBootURL(proxyAddr, fallbackHost, bootFilename string) (string, error) {
+	host, port, err := net.SplitHostPort(proxyAddr)
+	if err != nil {
+		return "", fmt.Errorf("proxy address %q: %w", proxyAddr, err)
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = fallbackHost
+	}
+	authority := host
+	if port != "" && port != fmt.Sprint(DefaultProxyPort) {
+		authority = net.JoinHostPort(host, port)
+	}
+	return "http://" + authority + httpBootRoutePrefix + bootFilename, nil
+}
+
 // ProxyConfig configures ProxyServer. Both upstream URLs are optional and
 // independent: a deployment can front only the agent API, only the boot
 // server, or both. Leaving both empty means the proxy is disabled
