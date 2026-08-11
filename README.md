@@ -1,5 +1,16 @@
 # kezio
 
+> **Proof of concept. Do not deploy machines you care about.**
+>
+> kezio is under active development and has not run anywhere but its own
+> labs. The API is not stable: field names, defaults and whole resources
+> change between releases with no migration path. Deploying an image
+> overwrites the target disk, so a mistake here costs data rather than
+> uptime.
+>
+> Expect to hit problems the documentation does not cover, and to read
+> the code when you do.
+
 kezio is a Kubernetes operator. It orchestrates bare-metal OS deployment.
 It uses [ezio](https://github.com/tjjh89017/ezio) as the deploy engine.
 ezio writes disk partitions over BitTorrent, with partclone images as
