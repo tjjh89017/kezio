@@ -114,6 +114,56 @@ func extractToken(t *testing.T, body string) string {
 	return m[1]
 }
 
+// TestHandleHTTPBootGrubSearch covers the config search a GRUB loaded
+// over UEFI HTTP Boot performs against /boot/http/grub/: the MAC-keyed
+// name must behave exactly like the colon-form route, and every other
+// search name must 404 so the search proceeds to (or past) it.
+func TestHandleHTTPBootGrubSearch(t *testing.T) {
+	machine := newTestMachine(keziov1alpha1.MachineStateInspecting)
+	s, _ := newTestServer(t, t.TempDir(), machine)
+	handler := s.Handler()
+
+	t.Run("dash MAC serves the per-machine config", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/boot/http/grub/grub.cfg-01-aa-bb-cc-dd-ee-01", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		if body := rec.Body.String(); !strings.Contains(body, "kezio.token=") {
+			t.Fatalf("response is not the net-boot config: %q", body)
+		}
+	})
+
+	t.Run("unknown dash MAC boots local, indistinguishable from known-idle", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/boot/http/grub/grub.cfg-01-aa-bb-cc-dd-ee-99", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		if body := rec.Body.String(); body != bootLocalConfig {
+			t.Fatalf("body = %q, want the fixed boot-local config", body)
+		}
+	})
+
+	// The UUID name is searched before the MAC one, so anything but 404
+	// here would stop GRUB from ever reaching grub.cfg-01-<mac>; the
+	// ip/plain names after it carry no identity to decide a response by.
+	for _, name := range []string{
+		"grub.cfg-8a3f0b6e-0000-4000-8000-2f6a1c3d9b10",
+		"grub.cfg-192.0.2.57",
+		"grub.cfg",
+		"something-else",
+	} {
+		t.Run("404: "+name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/boot/http/grub/"+name, nil))
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("status = %d, want 404 so the GRUB config search continues", rec.Code)
+			}
+		})
+	}
+}
+
 func TestHandleGrubConfig_NetBootNeededMintsAndRotatesToken(t *testing.T) {
 	machine := newTestMachine(keziov1alpha1.MachineStateInspecting)
 	s, c := newTestServer(t, t.TempDir(), machine)

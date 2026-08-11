@@ -140,7 +140,39 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /boot/{name}", s.handleBootPath)
 	mux.Handle("GET "+artifactsPrefix, artifactsHandler(s.Config.ArtifactsDir))
 	mux.HandleFunc("GET /boot/http/{name}", s.handleEFI)
+	mux.HandleFunc("GET /boot/http/grub/{name}", s.handleHTTPBootGrubSearch)
 	return logRequests(mux)
+}
+
+// grubNetSearchMACPrefix is the fixed prefix of the MAC-keyed name in
+// GRUB's netboot config search: "grub.cfg-01-" followed by the MAC with
+// dash separators ("01" is GRUB's hardware-type prefix for Ethernet, not
+// part of the address).
+const grubNetSearchMACPrefix = "grub.cfg-01-"
+
+// handleHTTPBootGrubSearch answers the config search a GRUB loaded over
+// UEFI HTTP Boot performs. GRUB derives its config location from the
+// directory it was itself fetched from, plus a "grub/" subdirectory: a
+// binary handed out as /boot/http/grubx64.efi (Config.HTTPBootURL's
+// intended shape) searches /boot/http/grub/grub.cfg-<UUID>, then
+// grub.cfg-01-<mac, dash-separated>, then grub.cfg-<ip>, then plain
+// grub.cfg, stopping at the first hit.
+//
+// Only the MAC-keyed name is answered; every other name 404s on purpose,
+// and that is load-bearing twice over. The UUID variant is searched
+// before the MAC one, so answering it - even with boot-local - would end
+// the search ahead of the only name this server can key a Machine (and
+// therefore a token decision) on. And the ip/plain fallbacks after it
+// carry no identity at all, so answering them would break the invariant
+// that every response is decided per-machine (see Server's doc comment).
+// A 404 mid-search is what GRUB expects and continues through.
+func (s *Server) handleHTTPBootGrubSearch(w http.ResponseWriter, r *http.Request) {
+	dashMAC, ok := strings.CutPrefix(r.PathValue("name"), grubNetSearchMACPrefix)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	s.handleGrubConfig(w, r, strings.ReplaceAll(dashMAC, "-", ":"))
 }
 
 // handleBootPath dispatches GET /boot/<name>: today the only recognized
