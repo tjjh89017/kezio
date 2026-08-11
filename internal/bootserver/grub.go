@@ -42,6 +42,22 @@ set timeout=0
 exit
 `
 
+// grubSearchRedirectConfig is the answer to the identity-free "grub.cfg"
+// name in the config search. Debian's netboot GRUB, loaded over UEFI HTTP
+// Boot, does not perform the per-machine search at all - no UUID name, no
+// MAC name; it asks for plain grub.cfg once and drops to its prompt on a
+// 404 (observed: six machines, only /grub/grub.cfg plus module-list
+// probes). This stub sends it back through the MAC-keyed name using its
+// own variables, so the per-machine decision still happens where it
+// always does; the stub itself is one fixed string for every requester,
+// the same no-information property bootLocalConfig has. GRUB expands
+// net_default_mac colon-separated, which the MAC-keyed handler accepts
+// alongside the dash form.
+const grubSearchRedirectConfig = `# kezio: re-entering the config search with this machine's MAC.
+set timeout=0
+configfile ${prefix}/grub.cfg-01-${net_default_mac}
+`
+
 // GrubNetPath converts an HTTP base URL plus an absolute path into GRUB's
 // network file syntax: "http://192.0.2.1:8090" + "/boot/x" becomes
 // "(http,192.0.2.1:8090)/boot/x". GRUB does not understand bare URLs -

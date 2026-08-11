@@ -145,13 +145,30 @@ func TestHandleHTTPBootGrubSearch(t *testing.T) {
 		}
 	})
 
+	t.Run("plain grub.cfg serves the fixed MAC-redirect stub", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/grub/grub.cfg", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		body := rec.Body.String()
+		if body != grubSearchRedirectConfig {
+			t.Fatalf("body = %q, want the fixed redirect stub", body)
+		}
+		// The stub must never vary by requester: it re-enters the search
+		// with the machine's own MAC, and the per-machine decision happens
+		// there, not here.
+		if !strings.Contains(body, "grub.cfg-01-${net_default_mac}") {
+			t.Fatalf("stub does not re-enter the MAC-keyed search: %q", body)
+		}
+	})
+
 	// The UUID name is searched before the MAC one, so anything but 404
-	// here would stop GRUB from ever reaching grub.cfg-01-<mac>; the
-	// ip/plain names after it carry no identity to decide a response by.
+	// here would stop GRUB from ever reaching grub.cfg-01-<mac>; the ip
+	// name after it carries no identity to decide a response by.
 	for _, name := range []string{
 		"grub.cfg-8a3f0b6e-0000-4000-8000-2f6a1c3d9b10",
 		"grub.cfg-192.0.2.57",
-		"grub.cfg",
 		"something-else",
 	} {
 		t.Run("404: "+name, func(t *testing.T) {

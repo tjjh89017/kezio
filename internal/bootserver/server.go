@@ -166,16 +166,27 @@ const grubNetSearchMACPrefix = "grub.cfg-01-"
 // reports $prefix=(http,192.0.2.2)/grub, and its probes of /grub/... died
 // as unlogged 404s at bootd's proxy while both ends' logs stayed empty.
 //
-// Only the MAC-keyed name is answered; every other name 404s on purpose,
-// and that is load-bearing twice over. The UUID variant is searched
-// before the MAC one, so answering it - even with boot-local - would end
-// the search ahead of the only name this server can key a Machine (and
-// therefore a token decision) on. And the ip/plain fallbacks after it
-// carry no identity at all, so answering them would break the invariant
-// that every response is decided per-machine (see Server's doc comment).
-// A 404 mid-search is what GRUB expects and continues through.
+// Two names are answered. The MAC-keyed one resolves a Machine and
+// decides per-machine, exactly like the colon-form route. Plain
+// "grub.cfg" gets grubSearchRedirectConfig - the same fixed string for
+// every requester - because Debian's HTTP-loaded GRUB skips the identity
+// search and asks for that name alone (see the stub's doc comment);
+// answering it is also safe for a GRUB that does search, since plain
+// grub.cfg is that search's last resort, after every identity-keyed
+// name. The UUID and ip names still 404 on purpose: UUID is searched
+// before the MAC name, so any answer there would end a proper search
+// ahead of the only name a Machine can be keyed on, and a 404
+// mid-search is what GRUB expects and continues through.
 func (s *Server) handleHTTPBootGrubSearch(w http.ResponseWriter, r *http.Request) {
-	dashMAC, ok := strings.CutPrefix(r.PathValue("name"), grubNetSearchMACPrefix)
+	name := r.PathValue("name")
+	if name == "grub.cfg" {
+		w.Header().Set("Content-Type", grubContentType)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, grubSearchRedirectConfig)
+		return
+	}
+	dashMAC, ok := strings.CutPrefix(name, grubNetSearchMACPrefix)
 	if !ok {
 		http.NotFound(w, r)
 		return
