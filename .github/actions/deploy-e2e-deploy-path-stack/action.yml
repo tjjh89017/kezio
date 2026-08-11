@@ -102,8 +102,12 @@ runs:
           BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL="http://kezio-boot-server.kezio-system.svc.cluster.local:8090" \
           BOOTD_DEPLOYMENT_SERVICE_ACCOUNT=kezio-bootd
 
-        kubectl -n kezio-system patch deployment/kezio-controller-manager --type=json \
-          --patch-file=config/e2e-boot-path/boot-artifacts-init-patch.yaml
+        # The fetch-boot-artifacts initContainer arrives with the overlay
+        # (config/components/boot-artifacts, through
+        # config/boot-agent-server), carrying the "latest" placeholder tag
+        # the JSON Patch needs; repoint it at this run's locally imported
+        # image. `set image` never re-runs defaulting, which is why that
+        # patch pins imagePullPolicy explicitly.
         kubectl -n kezio-system set image deployment/kezio-controller-manager \
           fetch-boot-artifacts="${BOOT_ARTIFACTS_IMG}"
 

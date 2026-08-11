@@ -11,9 +11,9 @@
 # Service and containerPort bytes an operator gets. It deliberately leaves
 # out config/components/boot-artifacts: this overlay stays hermetic, since
 # its lanes simulate GRUB and agent traffic and never read real artifact
-# bytes. The BMC e2e lane's deploy-e2e-deploy-path-stack action applies
-# boot-artifacts-init-patch.yaml from here by file path instead - that file
-# is a different patch from the component's, not a copy of it.
+# bytes. The BMC e2e lane gets those artifacts by building
+# config/e2e-deploy-path instead, which takes config/boot-agent-server as
+# its base and so includes the component.
 #
 # BOOT_SERVER_ADDR, BOOT_ARTIFACTS_DIR, BOOT_SERVER_URL,
 # BOOT_AGENT_SERVER_URL, AGENT_SERVER_ADDR, and DEPLOYER are NOT set here -
