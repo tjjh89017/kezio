@@ -2,37 +2,44 @@
 # Runs inside the chroot during `lb build`. Logs tty1 in as root.
 #
 # Without this, tty1 fails authentication in a loop. live-config-systemd
-# (package-lists/live.list.chroot) ships a getty@tty1 drop-in that runs
-# agetty with "--autologin user", and the account that name refers to is
-# created by user-setup - which live-config only Recommends, and
-# auto/config builds with --apt-recommends false. So the autologin is
-# configured, the account never exists, and every attempt is refused.
+# (package-lists/live.list.chroot) ships a systemd generator,
+# /usr/lib/systemd/system-generators/live-config-getty-generator, which on
+# every boot writes getty@ttyN.service.d/live-config_autologin.conf running
+# agetty with "--autologin ${LIVE_USERNAME}". That name defaults to "user",
+# an account user-setup creates - and user-setup is only a Recommends of
+# live-config, which auto/config drops with --apt-recommends false. So the
+# autologin is configured, the account never exists, and every attempt is
+# refused.
 #
-# Logging in as root rather than adding user-setup back: the live image
-# has no persistent state and no local users to speak of, so a "user"
-# account would be a second unprivileged identity that still cannot do
-# anything a deploy needs. What an operator wants from this console is to
-# read agent logs and poke at disks, both of which need root anyway.
+# The file name matters, and is the whole reason this hook writes
+# "live-config_autologin.conf" rather than something clearer. systemd
+# applies drop-ins from every search directory, ordered by file name, so a
+# differently-named file under /etc does not replace the generator's - both
+# apply, and the later name wins. Matching the name makes this a genuine
+# override: for one name, the higher-priority directory (/etc) masks the
+# generator's copy outright.
 #
-# The security cost is real and bounded. This image PXE-boots onto
-# arbitrary provisioning segments, so an autologin console is an entry
-# point for whoever can reach the machine's console or its BMC's KVM -
-# the same reasoning that masks sshd in 0100-disable-ssh.hook.chroot.
-# The difference is reachability: sshd is exposed to every host on the
-# segment, a console is not. Anyone who already has console or BMC access
-# can boot their own media on that machine regardless, so this grants no
-# capability they did not already have.
+# Type=idle and the empty ExecStart= are copied from the generator for the
+# same reasons it has them: the reset is required or systemd sees two
+# ExecStart lines and refuses to start the unit, leaving tty1 dead rather
+# than merely failing to log in.
 #
-# The drop-in goes under /etc, which takes precedence over the one
-# live-config-systemd installs under /lib. The empty ExecStart= is
-# required: without it systemd sees two ExecStart lines for a Type=idle
-# service and refuses to start the unit at all, which would leave tty1
-# dead instead of merely failing to log in.
+# Root rather than restoring user-setup: the live image keeps no persistent
+# state, and reading agent logs or inspecting disks - the reasons to open
+# this console - need root anyway. The exposure is a console on a machine
+# PXE-booting an arbitrary segment, the same concern
+# 0100-disable-ssh.hook.chroot cites; unlike sshd it answers no one on the
+# network, and anyone with console or BMC access can already boot their own
+# media here.
 set -eu
 
-mkdir -p /etc/systemd/system/getty@tty1.service.d
-cat > /etc/systemd/system/getty@tty1.service.d/autologin.conf <<'EOF'
+for tty in 1 2 3 4 5 6; do
+	dir="/etc/systemd/system/getty@tty${tty}.service.d"
+	mkdir -p "$dir"
+	cat > "$dir/live-config_autologin.conf" <<'EOF'
 [Service]
+Type=idle
 ExecStart=
 ExecStart=-/sbin/agetty --autologin root --noclear %I $TERM
 EOF
+done
