@@ -99,7 +99,7 @@ machine boots:
 | Network | `net0` on `vmbr1` only | The machine boots from this segment. Write down its MAC address. |
 | Disk | SCSI, 32 GiB or more, with a serial | The serial is how kezio picks the disk. |
 | Boot order | `net0` first, then the disk | kezio sets a one-time PXE boot over Redfish, but a listed net device is what the shim reorders. |
-| QEMU Guest Agent | Enabled | Lets you confirm the deployed OS booted. |
+| QEMU Guest Agent | Enabled | Lets you confirm the deployed OS booted. The deployed image must also carry the agent - section 7 puts it there. |
 
 Set the disk serial on the Proxmox host, because the web UI has no field
 for it (`501` is the VM ID used throughout this guide):
@@ -575,6 +575,51 @@ image such as
 `https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img`
 is a good first one.
 
+### 7.1 Prepare the image
+
+kezio deploys the image unchanged: it writes the partitions to the disk
+and it writes a UEFI NVRAM entry, but it never edits the file system.
+Everything you want in the deployed system must be in the image before
+you upload it. A pristine cloud image gives you a system you cannot log
+in to and cannot see from Proxmox, for two reasons:
+
+- **No account.** Cloud images get their users from cloud-init, and
+  cloud-init finds no datasource on a bare-metal machine. The console
+  shows a login prompt that no password opens.
+- **No guest agent.** The minimal cloud image does not carry
+  `qemu-guest-agent`, so the VM's QEMU Guest Agent option stays
+  disconnected and Proxmox never shows the guest's address.
+
+Fix both with one `virt-customize` call on the node. It edits the
+downloaded file in place, so keep a copy of the download if you want to
+start again:
+
+```sh
+sudo apt-get install -y --no-install-recommends libguestfs-tools
+sudo chmod 0644 /boot/vmlinuz-*        # supermin builds its appliance from it
+
+sudo virt-customize -a ./ubuntu-24.04-minimal-cloudimg-amd64.img \
+  --install qemu-guest-agent \
+  --root-password password:kezio \
+  --run-command 'touch /etc/cloud/cloud-init.disabled'
+```
+
+`--install` needs network access from the node, because it resolves the
+package inside the image with apt. The disabled cloud-init also removes
+the datasource search, which otherwise delays every boot by minutes.
+
+A lab root password is acceptable. Never build a production image this
+way - give it an account through your own image pipeline instead.
+
+The image must also already carry its own fallback bootloader at
+`\EFI\BOOT\BOOTX64.EFI` on its EFI System Partition. kezio-agent writes
+a UEFI NVRAM entry after the deploy, and firmware falls back to that
+fixed path whenever the NVRAM entry does not survive. Ubuntu cloud
+images ship it. For an image that does not, use the
+`install-removable-fallback` builtin `PostHook` step.
+
+### 7.2 Upload it
+
 The image-service Service is ClusterIP, so port-forward it from the
 node:
 
@@ -600,14 +645,6 @@ kubectl -n kezio-system logs -l job-name --tail=50
 Wait until the Image reports `Ready`. No seeder runs yet - a seeder
 Deployment exists only while a Machine at that Site is deploying that
 Image.
-
-**The image must already carry its own fallback bootloader** at
-`\EFI\BOOT\BOOTX64.EFI` on its EFI System Partition. kezio-agent writes
-a UEFI NVRAM entry after the deploy, but it never edits the deployed
-file system, and firmware falls back to that fixed path whenever the
-NVRAM entry does not survive. Ubuntu cloud images ship it. For an image
-that does not, use the `install-removable-fallback` builtin `PostHook`
-step.
 
 ## 8. Enroll the target machine
 
@@ -714,10 +751,10 @@ kubectl -n kezio-system get machine lab-target-1 \
   -o jsonpath='{.status.phase}{"\n"}{.status.conditions}' | jq .
 ```
 
-Then check the VM itself: the QEMU Guest Agent connects once the
-deployed OS is up (Proxmox shows the guest's IP address on the VM
-summary page), and the console shows the deployed system's login prompt
-rather than the live environment's.
+Then check the VM itself. The console shows the deployed system's login
+prompt rather than the live environment's, and section 7.1's root
+password opens it. The QEMU Guest Agent also connects, so Proxmox shows
+the guest's IP address on the VM summary page.
 
 ## 11. Add a second machine, or a second site
 
