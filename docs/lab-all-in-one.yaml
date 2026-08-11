@@ -3306,7 +3306,7 @@ metadata:
     kezio.kojuro.date/bmc-insecure-skip-verify: "true"
 spec:
   bmc:
-    address: redfish://10.0.0.10:8443/redfish/v1/Systems/501
+    address: redfish://10.0.0.10:8000/redfish/v1/Systems/501
     credentialsSecretRef:
       name: lab-target-1-bmc
   bootMACAddress: "52:54:00:be:ef:01"

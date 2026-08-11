@@ -117,36 +117,79 @@ a Redfish API in front of the Proxmox API. It answers the exact calls
 `internal/bmc/redfish` makes: `ComputerSystem.Reset` for power, and a
 `Boot` PATCH for the one-time PXE boot.
 
-Run its installer on the Proxmox host, as root:
+Install it from source, as root. The project also ships
+`scripts/install.sh`, but do not use it: its version check compares
+`3.11 >= 3.8` as a decimal number, so it rejects every Python newer than
+3.9 with "Python 3.8 or higher is required". Proxmox VE 8 carries Python
+3.11 and Proxmox VE 9 carries 3.13, so the check fails on both.
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/v1k0d3n/proxmox-redfish/main/scripts/install.sh
-less install.sh          # read it before you run it
-bash install.sh
+apt install -y python3 python3-pip python3-venv git openssl
+
+git clone https://github.com/v1k0d3n/proxmox-redfish.git /opt/proxmox-redfish
+cd /opt/proxmox-redfish
+python3 -m venv venv
+venv/bin/pip install -e .
 ```
 
-The installer puts the daemon in `/opt/proxmox-redfish`, writes a
-self-signed certificate, and creates a systemd unit that listens on
-port `8443`.
-
-Fill in `/opt/proxmox-redfish/config/params.env` with the host's own
-values:
+Give it a self-signed certificate:
 
 ```sh
-export PROXMOX_HOST="10.0.0.10"      # this host's management address
-export PROXMOX_USER="root@pam"
-export PROXMOX_PASSWORD="..."
-export PROXMOX_NODE="pve"            # this node's hostname
-export VERIFY_SSL="false"
+mkdir -p /opt/proxmox-redfish/config/ssl
+openssl req -x509 -newkey rsa:4096 -days 365 -nodes \
+  -keyout /opt/proxmox-redfish/config/ssl/server.key \
+  -out /opt/proxmox-redfish/config/ssl/server.crt \
+  -subj "/CN=$(hostname)"
+chmod 600 /opt/proxmox-redfish/config/ssl/server.key
 ```
 
-Start it, and confirm the port it really listens on - the shipped
-example unit uses `8000` while the installer's own unit uses `8443`:
+Write `/opt/proxmox-redfish/config/params.env` with the host's own
+values. Write literal values, not shell substitutions: systemd reads
+this file as an `EnvironmentFile`, and an `EnvironmentFile` never runs a
+command. A `$(hostname)` in it reaches the daemon as those exact
+characters, and the daemon then fails to reach the Proxmox API.
 
 ```sh
+PROXMOX_HOST="10.0.0.10"             # this host's management address
+PROXMOX_USER="root@pam"
+PROXMOX_PASSWORD="..."
+PROXMOX_API_PORT="8006"
+PROXMOX_NODE="pve"                   # this node's hostname
+VERIFY_SSL="false"
+SSL_CERT_FILE="/opt/proxmox-redfish/config/ssl/server.crt"
+SSL_KEY_FILE="/opt/proxmox-redfish/config/ssl/server.key"
+```
+
+Then write `/etc/systemd/system/proxmox-redfish.service`. This unit
+listens on port `8000`, the port the rest of this guide uses:
+
+```ini
+[Unit]
+Description=Proxmox Redfish Daemon
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/proxmox-redfish
+EnvironmentFile=/opt/proxmox-redfish/config/params.env
+ExecStart=/opt/proxmox-redfish/venv/bin/python \
+  /opt/proxmox-redfish/src/proxmox_redfish/proxmox_redfish.py --port 8000
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```sh
+systemctl daemon-reload
 systemctl enable --now proxmox-redfish
-systemctl cat proxmox-redfish | grep ExecStart
+systemctl status proxmox-redfish
 ```
+
+Change the port here and you must change it everywhere this guide names
+`8000`: section 2.5's `curl` check, and the Machine's BMC address in
+section 8.
 
 ### 2.5 Create the Proxmox credentials kezio uses
 
@@ -174,7 +217,7 @@ Check the endpoint before you go further:
 
 ```sh
 curl -k -u 'kezio@pve!kezio:<token-secret>' \
-  https://10.0.0.10:8443/redfish/v1/Systems/501 | jq .PowerState
+  https://10.0.0.10:8000/redfish/v1/Systems/501 | jq .PowerState
 ```
 
 ## 3. Install RKE2 on `kezio-node`
@@ -670,7 +713,7 @@ metadata:
     kezio.kojuro.date/bmc-insecure-skip-verify: "true"
 spec:
   bmc:
-    address: redfish://10.0.0.10:8443/redfish/v1/Systems/501
+    address: redfish://10.0.0.10:8000/redfish/v1/Systems/501
     credentialsSecretRef:
       name: lab-target-1-bmc
   bootMACAddress: "52:54:00:be:ef:01"
