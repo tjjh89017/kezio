@@ -1,0 +1,38 @@
+#!/bin/sh
+# Runs inside the chroot during `lb build`. Logs tty1 in as root.
+#
+# Without this, tty1 fails authentication in a loop. live-config-systemd
+# (package-lists/live.list.chroot) ships a getty@tty1 drop-in that runs
+# agetty with "--autologin user", and the account that name refers to is
+# created by user-setup - which live-config only Recommends, and
+# auto/config builds with --apt-recommends false. So the autologin is
+# configured, the account never exists, and every attempt is refused.
+#
+# Logging in as root rather than adding user-setup back: the live image
+# has no persistent state and no local users to speak of, so a "user"
+# account would be a second unprivileged identity that still cannot do
+# anything a deploy needs. What an operator wants from this console is to
+# read agent logs and poke at disks, both of which need root anyway.
+#
+# The security cost is real and bounded. This image PXE-boots onto
+# arbitrary provisioning segments, so an autologin console is an entry
+# point for whoever can reach the machine's console or its BMC's KVM -
+# the same reasoning that masks sshd in 0100-disable-ssh.hook.chroot.
+# The difference is reachability: sshd is exposed to every host on the
+# segment, a console is not. Anyone who already has console or BMC access
+# can boot their own media on that machine regardless, so this grants no
+# capability they did not already have.
+#
+# The drop-in goes under /etc, which takes precedence over the one
+# live-config-systemd installs under /lib. The empty ExecStart= is
+# required: without it systemd sees two ExecStart lines for a Type=idle
+# service and refuses to start the unit at all, which would leave tty1
+# dead instead of merely failing to log in.
+set -eu
+
+mkdir -p /etc/systemd/system/getty@tty1.service.d
+cat > /etc/systemd/system/getty@tty1.service.d/autologin.conf <<'EOF'
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin root --noclear %I $TERM
+EOF
