@@ -98,7 +98,7 @@ machine boots:
 | Machine | q35 | Matches OVMF. |
 | Network | `net0` on `vmbr1` only | The machine boots from this segment. Write down its MAC address. |
 | Disk | SCSI, 32 GiB or more, with a serial | The serial is how kezio picks the disk. |
-| Boot order | `net0` first, then the disk | kezio sets a one-time PXE boot over Redfish, but a listed net device is what the shim reorders. |
+| Boot order | Any order that lists `net0` | proxmox-redfish reorders the existing list, so `net0` must be in it. It does not need to be first: the daemon moves it there itself. |
 | QEMU Guest Agent | Enabled | Lets you confirm the deployed OS booted. The deployed image must also carry the agent - section 7 puts it there. |
 
 Set the disk serial on the Proxmox host, because the web UI has no field
@@ -132,36 +132,43 @@ python3 -m venv venv
 venv/bin/pip install -e .
 ```
 
-Give it a self-signed certificate:
-
-```sh
-mkdir -p /opt/proxmox-redfish/config/ssl
-openssl req -x509 -newkey rsa:4096 -days 365 -nodes \
-  -keyout /opt/proxmox-redfish/config/ssl/server.key \
-  -out /opt/proxmox-redfish/config/ssl/server.crt \
-  -subj "/CN=$(hostname)"
-chmod 600 /opt/proxmox-redfish/config/ssl/server.key
-```
-
 Write `/opt/proxmox-redfish/config/params.env` with the host's own
-values. Write literal values, not shell substitutions: systemd reads
-this file as an `EnvironmentFile`, and an `EnvironmentFile` never runs a
-command. A `$(hostname)` in it reaches the daemon as those exact
-characters, and the daemon then fails to reach the Proxmox API.
+values:
 
 ```sh
 PROXMOX_HOST="10.0.0.10"             # this host's management address
 PROXMOX_USER="root@pam"
-PROXMOX_PASSWORD="..."
+PROXMOX_PASSWORD="<root's password>"
 PROXMOX_API_PORT="8006"
 PROXMOX_NODE="pve"                   # this node's hostname
 VERIFY_SSL="false"
-SSL_CERT_FILE="/opt/proxmox-redfish/config/ssl/server.crt"
-SSL_KEY_FILE="/opt/proxmox-redfish/config/ssl/server.key"
 ```
 
+Three ways to get this file wrong, each of which fails differently:
+
+- **Write literal values, not shell substitutions.** systemd reads this
+  file as an `EnvironmentFile`, and an `EnvironmentFile` never runs a
+  command. A `$(hostname)` in it reaches the daemon as those exact
+  characters. The upstream README writes this file with a quoted
+  heredoc, which puts those characters in the file rather than their
+  output.
+- **`PROXMOX_USER` and `PROXMOX_PASSWORD` must name a real user and its
+  password, never an API token.** These are the credentials the daemon
+  itself uses against the Proxmox API, and it authenticates with them
+  through `/api2/json/access/ticket`, which rejects a token with
+  `authentication failure`. The API token section 2.5 creates is a
+  different credential for a different direction - see that section.
+- **An empty `PROXMOX_HOST` is not an error at startup.** The daemon
+  falls back to the literal string `pve-node-hostname`, serves
+  `/redfish/v1/` normally, and fails only on the first request that
+  needs the Proxmox API. Section 2.5's check is what catches it.
+
 Then write `/etc/systemd/system/proxmox-redfish.service`. This unit
-listens on port `8000`, the port the rest of this guide uses:
+serves plain HTTP on port `8000`, the port and scheme the rest of this
+guide uses. Basic credentials therefore cross the management network in
+base64, which is acceptable for a lab on a trusted segment and is not
+acceptable anywhere else - see the project's Administrators Guide for
+the TLS options:
 
 ```ini
 [Unit]
@@ -198,6 +205,19 @@ sets `BasicAuth: true`, because a controller connects many times an hour
 and BMCs cap concurrent Redfish sessions). proxmox-redfish accepts a
 Proxmox API token in that Basic header.
 
+**Two different credentials are in play, in two directions.** Keeping
+them apart is the single thing most worth getting right here:
+
+| Direction | Credential | Where it goes |
+|---|---|---|
+| kezio -> proxmox-redfish | the API token below | the Secret in section 8 |
+| proxmox-redfish -> Proxmox API | `PROXMOX_USER` + `PROXMOX_PASSWORD` | `params.env`, section 2.4 |
+
+The daemon validates the inbound token, then performs every VM
+operation as `PROXMOX_USER`. Putting the token in `params.env`, or the
+root password in the Secret, fails in a way whose error message names
+the other one.
+
 In the Proxmox web UI:
 
 1. Datacenter -> Permissions -> Users -> Add: user `kezio@pve`.
@@ -206,19 +226,31 @@ In the Proxmox web UI:
 3. Datacenter -> Permissions -> Add -> **API Token Permission**: path
    `/vms`, token `kezio@pve!kezio`, role `PVEVMAdmin`.
 
-Step 3 is not optional and not the same as a user permission:
-proxmox-redfish checks the ACL for the exact identity in the Basic
-header, and that identity is the token (`kezio@pve!kezio`), not the user
-behind it. A token with privilege separation turned off inherits the
-user's rights inside Proxmox but still has no ACL entry of its own, and
-the shim then refuses the call.
+Step 3 is not the same as a user permission: an API token gets no rights
+from the user behind it while privilege separation is on, and a token
+with no ACL entry of its own is rejected. Give the token its own entry,
+or turn privilege separation off on the token.
 
-Check the endpoint before you go further:
+Check the endpoint before you go further, with a real VM ID:
 
 ```sh
-curl -k -u 'kezio@pve!kezio:<token-secret>' \
-  https://10.0.0.10:8000/redfish/v1/Systems/501 | jq .PowerState
+curl -u 'kezio@pve!kezio:<token-secret>' \
+  http://10.0.0.10:8000/redfish/v1/Systems/501 | jq '.PowerState, .Name'
 ```
+
+`http`, not `https` - the unit in section 2.4 serves plain HTTP. Read
+what each outcome means before moving on:
+
+- **`PowerState` and the VM's name** - both directions work.
+- **`Invalid Basic Authentication credentials`** - the token itself is
+  rejected. Check step 3, or the secret.
+- **The connection closes with no response** - the token is fine and the
+  daemon's own credentials are not. `journalctl -u proxmox-redfish`
+  shows the reason; `Couldn't authenticate user ... /api2/json/access/ticket`
+  means `params.env` holds a token where a real user belongs.
+- **`/redfish/v1/` answers but `/redfish/v1/Systems/<id>` does not** -
+  the same thing. The service root needs no Proxmox connection at all,
+  so it keeps answering long after the rest has stopped working.
 
 ## 3. Install RKE2 on `kezio-node`
 
@@ -639,23 +671,59 @@ in to and cannot see from Proxmox, for two reasons:
   `qemu-guest-agent`, so the VM's QEMU Guest Agent option stays
   disconnected and Proxmox never shows the guest's address.
 
-Fix both with one `virt-customize` call on the node. It edits the
-downloaded file in place, so keep a copy of the download if you want to
-start again:
+Fix both with `virt-customize` on the node. It edits the downloaded file
+in place, so keep a copy of the download if you want to start again.
+
+Do not reach for `virt-customize --install`. It needs working networking
+inside libguestfs's own appliance, which frequently does not come up -
+apt then fails every index with `Temporary failure resolving
+archive.ubuntu.com` and reports the package as missing, which reads like
+a package-name problem and is not one. Download the packages on the node
+instead and install them offline. The node here runs the same Ubuntu
+release as the image, so its archive gives matching versions:
 
 ```sh
 sudo apt-get install -y --no-install-recommends libguestfs-tools
 sudo chmod 0644 /boot/vmlinuz-*        # supermin builds its appliance from it
+export LIBGUESTFS_BACKEND=direct
 
-sudo virt-customize -a ./ubuntu-24.04-minimal-cloudimg-amd64.img \
-  --install qemu-guest-agent \
+# Resolve qemu-guest-agent's full runtime closure, then keep only what
+# the image does not already carry, per its published manifest.
+mapfile -t closure < <(apt-get install --simulate -o Dir::State::status=/dev/null \
+  --no-install-recommends qemu-guest-agent | awk '/^Inst /{n=$2; sub(/:.*$/,"",n); print n}' | sort -u)
+curl -sfL -o /tmp/img.manifest \
+  https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.manifest
+mapfile -t missing < <(comm -23 <(printf '%s\n' "${closure[@]}" | sort -u) \
+  <(awk -F'\t' '{n=$1; sub(/:.*$/,"",n); print n}' /tmp/img.manifest | sort -u))
+printf '%s\n' "${missing[@]}" | grep -qxF qemu-guest-agent || missing+=(qemu-guest-agent)
+echo "injecting: ${missing[*]}"
+
+mkdir -p qga-debs && (cd qga-debs && for p in "${missing[@]}"; do apt-get download "$p"; done)
+
+sudo -E virt-customize -a ./ubuntu-24.04-minimal-cloudimg-amd64.img \
+  --no-network \
+  --copy-in "$PWD/qga-debs:/tmp" \
+  --run-command 'dpkg -i /tmp/qga-debs/*.deb' \
+  --run-command 'rm -rf /tmp/qga-debs' \
   --root-password password:kezio \
   --run-command 'touch /etc/cloud/cloud-init.disabled'
 ```
 
-`--install` needs network access from the node, because it resolves the
-package inside the image with apt. The disabled cloud-init also removes
-the datasource search, which otherwise delays every boot by minutes.
+Resolve the closure rather than naming a fixed dependency list: which
+packages the minimal image is missing changes between releases (for
+noble it is `libnuma1` and `liburing2`). Injecting an incomplete set
+leaves `qemu-ga` crash-looping at every boot with no clue why.
+
+The disabled cloud-init also removes the datasource search, which
+otherwise delays every boot by minutes.
+
+Confirm the three changes landed before uploading:
+
+```sh
+sudo -E virt-ls -a ./ubuntu-24.04-minimal-cloudimg-amd64.img /usr/sbin | grep qemu-ga
+sudo -E virt-ls -a ./ubuntu-24.04-minimal-cloudimg-amd64.img /etc/cloud | grep disabled
+sudo -E virt-ls -a ./ubuntu-24.04-minimal-cloudimg-amd64.img -m /dev/sda15 /EFI/BOOT
+```
 
 A lab root password is acceptable. Never build a production image this
 way - give it an account through your own image pipeline instead.
@@ -697,7 +765,9 @@ Image.
 
 ## 8. Enroll the target machine
 
-Store the Proxmox API token as a BMC credentials Secret:
+Store the Proxmox API token as a BMC credentials Secret. This is
+section 2.5's token, not the `PROXMOX_USER` credentials `params.env`
+holds:
 
 ```sh
 kubectl -n kezio-system create secret generic lab-target-1-bmc \
@@ -715,11 +785,9 @@ kind: Machine
 metadata:
   name: lab-target-1
   namespace: kezio-system
-  annotations:
-    kezio.kojuro.date/bmc-insecure-skip-verify: "true"
 spec:
   bmc:
-    address: redfish://10.0.0.10:8000/redfish/v1/Systems/501
+    address: redfish+http://10.0.0.10:8000/redfish/v1/Systems/501
     credentialsSecretRef:
       name: lab-target-1-bmc
   bootMACAddress: "52:54:00:be:ef:01"
@@ -739,11 +807,14 @@ Three fields carry lab-specific detail:
   VM on the host, so its `Systems` collection has many members.
   `resolveSystem` refuses to guess among them and needs
   `/redfish/v1/Systems/<vmid>`.
-- **The insecure annotation is needed** while proxmox-redfish uses its
-  installer's self-signed certificate. It is an annotation, not a spec
-  field, because it is a transport-trust decision, not deployment
-  intent. Any value other than exactly `"true"` means verify. Drop the
-  annotation once you give the daemon a certificate the cluster trusts.
+- **The scheme is `redfish+http`**, matching the plain-HTTP unit in
+  section 2.4. Plain `redfish://` means HTTPS and fails against that
+  unit with a connection error. If you give the daemon TLS instead, use
+  `redfish://` - and, while its certificate is self-signed, add the
+  `kezio.kojuro.date/bmc-insecure-skip-verify: "true"` annotation to the
+  Machine. That is an annotation, not a spec field, because it is a
+  transport-trust decision rather than deployment intent; any value
+  other than exactly `"true"` means verify.
 - **`subnetRef` decides the Site.** A Machine never names its Site:
   kezio derives it as `subnetRef -> Subnet.spec.siteRef -> Site`, so a
   machine always leeches from the seeder at the segment its boot NIC is
@@ -751,6 +822,15 @@ Three fields carry lab-specific detail:
 
 The MAC must match the target VM's `net0` MAC exactly. bootd answers
 nothing to a MAC that is not an enrolled Machine's.
+
+One difference from a real BMC to expect here: proxmox-redfish carries
+out a one-time PXE request by rewriting the VM's persistent boot order
+so that `net0` comes first, and nothing puts it back. A real BMC's
+one-time override is a firmware flag that clears itself after one boot.
+The deployed machine therefore keeps trying PXE first at every later
+boot; bootd's MAC gate leaves it unanswered, and firmware falls through
+to the disk after the PXE timeout. Reorder it by hand afterwards
+(`qm set <vmid> --boot order=scsi0;net0`) if that wait bothers you.
 
 ## 9. Watch the deploy
 
