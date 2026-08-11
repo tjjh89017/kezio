@@ -1,7 +1,7 @@
 # Overlay for the e2e full-deploy KubeVirt stage
 # (.github/workflows/e2e-deploy-kubevirt.yml, workflow_dispatch only): the
 # union of config/e2e-image-path (real ingest/publish) and
-# config/e2e-boot-path (boot/agent server Services), plus config/seeder,
+# the boot/agent server Services, plus config/seeder,
 # since full-deploy needs a real Image ingested, a real per-Image seeder
 # Deployment, and a real Machine net-booting through kezio-bootd into
 # kezio-agent to deploy onto a KubeVirt VM's disk.

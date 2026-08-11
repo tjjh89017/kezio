@@ -170,13 +170,35 @@ else
 endif
 
 .PHONY: lint
-lint: golangci-lint ## Run golangci-lint linter
+lint: golangci-lint kustomize ## Run golangci-lint linter
 	$(GOLANGCI_LINT) run
 	go run ./hack/lint-action-metadata
+	$(MAKE) lint-kustomizations
 
 .PHONY: lint-action-metadata
 lint-action-metadata: ## Reject GitHub-evaluated expressions in composite action.yml metadata fields
 	go run ./hack/lint-action-metadata
+
+# Every kustomization, not only the ones an e2e lane happens to deploy. A
+# broken overlay is otherwise found by whoever applies it - and the ones no
+# lane builds are exactly the ones an operator reaches for first.
+.PHONY: lint-kustomizations
+lint-kustomizations: kustomize ## Build every kustomization under config/
+# config/manifests is skipped: its base, bases/kezio.clusterserviceversion.yaml,
+# is written by `operator-sdk generate kustomize manifests` as part of `make
+# bundle` and is absent from a checked-out tree, so building it here would
+# fail for everyone every time and teach the reader to ignore this target.
+	@rc=0; \
+	for d in $$(find config -name kustomization.yaml -printf '%h\n' | grep -v '^config/manifests$$' | sort); do \
+		if $(KUSTOMIZE) build "$$d" >/dev/null 2>&1; then \
+			echo "  ok   $$d"; \
+		else \
+			echo "  FAIL $$d" >&2; \
+			$(KUSTOMIZE) build "$$d" >/dev/null || true; \
+			rc=1; \
+		fi; \
+	done; \
+	exit $$rc
 
 .PHONY: lint-fix
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
@@ -274,7 +296,7 @@ docker-push-bootd: ## Push docker image for kezio-bootd.
 # initrd.img, filesystem.squashfs, shimx64.efi, grubx64.efi, kernel.config,
 # manifest.json) - there is no Go binary here to compile, only those
 # files to package; see docker/boot-artifacts/Dockerfile and
-# config/bootserver's/config/bootd's fetch-boot-artifacts
+# config/components/boot-artifacts' and config/bootd's fetch-boot-artifacts
 # initContainers, the consumers this image feeds.
 BOOT_ARTIFACTS_IMG ?= $(IMAGE_TAG_BASE)-boot-artifacts:latest
 

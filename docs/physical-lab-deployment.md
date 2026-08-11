@@ -14,7 +14,7 @@ behind a step, or when your site does not match that shape.
 Read this guide together with:
 
 - `config/bootd/README.md` - the full bootd option list.
-- `config/bootserver/README.md` and `config/agentserver/README.md` -
+- `config/boot-agent-server/README.md` -
   the boot config and agent registration servers bootd fronts.
 - `config/seeder/README.md` - the BitTorrent data plane and its no-NAT
   rule.
@@ -253,7 +253,7 @@ receives to the matching Service, listening on `BOOTD_PROXY_ADDR`
 (default: `BOOTD_SERVER_IP` with port 80). Point `BOOT_SERVER_URL` and
 `BOOT_AGENT_SERVER_URL` (on the controller-manager Deployment) at that
 same bootd address instead of a separately exposed Service
-(`config/bootserver/README.md`, `config/agentserver/README.md`). With
+(`config/boot-agent-server/README.md`). With
 this in place, a machine on the provisioning segment needs exactly one
 reachable address for the whole boot-to-registration flow: bootd's own.
 
@@ -487,7 +487,7 @@ own documentation.
 ## 7. Bring-up order
 
 1. Deploy `config/default` (CRDs and controller-manager).
-2. Deploy `config/bootserver` and `config/agentserver`; set
+2. Deploy `config/boot-agent-server`; set
    `BOOT_SERVER_ADDR`, `AGENT_SERVER_ADDR`, `BOOT_SERVER_URL`,
    `BOOT_AGENT_SERVER_URL`, and `DEPLOYER=agent` on the
    controller-manager Deployment (see their READMEs).

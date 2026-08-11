@@ -462,13 +462,6 @@ not beside, `config/default`:
 bin/kustomize build config/boot-agent-server | kubectl apply -f -
 ```
 
-Do not apply `config/bootserver` and `config/agentserver` one after the
-other. Each one renders a complete manager Deployment carrying only its
-own patch, so the second apply removes the first one's containerPort and
-the `fetch-boot-artifacts` initContainer - and every command still
-reports success. You find out much later, when the target machine's GRUB
-cannot reach the boot server.
-
 Do this before section 5.4. The build re-applies the manager Deployment,
 so applying it again later drops the environment that section sets, and
 you must repeat it.

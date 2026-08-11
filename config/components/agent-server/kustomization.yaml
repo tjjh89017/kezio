@@ -2,8 +2,7 @@
 # controller-manager Deployment. See config/components/boot-server for why
 # these pieces are components rather than overlays.
 #
-# Included by config/agentserver, config/boot-agent-server,
-# config/e2e-boot-path and config/e2e-deploy-path.
+# Included by config/boot-agent-server and config/e2e-deploy-path.
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 

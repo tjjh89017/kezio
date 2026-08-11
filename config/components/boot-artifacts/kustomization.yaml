@@ -2,9 +2,8 @@
 # boot config server serves from, plus BOOT_ARTIFACTS_DIR pointing at it.
 # Separate from config/components/boot-server because it is optional: a
 # caller can turn the boot server on and supply the artifacts some other
-# way. config/e2e-boot-path deliberately leaves it out, so that overlay
-# stays hermetic - its lanes simulate GRUB and agent traffic and never read
-# real artifact bytes.
+# way. A caller that only simulates GRUB and agent traffic, and never reads
+# real artifact bytes, leaves it out and stays hermetic.
 #
 # The images: entry below is the knob for pinning a published version.
 # Override it from the including kustomization with the rewritten name, not

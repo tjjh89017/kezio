@@ -2,10 +2,9 @@
 
 This directory holds every kustomization kezio ships: the CRDs and
 controller-manager (`config/default`), and the standalone services
-applied alongside it (`config/bootd`, `config/bootserver`,
-`config/agentserver`, `config/boot-agent-server` - which turns on both
-of those two at once, the ordinary case - `config/seeder`, and
-`config/image-service`). Each of
+applied alongside it (`config/bootd`, `config/boot-agent-server`,
+`config/seeder`, and `config/image-service`), plus the shared pieces
+those compose in `config/components`. Each of
 those has its own README with its own setup steps. See
 `docs/physical-lab-deployment.md` for the bring-up order across all of
 them on real hardware, and `docs/lab-proxmox-rke2.md` for a

@@ -2,11 +2,11 @@
 # controller-manager Deployment. A component, not an overlay: it carries no
 # base of its own, so any number of kustomizations can include it beside
 # each other without each one pulling in ../default again - which is what
-# made config/bootserver and config/agentserver impossible to apply
-# together (see config/boot-agent-server's comment).
+# together in one Deployment without pulling ../default in twice (see
+# config/boot-agent-server's comment).
 #
-# Included by config/bootserver, config/boot-agent-server,
-# config/e2e-boot-path and config/e2e-deploy-path. It renders the same
+# Included by config/boot-agent-server and config/e2e-deploy-path. It
+# renders the same
 # bytes for all of them; anything one of them needs and the others do not
 # belongs in that kustomization, never here.
 apiVersion: kustomize.config.k8s.io/v1alpha1

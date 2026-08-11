@@ -104,7 +104,7 @@ spec:
             # BOOTD_BOOT_UPSTREAM_URL is set below - it is always
             # bootd's own address (BOOTD_SERVER_IP + BOOTD_PROXY_ADDR's
             # port), since bootd's own proxy answers /boot/grub.cfg-<mac> by
-            # forwarding to config/bootserver. Nothing to fill in here.
+            # forwarding to the boot config server. Nothing to fill in here.
             # Without a boot upstream URL configured, this stays unset and a
             # netbooting machine loads GRUB and stops at the grub> prompt.
             # - name: BOOTD_BOOT_CONFIG_URL
