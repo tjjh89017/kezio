@@ -56,19 +56,6 @@ const (
 // "HTTPClient:Arch:00016:UNDI:003001".
 const httpBootVendorClass = "HTTPClient"
 
-// leaseTime is the dhcp-range lease time in lease mode. dnsmasq's own
-// default is an hour, which is far longer than anything on a provisioning
-// segment lives: a machine there DHCPs several times per deployment -
-// firmware for PXE, then the live environment, then again after any power
-// cycle - and each lease outlives the boot that took it. Thirty machines
-// deploying together exhausted a 91-address range that way and started
-// answering DHCPREQUEST with "address in use" NAKs, which firmware
-// tolerates poorly: it walks its BootOrder on rather than retrying.
-//
-// Five minutes is comfortably longer than one net boot and short enough
-// that the range recycles faster than machines reboot.
-const leaseTime = "5m"
-
 // pxeVendorClass is dnsmasq's own default dhcp-pxe-vendor value. Naming
 // it explicitly matters because setting dhcp-pxe-vendor at all replaces
 // that default: dropping PXEClient from the list would stop dnsmasq's
@@ -178,7 +165,7 @@ func RenderDnsmasqConf(cfg Config, runDir string) (string, error) {
 	}
 	fmt.Fprintf(&b, "dhcp-leasefile=%s\n", filepath.Join(runDir, leasefileName))
 	if cfg.LeaseMode {
-		fmt.Fprintf(&b, "dhcp-range=%s,%s,%s\n", leaseStart, leaseEnd, leaseTime)
+		fmt.Fprintf(&b, "dhcp-range=%s,%s\n", leaseStart, leaseEnd)
 	} else {
 		fmt.Fprintf(&b, "dhcp-range=%s,proxy,%s\n", network, mask)
 	}
