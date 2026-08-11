@@ -458,6 +458,7 @@ func bootdDeploymentConfigFromEnv() (controller.BootdDeploymentConfig, error) {
 		ServiceAccountName: os.Getenv("BOOTD_DEPLOYMENT_SERVICE_ACCOUNT"),
 		AgentUpstreamURL:   os.Getenv("BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL"),
 		BootUpstreamURL:    os.Getenv("BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL"),
+		HTTPBootURL:        os.Getenv("BOOTD_DEPLOYMENT_HTTP_BOOT_URL"),
 	}, nil
 }
 

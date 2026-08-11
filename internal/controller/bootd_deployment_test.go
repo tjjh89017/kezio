@@ -194,6 +194,28 @@ func TestBuildBootdDeploymentEnv(t *testing.T) {
 		}
 	})
 
+	t.Run("HTTP Boot URL override passes through, and only when set", func(t *testing.T) {
+		cfg := BootdDeploymentConfig{
+			Image:              "bootd:test",
+			BootArtifactsImage: "boot-artifacts:test",
+			HTTPBootURL:        "http://192.0.2.2/boot/http/grubx64.efi",
+		}
+		env := bootdContainer(t, buildBootdDeployment(subnet, cfg)).Env
+
+		if got, _ := envValue(env, "BOOTD_HTTP_BOOT_URL"); got != cfg.HTTPBootURL {
+			t.Errorf("BOOTD_HTTP_BOOT_URL = %q, want %q", got, cfg.HTTPBootURL)
+		}
+
+		cfg.HTTPBootURL = ""
+		env = bootdContainer(t, buildBootdDeployment(subnet, cfg)).Env
+		// Unset must stay absent, not become empty: cmd/bootd treats the
+		// variable's presence as the override, and an empty value would
+		// silence its own derivation.
+		if _, ok := envValue(env, "BOOTD_HTTP_BOOT_URL"); ok {
+			t.Errorf("BOOTD_HTTP_BOOT_URL is set, want unset when cfg leaves it empty")
+		}
+	})
+
 	t.Run("agent upstream URL alone does not derive the boot config URL", func(t *testing.T) {
 		cfg := BootdDeploymentConfig{
 			Image:              "bootd:test",

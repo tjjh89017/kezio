@@ -105,6 +105,16 @@ type BootdDeploymentConfig struct {
 	// BootUpstreamURL is BOOTD_BOOT_UPSTREAM_URL's counterpart for
 	// internal/bootserver.
 	BootUpstreamURL string
+	// HTTPBootURL, set, becomes every Subnet's bootd BOOTD_HTTP_BOOT_URL,
+	// replacing the URL bootd derives itself (its own /boot/http/ proxy
+	// route to shim). The main use is handing UEFI HTTP Boot clients
+	// grubx64.efi directly: shim's second-stage lookup takes its
+	// compiled-in "\grubx64.efi" against a URI device path it cannot
+	// split, and the load dies inside the machine without a request ever
+	// reaching a server. Skipping shim trades away the Secure Boot chain
+	// on this path, so it is an operator's explicit choice, never derived.
+	// Empty keeps bootd's own derivation.
+	HTTPBootURL string
 }
 
 // enabled reports whether bootd Deployments are configured.
@@ -182,6 +192,9 @@ func bootdEnv(subnet *keziov1alpha1.Subnet, cfg BootdDeploymentConfig) []corev1.
 			Name:  "BOOTD_BOOT_CONFIG_URL",
 			Value: fmt.Sprintf("http://%s:%d", subnet.Spec.BootdServerIP, bootd.DefaultProxyPort),
 		})
+	}
+	if cfg.HTTPBootURL != "" {
+		env = append(env, corev1.EnvVar{Name: "BOOTD_HTTP_BOOT_URL", Value: cfg.HTTPBootURL})
 	}
 	return env
 }
