@@ -50,6 +50,17 @@ type BMC interface {
 	PowerOn(ctx context.Context) error
 	// PowerOff is an orderly shutdown, not an abrupt cut of power. Idempotent.
 	PowerOff(ctx context.Context) error
+	// ForcePowerOff cuts power without asking anything on the machine to
+	// shut down first, and is the escalation for a machine that cannot
+	// answer PowerOff at all: a machine parked in its firmware setup or
+	// boot menu runs no OS to handle the ACPI request, so PowerOff is
+	// accepted by the BMC and then simply never acted on. Idempotent.
+	//
+	// It can lose in-flight disk writes on a machine running a deployed
+	// OS, so a caller powering a machine down asks PowerOff first and only
+	// escalates here once the graceful request is observed not to take
+	// effect.
+	ForcePowerOff(ctx context.Context) error
 	// PowerCycle forces an immediate power-on reset without waiting for an
 	// orderly shutdown - one BMC action, used to guarantee a clean boot
 	// cycle even when the running OS is unresponsive.

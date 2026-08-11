@@ -113,6 +113,30 @@ func (d *laggingPowerOffDeployer) PowerOn(context.Context) (deployer.Result, err
 	return deployer.Result{Dirty: true, PoweredOn: &on}, nil
 }
 
+// wedgedPowerOffDeployer wraps a fake deployer.Deployer, simulating the
+// machine parked in its firmware boot menu that motivated the escalation:
+// the graceful PowerOff is always accepted and never acts (the machine
+// keeps observing itself on), while ForcePowerOff actually lands. Both
+// calls are counted, so a test can assert which command the reconciler
+// chose.
+type wedgedPowerOffDeployer struct {
+	deployer.Deployer
+	powerOffCalls      *int
+	forcePowerOffCalls *int
+}
+
+func (d *wedgedPowerOffDeployer) PowerOff(context.Context) (deployer.Result, error) {
+	*d.powerOffCalls++
+	on := true
+	return deployer.Result{Dirty: true, PoweredOn: &on}, nil
+}
+
+func (d *wedgedPowerOffDeployer) ForcePowerOff(context.Context) (deployer.Result, error) {
+	*d.forcePowerOffCalls++
+	off := false
+	return deployer.Result{Dirty: true, PoweredOn: &off}, nil
+}
+
 // racingRegisterDeployer wraps a fake deployer.Deployer, overriding
 // Register to write the Machine's status through its own, separate
 // Get/Update before returning - mimicking agentDeployer.Register's real
@@ -1197,6 +1221,78 @@ var _ = Describe("Machine Controller", func() {
 			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(powerOnCalls).To(Equal(1), "PowerOn must be called once spec.online flips back to true")
+		})
+
+		It("escalates to ForcePowerOff once a graceful power-off has been ignored for longer than gracefulPowerOffTimeout", func() {
+			const resourceName = "power-off-wedged-machine"
+			namespace := "default"
+			key := types.NamespacedName{Name: resourceName, Namespace: namespace}
+
+			machine := &keziov1alpha1.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec:       newPowerOnlyMachineSpec(resourceName, false),
+			}
+			Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+			DeferCleanup(func() {
+				m := &keziov1alpha1.Machine{}
+				if err := k8sClient.Get(ctx, key, m); err == nil {
+					Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+				}
+			})
+
+			var powerOffCalls, forcePowerOffCalls int
+			base := deployer.NewFactory()
+			r := &MachineReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+				DeployerFactory: func(m *keziov1alpha1.Machine) (deployer.Deployer, error) {
+					fake, err := base.New(m)
+					if err != nil {
+						return nil, err
+					}
+					if m.Name != resourceName {
+						return fake, nil
+					}
+					return &wedgedPowerOffDeployer{Deployer: fake, powerOffCalls: &powerOffCalls, forcePowerOffCalls: &forcePowerOffCalls}, nil
+				},
+			}
+
+			By("reconciling to Available, before reconcilePower has run at all")
+			_, err := reconcileUntil(ctx, r, key, 10, func(m *keziov1alpha1.Machine) bool {
+				return m.Status.State == keziov1alpha1.MachineStateAvailable
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("reconciling twice: the graceful power-off is accepted, ignored, and retried as a graceful one while inside the window")
+			for i := 0; i < 2; i++ {
+				powerResult, reconcileErr := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+				Expect(reconcileErr).NotTo(HaveOccurred())
+				Expect(powerResult.RequeueAfter).To(Equal(backoffBaseDelay))
+			}
+			Expect(powerOffCalls).To(Equal(2))
+			Expect(forcePowerOffCalls).To(BeZero(), "nothing may be forced while the graceful request is still plausibly in progress")
+
+			ignoring := &keziov1alpha1.Machine{}
+			Expect(k8sClient.Get(ctx, key, ignoring)).To(Succeed())
+			Expect(ignoring.Status.GracefulPowerOffSince).NotTo(BeNil(), "the ignored power-off must start the escalation clock")
+			firstSince := ignoring.Status.GracefulPowerOffSince.Time
+
+			By("backdating the clock past gracefulPowerOffTimeout, standing in for a machine that has been ignoring the request that long")
+			backdated := metav1.NewTime(firstSince.Add(-gracefulPowerOffTimeout - time.Minute))
+			ignoring.Status.GracefulPowerOffSince = &backdated
+			Expect(k8sClient.Status().Update(ctx, ignoring)).To(Succeed())
+
+			By("reconciling again, which must now issue the forced power-off instead of a third ineffective graceful one")
+			settledResult, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(settledResult.RequeueAfter).To(BeZero())
+			Expect(forcePowerOffCalls).To(Equal(1))
+			Expect(powerOffCalls).To(Equal(2), "the graceful command must not be reissued once it has been escalated past")
+
+			settled := &keziov1alpha1.Machine{}
+			Expect(k8sClient.Get(ctx, key, settled)).To(Succeed())
+			Expect(*settled.Status.PoweredOn).To(BeFalse())
+			Expect(settled.Status.GracefulPowerOffSince).To(BeNil(), "the clock must be cleared once the machine actually goes off")
 		})
 
 		It("calls PowerOff and records status.poweredOn=false when spec.online is false", func() {

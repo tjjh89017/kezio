@@ -66,6 +66,26 @@ const (
 // interrupt real progress. A human decides the right recovery instead.
 const inspectingStuckThreshold = 10 * time.Minute
 
+// gracefulPowerOffTimeout is how long reconcilePower keeps re-issuing a
+// graceful power-off that the machine never acts on before escalating to
+// dep.ForcePowerOff.
+//
+// backoffMaxDelay, not a new number: it is already this controller's
+// answer to "how long may one thing stay unresolved before the next
+// attempt", so it is the longest wait anything here settles for, and the
+// retry cadence below it is backoffBaseDelay, giving roughly 150 attempts
+// inside the window - far past any transient BMC read. It also sits
+// between the two bounds that matter. Above it: systemd's own
+// DefaultTimeoutStopSec is 90s, so an OS genuinely working through its
+// shutdown units finishes well inside the window and is never cut off
+// mid-write. Below it: inspectingStuckThreshold's 10 minutes, the point
+// where this controller stops acting on its own and asks for a human -
+// escalating must happen before that, or a machine parked in its firmware
+// boot menu (no OS, so nothing ever answers the ACPI request) would
+// retry an ineffective command forever, which is exactly what was
+// observed on real hardware.
+const gracefulPowerOffTimeout = backoffMaxDelay
+
 // MachineReconciler reconciles a Machine object
 type MachineReconciler struct {
 	client.Client
@@ -435,11 +455,20 @@ func (r *MachineReconciler) reconcilePower(ctx context.Context, machine *keziov1
 	log.Info("power state mismatch, issuing BMC power command",
 		"machine", machine.Name, "desiredOnline", desired)
 
+	forcing := !desired && gracefulPowerOffExhausted(machine)
+	if forcing {
+		log.Info("graceful power-off has not taken effect, escalating to a forced power-off",
+			"machine", machine.Name, "since", machine.Status.GracefulPowerOffSince)
+	}
+
 	var result deployer.Result
 	var err error
-	if desired {
+	switch {
+	case desired:
 		result, err = dep.PowerOn(ctx)
-	} else {
+	case forcing:
+		result, err = dep.ForcePowerOff(ctx)
+	default:
 		result, err = dep.PowerOff(ctx)
 	}
 	if err != nil {
@@ -452,6 +481,8 @@ func (r *MachineReconciler) reconcilePower(ctx context.Context, machine *keziov1
 	}
 
 	applyObservedPower(machine, result, desired)
+	stillMismatched := result.PoweredOn != nil && *result.PoweredOn != desired
+	trackGracefulPowerOff(machine, desired, stillMismatched)
 	if err := r.Status().Update(ctx, machine); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -463,8 +494,10 @@ func (r *MachineReconciler) reconcilePower(ctx context.Context, machine *keziov1
 	// observation in status.poweredOn without a retry would look like a
 	// confirmed state and could cause a later PowerOn to be skipped as a
 	// no-op; requeuing here keeps polling until the observation agrees
-	// with desired.
-	if result.PoweredOn != nil && *result.PoweredOn != desired {
+	// with desired. Retrying alone is not enough for a power-off the
+	// machine can never act on, which is what trackGracefulPowerOff's
+	// clock and the escalation above exist for.
+	if stillMismatched {
 		log.Info("BMC power command accepted but machine has not reached the desired state yet, retrying",
 			"machine", machine.Name, "desiredOnline", desired, "observedPoweredOn", *result.PoweredOn)
 		return ctrl.Result{RequeueAfter: backoffBaseDelay}, nil
@@ -486,6 +519,40 @@ func applyObservedPower(machine *keziov1alpha1.Machine, result deployer.Result, 
 		return
 	}
 	machine.Status.PoweredOn = &desired
+}
+
+// trackGracefulPowerOff maintains status.gracefulPowerOffSince, the clock
+// gracefulPowerOffExhausted reads: it starts on the first power-off the
+// machine is observed not to act on and is left alone afterward, so the
+// window measures how long the machine has ignored the request rather
+// than restarting on every retry.
+//
+// It is cleared the moment the observation agrees with desired again -
+// including when desired is true, since a machine an operator has asked
+// back on is no longer being powered down at all. Clearing it also on a
+// forced power-off that has landed is what keeps a later, ordinary
+// spec.online=false starting from a graceful attempt again.
+func trackGracefulPowerOff(machine *keziov1alpha1.Machine, desired, stillMismatched bool) {
+	if desired || !stillMismatched {
+		machine.Status.GracefulPowerOffSince = nil
+		return
+	}
+	if machine.Status.GracefulPowerOffSince == nil {
+		now := metav1.Now()
+		machine.Status.GracefulPowerOffSince = &now
+	}
+}
+
+// gracefulPowerOffExhausted reports whether the machine has ignored a
+// graceful power-off for longer than gracefulPowerOffTimeout, so
+// reconcilePower should escalate to a forced one. Once it trips it keeps
+// reporting true (the timestamp survives until the machine actually goes
+// off), so a force that is itself accepted-but-ignored is retried as a
+// force, not silently demoted back to a graceful request the machine has
+// already proven it cannot answer.
+func gracefulPowerOffExhausted(machine *keziov1alpha1.Machine) bool {
+	since := machine.Status.GracefulPowerOffSince
+	return since != nil && time.Since(since.Time) >= gracefulPowerOffTimeout
 }
 
 // needsProvisioning reports whether the machine's spec has drifted from

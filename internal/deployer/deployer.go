@@ -118,8 +118,14 @@ type Deployer interface {
 	Deprovision(ctx context.Context, data *DeprovisionData) (Result, error)
 	// PowerOn powers the machine on.
 	PowerOn(ctx context.Context) (Result, error)
-	// PowerOff powers the machine off.
+	// PowerOff powers the machine off, gracefully.
 	PowerOff(ctx context.Context) (Result, error)
+	// ForcePowerOff cuts the machine's power without a graceful shutdown.
+	// Used by reconcilePower to escalate once a PowerOff has been accepted
+	// but observed not to take effect - a machine with no running OS (in
+	// firmware setup, or in its boot menu) never acts on the graceful
+	// request, so repeating PowerOff can never turn it off.
+	ForcePowerOff(ctx context.Context) (Result, error)
 	// PowerCycle forces an immediate power-on reset. Used by
 	// reconcileProvisioning's AfterDeploy=Reboot handling and
 	// reconcileInspecting's stuck-machine recovery.

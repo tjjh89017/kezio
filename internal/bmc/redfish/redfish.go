@@ -144,6 +144,16 @@ func (d *driver) PowerOff(_ context.Context) error {
 	return d.reset(schemas.GracefulShutdownResetType)
 }
 
+// ForcePowerOff implements bmc.BMC using ForceOff - the same
+// ComputerSystem.Reset action, with the ResetType that cuts power
+// immediately instead of asking the OS to shut down. This is what
+// actually turns off a machine sitting in its firmware boot menu, where
+// GracefulShutdown is accepted and then ignored because no OS is running
+// to receive the ACPI request.
+func (d *driver) ForcePowerOff(_ context.Context) error {
+	return d.reset(schemas.ForceOffResetType)
+}
+
 // PowerCycle implements bmc.BMC using ForceRestart, an immediate
 // power-on reset independent of a running OS - used when a guaranteed
 // boot cycle is needed (e.g. to pick up a freshly set one-time PXE boot).

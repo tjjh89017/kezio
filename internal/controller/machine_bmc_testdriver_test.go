@@ -63,6 +63,13 @@ func (f *controllerTestBMC) PowerOff(context.Context) error {
 	return nil
 }
 
+func (f *controllerTestBMC) ForcePowerOff(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.state = bmc.PowerStateOff
+	return nil
+}
+
 func (f *controllerTestBMC) PowerCycle(context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -53,6 +53,7 @@ type testBMC struct {
 	setOneTimePXEBootCalls int
 	powerOnCalls           int
 	powerOffCalls          int
+	forcePowerOffCalls     int
 	powerCycleCalls        int
 	getPowerStateCalls     int
 
@@ -63,6 +64,7 @@ type testBMC struct {
 	setOneTimePXEBootErr error
 	powerOnErr           error
 	powerOffErr          error
+	forcePowerOffErr     error
 	powerCycleErr        error
 	getPowerStateErr     error
 
@@ -92,6 +94,25 @@ func (f *testBMC) PowerOff(context.Context) error {
 	f.powerOffCalls++
 	if f.powerOffErr != nil {
 		return f.powerOffErr
+	}
+	f.state = bmc.PowerStateOff
+	return nil
+}
+
+// forceOffCalls is separate from calls() so adding it did not have to
+// churn every existing caller of that five-value helper.
+func (f *testBMC) forceOffCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.forcePowerOffCalls
+}
+
+func (f *testBMC) ForcePowerOff(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.forcePowerOffCalls++
+	if f.forcePowerOffErr != nil {
+		return f.forcePowerOffErr
 	}
 	f.state = bmc.PowerStateOff
 	return nil
@@ -356,6 +377,66 @@ func TestAgentDeployer_PowerOff_WithBMC_CallsThrough(t *testing.T) {
 	_, _, powerOff, _, _ := testBMCFor(strings.TrimPrefix(address, testBMCScheme+"://")).calls()
 	if powerOff != 1 {
 		t.Errorf("PowerOff calls = %d, want 1", powerOff)
+	}
+}
+
+// ForcePowerOff must reach the driver's forced path, not the graceful
+// PowerOff one - the whole point of the escalation is that the graceful
+// command is the one the machine never acts on.
+func TestAgentDeployer_ForcePowerOff_WithBMC_CallsThrough(t *testing.T) {
+	machine := newTestMachine("default", "node-01")
+	address := testBMCAddress(t)
+	machine.Spec.BMC = keziov1alpha1.MachineBMC{
+		Address:              address,
+		CredentialsSecretRef: keziov1alpha1.SecretReference{Name: bmcCredsSecretName},
+	}
+	secret := bmcCredsSecret()
+	c := newAgentTestClientWithSecret(t, machine, secret)
+	dep := &agentDeployer{client: c, key: types.NamespacedName{Namespace: "default", Name: "node-01"}, bmcSpec: machine.Spec.BMC}
+
+	fakeKey := strings.TrimPrefix(address, testBMCScheme+"://")
+	testBMCFor(fakeKey).state = bmc.PowerStateOn
+
+	result, err := dep.ForcePowerOff(context.Background())
+	if err != nil {
+		t.Fatalf("ForcePowerOff: %v", err)
+	}
+	if result.ErrorMessage != "" {
+		t.Fatalf("ErrorMessage = %q, want empty", result.ErrorMessage)
+	}
+	if got := testBMCFor(fakeKey).forceOffCalls(); got != 1 {
+		t.Errorf("ForcePowerOff calls = %d, want 1", got)
+	}
+	if _, _, powerOff, _, _ := testBMCFor(fakeKey).calls(); powerOff != 0 {
+		t.Errorf("PowerOff calls = %d, want 0 (a forced power-off must not fall back to the graceful command)", powerOff)
+	}
+	if result.PoweredOn == nil || *result.PoweredOn {
+		t.Fatalf("PoweredOn = %v, want a non-nil false after a successful forced power-off", result.PoweredOn)
+	}
+}
+
+// A BMC ForcePowerOff call itself failing must surface as
+// Result.ErrorMessage, same as the other power actions.
+func TestAgentDeployer_ForcePowerOff_BMCForcePowerOffFails_ReportsError(t *testing.T) {
+	machine := newTestMachine("default", "node-01")
+	address := testBMCAddress(t)
+	machine.Spec.BMC = keziov1alpha1.MachineBMC{
+		Address:              address,
+		CredentialsSecretRef: keziov1alpha1.SecretReference{Name: bmcCredsSecretName},
+	}
+	secret := bmcCredsSecret()
+	c := newAgentTestClientWithSecret(t, machine, secret)
+	dep := &agentDeployer{client: c, key: types.NamespacedName{Namespace: "default", Name: "node-01"}, bmcSpec: machine.Spec.BMC}
+
+	fakeKey := strings.TrimPrefix(address, testBMCScheme+"://")
+	testBMCFor(fakeKey).forcePowerOffErr = errors.New("bmc: unsupported action")
+
+	result, err := dep.ForcePowerOff(context.Background())
+	if err != nil {
+		t.Fatalf("ForcePowerOff: %v", err)
+	}
+	if result.ErrorMessage == "" {
+		t.Fatal("ErrorMessage = \"\", want a non-empty message when the BMC rejects ForcePowerOff")
 	}
 }
 

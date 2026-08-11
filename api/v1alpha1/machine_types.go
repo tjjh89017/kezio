@@ -541,6 +541,17 @@ type MachineStatus struct {
 	// PoweredOn reports the machine's last observed power state.
 	// +optional
 	PoweredOn *bool `json:"poweredOn,omitempty"`
+	// GracefulPowerOffSince records when the controller first issued a
+	// graceful power-off that the BMC accepted while the machine kept
+	// reporting itself powered on. It survives across reconciles because
+	// nothing else can tell a shutdown still in progress apart from one
+	// nothing will ever act on: a machine parked in its firmware boot menu
+	// runs no OS to receive the ACPI request, so it acknowledges the
+	// command and stays on indefinitely. Past a threshold the controller
+	// escalates to a forced power-off (see reconcilePower). Cleared as
+	// soon as the observed power state agrees with spec.online again.
+	// +optional
+	GracefulPowerOffSince *metav1.Time `json:"gracefulPowerOffSince,omitempty"`
 	// ErrorCount counts consecutive errors since the last success. The
 	// controller uses it to compute exponential backoff with jitter.
 	// +optional

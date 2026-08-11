@@ -15,6 +15,27 @@ address you configure:
   container's PATH, so it only works with the opt-in ipmitool-enabled
   manager image (see below).
 
+## Powering a machine off: graceful first, forced if it is ignored
+
+`spec.online: false` first asks the machine to shut down gracefully
+(Redfish `GracefulShutdown`, IPMI's soft shutdown), so a machine
+running a deployed OS closes its files instead of losing in-flight
+writes.
+
+A machine with no running OS - one sitting in its firmware setup or
+boot menu, or with a hung kernel - has nothing to receive that
+request. The BMC accepts it and the machine simply stays on. When the
+machine keeps reporting itself powered on 5 minutes after the graceful
+request, the controller escalates once to a forced power-off (Redfish
+`ForceOff`, IPMI `chassis power off`), which the BMC carries out
+itself. `spec.online: false` therefore takes effect even on a machine
+that is wedged before any OS runs.
+
+`afterDeploy: PowerOff` reaches the same path: it makes one graceful
+request of its own at the end of the deployment and then sets
+`spec.online: false`, so a machine that ignores that request is
+escalated by the same rule.
+
 ## Redfish is the recommended path
 
 Use `redfish://` when the BMC supports it. It is the protocol modern

@@ -30,6 +30,7 @@ type stubBMC struct{}
 
 func (stubBMC) PowerOn(context.Context) error                     { return nil }
 func (stubBMC) PowerOff(context.Context) error                    { return nil }
+func (stubBMC) ForcePowerOff(context.Context) error               { return nil }
 func (stubBMC) PowerCycle(context.Context) error                  { return nil }
 func (stubBMC) GetPowerState(context.Context) (PowerState, error) { return PowerStateOn, nil }
 func (stubBMC) SetOneTimePXEBoot(context.Context) error           { return nil }

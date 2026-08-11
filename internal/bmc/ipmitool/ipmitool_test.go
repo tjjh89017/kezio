@@ -111,6 +111,20 @@ func TestPowerOffIssuesChassisPowerSoft(t *testing.T) {
 	}
 }
 
+func TestForcePowerOffIssuesChassisPowerOff(t *testing.T) {
+	run := &fakeRunner{}
+	d := newTestDriver(run)
+
+	if err := d.ForcePowerOff(context.Background()); err != nil {
+		t.Fatalf("ForcePowerOff() error = %v", err)
+	}
+
+	call := lastCall(t, run)
+	if !hasSubsequence(call, []string{"chassis", "power", "off"}) {
+		t.Errorf("argv = %v, want it to end with chassis power off (the hard power-down), not power soft", call)
+	}
+}
+
 func TestPowerCycleIssuesChassisPowerCycle(t *testing.T) {
 	run := &fakeRunner{}
 	d := newTestDriver(run)

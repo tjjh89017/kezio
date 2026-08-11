@@ -32,13 +32,14 @@ type Phase string
 
 // The phases a FailFunc can target.
 const (
-	PhaseRegister    Phase = "Register"
-	PhaseInspect     Phase = "Inspect"
-	PhaseProvision   Phase = "Provision"
-	PhaseDeprovision Phase = "Deprovision"
-	PhasePowerOn     Phase = "PowerOn"
-	PhasePowerOff    Phase = "PowerOff"
-	PhasePowerCycle  Phase = "PowerCycle"
+	PhaseRegister      Phase = "Register"
+	PhaseInspect       Phase = "Inspect"
+	PhaseProvision     Phase = "Provision"
+	PhaseDeprovision   Phase = "Deprovision"
+	PhasePowerOn       Phase = "PowerOn"
+	PhasePowerOff      Phase = "PowerOff"
+	PhaseForcePowerOff Phase = "ForcePowerOff"
+	PhasePowerCycle    Phase = "PowerCycle"
 )
 
 // FailFunc decides whether a phase call should fail. Returning a non-empty
@@ -184,6 +185,22 @@ func (d *fakeDeployer) PowerOn(_ context.Context) (Result, error) {
 // PowerOff powers the fake machine off.
 func (d *fakeDeployer) PowerOff(_ context.Context) (Result, error) {
 	if msg := d.fail(PhasePowerOff); msg != "" {
+		return Result{ErrorMessage: msg}, nil
+	}
+
+	d.factory.mu.Lock()
+	d.state.poweredOn = false
+	d.factory.mu.Unlock()
+
+	return Result{Dirty: true}, nil
+}
+
+// ForcePowerOff powers the fake machine off. The fake models no OS and so
+// no shutdown that could be ignored, which is exactly why it lands on the
+// same state PowerOff does: what separates the two here is which phase a
+// test observes being called, not a different outcome.
+func (d *fakeDeployer) ForcePowerOff(_ context.Context) (Result, error) {
+	if msg := d.fail(PhaseForcePowerOff); msg != "" {
 		return Result{ErrorMessage: msg}, nil
 	}
 

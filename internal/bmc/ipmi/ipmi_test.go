@@ -116,6 +116,21 @@ func TestPowerOffIssuesChassisControlSoftShutdown(t *testing.T) {
 	}
 }
 
+func TestForcePowerOffIssuesChassisControlPowerDown(t *testing.T) {
+	s := &fakeSession{}
+	d := newTestDriver(s)
+
+	if err := d.ForcePowerOff(context.Background()); err != nil {
+		t.Fatalf("ForcePowerOff() error = %v", err)
+	}
+	if got := s.chassisControlCalls; len(got) != 1 || got[0] != ipmilib.ChassisControlPowerDown {
+		t.Errorf("ChassisControl calls = %v, want exactly [PowerDown] (an immediate power-off, not the soft shutdown PowerOff sends)", got)
+	}
+	if !s.closed {
+		t.Error("ForcePowerOff() did not close the session")
+	}
+}
+
 func TestPowerCycleIssuesChassisControlPowerCycle(t *testing.T) {
 	s := &fakeSession{}
 	d := newTestDriver(s)

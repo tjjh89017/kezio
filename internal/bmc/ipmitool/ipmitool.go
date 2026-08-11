@@ -44,6 +44,9 @@ limitations under the License.
 //     "chassis power off" is a hard power-down, the wrong default for the
 //     same reason internal/bmc/redfish prefers GracefulShutdown over
 //     ForceOff.
+//   - ForcePowerOff: "chassis power off", the hard power-down PowerOff
+//     deliberately avoids - the escalation for a machine with no OS to
+//     answer "chassis power soft" (mirrors redfish's ForceOff).
 //   - PowerCycle: "chassis power cycle" (one BMC action), mirroring
 //     redfish's ForceRestart. Per spec, only guaranteed to act when the
 //     chassis is already on.
@@ -146,6 +149,16 @@ func (d *driver) PowerOn(ctx context.Context) error {
 func (d *driver) PowerOff(ctx context.Context) error {
 	if _, err := d.ipmitool(ctx, "chassis", "power", "soft"); err != nil {
 		return fmt.Errorf("ipmitool: power off: %w", err)
+	}
+	return nil
+}
+
+// ForcePowerOff implements bmc.BMC using "chassis power off": the BMC
+// drops power itself, so it still lands on a machine parked in firmware
+// setup that never answers "chassis power soft" - see the package doc.
+func (d *driver) ForcePowerOff(ctx context.Context) error {
+	if _, err := d.ipmitool(ctx, "chassis", "power", "off"); err != nil {
+		return fmt.Errorf("ipmitool: force power off: %w", err)
 	}
 	return nil
 }

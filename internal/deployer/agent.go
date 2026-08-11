@@ -264,7 +264,8 @@ func (d *agentDeployer) PowerOn(ctx context.Context) (Result, error) {
 
 // PowerOff powers the machine off through its BMC (see PowerOn for
 // Result.PoweredOn). BMC.PowerOff is a graceful shutdown, equivalent to
-// an agent-issued "systemctl poweroff".
+// an agent-issued "systemctl poweroff", so a machine with no OS to
+// receive it stays on; ForcePowerOff is the escalation for that.
 func (d *agentDeployer) PowerOff(ctx context.Context) (Result, error) {
 	bmcClient, err := d.connectBMC(ctx)
 	if err != nil {
@@ -272,6 +273,22 @@ func (d *agentDeployer) PowerOff(ctx context.Context) (Result, error) {
 	}
 	if err := bmcClient.PowerOff(ctx); err != nil {
 		return Result{ErrorMessage: fmt.Sprintf("agent deployer: powering off machine: %v", err)}, nil
+	}
+	return Result{Dirty: true, PoweredOn: observedPowerState(ctx, bmcClient)}, nil
+}
+
+// ForcePowerOff cuts the machine's power through its BMC, skipping the
+// ACPI request PowerOff makes. The escalation path for a machine that
+// cannot answer PowerOff at all: a machine sitting in its firmware boot
+// menu has no OS to receive the request, so the BMC accepts PowerOff and
+// the machine stays on forever.
+func (d *agentDeployer) ForcePowerOff(ctx context.Context) (Result, error) {
+	bmcClient, err := d.connectBMC(ctx)
+	if err != nil {
+		return Result{ErrorMessage: err.Error()}, nil
+	}
+	if err := bmcClient.ForcePowerOff(ctx); err != nil {
+		return Result{ErrorMessage: fmt.Sprintf("agent deployer: forcing machine off: %v", err)}, nil
 	}
 	return Result{Dirty: true, PoweredOn: observedPowerState(ctx, bmcClient)}, nil
 }

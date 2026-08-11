@@ -51,6 +51,10 @@ limitations under the License.
 //   - PowerOff: Chassis Control, "soft shutdown" - an ACPI request to the
 //     running OS, not an immediate power cut (matches redfish's
 //     GracefulShutdown and ipmitool's "chassis power soft" preference).
+//   - ForcePowerOff: Chassis Control, "power down" - IPMI's immediate
+//     power-off (section 28.3), the escalation for a machine with no OS to
+//     answer the soft shutdown above (matches redfish's ForceOff and
+//     ipmitool's "chassis power off").
 //   - PowerCycle: Chassis Control, "power cycle" (one BMC action),
 //     mirroring redfish's ForceRestart. Per spec, only guaranteed to act
 //     when the chassis is already on.
@@ -169,6 +173,21 @@ func (d *driver) PowerOff(ctx context.Context) error {
 	})
 	if err != nil {
 		return fmt.Errorf("ipmi: power off: %w", err)
+	}
+	return nil
+}
+
+// ForcePowerOff implements bmc.BMC using a "power down" chassis control:
+// the BMC drops power itself, with nothing on the machine involved, so it
+// still lands on a machine parked in firmware setup that never answers
+// PowerOff's soft shutdown - see the package doc.
+func (d *driver) ForcePowerOff(ctx context.Context) error {
+	err := d.withSession(ctx, func(s session) error {
+		_, err := s.ChassisControl(ctx, ipmilib.ChassisControlPowerDown)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("ipmi: force power off: %w", err)
 	}
 	return nil
 }

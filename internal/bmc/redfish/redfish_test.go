@@ -248,6 +248,22 @@ func TestPowerOffPostsGracefulShutdown(t *testing.T) {
 	}
 }
 
+func TestForcePowerOffPostsForceOff(t *testing.T) {
+	fake := newFakeRedfishServer("1")
+	server := fake.start(t)
+	fake.setPowerState("1", "On")
+
+	b := connectTo(t, server.URL, "/redfish/v1/Systems/1", bmc.Credentials{Username: "admin", Password: "hunter2"})
+
+	if err := b.ForcePowerOff(context.Background()); err != nil {
+		t.Fatalf("ForcePowerOff() error = %v", err)
+	}
+
+	if len(fake.resetCalls) != 1 || fake.resetCalls[0].resetType != "ForceOff" {
+		t.Fatalf("resetCalls = %+v, want one call with ResetType=ForceOff (the reset that lands with no OS running, unlike GracefulShutdown)", fake.resetCalls)
+	}
+}
+
 func TestPowerCyclePostsForceRestart(t *testing.T) {
 	fake := newFakeRedfishServer("1")
 	server := fake.start(t)
