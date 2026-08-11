@@ -6,25 +6,15 @@
 #
 #   kustomize build config/bootserver | kubectl apply -f -
 #
+# Use this only when the boot config server is the sole server you turn on.
+# Applying this and config/agentserver one after the other keeps only the
+# second one's patch - apply config/boot-agent-server instead, which turns
+# on both.
+#
 # Read README.md first - the BOOT_* variables and artifacts volume it needs.
 resources:
   - ../default
-  - service.yaml
 
-# Named by boot-artifacts-init-patch.yaml's fetch-boot-artifacts
-# initContainer; override with `kustomize edit set image
-# kezio-boot-artifacts=...` to pin a version.
-images:
-  - name: kezio-boot-artifacts
-    newName: ghcr.io/tjjh89017/kezio-boot-artifacts
-    newTag: latest
-
-patches:
-  - path: manager-port-patch.yaml
-    target:
-      kind: Deployment
-      name: kezio-controller-manager
-  - path: boot-artifacts-init-patch.yaml
-    target:
-      kind: Deployment
-      name: kezio-controller-manager
+components:
+  - ../components/boot-server
+  - ../components/boot-artifacts

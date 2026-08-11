@@ -5,19 +5,15 @@
 # normally leave for a cluster operator to opt into, mirroring
 # config/e2e-image-path's shape for image-service/seeder.
 #
-# config/e2e-deploy-path keeps local copies of this directory's
-# Service/patch manifests rather than composing it directly (see that
-# directory's own comment for why), and the BMC e2e lane's
-# deploy-e2e-deploy-path-stack action applies
-# boot-artifacts-init-patch.yaml from here by file path. Keep those
-# copies in sync with the originals here.
-#
-# Does not compose config/bootserver or config/agentserver directly: both
-# already list ../default as a resource, and kustomize cannot merge two
-# kustomizations that each independently pull in the same base. Instead this
-# overlay pulls in ../default once, plus local copies of the Service/patch
-# manifests bootserver and agentserver each ship (see
-# boot-server-service.yaml's header comment for why they're local copies).
+# Pulls in ../default once and includes the same boot-server and
+# agent-server components config/bootserver, config/agentserver and
+# config/boot-agent-server include, so this lane builds the identical
+# Service and containerPort bytes an operator gets. It deliberately leaves
+# out config/components/boot-artifacts: this overlay stays hermetic, since
+# its lanes simulate GRUB and agent traffic and never read real artifact
+# bytes. The BMC e2e lane's deploy-e2e-deploy-path-stack action applies
+# boot-artifacts-init-patch.yaml from here by file path instead - that file
+# is a different patch from the component's, not a copy of it.
 #
 # BOOT_SERVER_ADDR, BOOT_ARTIFACTS_DIR, BOOT_SERVER_URL,
 # BOOT_AGENT_SERVER_URL, AGENT_SERVER_ADDR, and DEPLOYER are NOT set here -
@@ -25,15 +21,7 @@
 # after applying this overlay.
 resources:
   - ../default
-  - boot-server-service.yaml
-  - agent-server-service.yaml
 
-patches:
-  - path: manager-boot-port-patch.yaml
-    target:
-      kind: Deployment
-      name: kezio-controller-manager
-  - path: manager-agent-port-patch.yaml
-    target:
-      kind: Deployment
-      name: kezio-controller-manager
+components:
+  - ../components/boot-server
+  - ../components/agent-server

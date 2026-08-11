@@ -9,11 +9,12 @@
 # Does not compose ../e2e-image-path or ../e2e-boot-path directly: both
 # already pull in ../default, and kustomize cannot merge two kustomizations
 # that each independently pull in the same base. Instead this overlay pulls
-# in ../default once, plus ../image-service, ../seeder, and ../ingest, plus
-# local copies of the plain-YAML resource/patch files those two overlays
-# ship (kustomize's LoadRestrictionsRootOnly forbids referencing a plain
-# file outside this kustomization's own root). Keep each copy in sync with
-# its origin.
+# in ../default once, plus ../image-service, ../seeder and ../ingest, and
+# includes the same boot-server and agent-server components an operator's
+# config/boot-agent-server includes - so the Service and containerPort
+# bytes this lane exercises are the operator's, not a copy. It leaves out
+# config/components/boot-artifacts because deploy-e2e-deploy-path-stack
+# applies its own variant of that patch after `kubectl set env`.
 #
 # INGEST_IMAGE, SEEDER_*, SEEDER_DEPLOYMENT_*, BOOT_SERVER_ADDR,
 # BOOT_ARTIFACTS_DIR, BOOT_SERVER_URL, BOOT_AGENT_SERVER_URL,
@@ -24,19 +25,13 @@ resources:
   - ../image-service
   - ../seeder
   - ../ingest
-  - boot-server-service.yaml
-  - agent-server-service.yaml
+
+components:
+  - ../components/boot-server
+  - ../components/agent-server
 
 patches:
   - path: staging-pvc-patch.yaml
     target:
       kind: PersistentVolumeClaim
       name: kezio-image-service-staging
-  - path: manager-boot-port-patch.yaml
-    target:
-      kind: Deployment
-      name: kezio-controller-manager
-  - path: manager-agent-port-patch.yaml
-    target:
-      kind: Deployment
-      name: kezio-controller-manager
