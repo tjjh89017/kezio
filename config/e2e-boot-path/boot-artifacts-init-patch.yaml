@@ -1,7 +1,6 @@
-# Byte-identical copy of config/bootserver/boot-artifacts-init-patch.yaml -
-# see boot-server-service.yaml in this directory for why this overlay keeps
-# local copies (kustomize's LoadRestrictionsRootOnly forbids a `patches:`
-# entry outside this kustomization's own root). Keep the two in sync.
+# A different patch from config/components/boot-artifacts', not a copy of
+# it - see the two deliberate differences below. Kept here as a plain file
+# because nothing builds it: only the BMC e2e lane applies it, by path.
 #
 # Deliberately NOT wired into this directory's kustomization.yaml `patches:`
 # list: config/e2e-boot-path's base overlay stays hermetic (simulated
@@ -10,7 +9,7 @@
 # action applies this file (`kubectl patch --type=json --patch-file`)
 # after the base overlay is up, to wire real boot artifacts in.
 #
-# Unlike config/bootserver/boot-artifacts-init-patch.yaml, this copy has no
+# Unlike config/components/boot-artifacts', this patch has no
 # "add .../containers/0/env" op: deploy-e2e-deploy-path-stack already ran
 # `kubectl set env` (BOOT_ARTIFACTS_DIR=/boot-artifacts, etc.), which
 # populates containers[0].env as a whole array - an "add" at that path here
@@ -39,7 +38,7 @@
       # container is later repointed at the real tag with `kubectl set
       # image`, which never re-runs defaulting, so an implicit default here
       # would bake in imagePullPolicy: Always and ignore an already-imported
-      # local image. Keep in sync with config/bootserver's copy.
+      # local image.
       imagePullPolicy: IfNotPresent
       command:
         - cp

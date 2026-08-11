@@ -461,8 +461,8 @@ declare it.
 | 67 | UDP | bootd proxyDHCP | `internal/bootd/render.go` (`dhcp-range=...,proxy`); `config/bootd/deployment.yaml` container port `proxydhcp` |
 | 4011 | UDP | bootd PXE boot-server (`pxe-service`) | `internal/bootd/render.go`'s `pxe-service` line; `config/bootd/deployment.yaml` container port `pxe` |
 | 69 | UDP | bootd TFTP (shim/GRUB artifacts) | `config/bootd/deployment.yaml` container port `tftp`; `internal/bootd` package doc comment |
-| 8090 | TCP | Boot config server (`internal/bootserver`, GRUB config + live artifacts) | `config/bootserver/manager-port-patch.yaml`, `config/bootserver/service.yaml` |
-| 8091 | TCP | Agent registration server (`internal/agentserver`) | `config/agentserver/manager-port-patch.yaml`, `config/agentserver/service.yaml` |
+| 8090 | TCP | Boot config server (`internal/bootserver`, GRUB config + live artifacts) | `config/components/boot-server/` |
+| 8091 | TCP | Agent registration server (`internal/agentserver`) | `config/components/agent-server/` |
 | 6969 | TCP+UDP | opentracker announce | `config/seeder/opentracker-deployment.yaml` (`args: -p 6969`); `config/seeder/opentracker-service.yaml` |
 | 16881 | TCP | ezio-seeder BitTorrent listen port | `internal/controller/seeder_deployment.go` (`seederBTPort`, wired to the `EZIO_BT_PORT` env var) |
 
@@ -596,8 +596,8 @@ lane) with a `DHCP_SCENARIO: lease` variant remains open work.
 | bootd needs a Multus attachment, not `hostNetwork` | `config/bootd/networkattachmentdefinition.example.yaml` |
 | Namespace needs `pod-security.kubernetes.io/enforce=privileged` | `config/bootd/README.md`, `config/bootd/deployment.yaml` |
 | bootd reverse-proxies `/agent/...` and `/boot/...` via `BOOTD_AGENT_UPSTREAM_URL` / `BOOTD_BOOT_UPSTREAM_URL` | `config/bootd/README.md`, `cmd/bootd/main.go` |
-| Boot config server / agent server default Services are ClusterIP | `config/bootserver/service.yaml`, `config/agentserver/service.yaml` |
-| Ports 8090 / 8091 | `config/bootserver/manager-port-patch.yaml`, `config/agentserver/manager-port-patch.yaml` |
+| Boot config server / agent server default Services are ClusterIP | `config/components/boot-server/service.yaml`, `config/components/agent-server/service.yaml` |
+| Ports 8090 / 8091 | `config/components/boot-server/manager-port-patch.yaml`, `config/components/agent-server/manager-port-patch.yaml` |
 | No-NAT rule for tracker/seeder | `config/seeder/README.md` |
 | Tracker Service is ClusterIP-only, no LoadBalancer/NodePort variant shipped; no Service at all exists for a seeder pod | `config/seeder/opentracker-service.yaml`, `internal/controller/seeder_deployment.go` |
 | e2e lanes use Multus same-bridge attachment for tracker/seeder | `.github/workflows/main.yaml` (`e2e-bmc` job) |
