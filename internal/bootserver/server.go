@@ -141,6 +141,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET "+artifactsPrefix, artifactsHandler(s.Config.ArtifactsDir))
 	mux.HandleFunc("GET /boot/http/{name}", s.handleEFI)
 	mux.HandleFunc("GET /boot/http/grub/{name}", s.handleHTTPBootGrubSearch)
+	mux.HandleFunc("GET /grub/{name}", s.handleHTTPBootGrubSearch)
 	return logRequests(mux)
 }
 
@@ -151,12 +152,19 @@ func (s *Server) Handler() http.Handler {
 const grubNetSearchMACPrefix = "grub.cfg-01-"
 
 // handleHTTPBootGrubSearch answers the config search a GRUB loaded over
-// UEFI HTTP Boot performs. GRUB derives its config location from the
-// directory it was itself fetched from, plus a "grub/" subdirectory: a
+// UEFI HTTP Boot performs: grub.cfg-<UUID>, then grub.cfg-01-<mac,
+// dash-separated>, then grub.cfg-<ip>, then plain grub.cfg, stopping at
+// the first hit.
+//
+// It is mounted twice because where that search lands depends on how the
+// GRUB binary was built. The GRUB manual has it relative to the directory
+// the binary was fetched from plus "grub/" - /boot/http/grub/ for a
 // binary handed out as /boot/http/grubx64.efi (Config.HTTPBootURL's
-// intended shape) searches /boot/http/grub/grub.cfg-<UUID>, then
-// grub.cfg-01-<mac, dash-separated>, then grub.cfg-<ip>, then plain
-// grub.cfg, stopping at the first hit.
+// intended shape). Debian's signed netboot build instead bakes in the
+// prefix "/grub", applied against the server root regardless of where
+// the binary came from: a live machine dropped at the resulting prompt
+// reports $prefix=(http,192.0.2.2)/grub, and its probes of /grub/... died
+// as unlogged 404s at bootd's proxy while both ends' logs stayed empty.
 //
 // Only the MAC-keyed name is answered; every other name 404s on purpose,
 // and that is load-bearing twice over. The UUID variant is searched

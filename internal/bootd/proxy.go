@@ -71,6 +71,10 @@ const bootRoutePrefix = "/boot/"
 // same rationale as bootRoutePrefix.
 const agentRoutePrefix = "/agent/"
 
+// grubNetSearchRoutePrefix mirrors internal/bootserver's GET /grub/<name>
+// route, same rationale as bootRoutePrefix.
+const grubNetSearchRoutePrefix = "/grub/"
+
 // httpBootRoutePrefix mirrors internal/bootserver's GET /boot/http/<name>
 // route, the one this proxy hands a UEFI HTTP Boot client (see
 // HTTPBootURL). It is a subtree of bootRoutePrefix, so nothing extra is
@@ -188,6 +192,14 @@ func NewProxyServer(cfg ProxyConfig) (*ProxyServer, error) {
 			return nil, fmt.Errorf("boot upstream URL %q: %w", cfg.BootUpstreamURL, err)
 		}
 		mux.Handle(bootRoutePrefix, proxy)
+		// The netboot GRUB handed to UEFI HTTP Boot clients does not
+		// search for its config under the directory it was fetched from:
+		// Debian bakes in the prefix "/grub", applied against the server
+		// root (a live machine at the resulting prompt reports
+		// $prefix=(http,192.0.2.2)/grub). Its whole config search lands
+		// outside bootRoutePrefix, and without this route every probe died
+		// here as an unlogged 404 while both ends' logs stayed empty.
+		mux.Handle(grubNetSearchRoutePrefix, proxy)
 	}
 
 	return &ProxyServer{handler: mux, addr: cfg.addr()}, nil
