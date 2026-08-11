@@ -133,7 +133,7 @@ func TestRenderDnsmasqConf_LeaseModeAutoDerivesRange(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"dhcp-range=192.0.2.1,192.0.2.254\n",
+		"dhcp-range=192.0.2.1,192.0.2.254,5m\n",
 		"dhcp-boot=shimx64.efi,,192.0.2.2\n",
 		"dhcp-match=set:efi-x86_64,option:client-arch,7\n",
 		"dhcp-boot=tag:efi-x86_64,shimx64.efi,,192.0.2.2\n",
@@ -160,7 +160,7 @@ func TestRenderDnsmasqConf_LeaseModeExplicitRange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderDnsmasqConf: %v", err)
 	}
-	if !strings.Contains(conf, "dhcp-range=192.0.2.50,192.0.2.60\n") {
+	if !strings.Contains(conf, "dhcp-range=192.0.2.50,192.0.2.60,5m\n") {
 		t.Errorf("lease-mode config does not honor the explicit range:\n%s", conf)
 	}
 }

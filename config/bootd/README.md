@@ -78,6 +78,14 @@ the proxyDHCP one. The lease range defaults to the provisioning
 subnet's first and last host addresses; set `BOOTD_LEASE_RANGE_START`
 and `BOOTD_LEASE_RANGE_END` together to override it.
 
+Leases last five minutes, not dnsmasq's default hour. A machine on a
+provisioning segment takes several leases per deployment - firmware for
+PXE, then the live environment, then again after any power cycle - and an
+hour-long lease outlives every one of them. Thirty machines deploying
+together exhausted a 91-address range that way, and the NAKs that
+followed cost boots: firmware answered `address in use` walks its
+BootOrder on rather than retrying PXE.
+
 The MAC gate below is unchanged: only enrolled MACs receive a lease.
 This mode does not turn bootd into a general-purpose DHCP server for
 the segment - a device that is not an enrolled Machine still gets
