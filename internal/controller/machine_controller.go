@@ -305,8 +305,41 @@ func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *
 		}
 	}
 
+	if err := r.clearOnlineAfterPowerOff(ctx, machine); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	return r.advance(ctx, machine, keziov1alpha1.MachineStateProvisioned, reasonProvisioned,
 		"Deployment complete")
+}
+
+// clearOnlineAfterPowerOff writes spec.online=false when the finished
+// deployment asked for AfterDeployPowerOff, so the machine stays off.
+//
+// spec.online is enforced continuously (reconcileProvisioned ->
+// reconcilePower), while AfterDeployPowerOff acts once at the end of a
+// deployment. Without this the two contradict each other and whichever ran
+// last wins, so a batch ends with some machines off and some powered back
+// on. Writing spec rather than skipping enforcement keeps spec.online
+// honest about a machine that is deliberately off, and makes a later
+// `online: true` mean what an operator intends by it.
+//
+// Covers both paths: the BMC-driven PowerOff above (no OS image) and the
+// agent's own in-guest shutdown.
+func (r *MachineReconciler) clearOnlineAfterPowerOff(ctx context.Context, machine *keziov1alpha1.Machine) error {
+	if machine.Spec.EffectiveAfterDeploy() != keziov1alpha1.AfterDeployPowerOff {
+		return nil
+	}
+	if !machine.Spec.EffectiveOnline() {
+		return nil
+	}
+
+	logf.FromContext(ctx).Info("deployment finished with AfterDeploy=PowerOff; clearing spec.online",
+		"machine", machine.Name)
+
+	off := false
+	machine.Spec.Online = &off
+	return r.Update(ctx, machine)
 }
 
 // reconcileProvisioned checks for a new deployment request (a later spec
