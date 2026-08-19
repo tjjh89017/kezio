@@ -1,5 +1,10 @@
 # kezio
 
+> **This tree is being rebuilt from scratch.** The description below
+> documents the previous implementation, which now lives on the
+> [`legacy`](https://github.com/tjjh89017/kezio/tree/legacy) branch.
+> This README is rewritten when the rebuild completes.
+
 > **Proof of concept. Do not deploy machines you care about.**
 >
 > kezio is under active development and has not run anywhere but its own

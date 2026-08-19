@@ -125,7 +125,7 @@ func transitiveKezioDeps(t *testing.T, repoRoot, target string) []string {
 func findDockerfiles(t *testing.T, repoRoot string) []string {
 	t.Helper()
 
-	var files []string
+	files := make([]string, 0, 8)
 	if _, err := os.Stat(filepath.Join(repoRoot, "Dockerfile")); err == nil {
 		files = append(files, "Dockerfile")
 	}

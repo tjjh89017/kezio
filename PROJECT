@@ -8,7 +8,7 @@ layout:
 plugins:
   manifests.sdk.operatorframework.io/v2: {}
   scorecard.sdk.operatorframework.io/v2: {}
-projectName: kezio
+projectName: scaffold
 repo: github.com/tjjh89017/kezio
 resources:
 - api:
@@ -17,37 +17,27 @@ resources:
   controller: true
   domain: kojuro.date
   group: kezio
-  kind: Image
-  path: github.com/tjjh89017/kezio/api/v1alpha1
-  version: v1alpha1
-  webhooks:
-    defaulting: true
-    validation: true
-    webhookVersion: v1
-- api:
-    crdVersion: v1
-    namespaced: true
-  controller: true
-  domain: kojuro.date
-  group: kezio
-  kind: PostHook
-  path: github.com/tjjh89017/kezio/api/v1alpha1
-  version: v1alpha1
-  webhooks:
-    defaulting: true
-    validation: true
-    webhookVersion: v1
-- api:
-    crdVersion: v1
-    namespaced: true
-  controller: true
-  domain: kojuro.date
-  group: kezio
   kind: Machine
-  path: github.com/tjjh89017/kezio/api/v1alpha1
-  version: v1alpha1
+  path: github.com/tjjh89017/kezio/api/v1alpha2
+  version: v1alpha2
   webhooks:
-    defaulting: true
     validation: true
     webhookVersion: v1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: kojuro.date
+  group: kezio
+  kind: DeployRun
+  path: github.com/tjjh89017/kezio/api/v1alpha2
+  version: v1alpha2
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: kojuro.date
+  group: kezio
+  kind: MachineHardware
+  path: github.com/tjjh89017/kezio/api/v1alpha2
+  version: v1alpha2
 version: "3"

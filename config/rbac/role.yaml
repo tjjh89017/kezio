@@ -5,85 +5,10 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
-  - ""
-  resources:
-  - configmaps
-  - namespaces
-  - pods
-  - secrets
-  - serviceaccounts
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - persistentvolumeclaims
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - apps
-  resources:
-  - deployments
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - apps
-  resources:
-  - replicasets
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - batch
-  resources:
-  - jobs
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - k8s.cni.cncf.io
-  resources:
-  - network-attachment-definitions
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
   - kezio.kojuro.date
   resources:
-  - imagelayouts
-  - sites
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - kezio.kojuro.date
-  resources:
-  - images
+  - deployruns
   - machines
-  - posthooks
-  - subnets
   verbs:
   - create
   - delete
@@ -95,19 +20,15 @@ rules:
 - apiGroups:
   - kezio.kojuro.date
   resources:
-  - images/finalizers
+  - deployruns/finalizers
   - machines/finalizers
-  - posthooks/finalizers
-  - subnets/finalizers
   verbs:
   - update
 - apiGroups:
   - kezio.kojuro.date
   resources:
-  - images/status
+  - deployruns/status
   - machines/status
-  - posthooks/status
-  - subnets/status
   verbs:
   - get
   - patch

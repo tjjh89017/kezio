@@ -1,0 +1,9 @@
+apiVersion: kezio.kojuro.date/v1alpha2
+kind: DeployRun
+metadata:
+  labels:
+    app.kubernetes.io/name: scaffold
+    app.kubernetes.io/managed-by: kustomize
+  name: deployrun-sample
+spec:
+  # TODO(user): Add fields here

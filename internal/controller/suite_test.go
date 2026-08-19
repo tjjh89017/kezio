@@ -1,5 +1,5 @@
 /*
-Copyright 2026 Date Huang.
+Copyright 2026.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,29 +18,21 @@ package controller
 
 import (
 	"context"
-	"crypto/tls"
-	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
-	webhookv1alpha1 "github.com/tjjh89017/kezio/internal/webhook/v1alpha1"
+	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -67,34 +59,15 @@ var _ = BeforeSuite(func() {
 	ctx, cancel = context.WithCancel(context.TODO())
 
 	var err error
-	err = keziov1alpha1.AddToScheme(scheme.Scheme)
+	err = keziov1alpha2.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 
 	// +kubebuilder:scaffold:scheme
 
 	By("bootstrapping test environment")
 	testEnv = &envtest.Environment{
-		// The second path installs a minimal stand-in for Multus's own
-		// NetworkAttachmentDefinition CRD (see that directory's own
-		// comment) so SubnetReconciler's nadvalidate wiring can be
-		// exercised against real NAD objects.
-		CRDDirectoryPaths: []string{
-			filepath.Join("..", "..", "config", "crd", "bases"),
-			filepath.Join("testdata", "multus-crds"),
-		},
+		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
 		ErrorIfCRDPathMissing: true,
-
-		// Installing the real webhooks (not just their handler methods,
-		// called directly, the way internal/webhook/v1alpha1's own suite
-		// does) matters here: the finalizer-add Update this package's
-		// reconciler issues goes through the actual admission chain in
-		// production, including the defaulting webhook's patch
-		// computation, which has previously produced unintended mutations
-		// (see image_webhook_regression_test.go). A suite that never
-		// starts the webhook server cannot catch that class of bug.
-		WebhookInstallOptions: envtest.WebhookInstallOptions{
-			Paths: []string{filepath.Join("..", "..", "config", "webhook")},
-		},
 	}
 
 	// Retrieve the first found binary directory to allow running tests from IDEs
@@ -110,45 +83,6 @@ var _ = BeforeSuite(func() {
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
-
-	webhookInstallOptions := &testEnv.WebhookInstallOptions
-	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme: scheme.Scheme,
-		WebhookServer: webhook.NewServer(webhook.Options{
-			Host:    webhookInstallOptions.LocalServingHost,
-			Port:    webhookInstallOptions.LocalServingPort,
-			CertDir: webhookInstallOptions.LocalServingCertDir,
-		}),
-		LeaderElection: false,
-		Metrics:        metricsserver.Options{BindAddress: "0"},
-	})
-	Expect(err).NotTo(HaveOccurred())
-
-	err = webhookv1alpha1.SetupImageWebhookWithManager(mgr)
-	Expect(err).NotTo(HaveOccurred())
-
-	err = webhookv1alpha1.SetupMachineWebhookWithManager(mgr)
-	Expect(err).NotTo(HaveOccurred())
-
-	err = webhookv1alpha1.SetupPostHookWebhookWithManager(mgr)
-	Expect(err).NotTo(HaveOccurred())
-
-	go func() {
-		defer GinkgoRecover()
-		err = mgr.Start(ctx)
-		Expect(err).NotTo(HaveOccurred())
-	}()
-
-	// wait for the webhook server to get ready.
-	dialer := &net.Dialer{Timeout: time.Second}
-	addrPort := fmt.Sprintf("%s:%d", webhookInstallOptions.LocalServingHost, webhookInstallOptions.LocalServingPort)
-	Eventually(func() error {
-		conn, err := tls.DialWithDialer(dialer, "tcp", addrPort, &tls.Config{InsecureSkipVerify: true})
-		if err != nil {
-			return err
-		}
-		return conn.Close()
-	}).Should(Succeed())
 })
 
 var _ = AfterSuite(func() {

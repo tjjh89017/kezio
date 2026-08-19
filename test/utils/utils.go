@@ -1,5 +1,5 @@
 /*
-Copyright 2026 Date Huang.
+Copyright 2026.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -32,33 +32,9 @@ const (
 	prometheusOperatorURL     = "https://github.com/prometheus-operator/prometheus-operator/" +
 		"releases/download/%s/bundle.yaml"
 
-	// certManagerURL always resolves to whatever cert-manager currently
-	// calls "latest" rather than a version pinned in this repo. kezio's
-	// webhooks only need cert-manager to mint and rotate a self-signed
-	// serving certificate - a narrow, stable surface - so there is no
-	// compatibility matrix worth pinning against, and pinning would just
-	// mean a second place to remember to bump. This is a standing project
-	// directive: never pin cert-manager's version here.
-	certManagerURL = "https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml"
-
-	// certManagerNamespace is the namespace the upstream manifest above
-	// installs cert-manager into.
-	certManagerNamespace = "cert-manager"
-
-	// certManagerDeployTimeout bounds how long InstallCertManager waits for
-	// each cert-manager Deployment to report Available.
-	certManagerDeployTimeout = "5m"
+	certmanagerVersion = "v1.16.3"
+	certmanagerURLTmpl = "https://github.com/cert-manager/cert-manager/releases/download/%s/cert-manager.yaml"
 )
-
-// certManagerDeployments are the Deployments the upstream cert-manager
-// manifest creates. InstallCertManager waits for all of them (not just
-// cert-manager-webhook) to be Available: the controller and cainjector
-// also gate whether a Certificate actually gets issued.
-var certManagerDeployments = []string{
-	"cert-manager",
-	"cert-manager-webhook",
-	"cert-manager-cainjector",
-}
 
 func warnError(err error) {
 	_, _ = fmt.Fprintf(GinkgoWriter, "warning: %v\n", err)
@@ -130,36 +106,30 @@ func IsPrometheusCRDsInstalled() bool {
 
 // UninstallCertManager uninstalls the cert manager
 func UninstallCertManager() {
-	cmd := exec.Command("kubectl", "delete", "-f", certManagerURL)
+	url := fmt.Sprintf(certmanagerURLTmpl, certmanagerVersion)
+	cmd := exec.Command("kubectl", "delete", "-f", url)
 	if _, err := Run(cmd); err != nil {
 		warnError(err)
 	}
 }
 
-// InstallCertManager installs cert-manager at whatever release the
-// upstream project currently tags "latest" (see certManagerURL) and waits
-// for every cert-manager Deployment to report Available before returning.
-// Waiting on all three Deployments, not just cert-manager-webhook, avoids
-// a race where kezio's webhook Certificate is created before the
-// controller or cainjector is ready to issue and inject it.
+// InstallCertManager installs the cert manager bundle.
 func InstallCertManager() error {
-	cmd := exec.Command("kubectl", "apply", "-f", certManagerURL)
+	url := fmt.Sprintf(certmanagerURLTmpl, certmanagerVersion)
+	cmd := exec.Command("kubectl", "apply", "-f", url)
 	if _, err := Run(cmd); err != nil {
 		return err
 	}
+	// Wait for cert-manager-webhook to be ready, which can take time if cert-manager
+	// was re-installed after uninstalling on a cluster.
+	cmd = exec.Command("kubectl", "wait", "deployment.apps/cert-manager-webhook",
+		"--for", "condition=Available",
+		"--namespace", "cert-manager",
+		"--timeout", "5m",
+	)
 
-	for _, name := range certManagerDeployments {
-		cmd = exec.Command("kubectl", "wait", "deployment.apps/"+name,
-			"--for", "condition=Available",
-			"--namespace", certManagerNamespace,
-			"--timeout", certManagerDeployTimeout,
-		)
-		if _, err := Run(cmd); err != nil {
-			return fmt.Errorf("wait for %s to become available: %w", name, err)
-		}
-	}
-
-	return nil
+	_, err := Run(cmd)
+	return err
 }
 
 // IsCertManagerCRDsInstalled checks if any Cert Manager CRDs are installed
@@ -205,46 +175,6 @@ func LoadImageToKindClusterWithName(name string) error {
 	cmd := exec.Command("kind", kindOptions...)
 	_, err := Run(cmd)
 	return err
-}
-
-// LoadImageToRKE2Containerd imports a local docker image into the RKE2
-// node's containerd image store. Used when the e2e suite targets a
-// pre-provisioned single-node RKE2 cluster instead of Kind. Unlike k3s's
-// "k3s ctr" wrapper (which defaults to the embedded socket and the k8s.io
-// namespace on its own), RKE2 ships a plain "ctr" binary that needs both
-// pointed at explicitly: -a selects RKE2's containerd socket (still under
-// /run/k3s/containerd - RKE2 kept that path from its k3s lineage even
-// though the cluster itself is RKE2, not k3s), and -n k8s.io selects the
-// namespace the kubelet reads from, matching what "k3s ctr" did implicitly.
-func LoadImageToRKE2Containerd(name string) error {
-	// Stream the docker image tarball straight into RKE2's containerd
-	// rather than buffering it to disk: docker save (stdout) -> ctr images
-	// import (stdin).
-	saveCmd := exec.Command("docker", "save", name)
-	importCmd := exec.Command("sudo", "ctr", "-a", "/run/k3s/containerd/containerd.sock",
-		"-n", "k8s.io", "images", "import", "-")
-
-	pipe, err := saveCmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("failed to create docker save pipe: %w", err)
-	}
-	importCmd.Stdin = pipe
-
-	var importOut bytes.Buffer
-	importCmd.Stdout = &importOut
-	importCmd.Stderr = &importOut
-
-	if err := importCmd.Start(); err != nil {
-		return fmt.Errorf("failed to start ctr images import: %w", err)
-	}
-	if err := saveCmd.Run(); err != nil {
-		return fmt.Errorf("failed to run docker save %q: %w", name, err)
-	}
-	if err := importCmd.Wait(); err != nil {
-		return fmt.Errorf("ctr images import failed: %q: %w", importOut.String(), err)
-	}
-
-	return nil
 }
 
 // GetNonEmptyLines converts given command output string into individual objects

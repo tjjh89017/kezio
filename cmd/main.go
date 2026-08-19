@@ -1,5 +1,5 @@
 /*
-Copyright 2026 Date Huang.
+Copyright 2026.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,46 +17,29 @@ limitations under the License.
 package main
 
 import (
-	"context"
 	"crypto/tls"
 	"flag"
-	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
-	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	keziov1alpha1 "github.com/tjjh89017/kezio/api/v1alpha1"
-	"github.com/tjjh89017/kezio/internal/agentserver"
-	"github.com/tjjh89017/kezio/internal/bootserver"
-
-	// Blank-imported to register their URL scheme with internal/bmc's
-	// driver registry (internal/bmc/registry.go's Register).
-	_ "github.com/tjjh89017/kezio/internal/bmc/ipmi"
-	_ "github.com/tjjh89017/kezio/internal/bmc/ipmitool"
-	_ "github.com/tjjh89017/kezio/internal/bmc/redfish"
+	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 	"github.com/tjjh89017/kezio/internal/controller"
-	"github.com/tjjh89017/kezio/internal/deployer"
-	webhookv1alpha1 "github.com/tjjh89017/kezio/internal/webhook/v1alpha1"
+	webhookv1alpha2 "github.com/tjjh89017/kezio/internal/webhook/v1alpha2"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -68,7 +51,7 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
-	utilruntime.Must(keziov1alpha1.AddToScheme(scheme))
+	utilruntime.Must(keziov1alpha2.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -107,8 +90,12 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	// HTTP/2 is disabled by default to avoid the Stream Cancellation and
-	// Rapid Reset CVEs (GHSA-qppj-fm5r-hxr3, GHSA-4374-p667-p6c8).
+	// if the enable-http2 flag is false (the default), http/2 should be disabled
+	// due to its vulnerabilities. More specifically, disabling http/2 will
+	// prevent from being vulnerable to the HTTP/2 Stream Cancellation and
+	// Rapid Reset CVEs. For more information see:
+	// - https://github.com/advisories/GHSA-qppj-fm5r-hxr3
+	// - https://github.com/advisories/GHSA-4374-p667-p6c8
 	disableHTTP2 := func(c *tls.Config) {
 		setupLog.Info("disabling http/2")
 		c.NextProtos = []string{"http/1.1"}
@@ -147,7 +134,10 @@ func main() {
 		TLSOpts: webhookTLSOpts,
 	})
 
-	// Metrics endpoint is enabled in config/default/kustomization.yaml.
+	// Metrics endpoint is enabled in 'config/default/kustomization.yaml'. The Metrics options configure the server.
+	// More info:
+	// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/metrics/server
+	// - https://book.kubebuilder.io/reference/metrics.html
 	metricsServerOptions := metricsserver.Options{
 		BindAddress:   metricsAddr,
 		SecureServing: secureMetrics,
@@ -155,13 +145,21 @@ func main() {
 	}
 
 	if secureMetrics {
-		// Protects the metrics endpoint with authn/authz; RBAC is
-		// configured in config/rbac/kustomization.yaml.
+		// FilterProvider is used to protect the metrics endpoint with authn/authz.
+		// These configurations ensure that only authorized users and service accounts
+		// can access the metrics endpoint. The RBAC are configured in 'config/rbac/kustomization.yaml'. More info:
+		// https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/metrics/filters#WithAuthenticationAndAuthorization
 		metricsServerOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
 	}
 
-	// With no certificate specified, controller-runtime generates a
-	// self-signed one - fine for development, not for production.
+	// If the certificate is not specified, controller-runtime will automatically
+	// generate self-signed certificates for the metrics server. While convenient for development and testing,
+	// this setup is not recommended for production.
+	//
+	// TODO(user): If you enable certManager, uncomment the following lines:
+	// - [METRICS-WITH-CERTS] at config/default/kustomization.yaml to generate and use certificates
+	// managed by cert-manager for the metrics server.
+	// - [PROMETHEUS-WITH-CERTS] at config/prometheus/kustomization.yaml for TLS certification.
 	if len(metricsCertPath) > 0 {
 		setupLog.Info("Initializing metrics certificate watcher using provided certificates",
 			"metrics-cert-path", metricsCertPath, "metrics-cert-name", metricsCertName, "metrics-cert-key", metricsCertKey)
@@ -188,9 +186,16 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "4f000b8a.kojuro.date",
-		// LeaderElectionReleaseOnCancel speeds up leader transitions but
-		// is only safe if the binary exits immediately when the Manager
-		// stops (no cleanup work after that point).
+		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
+		// when the Manager ends. This requires the binary to immediately end when the
+		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
+		// speeds up voluntary leader transitions as the new leader don't have to wait
+		// LeaseDuration time first.
+		//
+		// In the default scaffold provided, the program ends immediately after
+		// the manager stops, so would be fine to enable this option. However,
+		// if you are doing or is intended to do any operation such as perform cleanups
+		// after the manager stops then its usage might be unsafe.
 		// LeaderElectionReleaseOnCancel: true,
 	})
 	if err != nil {
@@ -198,106 +203,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	ingestConfig, err := ingestConfigFromEnv()
-	if err != nil {
-		setupLog.Error(err, "invalid ingest configuration")
-		os.Exit(1)
-	}
-	// Shared by seederDeploymentConfigFromEnv and agentServerConfigFromEnv below.
-	tracker, err := trackerConfigFromEnv()
-	if err != nil {
-		setupLog.Error(err, "invalid tracker configuration")
-		os.Exit(1)
-	}
-	seederDeploymentConfig, err := seederDeploymentConfigFromEnv(tracker)
-	if err != nil {
-		setupLog.Error(err, "invalid seeder deployment configuration")
-		os.Exit(1)
-	}
-	if err := (&controller.ImageReconciler{
-		Client:           mgr.GetClient(),
-		Scheme:           mgr.GetScheme(),
-		Ingest:           ingestConfig,
-		SeederDeployment: seederDeploymentConfig,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "Image")
-		os.Exit(1)
-	}
-	if err := (&controller.PostHookReconciler{
+	if err := (&controller.MachineReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "PostHook")
-		os.Exit(1)
-	}
-	if err := (&controller.MachineReconciler{
-		Client:          mgr.GetClient(),
-		Scheme:          mgr.GetScheme(),
-		DeployerFactory: deployerFactoryFromEnv(mgr.GetClient()),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Machine")
 		os.Exit(1)
 	}
-	bootdDeploymentConfig, err := bootdDeploymentConfigFromEnv()
-	if err != nil {
-		setupLog.Error(err, "invalid bootd deployment configuration")
-		os.Exit(1)
-	}
-	if err := (&controller.SubnetReconciler{
-		Client:          mgr.GetClient(),
-		Scheme:          mgr.GetScheme(),
-		BootdDeployment: bootdDeploymentConfig,
+	if err := (&controller.DeployRunReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "Subnet")
+		setupLog.Error(err, "unable to create controller", "controller", "DeployRun")
 		os.Exit(1)
 	}
-	if webhooksEnabled() {
-		if err := webhookv1alpha1.SetupImageWebhookWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "Image")
-			os.Exit(1)
-		}
-	}
-	if webhooksEnabled() {
-		if err := webhookv1alpha1.SetupPostHookWebhookWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "PostHook")
-			os.Exit(1)
-		}
-	}
-	if webhooksEnabled() {
-		if err := webhookv1alpha1.SetupMachineWebhookWithManager(mgr); err != nil {
+	// nolint:goconst
+	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
+		if err := webhookv1alpha2.SetupMachineWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "Machine")
-			os.Exit(1)
-		}
-	}
-
-	bootConfig, err := bootServerConfigFromEnv()
-	if err != nil {
-		setupLog.Error(err, "invalid boot server configuration")
-		os.Exit(1)
-	}
-	if bootConfig != nil {
-		if err := bootserver.SetupFieldIndexer(context.Background(), mgr); err != nil {
-			setupLog.Error(err, "unable to set up boot MAC field indexer")
-			os.Exit(1)
-		}
-		if err := mgr.Add(bootserver.New(mgr.GetClient(), *bootConfig)); err != nil {
-			setupLog.Error(err, "unable to add boot config server")
-			os.Exit(1)
-		}
-	}
-
-	agentConfig, err := agentServerConfigFromEnv(tracker)
-	if err != nil {
-		setupLog.Error(err, "invalid agent server configuration")
-		os.Exit(1)
-	}
-	if agentConfig != nil {
-		if err := agentserver.SetupFieldIndexer(context.Background(), mgr); err != nil {
-			setupLog.Error(err, "unable to set up agent token field indexer")
-			os.Exit(1)
-		}
-		if err := mgr.Add(agentserver.New(mgr.GetClient(), *agentConfig)); err != nil {
-			setupLog.Error(err, "unable to add agent registration server")
 			os.Exit(1)
 		}
 	}
@@ -333,243 +256,4 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
-}
-
-// webhooksEnabled reports whether webhooks should be registered with the
-// manager. Set ENABLE_WEBHOOKS=false to run without them - for example
-// locally, without the TLS serving certificate a real cluster provides via
-// cert-manager.
-func webhooksEnabled() bool {
-	return os.Getenv("ENABLE_WEBHOOKS") != "false"
-}
-
-// ingestConfigFromEnv builds the Image reconciler's IngestConfig from the
-// environment. Leaving INGEST_IMAGE unset yields the zero IngestConfig,
-// which keeps the Image reconciler on its stub fast path (no ingest Job,
-// no scratch/staging volume). INGEST_PARTITION_ACCESS_MODES defaults to
-// ReadWriteOnce, correct for a single-node cluster but not for a
-// per-Image seeder Deployment scheduled across nodes.
-func ingestConfigFromEnv() (controller.IngestConfig, error) {
-	image := os.Getenv("INGEST_IMAGE")
-	if image == "" {
-		return controller.IngestConfig{}, nil
-	}
-
-	cfg := controller.IngestConfig{
-		Image:                     image,
-		ScratchStorageClassName:   os.Getenv("INGEST_SCRATCH_STORAGE_CLASS"),
-		PartitionStorageClassName: os.Getenv("INGEST_PARTITION_STORAGE_CLASS"),
-		ServiceAccountName:        os.Getenv("INGEST_SERVICE_ACCOUNT"),
-	}
-	if size := os.Getenv("INGEST_SCRATCH_STORAGE_SIZE"); size != "" {
-		q, err := resource.ParseQuantity(size)
-		if err != nil {
-			return controller.IngestConfig{}, fmt.Errorf("invalid INGEST_SCRATCH_STORAGE_SIZE: %w", err)
-		}
-		cfg.ScratchStorageSize = q
-	}
-	if modes := os.Getenv("INGEST_PARTITION_ACCESS_MODES"); modes != "" {
-		for _, m := range strings.Split(modes, ",") {
-			cfg.PartitionAccessModes = append(cfg.PartitionAccessModes, corev1.PersistentVolumeAccessMode(strings.TrimSpace(m)))
-		}
-	}
-	if stagingPVC := os.Getenv("INGEST_STAGING_PVC"); stagingPVC != "" {
-		cfg.StagingVolume = &corev1.VolumeSource{
-			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: stagingPVC},
-		}
-	}
-	return cfg, nil
-}
-
-// trackerConfig carries the tracker URL and cluster-wide default
-// AddTorrent tuning shared by seederDeploymentConfigFromEnv and
-// agentServerConfigFromEnv, read once rather than once per consumer.
-type trackerConfig struct {
-	URL    string
-	Tuning *keziov1alpha1.MachineEzioTuning
-}
-
-// trackerConfigFromEnv reads trackerConfig from the environment. Leaving
-// SEEDER_TRACKER_URL unset yields the zero trackerConfig: per-Image
-// seeder Deployments and the agent server still run, only the
-// content-adding/torrent-building half is skipped.
-func trackerConfigFromEnv() (trackerConfig, error) {
-	trackerURL := os.Getenv("SEEDER_TRACKER_URL")
-	if trackerURL == "" {
-		return trackerConfig{}, nil
-	}
-	ezioTuning, err := ezioTuningFromEnv("SEEDER_MAX_UPLOADS", "SEEDER_MAX_CONNECTIONS")
-	if err != nil {
-		return trackerConfig{}, err
-	}
-	return trackerConfig{URL: trackerURL, Tuning: ezioTuning}, nil
-}
-
-// seederDeploymentConfigFromEnv builds the Image reconciler's
-// SeederDeploymentConfig from the environment. Leaving
-// SEEDER_DEPLOYMENT_IMAGE unset yields the zero SeederDeploymentConfig,
-// disabling per-Image seeder Deployments entirely. The Multus
-// default-network annotation is no longer sourced from the environment:
-// it is derived per-site from the Site's own seeder Subnet (see
-// controller.seederPodAnnotations).
-func seederDeploymentConfigFromEnv(tracker trackerConfig) (controller.SeederDeploymentConfig, error) {
-	image := os.Getenv("SEEDER_DEPLOYMENT_IMAGE")
-	if image == "" {
-		return controller.SeederDeploymentConfig{}, nil
-	}
-
-	cfg := controller.SeederDeploymentConfig{
-		Image:      image,
-		TrackerURL: tracker.URL,
-		EzioTuning: tracker.Tuning,
-	}
-	if raw := os.Getenv("SEEDER_DEPLOYMENT_GRACE_PERIOD"); raw != "" {
-		gracePeriod, err := time.ParseDuration(raw)
-		if err != nil {
-			return controller.SeederDeploymentConfig{}, fmt.Errorf("invalid SEEDER_DEPLOYMENT_GRACE_PERIOD: %w", err)
-		}
-		cfg.GracePeriod = gracePeriod
-	}
-	return cfg, nil
-}
-
-// bootdDeploymentConfigFromEnv builds the Subnet reconciler's
-// BootdDeploymentConfig from the environment. Leaving
-// BOOTD_DEPLOYMENT_IMAGE unset yields the zero BootdDeploymentConfig, and
-// SubnetReconciler creates no bootd Deployment. These BOOTD_* variables
-// configure the controller-manager, distinct from cmd/bootd's
-// identically-prefixed variables which configure the bootd process
-// itself and are never read here.
-func bootdDeploymentConfigFromEnv() (controller.BootdDeploymentConfig, error) {
-	image := os.Getenv("BOOTD_DEPLOYMENT_IMAGE")
-	if image == "" {
-		return controller.BootdDeploymentConfig{}, nil
-	}
-
-	bootArtifactsImage := os.Getenv("BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE")
-	if bootArtifactsImage == "" {
-		return controller.BootdDeploymentConfig{}, fmt.Errorf(
-			"BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE is required when BOOTD_DEPLOYMENT_IMAGE is set")
-	}
-
-	return controller.BootdDeploymentConfig{
-		Image:              image,
-		BootArtifactsImage: bootArtifactsImage,
-		ServiceAccountName: os.Getenv("BOOTD_DEPLOYMENT_SERVICE_ACCOUNT"),
-		AgentUpstreamURL:   os.Getenv("BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL"),
-		BootUpstreamURL:    os.Getenv("BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL"),
-		HTTPBootURL:        os.Getenv("BOOTD_DEPLOYMENT_HTTP_BOOT_URL"),
-	}, nil
-}
-
-// ezioTuningFromEnv reads a cluster-wide default MaxUploads/MaxConnections
-// override from the two named environment variables, returning nil when
-// neither is set (like an absent Machine.spec.ezio field; see
-// keziov1alpha1.MergeEzioTuning).
-func ezioTuningFromEnv(maxUploadsVar, maxConnectionsVar string) (*keziov1alpha1.MachineEzioTuning, error) {
-	var tuning keziov1alpha1.MachineEzioTuning
-	var set bool
-	if v := os.Getenv(maxUploadsVar); v != "" {
-		n, err := strconv.ParseInt(v, 10, 32)
-		if err != nil {
-			return nil, fmt.Errorf("invalid %s: %w", maxUploadsVar, err)
-		}
-		n32 := int32(n)
-		tuning.MaxUploads = &n32
-		set = true
-	}
-	if v := os.Getenv(maxConnectionsVar); v != "" {
-		n, err := strconv.ParseInt(v, 10, 32)
-		if err != nil {
-			return nil, fmt.Errorf("invalid %s: %w", maxConnectionsVar, err)
-		}
-		n32 := int32(n)
-		tuning.MaxConnections = &n32
-		set = true
-	}
-	if !set {
-		return nil, nil
-	}
-	return &tuning, nil
-}
-
-// bootServerConfigFromEnv builds the boot config server's
-// bootserver.Config from the environment. Leaving BOOT_SERVER_ADDR unset
-// returns a nil Config, and main does not add the server to the manager.
-// Setting it opts in; BOOT_ARTIFACTS_DIR and BOOT_SERVER_URL must then
-// also be set. BOOT_AGENT_SERVER_URL is ordinarily a different address
-// from BOOT_SERVER_URL (a different Service/port fronting the same Pod);
-// left unset it falls back to BOOT_SERVER_URL, correct only when both
-// servers truly share one address - a deployment setting AGENT_SERVER_ADDR
-// should set this too. BOOT_EFI_DIR defaults to BOOT_ARTIFACTS_DIR.
-func bootServerConfigFromEnv() (*bootserver.Config, error) {
-	addr := os.Getenv("BOOT_SERVER_ADDR")
-	if addr == "" {
-		return nil, nil
-	}
-
-	artifactsDir := os.Getenv("BOOT_ARTIFACTS_DIR")
-	if artifactsDir == "" {
-		return nil, fmt.Errorf("BOOT_SERVER_ADDR is set but BOOT_ARTIFACTS_DIR is not")
-	}
-	serverURL := os.Getenv("BOOT_SERVER_URL")
-	if serverURL == "" {
-		return nil, fmt.Errorf("BOOT_SERVER_ADDR is set but BOOT_SERVER_URL is not")
-	}
-
-	cfg := &bootserver.Config{
-		Addr:           addr,
-		ArtifactsDir:   artifactsDir,
-		ServerURL:      serverURL,
-		AgentServerURL: os.Getenv("BOOT_AGENT_SERVER_URL"),
-		KernelPath:     os.Getenv("BOOT_KERNEL_PATH"),
-		InitrdPath:     os.Getenv("BOOT_INITRD_PATH"),
-		EFIDir:         os.Getenv("BOOT_EFI_DIR"),
-	}
-	if ttl := os.Getenv("BOOT_TOKEN_TTL"); ttl != "" {
-		d, err := time.ParseDuration(ttl)
-		if err != nil {
-			return nil, fmt.Errorf("invalid BOOT_TOKEN_TTL: %w", err)
-		}
-		cfg.TokenTTL = d
-	}
-	return cfg, nil
-}
-
-// agentServerConfigFromEnv builds the agent registration server's
-// agentserver.Config from the environment, mirroring
-// bootServerConfigFromEnv's inert-by-default shape. A deployment that
-// sets AGENT_SERVER_ADDR without SEEDER_TRACKER_URL still starts: GET
-// .../next then answers ActionWait forever instead of failing, for any
-// Image with a content partition. EZIO_DEFAULT_MAX_UPLOADS /
-// EZIO_DEFAULT_MAX_CONNECTIONS are intentionally separate from
-// SEEDER_MAX_UPLOADS/SEEDER_MAX_CONNECTIONS: a seeder serving every site
-// and a leecher serving only itself can reasonably want different
-// defaults.
-func agentServerConfigFromEnv(tracker trackerConfig) (*agentserver.Config, error) {
-	addr := os.Getenv("AGENT_SERVER_ADDR")
-	if addr == "" {
-		return nil, nil
-	}
-	ezioDefaults, err := ezioTuningFromEnv("EZIO_DEFAULT_MAX_UPLOADS", "EZIO_DEFAULT_MAX_CONNECTIONS")
-	if err != nil {
-		return nil, err
-	}
-	return &agentserver.Config{
-		Addr:         addr,
-		TrackerURL:   tracker.URL,
-		EzioDefaults: ezioDefaults,
-	}, nil
-}
-
-// deployerFactoryFromEnv selects the Deployer implementation the Machine
-// reconciler drives. DEPLOYER=agent wires deployer.AgentFactory (the real
-// kezio-agent flow); anything else, including unset, wires
-// deployer.FakeFactory, which fabricates results for every phase with no
-// live hardware or agent.
-func deployerFactoryFromEnv(c client.Client) deployer.Factory {
-	if os.Getenv("DEPLOYER") == "agent" {
-		return deployer.NewAgentFactory(c).New
-	}
-	return deployer.NewFactory().New
 }

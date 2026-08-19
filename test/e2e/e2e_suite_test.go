@@ -1,5 +1,5 @@
 /*
-Copyright 2026 Date Huang.
+Copyright 2026.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,95 +29,61 @@ import (
 )
 
 var (
-	// e2eCluster selects the target cluster flavor and must stay in sync
-	// with the Makefile's E2E_CLUSTER variable. The default (empty or
-	// "kind") builds and `kind load`s the manager image into a throwaway
-	// Kind cluster. Set E2E_CLUSTER=rke2 to target a pre-provisioned
-	// single-node RKE2 cluster (the CI job stands one up and sets
-	// KUBECONFIG itself), in which case the image is imported into the
-	// node's containerd instead, and no Kind cluster is created or torn
-	// down around the run.
-	e2eCluster = os.Getenv("E2E_CLUSTER")
+	// Optional Environment Variables:
+	// - CERT_MANAGER_INSTALL_SKIP=true: Skips CertManager installation during test setup.
+	// These variables are useful if CertManager is already installed, avoiding
+	// re-installation and conflicts.
+	skipCertManagerInstall = os.Getenv("CERT_MANAGER_INSTALL_SKIP") == "true"
+	// isCertManagerAlreadyInstalled will be set true when CertManager CRDs be found on the cluster
+	isCertManagerAlreadyInstalled = false
 
 	// projectImage is the name of the image which will be build and loaded
 	// with the code source changes to be tested.
-	projectImage = "example.com/kezio:v0.0.1"
-
-	// skipCertManagerInstall skips installing cert-manager when the
-	// CERT_MANAGER_INSTALL_SKIP env var is "true". Useful when cert-manager
-	// is already present on the target cluster (e.g. a developer's local
-	// cluster), so the suite does not fight over managing it.
-	skipCertManagerInstall = os.Getenv("CERT_MANAGER_INSTALL_SKIP") == "true"
-
-	// isCertManagerAlreadyInstalled records whether cert-manager's CRDs
-	// were found on the cluster before this suite tried to install it, so
-	// AfterSuite only tears down an installation this suite itself made.
-	isCertManagerAlreadyInstalled = false
-
-	// skipManagerImageBuild skips building and loading/importing
-	// projectImage when CI already staged it (see .github/workflows/main.yaml's
-	// "Import the manager image" step) - it is set only by CI, never by a
-	// local dev run.
-	skipManagerImageBuild = os.Getenv("E2E_SKIP_MANAGER_IMAGE_BUILD") == "true"
+	projectImage = "example.com/scaffold:v0.0.1"
 )
 
 // TestE2E runs the end-to-end (e2e) test suite for the project. These tests execute in an isolated,
 // temporary environment to validate project changes with the purposed to be used in CI jobs.
-// The default setup requires Kind and builds/loads the Manager Docker image locally.
+// The default setup requires Kind, builds/loads the Manager Docker image locally, and installs
+// CertManager.
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
-	_, _ = fmt.Fprintf(GinkgoWriter, "Starting kezio integration test suite\n")
+	_, _ = fmt.Fprintf(GinkgoWriter, "Starting scaffold integration test suite\n")
 	RunSpecs(t, "e2e suite")
 }
 
 var _ = BeforeSuite(func() {
-	// kezio's Image, Machine, and PostHook CRDs each carry a defaulting
-	// and a validating webhook, so the controller-manager cannot start
-	// serving admission requests (and "make deploy" in e2e_test.go's
-	// BeforeAll cannot succeed) until cert-manager has minted the webhook
-	// serving certificate. Install cert-manager first, before anything
-	// that depends on it.
-	if !skipCertManagerInstall {
-		By("checking if cert-manager is already installed")
-		isCertManagerAlreadyInstalled = utils.IsCertManagerCRDsInstalled()
-		if !isCertManagerAlreadyInstalled {
-			By("installing cert-manager")
-			Expect(utils.InstallCertManager()).To(Succeed(), "Failed to install cert-manager")
-		} else {
-			_, _ = fmt.Fprintf(GinkgoWriter, "WARNING: cert-manager is already installed. Skipping installation...\n")
-		}
-	}
-
-	if skipManagerImageBuild {
-		_, _ = fmt.Fprintf(GinkgoWriter, "E2E_SKIP_MANAGER_IMAGE_BUILD=true: reusing the already-imported %s\n", projectImage)
-		return
-	}
-
 	By("building the manager(Operator) image")
 	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", projectImage))
 	_, err := utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the manager(Operator) image")
 
-	// Make the freshly built image available to the target cluster. Kind
-	// loads it directly; a pre-provisioned RKE2 cluster (E2E_CLUSTER=rke2)
-	// imports it into the node's containerd instead, since there is no
-	// Kind cluster to load it into.
-	if e2eCluster == "rke2" {
-		By("importing the manager(Operator) image into the RKE2 node containerd")
-		err = utils.LoadImageToRKE2Containerd(projectImage)
-		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to import the manager(Operator) image into RKE2 containerd")
-	} else {
-		By("loading the manager(Operator) image on Kind")
-		err = utils.LoadImageToKindClusterWithName(projectImage)
-		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager(Operator) image into Kind")
+	// TODO(user): If you want to change the e2e test vendor from Kind, ensure the image is
+	// built and available before running the tests. Also, remove the following block.
+	By("loading the manager(Operator) image on Kind")
+	err = utils.LoadImageToKindClusterWithName(projectImage)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager(Operator) image into Kind")
+
+	// The tests-e2e are intended to run on a temporary cluster that is created and destroyed for testing.
+	// To prevent errors when tests run in environments with CertManager already installed,
+	// we check for its presence before execution.
+	// Setup CertManager before the suite if not skipped and if not already installed
+	if !skipCertManagerInstall {
+		By("checking if cert manager is installed already")
+		isCertManagerAlreadyInstalled = utils.IsCertManagerCRDsInstalled()
+		if !isCertManagerAlreadyInstalled {
+			_, _ = fmt.Fprintf(GinkgoWriter, "Installing CertManager...\n")
+			Expect(utils.InstallCertManager()).To(Succeed(), "Failed to install CertManager")
+		} else {
+			_, _ = fmt.Fprintf(GinkgoWriter, "WARNING: CertManager is already installed. Skipping installation...\n")
+		}
 	}
 })
 
 var _ = AfterSuite(func() {
-	// Teardown cert-manager after the suite if not skipped and if this
-	// suite is the one that installed it.
+	// Teardown CertManager after the suite if not skipped and if it was not already installed
 	if !skipCertManagerInstall && !isCertManagerAlreadyInstalled {
-		By("uninstalling cert-manager")
+		_, _ = fmt.Fprintf(GinkgoWriter, "Uninstalling CertManager...\n")
 		utils.UninstallCertManager()
 	}
 })

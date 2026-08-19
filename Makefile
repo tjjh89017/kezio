@@ -28,8 +28,8 @@ BUNDLE_METADATA_OPTS ?= $(BUNDLE_CHANNELS) $(BUNDLE_DEFAULT_CHANNEL)
 # This variable is used to construct full image tags for bundle and catalog images.
 #
 # For example, running 'make bundle-build bundle-push catalog-build catalog-push' will build and push both
-# kojuro.date/kezio-bundle:$VERSION and kojuro.date/kezio-catalog:$VERSION.
-IMAGE_TAG_BASE ?= ghcr.io/tjjh89017/kezio
+# kojuro.date/scaffold-bundle:$VERSION and kojuro.date/scaffold-catalog:$VERSION.
+IMAGE_TAG_BASE ?= kojuro.date/scaffold
 
 # BUNDLE_IMG defines the image:tag used for the bundle.
 # You can use it as an arg. (E.g make bundle-build BUNDLE_IMG=<some-registry>/<project-name-bundle>:<tag>)
@@ -107,10 +107,6 @@ manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and Cust
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" $(addprefix paths=,$(GEN_PATHS))
 
-.PHONY: proto
-proto: buf protoc-gen-go protoc-gen-go-grpc ## Regenerate the seeder gRPC client stubs from proto/ezio.proto into internal/seeder/ezioapi.
-	PATH="$(LOCALBIN):$$PATH" $(BUF) generate
-
 .PHONY: fmt
 fmt: ## Run go fmt against code.
 	go fmt ./...
@@ -123,20 +119,14 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
-KIND_CLUSTER ?= kezio-test-e2e
-
-# E2E_CLUSTER selects the cluster flavor the e2e suite targets. The default
-# "kind" creates and deletes a throwaway Kind cluster locally. Set
-# E2E_CLUSTER=rke2 to run against a pre-provisioned single-node RKE2 cluster
-# (the RKE2 CI workflow stands one up and sets KUBECONFIG itself): setup and
-# cleanup become no-ops that leave the external cluster intact, and the
-# manager image is imported into the node's containerd instead of `kind
-# load`.
-E2E_CLUSTER ?= kind
+# TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
+# The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
+# CertManager is installed by default; skip with:
+# - CERT_MANAGER_INSTALL_SKIP=true
+KIND_CLUSTER ?= scaffold-test-e2e
 
 .PHONY: setup-test-e2e
-setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist (skipped when E2E_CLUSTER!=kind)
-ifeq ($(E2E_CLUSTER),kind)
+setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 	@command -v $(KIND) >/dev/null 2>&1 || { \
 		echo "Kind is not installed. Please install Kind manually."; \
 		exit 1; \
@@ -148,57 +138,19 @@ ifeq ($(E2E_CLUSTER),kind)
 			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
 			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
 	esac
-else
-	@echo "E2E_CLUSTER=$(E2E_CLUSTER): using pre-provisioned cluster, skipping Kind creation."
-	@$(KUBECTL) cluster-info >/dev/null 2>&1 || { \
-		echo "No reachable cluster: set KUBECONFIG to the pre-provisioned $(E2E_CLUSTER) cluster."; \
-		exit 1; \
-	}
-endif
 
 .PHONY: test-e2e
-test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated Kind environment, or a pre-provisioned cluster via E2E_CLUSTER.
-	KIND_CLUSTER=$(KIND_CLUSTER) E2E_CLUSTER=$(E2E_CLUSTER) go test ./test/e2e/ -v -ginkgo.v -timeout 15m
-	$(MAKE) cleanup-test-e2e E2E_CLUSTER=$(E2E_CLUSTER)
+test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
+	KIND_CLUSTER=$(KIND_CLUSTER) go test ./test/e2e/ -v -ginkgo.v
+	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e
-cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests (skipped when E2E_CLUSTER!=kind)
-ifeq ($(E2E_CLUSTER),kind)
+cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
-else
-	@echo "E2E_CLUSTER=$(E2E_CLUSTER): pre-provisioned cluster left intact."
-endif
 
 .PHONY: lint
-lint: golangci-lint kustomize ## Run golangci-lint linter
+lint: golangci-lint ## Run golangci-lint linter
 	$(GOLANGCI_LINT) run
-	go run ./hack/lint-action-metadata
-	$(MAKE) lint-kustomizations
-
-.PHONY: lint-action-metadata
-lint-action-metadata: ## Reject GitHub-evaluated expressions in composite action.yml metadata fields
-	go run ./hack/lint-action-metadata
-
-# Every kustomization, not only the ones an e2e lane happens to deploy. A
-# broken overlay is otherwise found by whoever applies it - and the ones no
-# lane builds are exactly the ones an operator reaches for first.
-.PHONY: lint-kustomizations
-lint-kustomizations: kustomize ## Build every kustomization under config/
-# config/manifests is skipped: its base, bases/kezio.clusterserviceversion.yaml,
-# is written by `operator-sdk generate kustomize manifests` as part of `make
-# bundle` and is absent from a checked-out tree, so building it here would
-# fail for everyone every time and teach the reader to ignore this target.
-	@rc=0; \
-	for d in $$(find config -name kustomization.yaml -printf '%h\n' | grep -v '^config/manifests$$' | sort); do \
-		if $(KUSTOMIZE) build "$$d" >/dev/null 2>&1; then \
-			echo "  ok   $$d"; \
-		else \
-			echo "  FAIL $$d" >&2; \
-			$(KUSTOMIZE) build "$$d" >/dev/null || true; \
-			rc=1; \
-		fi; \
-	done; \
-	exit $$rc
 
 .PHONY: lint-fix
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
@@ -218,110 +170,6 @@ build: manifests generate fmt vet ## Build manager binary.
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go
 
-.PHONY: build-image-service
-build-image-service: fmt vet ## Build the image-service binary (server side of `kezioctl image upload`).
-	go build -o bin/image-service ./cmd/image-service
-
-.PHONY: run-image-service
-run-image-service: fmt vet ## Run the image-service from your host.
-	go run ./cmd/image-service
-
-# IMAGE_SERVICE_IMG is the image tag for the image-service binary. It is a
-# separate image from IMG (the controller manager) because the two ship
-# and deploy independently; see docker/image-service/Dockerfile and
-# config/image-service.
-IMAGE_SERVICE_IMG ?= $(IMAGE_TAG_BASE)-image-service:latest
-
-.PHONY: docker-build-image-service
-docker-build-image-service: ## Build docker image for image-service.
-	$(CONTAINER_TOOL) build -t ${IMAGE_SERVICE_IMG} -f docker/image-service/Dockerfile .
-
-.PHONY: docker-push-image-service
-docker-push-image-service: ## Push docker image for image-service.
-	$(CONTAINER_TOOL) push ${IMAGE_SERVICE_IMG}
-
-.PHONY: build-ingest
-build-ingest: fmt vet ## Build the kezio-ingest binary (runs inside the Image reconciler's ingest Job).
-	go build -o bin/kezio-ingest ./cmd/ingest
-
-# INGEST_IMG is the image tag for kezio-ingest. It is a separate image
-# from IMG (the controller manager) and IMAGE_SERVICE_IMG because it runs
-# as a Job pod (not a Deployment) and needs partclone/qemu-img/sfdisk/
-# blkid installed; see docker/ingest/Dockerfile.
-INGEST_IMG ?= $(IMAGE_TAG_BASE)-ingest:latest
-
-.PHONY: docker-build-ingest
-docker-build-ingest: ## Build docker image for kezio-ingest.
-	$(CONTAINER_TOOL) build -t ${INGEST_IMG} -f docker/ingest/Dockerfile .
-
-.PHONY: docker-push-ingest
-docker-push-ingest: ## Push docker image for kezio-ingest.
-	$(CONTAINER_TOOL) push ${INGEST_IMG}
-
-# SEEDER_IMG is the image tag for the ezio seeder container
-# (docker/seeder/Dockerfile). It ships no kezio Go binary (see
-# docker/seeder/Dockerfile's header comment), so there is no matching
-# "build-seeder" Go-build target, only the docker one.
-SEEDER_IMG ?= $(IMAGE_TAG_BASE)-seeder:latest
-
-.PHONY: docker-build-seeder
-docker-build-seeder: ## Build docker image for the ezio seeder.
-	$(CONTAINER_TOOL) build -t ${SEEDER_IMG} -f docker/seeder/Dockerfile .
-
-.PHONY: docker-push-seeder
-docker-push-seeder: ## Push docker image for the ezio seeder.
-	$(CONTAINER_TOOL) push ${SEEDER_IMG}
-
-.PHONY: build-bootd
-build-bootd: fmt vet ## Build the kezio-bootd binary (proxyDHCP/PXE/TFTP, see internal/bootd).
-	go build -o bin/bootd ./cmd/bootd
-
-# BOOTD_IMG is the image tag for kezio-bootd. It is a separate image
-# from IMG (the controller manager) because bootd is not part of the
-# manager process - it is its own per-site binary needing privileged UDP
-# ports; see docker/bootd/Dockerfile and config/bootd.
-BOOTD_IMG ?= $(IMAGE_TAG_BASE)-bootd:latest
-
-.PHONY: docker-build-bootd
-docker-build-bootd: ## Build docker image for kezio-bootd.
-	$(CONTAINER_TOOL) build -t ${BOOTD_IMG} -f docker/bootd/Dockerfile .
-
-.PHONY: docker-push-bootd
-docker-push-bootd: ## Push docker image for kezio-bootd.
-	$(CONTAINER_TOOL) push ${BOOTD_IMG}
-
-# BOOT_ARTIFACTS_IMG is the image tag for kezio-boot-artifacts. Unlike
-# every other docker-build-* target above, its build context must
-# already hold dist/live/ (hack/live-image/build.sh's output: vmlinuz,
-# initrd.img, filesystem.squashfs, shimx64.efi, grubx64.efi, kernel.config,
-# manifest.json) - there is no Go binary here to compile, only those
-# files to package; see docker/boot-artifacts/Dockerfile and
-# config/components/boot-artifacts' and config/bootd's fetch-boot-artifacts
-# initContainers, the consumers this image feeds.
-BOOT_ARTIFACTS_IMG ?= $(IMAGE_TAG_BASE)-boot-artifacts:latest
-
-.PHONY: docker-build-boot-artifacts
-docker-build-boot-artifacts: ## Build docker image for kezio-boot-artifacts (dist/live/ must already exist - run hack/live-image/build.sh first).
-	$(CONTAINER_TOOL) build -t ${BOOT_ARTIFACTS_IMG} -f docker/boot-artifacts/Dockerfile .
-
-.PHONY: docker-push-boot-artifacts
-docker-push-boot-artifacts: ## Push docker image for kezio-boot-artifacts.
-	$(CONTAINER_TOOL) push ${BOOT_ARTIFACTS_IMG}
-
-.PHONY: build-kezioctl
-build-kezioctl: fmt vet ## Build the kezioctl binary (the operator-side CLI client; no container image, it runs on an operator's workstation).
-	go build -o bin/kezioctl ./cmd/kezioctl
-
-# build-agent is for local development only (a native-arch build to run
-# internal/agent's own tests or poke at the binary by hand). The live
-# image itself never uses this target - hack/live-image/build.sh cross-
-# compiles cmd/agent to linux/amd64 in its own containerized step
-# (build_agent), the same way it resolves the ezio binary, so the live
-# image build has no dependency on the host's Go toolchain or arch.
-.PHONY: build-agent
-build-agent: fmt vet ## Build the kezio-agent binary for the host's own OS/arch (see hack/live-image/build.sh for the live-image cross-compile).
-	go build -o bin/agent ./cmd/agent
-
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
@@ -333,21 +181,6 @@ docker-build: ## Build docker image with the manager.
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
 
-# IMG_IPMI is the image tag for the opt-in, ipmitool-enabled manager
-# build (docker/manager-ipmi/Dockerfile). It is a separate tag from IMG because
-# most deployments should stay on the smaller, dependency-free default
-# manager image; only use this build if you have ipmitool:// BMCs (see
-# internal/bmc/ipmitool's package doc comment and the README).
-IMG_IPMI ?= $(IMAGE_TAG_BASE)-ipmi:latest
-
-.PHONY: docker-build-manager-ipmi
-docker-build-manager-ipmi: ## Build the opt-in ipmitool-enabled manager image (for ipmitool:// BMCs).
-	$(CONTAINER_TOOL) build -t ${IMG_IPMI} -f docker/manager-ipmi/Dockerfile .
-
-.PHONY: docker-push-manager-ipmi
-docker-push-manager-ipmi: ## Push the opt-in ipmitool-enabled manager image.
-	$(CONTAINER_TOOL) push ${IMG_IPMI}
-
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
 # - be able to use docker buildx. More info: https://docs.docker.com/build/buildx/
@@ -357,11 +190,13 @@ docker-push-manager-ipmi: ## Push the opt-in ipmitool-enabled manager image.
 PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
 .PHONY: docker-buildx
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
-	# Dockerfile already declares --platform=$$BUILDPLATFORM on its builder stage, so build it directly
-	- $(CONTAINER_TOOL) buildx create --name kezio-builder
-	$(CONTAINER_TOOL) buildx use kezio-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile .
-	- $(CONTAINER_TOOL) buildx rm kezio-builder
+	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
+	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
+	- $(CONTAINER_TOOL) buildx create --name scaffold-builder
+	$(CONTAINER_TOOL) buildx use scaffold-builder
+	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
+	- $(CONTAINER_TOOL) buildx rm scaffold-builder
+	rm Dockerfile.cross
 
 .PHONY: build-installer
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
@@ -392,30 +227,6 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	$(KUSTOMIZE) build config/default | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
-# deploy-image-path applies config/e2e-image-path (config/default plus
-# config/image-service, see that overlay's README-style comment) and then
-# wires INGEST_IMAGE onto the already-deployed controller-manager with
-# `kubectl set env`, since that value is a per-run image tag kustomize's
-# static YAML has no way to express (see
-# config/e2e-image-path/kustomization.yaml). Used only by the e2e
-# image-path stage (test/e2e's "Image ingest and seeding" Context); run
-# `deploy` first so config/default's CRDs/RBAC/webhook/manager exist to
-# add these resources on top of.
-#
-# No seeder is deployed or wired here: this stage never creates a
-# Machine, and seeding is demand-driven by a Machine deploying the Image
-# (see internal/controller/seeder_deployment.go) - the deploy-path e2e
-# lane is where a real per-Image seeder Deployment gets exercised.
-.PHONY: deploy-image-path
-deploy-image-path: manifests kustomize ## Deploy image-service and wire real ingest onto the controller-manager (e2e image-path stage only).
-	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
-	cd config/image-service && $(KUSTOMIZE) edit set image image-service=${IMAGE_SERVICE_IMG}
-	$(KUSTOMIZE) build config/e2e-image-path | $(KUBECTL) apply -f -
-	$(KUBECTL) -n kezio-system set env deployment/kezio-controller-manager \
-		INGEST_IMAGE=${INGEST_IMG} \
-		INGEST_STAGING_PVC=kezio-image-service-staging \
-		INGEST_SERVICE_ACCOUNT=kezio-ingest
-
 ##@ Dependencies
 
 ## Location to install dependencies to
@@ -430,27 +241,15 @@ KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
-BUF ?= $(LOCALBIN)/buf
-PROTOC_GEN_GO ?= $(LOCALBIN)/protoc-gen-go
-PROTOC_GEN_GO_GRPC ?= $(LOCALBIN)/protoc-gen-go-grpc
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.6.0
 CONTROLLER_TOOLS_VERSION ?= v0.18.0
-# BUF_VERSION and the two protoc-gen-go* versions are only used by `make
-# proto` (proto/ezio.proto -> internal/seeder/ezioapi). buf bundles its own
-# protobuf compiler (no system protoc needed); protoc-gen-go and
-# protoc-gen-go-grpc are pinned close to the google.golang.org/protobuf and
-# google.golang.org/grpc versions already in go.mod so generated code
-# matches what the module actually vendors.
-BUF_VERSION ?= v1.47.2
-PROTOC_GEN_GO_VERSION ?= v1.36.5
-PROTOC_GEN_GO_GRPC_VERSION ?= v1.5.1
 #ENVTEST_VERSION is the version of controller-runtime release branch to fetch the envtest setup script (i.e. release-0.20)
 ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller-runtime | awk -F'[v.]' '{printf "release-%d.%d", $$2, $$3}')
 #ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
-GOLANGCI_LINT_VERSION ?= v2.12.2
+GOLANGCI_LINT_VERSION ?= v2.1.0
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
@@ -479,21 +278,6 @@ $(ENVTEST): $(LOCALBIN)
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
-
-.PHONY: buf
-buf: $(BUF) ## Download buf locally if necessary.
-$(BUF): $(LOCALBIN)
-	$(call go-install-tool,$(BUF),github.com/bufbuild/buf/cmd/buf,$(BUF_VERSION))
-
-.PHONY: protoc-gen-go
-protoc-gen-go: $(PROTOC_GEN_GO) ## Download protoc-gen-go locally if necessary.
-$(PROTOC_GEN_GO): $(LOCALBIN)
-	$(call go-install-tool,$(PROTOC_GEN_GO),google.golang.org/protobuf/cmd/protoc-gen-go,$(PROTOC_GEN_GO_VERSION))
-
-.PHONY: protoc-gen-go-grpc
-protoc-gen-go-grpc: $(PROTOC_GEN_GO_GRPC) ## Download protoc-gen-go-grpc locally if necessary.
-$(PROTOC_GEN_GO_GRPC): $(LOCALBIN)
-	$(call go-install-tool,$(PROTOC_GEN_GO_GRPC),google.golang.org/grpc/cmd/protoc-gen-go-grpc,$(PROTOC_GEN_GO_GRPC_VERSION))
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary
