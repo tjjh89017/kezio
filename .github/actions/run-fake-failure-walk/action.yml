@@ -167,8 +167,11 @@ runs:
           exit 1
         fi
 
-        error_count="$(echo "${machine_json}" | jq -r '.status.errorCount')"
-        if [ -z "${error_count}" ] || [ "${error_count}" -lt 1 ]; then
+        # status.errorCount is json:",omitempty": the API server prunes it
+        # from the object entirely when it is 0 (jq reports that as null),
+        # rather than storing an explicit 0 - normalize before comparing.
+        error_count="$(echo "${machine_json}" | jq -r '.status.errorCount // 0')"
+        if [ "${error_count}" -lt 1 ]; then
           echo "machine/${MACHINE_NAME} status.errorCount is \"${error_count}\", want >= 1" >&2
           exit 1
         fi
@@ -195,7 +198,9 @@ runs:
           exit 1
         fi
 
-        error_count="$(echo "${machine_json}" | jq -r '.status.errorCount')"
+        # See the note in the previous step: a reset-to-0 errorCount is
+        # pruned from the object (SSA + omitempty), not stored as 0.
+        error_count="$(echo "${machine_json}" | jq -r '.status.errorCount // 0')"
         if [ "${error_count}" != "0" ]; then
           echo "machine/${MACHINE_NAME} reached state Provisioned but status.errorCount is \"${error_count}\", not 0" >&2
           exit 1
