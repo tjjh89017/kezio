@@ -149,10 +149,15 @@ jobs:
 
       - name: Run a fake-deployer Machine walk
         uses: ./.github/actions/run-fake-deploy-walk
+        with:
+          namespace: "default"
 
       - name: Collect diagnostics
         if: failure()
         uses: ./.github/actions/collect-diagnostics
+        with:
+          namespace: "scaffold-system"
+          workload-namespace: "default"
 
       - name: Upload diagnostics
         if: failure()

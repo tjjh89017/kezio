@@ -10,9 +10,17 @@ description: >-
 
 inputs:
   namespace:
-    description: 'Namespace to collect the controller-manager logs and events from.'
+    description: 'Namespace to collect the controller-manager pod/logs from.'
     required: false
     default: "scaffold-system"
+  workload-namespace:
+    description: >-
+      Namespace to collect the Machine/DeployRun/MachineHardware CRs and
+      events from. Machines are namespaced independently of the
+      controller-manager's own namespace, so this defaults to "default" to
+      match run-fake-deploy-walk's default rather than reusing `namespace`.
+    required: false
+    default: "default"
   output-path:
     description: 'Directory the collected files are written into (created if missing).'
     required: false
@@ -29,17 +37,19 @@ runs:
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
+        WORKLOAD_NAMESPACE: ${{ inputs.workload-namespace }}
         OUTPUT_PATH: ${{ inputs.output-path }}
       run: |
         set +e
         mkdir -p "${OUTPUT_PATH}"
 
         echo "===== Machine CRs ====="
-        kubectl get machines.kezio.kojuro.date -n "${NAMESPACE}" -o yaml >"${OUTPUT_PATH}/machines.yaml" 2>&1
+        kubectl get machines.kezio.kojuro.date -n "${WORKLOAD_NAMESPACE}" -o yaml >"${OUTPUT_PATH}/machines.yaml" 2>&1
         echo "===== DeployRun CRs ====="
-        kubectl get deployruns.kezio.kojuro.date -n "${NAMESPACE}" -o yaml >"${OUTPUT_PATH}/deployruns.yaml" 2>&1
+        kubectl get deployruns.kezio.kojuro.date -n "${WORKLOAD_NAMESPACE}" -o yaml \
+          >"${OUTPUT_PATH}/deployruns.yaml" 2>&1
         echo "===== MachineHardware CRs ====="
-        kubectl get machinehardwares.kezio.kojuro.date -n "${NAMESPACE}" -o yaml \
+        kubectl get machinehardwares.kezio.kojuro.date -n "${WORKLOAD_NAMESPACE}" -o yaml \
           >"${OUTPUT_PATH}/machinehardwares.yaml" 2>&1
 
         echo "===== pods ====="
@@ -56,6 +66,6 @@ runs:
           >"${OUTPUT_PATH}/manager-logs-previous.txt" 2>&1
 
         echo "===== events ====="
-        kubectl get events -n "${NAMESPACE}" --sort-by=.lastTimestamp >"${OUTPUT_PATH}/events.txt" 2>&1
+        kubectl get events -n "${WORKLOAD_NAMESPACE}" --sort-by=.lastTimestamp >"${OUTPUT_PATH}/events.txt" 2>&1
 
         exit 0
