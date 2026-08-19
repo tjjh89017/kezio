@@ -610,6 +610,10 @@ var _ = Describe("Machine Controller", func() {
 			delayedRequeueInterval = time.Millisecond
 			DeferCleanup(func() { delayedRequeueInterval = origInterval })
 
+			origJitter := jitter
+			jitter = func(d time.Duration) time.Duration { return d }
+			DeferCleanup(func() { jitter = origJitter })
+
 			var calls int
 			delayingDeployer := &deployer.FakeDeployer{
 				Client: k8sClient,
@@ -1421,6 +1425,10 @@ var _ = Describe("Machine Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, resource)).To(Succeed()) })
+
+			origJitter := jitter
+			jitter = func(d time.Duration) time.Duration { return d }
+			DeferCleanup(func() { jitter = origJitter })
 
 			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}}
 
@@ -2671,6 +2679,56 @@ var _ = Describe("Machine Controller", func() {
 			Expect(result).To(Equal(reconcile.Result{Requeue: true}))
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+		})
+	})
+
+	Context("Server-Side Apply field ownership", func() {
+		ctx := context.Background()
+
+		It("stamps status writes with the controller's field owner, with no ownership conflict across repeated reconciles", func() {
+			machineName := fmt.Sprintf("ssa-owner-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:70",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, resource)).To(Succeed()) })
+
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}}
+
+			By("reconciling several status writes")
+			for i := 0; i < 10; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+
+			var statusManagers []string
+			for _, mf := range machine.ManagedFields {
+				if mf.Subresource == "status" {
+					statusManagers = append(statusManagers, mf.Manager)
+				}
+			}
+			Expect(statusManagers).NotTo(BeEmpty(), "expected at least one status managedFields entry")
+			for _, manager := range statusManagers {
+				Expect(manager).To(Equal(machineControllerFieldOwner))
+			}
+
+			By("reconciling again must not hit a Server-Side Apply ownership conflict")
+			for i := 0; i < 5; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+			}
 		})
 	})
 })

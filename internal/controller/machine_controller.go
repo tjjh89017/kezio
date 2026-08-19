@@ -18,8 +18,10 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"reflect"
 	"time"
 
@@ -30,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -64,6 +67,18 @@ var delayedRequeueInterval = 15 * time.Second
 // package variable, not a const, so a test can shorten it.
 var credentialsSecretAbsentRequeueInterval = 10 * time.Second
 
+// jitter adds 0-25% to a success-path requeue interval (continuing, busy,
+// delayed - a deployer step that ran without failing): the same fixed
+// interval on every Machine would otherwise line them up into a lockstep
+// reconcile storm. It is a package variable, not a plain function, so a
+// test can replace it with the identity function and keep exact interval
+// assertions. The failed-outcome backoff (failedRequeueInterval) is
+// deliberately not jittered here - it is error backoff, not a
+// success-path requeue.
+var jitter = func(d time.Duration) time.Duration {
+	return d + time.Duration(rand.Float64()*0.25*float64(d))
+}
+
 // deleteStageMaxErrorCount is the delete walk's per-stage give-up
 // threshold: a stage gives up once its errorCount exceeds this value,
 // advancing to the next stage instead of retrying forever against a dead
@@ -79,6 +94,12 @@ var machineDeleteStageGiveUpTotal = promauto.With(metrics.Registry).NewCounterVe
 	Name: "kezio_machine_delete_stage_giveups_total",
 	Help: "Total number of Machine delete-walk stages that exceeded their retry limit and advanced anyway.",
 }, []string{"stage"})
+
+// machineControllerFieldOwner is the Server-Side Apply field manager identity
+// for every Machine status write this reconciler makes. Kept as a stable
+// string (not derived from a binary name or hostname) so managedFields stays
+// readable and consistent across restarts and replicas.
+const machineControllerFieldOwner = "kezio-machine-controller"
 
 // MachineReconciler reconciles a Machine object
 type MachineReconciler struct {
@@ -194,9 +215,9 @@ func (r *MachineReconciler) runDeleteStage(ctx context.Context, machine *keziov1
 	case deployer.Complete:
 		return r.advanceDeleteStage(ctx, machine, nextState)
 	case deployer.Continuing:
-		return ctrl.Result{RequeueAfter: continuingRequeueInterval}, nil
+		return ctrl.Result{RequeueAfter: jitter(continuingRequeueInterval)}, nil
 	case deployer.Busy:
-		requeueAfter := defaultBusyRequeueInterval
+		requeueAfter := jitter(defaultBusyRequeueInterval)
 		if result.RequeueAfter > 0 {
 			requeueAfter = result.RequeueAfter
 		}
@@ -218,20 +239,24 @@ func (r *MachineReconciler) runDeleteStage(ctx context.Context, machine *keziov1
 // a Complete outcome would - a dead stage must never block the machine's
 // removal.
 func (r *MachineReconciler) recordDeleteStageFailure(ctx context.Context, machine *keziov1alpha2.Machine, result deployer.Result, stageName, nextState string) (ctrl.Result, error) {
-	patch := client.MergeFrom(machine.DeepCopy())
 	applyFailure(machine, result.ErrorType, result.ErrorMessage)
 	giveUp := machine.Status.ErrorCount > deleteStageMaxErrorCount
 	stampLastUpdated(machine)
-	if err := r.Status().Patch(ctx, machine, patch); err != nil {
+
+	var onSuccess []func()
+	if giveUp {
+		onSuccess = append(onSuccess, func() {
+			logf.FromContext(ctx).Error(errors.New("delete stage exceeded its retry limit"),
+				"giving up on Machine delete stage and advancing", "machine", machine.Name, "stage", stageName, "errorCount", machine.Status.ErrorCount)
+			machineDeleteStageGiveUpTotal.WithLabelValues(stageName).Inc()
+		})
+	}
+	if err := r.applyMachineStatus(ctx, machine, onSuccess...); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: recording delete stage %q failure: %w", machine.Name, stageName, err)
 	}
 	if !giveUp {
 		return ctrl.Result{RequeueAfter: failedRequeueInterval}, nil
 	}
-
-	logf.FromContext(ctx).Error(errors.New("delete stage exceeded its retry limit"),
-		"giving up on Machine delete stage and advancing", "machine", machine.Name, "stage", stageName, "errorCount", machine.Status.ErrorCount)
-	machineDeleteStageGiveUpTotal.WithLabelValues(stageName).Inc()
 	return r.advanceDeleteStage(ctx, machine, nextState)
 }
 
@@ -248,12 +273,11 @@ func (r *MachineReconciler) advanceDeleteStage(ctx context.Context, machine *kez
 		return r.releaseMachine(ctx, machine)
 	}
 
-	patch := client.MergeFrom(machine.DeepCopy())
 	machine.Status.State = nextState
 	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusOK
 	machine.Status.ErrorCount = 0
 	stampLastUpdated(machine)
-	if err := r.Status().Patch(ctx, machine, patch); err != nil {
+	if err := r.applyMachineStatus(ctx, machine); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: advancing delete walk to %q: %w", machine.Name, nextState, err)
 	}
 	return ctrl.Result{Requeue: true}, nil
@@ -313,21 +337,75 @@ func (r *MachineReconciler) onChange(ctx context.Context, machine *keziov1alpha2
 	}
 }
 
+// machineStatusApplyBody is the Server-Side Apply request body
+// applyMachineStatus sends: identity plus status, deliberately with no Spec
+// field at all. MachineSpec has several non-omitempty-eligible required
+// fields (non-pointer structs, and string fields with no omitempty), so
+// marshaling any *keziov1alpha2.Machine value - even one built with a
+// zero-valued Spec - puts a populated "spec" object in the request body.
+// Sent to the status subresource, the API server validates that body
+// against the whole resource's schema, and a zero-valued required Spec
+// fails that validation. A distinct type with no Spec field sidesteps this
+// rather than fighting it field by field.
+type machineStatusApplyBody struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	Status            keziov1alpha2.MachineStatus `json:"status"`
+}
+
+// applyMachineStatus writes machine.Status through Server-Side Apply under
+// machineControllerFieldOwner, and - only once the write succeeds - runs
+// each of onSuccess in order. onSuccess is where a status write's event or
+// metric emission belongs: a callback describes a state that is true only
+// once the write has actually landed, so a failed write must drop every
+// queued callback along with the error.
+//
+// The apply body carries machine.Status wholesale (not just the fields this
+// call intends to change): MachineStatus has two non-pointer struct fields
+// (GoodCredentials, TriedCredentials) that encoding/json's omitempty cannot
+// elide, so a genuinely field-scoped Apply body is not reachable through the
+// generated Go types without an ApplyConfiguration or a hand-built
+// unstructured object. Sending the full, current status (never a
+// mostly-zero placeholder) keeps every field's last real value intact
+// across writes; it does mean this owns every populated status field on
+// every write, not a disjoint subset. That is safe today because the
+// Machine controller is the only writer of Machine.status - a future writer
+// of disjoint fields needs a narrower patch shape than this one.
+func (r *MachineReconciler) applyMachineStatus(ctx context.Context, machine *keziov1alpha2.Machine, onSuccess ...func()) error {
+	body := machineStatusApplyBody{
+		TypeMeta:   metav1.TypeMeta{APIVersion: keziov1alpha2.GroupVersion.String(), Kind: "Machine"},
+		ObjectMeta: metav1.ObjectMeta{Name: machine.Name, Namespace: machine.Namespace},
+		Status:     machine.Status,
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("machine %q: encoding status apply body: %w", machine.Name, err)
+	}
+	patch := client.RawPatch(types.ApplyPatchType, data)
+	if err := r.Status().Patch(ctx, machine, patch, client.FieldOwner(machineControllerFieldOwner), client.ForceOwnership); err != nil {
+		return err
+	}
+	for _, cb := range onSuccess {
+		cb()
+	}
+	return nil
+}
+
 // setState patches machine.status.state and clears any error, leaving every
 // other status field untouched. It also clears MachineConditionStatusLossHold
 // if present: any forward move out of the empty state means the hold (if any)
 // has already been resolved by reconcileEmptyStatus/reconcileStatusLossHold.
 // The status write itself does not re-trigger the watch (the Machine update
 // predicate ignores status-only changes), so this requeues explicitly to run
-// the next walk step.
-func (r *MachineReconciler) setState(ctx context.Context, machine *keziov1alpha2.Machine, state string) (ctrl.Result, error) {
-	patch := client.MergeFrom(machine.DeepCopy())
+// the next walk step. onSuccess callbacks (an event, typically) run only
+// after the write succeeds - see applyMachineStatus.
+func (r *MachineReconciler) setState(ctx context.Context, machine *keziov1alpha2.Machine, state string, onSuccess ...func()) (ctrl.Result, error) {
 	machine.Status.State = state
 	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusOK
 	machine.Status.ErrorCount = 0
 	meta.RemoveStatusCondition(&machine.Status.Conditions, keziov1alpha2.MachineConditionStatusLossHold)
 	stampLastUpdated(machine)
-	if err := r.Status().Patch(ctx, machine, patch); err != nil {
+	if err := r.applyMachineStatus(ctx, machine, onSuccess...); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: setting status.state to %q: %w", machine.Name, state, err)
 	}
 	return ctrl.Result{Requeue: true}, nil
@@ -392,7 +470,6 @@ func statusLossHeld(machine *keziov1alpha2.Machine) bool {
 // confirm annotation (or the spec) does, and that arrives through the
 // normal watch.
 func (r *MachineReconciler) enterStatusLossHold(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
-	patch := client.MergeFrom(machine.DeepCopy())
 	meta.SetStatusCondition(&machine.Status.Conditions, metav1.Condition{
 		Type:    keziov1alpha2.MachineConditionStatusLossHold,
 		Status:  metav1.ConditionTrue,
@@ -400,11 +477,13 @@ func (r *MachineReconciler) enterStatusLossHold(ctx context.Context, machine *ke
 		Message: "status was never recorded but spec carries deploy intent and DeployRuns already exist for this machine; holding until " + keziov1alpha2.MachineAnnotationConfirmStatusLoss + " is set",
 	})
 	stampLastUpdated(machine)
-	if err := r.Status().Patch(ctx, machine, patch); err != nil {
+	onSuccess := func() {
+		r.Recorder.Eventf(machine, corev1.EventTypeWarning, "StatusLossHold",
+			"status was never recorded but spec carries deploy intent and DeployRuns already exist for this machine; holding until the %q annotation is set", keziov1alpha2.MachineAnnotationConfirmStatusLoss)
+	}
+	if err := r.applyMachineStatus(ctx, machine, onSuccess); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: entering status-loss hold: %w", machine.Name, err)
 	}
-	r.Recorder.Eventf(machine, corev1.EventTypeWarning, "StatusLossHold",
-		"status was never recorded but spec carries deploy intent and DeployRuns already exist for this machine; holding until the %q annotation is set", keziov1alpha2.MachineAnnotationConfirmStatusLoss)
 	return ctrl.Result{}, nil
 }
 
@@ -422,9 +501,10 @@ func (r *MachineReconciler) reconcileStatusLossHold(ctx context.Context, machine
 	if err := r.consumeConfirmStatusLossAnnotation(ctx, machine); err != nil {
 		return ctrl.Result{}, err
 	}
-	r.Recorder.Event(machine, corev1.EventTypeNormal, "StatusLossHoldCleared",
-		"confirm-status-loss annotation accepted: resuming the normal state walk from Enrolling")
-	return r.setState(ctx, machine, keziov1alpha2.MachineStateEnrolling)
+	return r.setState(ctx, machine, keziov1alpha2.MachineStateEnrolling, func() {
+		r.Recorder.Event(machine, corev1.EventTypeNormal, "StatusLossHoldCleared",
+			"confirm-status-loss annotation accepted: resuming the normal state walk from Enrolling")
+	})
 }
 
 // consumeConfirmStatusLossAnnotation removes
@@ -509,9 +589,10 @@ func (r *MachineReconciler) reconcileReInspect(ctx context.Context, machine *kez
 	if err := r.deleteMachineHardware(ctx, machine); err != nil {
 		return ctrl.Result{}, err
 	}
-	r.Recorder.Event(machine, corev1.EventTypeNormal, "ReInspectAccepted",
-		"re-inspect annotation accepted: MachineHardware deleted, machine moving to Inspecting")
-	return r.setState(ctx, machine, keziov1alpha2.MachineStateInspecting)
+	return r.setState(ctx, machine, keziov1alpha2.MachineStateInspecting, func() {
+		r.Recorder.Event(machine, corev1.EventTypeNormal, "ReInspectAccepted",
+			"re-inspect annotation accepted: MachineHardware deleted, machine moving to Inspecting")
+	})
 }
 
 // consumeReInspectAnnotation removes MachineAnnotationReInspect from
@@ -565,13 +646,12 @@ func (r *MachineReconciler) startProvisioningRun(ctx context.Context, machine *k
 		return ctrl.Result{}, fmt.Errorf("machine %q: creating DeployRun: %w", machine.Name, err)
 	}
 
-	patch := client.MergeFrom(machine.DeepCopy())
 	machine.Status.State = keziov1alpha2.MachineStateProvisioning
 	machine.Status.CurrentRunRef = &keziov1alpha2.NameRef{Name: run.Name}
 	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusOK
 	machine.Status.ErrorCount = 0
 	stampLastUpdated(machine)
-	if err := r.Status().Patch(ctx, machine, patch); err != nil {
+	if err := r.applyMachineStatus(ctx, machine); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: setting status.state to Provisioning: %w", machine.Name, err)
 	}
 	return ctrl.Result{Requeue: true}, nil
@@ -614,13 +694,12 @@ func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *
 		return r.applyNonCompleteOutcome(ctx, machine, result)
 	}
 
-	patch := client.MergeFrom(machine.DeepCopy())
 	machine.Status.State = keziov1alpha2.MachineStateProvisioned
 	machine.Status.LastSuccessfulRunRef = &keziov1alpha2.NameRef{Name: run.Name}
 	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusOK
 	machine.Status.ErrorCount = 0
 	stampLastUpdated(machine)
-	if err := r.Status().Patch(ctx, machine, patch); err != nil {
+	if err := r.applyMachineStatus(ctx, machine); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: setting status.state to Provisioned: %w", machine.Name, err)
 	}
 	// The status write above does not itself re-trigger the watch, so this
@@ -664,10 +743,9 @@ func (r *MachineReconciler) reconcileDetached(ctx context.Context, machine *kezi
 	if machine.Status.OperationalStatus == keziov1alpha2.MachineOperationalStatusDetached {
 		return ctrl.Result{}, nil
 	}
-	patch := client.MergeFrom(machine.DeepCopy())
 	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusDetached
 	stampLastUpdated(machine)
-	if err := r.Status().Patch(ctx, machine, patch); err != nil {
+	if err := r.applyMachineStatus(ctx, machine); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: recording detached status: %w", machine.Name, err)
 	}
 	return ctrl.Result{}, nil
@@ -680,10 +758,9 @@ func (r *MachineReconciler) reconcileDetached(ctx context.Context, machine *kezi
 // that reached this reconcile already happened; nothing further will
 // re-trigger the watch, so this requeues explicitly to resume the walk.
 func (r *MachineReconciler) clearDetached(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
-	patch := client.MergeFrom(machine.DeepCopy())
 	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusOK
 	stampLastUpdated(machine)
-	if err := r.Status().Patch(ctx, machine, patch); err != nil {
+	if err := r.applyMachineStatus(ctx, machine); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: clearing detached status: %w", machine.Name, err)
 	}
 	return ctrl.Result{Requeue: true}, nil
@@ -715,9 +792,9 @@ func (r *MachineReconciler) reconcileReboot(ctx context.Context, machine *keziov
 func (r *MachineReconciler) applyNonCompleteOutcome(ctx context.Context, machine *keziov1alpha2.Machine, result deployer.Result) (ctrl.Result, error) {
 	switch result.Outcome {
 	case deployer.Continuing:
-		return r.clearDelayed(ctx, machine, ctrl.Result{RequeueAfter: continuingRequeueInterval})
+		return r.clearDelayed(ctx, machine, ctrl.Result{RequeueAfter: jitter(continuingRequeueInterval)})
 	case deployer.Busy:
-		requeueAfter := defaultBusyRequeueInterval
+		requeueAfter := jitter(defaultBusyRequeueInterval)
 		if result.RequeueAfter > 0 {
 			requeueAfter = result.RequeueAfter
 		}
@@ -742,13 +819,12 @@ func (r *MachineReconciler) recordDelayed(ctx context.Context, machine *keziov1a
 // backoff/reset accounting. The caller always requeues after requeueAfter,
 // a fixed delay independent of any error backoff.
 func (r *MachineReconciler) markDelayed(ctx context.Context, machine *keziov1alpha2.Machine, requeueAfter time.Duration) (ctrl.Result, error) {
-	patch := client.MergeFrom(machine.DeepCopy())
 	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusDelayed
 	stampLastUpdated(machine)
-	if err := r.Status().Patch(ctx, machine, patch); err != nil {
+	if err := r.applyMachineStatus(ctx, machine); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: recording delayed status: %w", machine.Name, err)
 	}
-	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+	return ctrl.Result{RequeueAfter: jitter(requeueAfter)}, nil
 }
 
 // clearDelayed clears a previously recorded delayed status on any outcome
@@ -760,20 +836,18 @@ func (r *MachineReconciler) clearDelayed(ctx context.Context, machine *keziov1al
 	if machine.Status.OperationalStatus != keziov1alpha2.MachineOperationalStatusDelayed {
 		return result, nil
 	}
-	patch := client.MergeFrom(machine.DeepCopy())
 	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusOK
 	stampLastUpdated(machine)
-	if err := r.Status().Patch(ctx, machine, patch); err != nil {
+	if err := r.applyMachineStatus(ctx, machine); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: clearing delayed status: %w", machine.Name, err)
 	}
 	return result, nil
 }
 
 func (r *MachineReconciler) recordFailure(ctx context.Context, machine *keziov1alpha2.Machine, result deployer.Result) (ctrl.Result, error) {
-	patch := client.MergeFrom(machine.DeepCopy())
 	applyFailure(machine, result.ErrorType, result.ErrorMessage)
 	stampLastUpdated(machine)
-	if err := r.Status().Patch(ctx, machine, patch); err != nil {
+	if err := r.applyMachineStatus(ctx, machine); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: recording deployer failure: %w", machine.Name, err)
 	}
 	return ctrl.Result{RequeueAfter: failedRequeueInterval}, nil
@@ -798,14 +872,13 @@ func applyFailure(machine *keziov1alpha2.Machine, errorType keziov1alpha2.Machin
 // path, and currentRunRef is cleared in the same patch so the next
 // Provisioning reconcile's nil-ref branch starts a fresh run.
 func (r *MachineReconciler) recordCurrentRunDeleted(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
-	patch := client.MergeFrom(machine.DeepCopy())
 	// MachineErrorTypeRestart: the run this errorType would ask to resume no
 	// longer exists, so the only meaningful next step is starting over, not
 	// resuming in-progress step state.
 	applyFailure(machine, keziov1alpha2.MachineErrorTypeRestart, fmt.Sprintf("current DeployRun %q no longer exists", machine.Status.CurrentRunRef.Name))
 	machine.Status.CurrentRunRef = nil
 	stampLastUpdated(machine)
-	if err := r.Status().Patch(ctx, machine, patch); err != nil {
+	if err := r.applyMachineStatus(ctx, machine); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: recording current-run-deleted failure: %w", machine.Name, err)
 	}
 	return ctrl.Result{RequeueAfter: failedRequeueInterval}, nil
@@ -1036,6 +1109,16 @@ func (r *MachineReconciler) releaseCredentialsSecretFinalizer(ctx context.Contex
 // and claimed for this attempt. A goodCredentials resourceVersion mismatch
 // against the current Secret forces re-registration: goodCredentials is
 // cleared here, in the same patch, without touching status.state.
+//
+// This is the one status write that stays on the pre-SSA merge patch
+// (client.MergeFrom) rather than applyMachineStatus: goodStale clears
+// GoodCredentials to its zero value, and GoodCredentials/TriedCredentials
+// are non-pointer struct fields, so a structural schema without an
+// explicit "nullable: true" rejects the Server-Side Apply merge that
+// results - the API server reported the merged field as invalid type
+// "null" once every subfield was removed. Making these fields pointers
+// would let SSA clear them cleanly, but that is a schema change outside
+// this function's scope.
 func (r *MachineReconciler) recordTriedCredentials(ctx context.Context, machine *keziov1alpha2.Machine, secret *corev1.Secret) error {
 	observed := keziov1alpha2.MachineCredentialsStatus{
 		SecretRef:       &keziov1alpha2.SecretReference{Name: secret.Name},
@@ -1053,7 +1136,11 @@ func (r *MachineReconciler) recordTriedCredentials(ctx context.Context, machine 
 		machine.Status.GoodCredentials = keziov1alpha2.MachineCredentialsStatus{}
 	}
 	stampLastUpdated(machine)
-	if err := r.Status().Patch(ctx, machine, patch); err != nil {
+	// FieldOwner is honored on a merge patch too, even though this is not a
+	// Server-Side Apply request: every Machine status write attributes to
+	// the same manager identity regardless of which of the two write paths
+	// made it.
+	if err := r.Status().Patch(ctx, machine, patch, client.FieldOwner(machineControllerFieldOwner)); err != nil {
 		return fmt.Errorf("machine %q: recording tried BMC credentials: %w", machine.Name, err)
 	}
 	return nil
@@ -1072,10 +1159,9 @@ func (r *MachineReconciler) recordGoodCredentials(ctx context.Context, machine *
 		return nil
 	}
 
-	patch := client.MergeFrom(machine.DeepCopy())
 	machine.Status.GoodCredentials = machine.Status.TriedCredentials
 	stampLastUpdated(machine)
-	if err := r.Status().Patch(ctx, machine, patch); err != nil {
+	if err := r.applyMachineStatus(ctx, machine); err != nil {
 		return fmt.Errorf("machine %q: recording good BMC credentials: %w", machine.Name, err)
 	}
 	return nil
