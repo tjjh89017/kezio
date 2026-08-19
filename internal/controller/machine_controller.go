@@ -26,8 +26,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 	"github.com/tjjh89017/kezio/internal/deployer"
@@ -151,6 +154,14 @@ func (r *MachineReconciler) reconcileIdle(ctx context.Context, machine *keziov1a
 		return ctrl.Result{}, nil
 	}
 
+	return r.startProvisioningRun(ctx, machine)
+}
+
+// startProvisioningRun creates a fresh DeployRun for machine and records it
+// as the current run, moving (or keeping) status.state at Provisioning.
+// Used both to enter Provisioning from an idle state and to recover from a
+// current run that disappeared mid-Provisioning.
+func (r *MachineReconciler) startProvisioningRun(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
 	run, err := r.createDeployRun(ctx, machine)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: creating DeployRun: %w", machine.Name, err)
@@ -169,11 +180,18 @@ func (r *MachineReconciler) reconcileIdle(ctx context.Context, machine *keziov1a
 }
 
 func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+	// A nil currentRunRef while still Provisioning is not an invariant
+	// violation: recordCurrentRunDeleted clears it after the run
+	// disappears out from under an in-progress deployment, and this is
+	// where the retry-in-place picks it back up with a fresh run.
 	if machine.Status.CurrentRunRef == nil {
-		return ctrl.Result{}, fmt.Errorf("machine %q: status.state is Provisioning but status.currentRunRef is unset", machine.Name)
+		return r.startProvisioningRun(ctx, machine)
 	}
 
 	run, err := r.getRun(ctx, machine, machine.Status.CurrentRunRef)
+	if apierrors.IsNotFound(err) {
+		return r.recordCurrentRunDeleted(ctx, machine)
+	}
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: getting DeployRun %q: %w", machine.Name, machine.Status.CurrentRunRef.Name, err)
 	}
@@ -279,13 +297,42 @@ func (r *MachineReconciler) clearDelayed(ctx context.Context, machine *keziov1al
 
 func (r *MachineReconciler) recordFailure(ctx context.Context, machine *keziov1alpha2.Machine, result deployer.Result) (ctrl.Result, error) {
 	patch := client.MergeFrom(machine.DeepCopy())
-	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusError
-	machine.Status.ErrorType = result.ErrorType
-	machine.Status.ErrorMessage = result.ErrorMessage
-	machine.Status.ErrorCount++
+	applyFailure(machine, result.ErrorType, result.ErrorMessage)
 	stampLastUpdated(machine)
 	if err := r.Status().Patch(ctx, machine, patch); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: recording deployer failure: %w", machine.Name, err)
+	}
+	return ctrl.Result{RequeueAfter: failedRequeueInterval}, nil
+}
+
+// applyFailure applies the two-axis error semantics shared by every failure
+// path: state is left untouched, only operationalStatus/errorType/
+// errorMessage/errorCount change.
+func applyFailure(machine *keziov1alpha2.Machine, errorType keziov1alpha2.MachineErrorType, errorMessage string) {
+	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusError
+	machine.Status.ErrorType = errorType
+	machine.Status.ErrorMessage = errorMessage
+	machine.Status.ErrorCount++
+}
+
+// recordCurrentRunDeleted handles the current DeployRun having disappeared
+// out from under a Provisioning machine - GC or an operator deleting it
+// mid-run. The abort transport that would let the controller interrupt an
+// in-progress agent session ships later; until then this is reported
+// through the same recordFailure semantics as any other phase failure
+// (state unchanged, operationalStatus=error) rather than a parallel error
+// path, and currentRunRef is cleared in the same patch so the next
+// Provisioning reconcile's nil-ref branch starts a fresh run.
+func (r *MachineReconciler) recordCurrentRunDeleted(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+	patch := client.MergeFrom(machine.DeepCopy())
+	// MachineErrorTypeRestart: the run this errorType would ask to resume no
+	// longer exists, so the only meaningful next step is starting over, not
+	// resuming in-progress step state.
+	applyFailure(machine, keziov1alpha2.MachineErrorTypeRestart, fmt.Sprintf("current DeployRun %q no longer exists", machine.Status.CurrentRunRef.Name))
+	machine.Status.CurrentRunRef = nil
+	stampLastUpdated(machine)
+	if err := r.Status().Patch(ctx, machine, patch); err != nil {
+		return ctrl.Result{}, fmt.Errorf("machine %q: recording current-run-deleted failure: %w", machine.Name, err)
 	}
 	return ctrl.Result{RequeueAfter: failedRequeueInterval}, nil
 }
@@ -394,10 +441,23 @@ func stampLastUpdated(machine *keziov1alpha2.Machine) {
 	machine.Status.LastUpdated = &now
 }
 
+// deployRunDeletionOnly restricts the Owns(DeployRun) watch to deletion
+// events: the reconciler only needs to notice a currentRunRef target
+// disappearing. Progress-only DeployRun status updates must not fan out
+// into Machine reconciles (the same reconcile-hygiene discipline as the
+// Machine update predicate).
+var deployRunDeletionOnly = predicate.Funcs{
+	CreateFunc:  func(event.CreateEvent) bool { return false },
+	UpdateFunc:  func(event.UpdateEvent) bool { return false },
+	DeleteFunc:  func(event.DeleteEvent) bool { return true },
+	GenericFunc: func(event.GenericEvent) bool { return false },
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *MachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&keziov1alpha2.Machine{}).
+		Owns(&keziov1alpha2.DeployRun{}, builder.WithPredicates(deployRunDeletionOnly)).
 		Named("machine").
 		Complete(r)
 }
