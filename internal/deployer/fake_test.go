@@ -19,11 +19,16 @@ package deployer
 import (
 	"context"
 	"errors"
+	"go/parser"
+	"go/token"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
+	apimachineryruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -33,7 +38,7 @@ import (
 
 func newFakeClient(t *testing.T) client.Client {
 	t.Helper()
-	scheme := runtime.NewScheme()
+	scheme := apimachineryruntime.NewScheme()
 	if err := keziov1alpha2.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
@@ -244,5 +249,50 @@ func TestFakeDeployerProvisionFuncOverrideCanScriptEveryOutcome(t *testing.T) {
 				t.Fatalf("Provision() result = %+v, want %+v", result, tc.result)
 			}
 		})
+	}
+}
+
+// TestFakeGoSourceDoesNotImportBMC guards the doc comment on FakeDeployer:
+// this stage's fast lane must never dial a BMC, and this parses fake.go's
+// own import list rather than trusting the comment to stay accurate.
+func TestFakeGoSourceDoesNotImportBMC(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller(0) failed to report this test file's path")
+	}
+	fakeGoPath := filepath.Join(filepath.Dir(thisFile), "fake.go")
+
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, fakeGoPath, nil, parser.ImportsOnly)
+	if err != nil {
+		t.Fatalf("parsing %s: %v", fakeGoPath, err)
+	}
+	for _, imp := range f.Imports {
+		path := strings.Trim(imp.Path.Value, `"`)
+		if strings.Contains(path, "/internal/bmc") {
+			t.Fatalf("fake.go imports %q; the fake deployer must never dial a BMC", path)
+		}
+	}
+}
+
+// TestFakeDeployerInspectIgnoresUnresolvedReferences proves the fake path
+// skips reference resolution: subnetRef, postHookRefs, and imageRef name
+// objects of kinds that do not exist yet, and Inspect must complete without
+// ever trying to read them.
+func TestFakeDeployerInspectIgnoresUnresolvedReferences(t *testing.T) {
+	c := newFakeClient(t)
+	machine := newTestMachine()
+	machine.Spec.SubnetRef = keziov1alpha2.NameRef{Name: "no-such-subnet"}
+	machine.Spec.PostHookRefs = []keziov1alpha2.NameRef{{Name: "no-such-hook"}}
+	imageRef := keziov1alpha2.NameRef{Name: "no-such-image"}
+	machine.Spec.ImageRef = &imageRef
+	f := &FakeDeployer{Client: c}
+
+	result, err := f.Inspect(context.Background(), machine)
+	if err != nil {
+		t.Fatalf("Inspect() error = %v, want nil: the fake deployer must not resolve subnetRef/postHookRefs/imageRef", err)
+	}
+	if result.Outcome != Complete {
+		t.Fatalf("Inspect() outcome = %v, want Complete", result.Outcome)
 	}
 }

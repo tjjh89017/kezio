@@ -19,6 +19,12 @@ package controller
 import (
 	"context"
 	"fmt"
+	"go/parser"
+	"go/token"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -30,6 +36,30 @@ import (
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 	"github.com/tjjh89017/kezio/internal/deployer"
 )
+
+// TestMachineControllerGoSourceDoesNotImportBMC guards the fast lane's stub
+// boundary: the Machine reconciler must never dial a BMC in this stage, and
+// this parses machine_controller.go's own import list rather than trusting
+// a comment to stay accurate.
+func TestMachineControllerGoSourceDoesNotImportBMC(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller(0) failed to report this test file's path")
+	}
+	sourcePath := filepath.Join(filepath.Dir(thisFile), "machine_controller.go")
+
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, sourcePath, nil, parser.ImportsOnly)
+	if err != nil {
+		t.Fatalf("parsing %s: %v", sourcePath, err)
+	}
+	for _, imp := range f.Imports {
+		path := strings.Trim(imp.Path.Value, `"`)
+		if strings.Contains(path, "/internal/bmc") {
+			t.Fatalf("machine_controller.go imports %q; this stage's reconciler must never dial a BMC", path)
+		}
+	}
+}
 
 var _ = Describe("Machine Controller", func() {
 	Context("When reconciling a resource", func() {
@@ -189,6 +219,58 @@ var _ = Describe("Machine Controller", func() {
 			secondRunName := types.NamespacedName{Name: machine.Status.LastSuccessfulRunRef.Name, Namespace: "default"}
 			Expect(k8sClient.Get(ctx, secondRunName, &secondRun)).To(Succeed())
 			Expect(secondRun.Spec.ImageRef.Name).To(Equal("other-image"))
+		})
+	})
+
+	Context("When spec references name kinds that do not exist yet", func() {
+		ctx := context.Background()
+
+		It("still walks Enrolling to Provisioned, proving subnetRef/postHookRefs/imageRef are never resolved", func() {
+			machineName := fmt.Sprintf("unresolved-refs-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			imageRef := keziov1alpha2.NameRef{Name: "no-such-image"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:04",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "no-such-subnet"},
+					PostHookRefs:   []keziov1alpha2.NameRef{{Name: "no-such-hook"}},
+					ImageRef:       &imageRef,
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			})
+
+			reconciler := &MachineReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Deployer: &deployer.FakeDeployer{Client: k8sClient},
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			for range 50 {
+				result, rerr := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(rerr).NotTo(HaveOccurred())
+				if result.RequeueAfter == 0 {
+					var m keziov1alpha2.Machine
+					Expect(k8sClient.Get(ctx, name, &m)).To(Succeed())
+					if m.Status.State == keziov1alpha2.MachineStateProvisioned {
+						break
+					}
+				}
+			}
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioned))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
 		})
 	})
 
