@@ -22,6 +22,7 @@ import (
 	"reflect"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -63,6 +64,7 @@ type MachineReconciler struct {
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines/finalizers,verbs=update
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machinehardwares,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -133,9 +135,17 @@ func (r *MachineReconciler) setState(ctx context.Context, machine *keziov1alpha2
 }
 
 func (r *MachineReconciler) reconcileInspecting(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+	if err := r.recordTriedCredentials(ctx, machine); err != nil {
+		return ctrl.Result{}, err
+	}
 	result, err := r.Deployer.Inspect(ctx, machine, restartOnFailure(machine))
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if result.Outcome != deployer.Failed {
+		if err := r.recordGoodCredentials(ctx, machine); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 	if result.Outcome == deployer.Complete {
 		return r.setState(ctx, machine, keziov1alpha2.MachineStateAvailable)
@@ -196,9 +206,17 @@ func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *
 		return ctrl.Result{}, fmt.Errorf("machine %q: getting DeployRun %q: %w", machine.Name, machine.Status.CurrentRunRef.Name, err)
 	}
 
+	if err := r.recordTriedCredentials(ctx, machine); err != nil {
+		return ctrl.Result{}, err
+	}
 	result, err := r.Deployer.Provision(ctx, machine, run, restartOnFailure(machine))
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if result.Outcome != deployer.Failed {
+		if err := r.recordGoodCredentials(ctx, machine); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 	if result.Outcome != deployer.Complete {
 		return r.applyNonCompleteOutcome(ctx, machine, result)
@@ -434,6 +452,99 @@ func nameRefEqual(a, b *keziov1alpha2.NameRef) bool {
 		return a == b
 	}
 	return a.Name == b.Name && a.Namespace == b.Namespace
+}
+
+// recordTriedCredentials fetches the BMC credentials Secret named by
+// spec.bmc.credentialsSecretRef and records its name and resourceVersion as
+// status.triedCredentials, before an attempt (Inspect/Provision) that would
+// use it. A missing Secret is not an error at this stage - the full
+// secret-lifecycle rules (label, owner reference, requeue behavior) are a
+// separate concern - so this simply skips credential tracking for the
+// attempt. A goodCredentials resourceVersion mismatch against the current
+// Secret forces re-registration: goodCredentials is cleared here, in the
+// same patch, without touching status.state.
+func (r *MachineReconciler) recordTriedCredentials(ctx context.Context, machine *keziov1alpha2.Machine) error {
+	secret, err := r.getCredentialsSecret(ctx, machine)
+	if err != nil {
+		return err
+	}
+	if secret == nil {
+		return nil
+	}
+
+	observed := keziov1alpha2.MachineCredentialsStatus{
+		SecretRef:       &keziov1alpha2.SecretReference{Name: secret.Name},
+		ResourceVersion: secret.ResourceVersion,
+	}
+	goodStale := machine.Status.GoodCredentials.SecretRef != nil &&
+		!credentialsStatusEqual(machine.Status.GoodCredentials, observed)
+	if credentialsStatusEqual(machine.Status.TriedCredentials, observed) && !goodStale {
+		return nil
+	}
+
+	patch := client.MergeFrom(machine.DeepCopy())
+	machine.Status.TriedCredentials = observed
+	if goodStale {
+		machine.Status.GoodCredentials = keziov1alpha2.MachineCredentialsStatus{}
+	}
+	stampLastUpdated(machine)
+	if err := r.Status().Patch(ctx, machine, patch); err != nil {
+		return fmt.Errorf("machine %q: recording tried BMC credentials: %w", machine.Name, err)
+	}
+	return nil
+}
+
+// recordGoodCredentials copies status.triedCredentials into
+// status.goodCredentials once a Deployer call returns without a transient
+// error and without Outcome == Failed - the modeled stand-in for "the BMC
+// answered" in a codebase whose fake path never dials a real BMC. A no-op
+// when no Secret was resolved for the attempt (recordTriedCredentials found
+// none) or when goodCredentials is already up to date.
+func (r *MachineReconciler) recordGoodCredentials(ctx context.Context, machine *keziov1alpha2.Machine) error {
+	if machine.Status.TriedCredentials.SecretRef == nil {
+		return nil
+	}
+	if credentialsStatusEqual(machine.Status.GoodCredentials, machine.Status.TriedCredentials) {
+		return nil
+	}
+
+	patch := client.MergeFrom(machine.DeepCopy())
+	machine.Status.GoodCredentials = machine.Status.TriedCredentials
+	stampLastUpdated(machine)
+	if err := r.Status().Patch(ctx, machine, patch); err != nil {
+		return fmt.Errorf("machine %q: recording good BMC credentials: %w", machine.Name, err)
+	}
+	return nil
+}
+
+// getCredentialsSecret fetches spec.bmc.credentialsSecretRef in machine's
+// own namespace. A NotFound Secret returns (nil, nil): the caller treats
+// "secret absent" as nothing to track yet, not an error.
+func (r *MachineReconciler) getCredentialsSecret(ctx context.Context, machine *keziov1alpha2.Machine) (*corev1.Secret, error) {
+	var secret corev1.Secret
+	key := client.ObjectKey{Namespace: machine.Namespace, Name: machine.Spec.BMC.CredentialsSecretRef.Name}
+	if err := r.Get(ctx, key, &secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("machine %q: getting BMC credentials secret %q: %w", machine.Name, key.Name, err)
+	}
+	return &secret, nil
+}
+
+// credentialsStatusEqual compares two MachineCredentialsStatus values by
+// value, since SecretRef is a pointer and the zero value (no observation
+// yet) must compare equal to itself.
+func credentialsStatusEqual(a, b keziov1alpha2.MachineCredentialsStatus) bool {
+	if a.ResourceVersion != b.ResourceVersion {
+		return false
+	}
+	switch {
+	case a.SecretRef == nil || b.SecretRef == nil:
+		return a.SecretRef == b.SecretRef
+	default:
+		return a.SecretRef.Name == b.SecretRef.Name
+	}
 }
 
 func stampLastUpdated(machine *keziov1alpha2.Machine) {

@@ -35,6 +35,20 @@ func TestCredentialsFromSecretData(t *testing.T) {
 	}
 }
 
+func TestCredentialsFromSecretDataTrimsTrailingWhitespace(t *testing.T) {
+	got, err := CredentialsFromSecretData(map[string][]byte{
+		"username": []byte("admin\n"),
+		"password": []byte("hunter2 \t\n"),
+	})
+	if err != nil {
+		t.Fatalf("CredentialsFromSecretData() error = %v", err)
+	}
+	want := Credentials{Username: "admin", Password: "hunter2"}
+	if got != want {
+		t.Errorf("CredentialsFromSecretData() = %+v, want %+v", got, want)
+	}
+}
+
 func TestCredentialsFromSecretDataMissingKeys(t *testing.T) {
 	tests := []struct {
 		name          string

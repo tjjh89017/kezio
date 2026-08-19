@@ -16,7 +16,10 @@ limitations under the License.
 
 package bmc
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Keys match the builtin "kubernetes.io/basic-auth" Secret type, so an
 // operator can reuse that type verbatim for a Machine's BMC credentials
@@ -33,15 +36,20 @@ const (
 // contents - failing loudly here rather than connecting to the BMC with an
 // empty username or password.
 func CredentialsFromSecretData(data map[string][]byte) (Credentials, error) {
-	username, password := data[SecretKeyUsername], data[SecretKeyPassword]
+	// Trimmed here, the one seam a caller goes through to turn Secret bytes
+	// into a Credentials value: a trailing newline from how the value was
+	// authored (e.g. `kubectl create secret ... --from-file`) must never
+	// reach a BMC login attempt.
+	username := strings.TrimRight(string(data[SecretKeyUsername]), " \t\r\n")
+	password := strings.TrimRight(string(data[SecretKeyPassword]), " \t\r\n")
 	switch {
-	case len(username) == 0 && len(password) == 0:
+	case username == "" && password == "":
 		return Credentials{}, fmt.Errorf("bmc: secret data missing %q and %q keys", SecretKeyUsername, SecretKeyPassword)
-	case len(username) == 0:
+	case username == "":
 		return Credentials{}, fmt.Errorf("bmc: secret data missing %q key", SecretKeyUsername)
-	case len(password) == 0:
+	case password == "":
 		return Credentials{}, fmt.Errorf("bmc: secret data missing %q key", SecretKeyPassword)
 	}
 
-	return Credentials{Username: string(username), Password: string(password)}, nil
+	return Credentials{Username: username, Password: password}, nil
 }
