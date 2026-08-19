@@ -135,10 +135,17 @@ runs:
         TOKEN: ${{ steps.token.outputs.token }}
       run: |
         set -euo pipefail
-        count="$(kubectl exec -n "${NAMESPACE}" watch-churn-sampler -- curl -sk \
+        raw="$(kubectl exec -n "${NAMESPACE}" watch-churn-sampler -- curl -skf \
           -H "Authorization: Bearer ${TOKEN}" \
-          "https://${METRICS_SERVICE_NAME}.${MANAGER_NAMESPACE}.svc:8443/metrics" \
-          | awk '/^controller_runtime_reconcile_total\{.*controller="machine"/ {sum+=$NF} END {print sum+0}')"
+          "https://${METRICS_SERVICE_NAME}.${MANAGER_NAMESPACE}.svc:8443/metrics")"
+        count="$(awk '/^controller_runtime_reconcile_total\{.*controller="machine"/ {sum+=$NF} END {print sum+0}' <<<"${raw}")"
+        if ! [[ "${count}" =~ ^[0-9]+$ ]] || [ "${count}" -eq 0 ]; then
+          echo "Machine reconcile count before the DeployRun updates is '${count}', not a positive integer;" \
+            "a settled Provisioned machine must already have a nonzero reconcile count, so the scrape" \
+            "target is wrong even though the HTTP request succeeded. Raw scrape output:" >&2
+          echo "${raw}" >&2
+          exit 1
+        fi
         echo "Machine reconcile count before the DeployRun updates: ${count}"
         echo "count=${count}" >>"${GITHUB_OUTPUT}"
 
@@ -174,7 +181,7 @@ runs:
         UPDATE_COUNT: ${{ inputs.update-count }}
       run: |
         set -euo pipefail
-        after_count="$(kubectl exec -n "${NAMESPACE}" watch-churn-sampler -- curl -sk \
+        after_count="$(kubectl exec -n "${NAMESPACE}" watch-churn-sampler -- curl -skf \
           -H "Authorization: Bearer ${TOKEN}" \
           "https://${METRICS_SERVICE_NAME}.${MANAGER_NAMESPACE}.svc:8443/metrics" \
           | awk '/^controller_runtime_reconcile_total\{.*controller="machine"/ {sum+=$NF} END {print sum+0}')"
