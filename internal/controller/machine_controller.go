@@ -355,12 +355,20 @@ func (r *MachineReconciler) reconcileInspecting(ctx context.Context, machine *ke
 }
 
 // reInspectAcceptable reports whether machine's current status.state honors
-// a re-inspect annotation right now. This stage implements only the
-// unambiguous case: Available. Extending this predicate (for example,
-// Provisioned with an empty deploy payload) is how a later stage widens
-// acceptance - the call site in reconcileReInspect does not change.
+// a re-inspect annotation right now. Available always accepts. Provisioned
+// accepts only when the deploy payload is empty - this is the only
+// Provisioned -> Available path, and it is what lets a released machine
+// re-enter service. A Provisioned machine with a set deploy payload always
+// refuses, and every other state refuses.
 func reInspectAcceptable(machine *keziov1alpha2.Machine) bool {
-	return machine.Status.State == keziov1alpha2.MachineStateAvailable
+	switch machine.Status.State {
+	case keziov1alpha2.MachineStateAvailable:
+		return true
+	case keziov1alpha2.MachineStateProvisioned:
+		return isEmptyDeployPayload(machine)
+	default:
+		return false
+	}
 }
 
 // reconcileReInspect handles the re-inspect annotation: consume-then-delete,

@@ -35,6 +35,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
@@ -205,6 +206,43 @@ func TestShouldProvision(t *testing.T) {
 				t.Errorf("shouldProvision() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestReInspectAcceptable(t *testing.T) {
+	image := keziov1alpha2.NameRef{Name: "test-image"}
+	emptyPayload := keziov1alpha2.MachineSpec{}
+	setPayload := keziov1alpha2.MachineSpec{ImageRef: &image}
+
+	states := []string{
+		"",
+		keziov1alpha2.MachineStateEnrolling,
+		keziov1alpha2.MachineStateInspecting,
+		keziov1alpha2.MachineStateAvailable,
+		keziov1alpha2.MachineStateProvisioning,
+		keziov1alpha2.MachineStateProvisioned,
+	}
+
+	for _, state := range states {
+		for _, tc := range []struct {
+			payloadName string
+			spec        keziov1alpha2.MachineSpec
+		}{
+			{"empty payload", emptyPayload},
+			{"set payload", setPayload},
+		} {
+			want := state == keziov1alpha2.MachineStateAvailable ||
+				(state == keziov1alpha2.MachineStateProvisioned && tc.payloadName == "empty payload")
+			t.Run(fmt.Sprintf("state=%q/%s", state, tc.payloadName), func(t *testing.T) {
+				machine := &keziov1alpha2.Machine{
+					Spec:   tc.spec,
+					Status: keziov1alpha2.MachineStatus{State: state},
+				}
+				if got := reInspectAcceptable(machine); got != want {
+					t.Errorf("reInspectAcceptable() = %v, want %v", got, want)
+				}
+			})
+		}
 	}
 }
 
@@ -2097,6 +2135,43 @@ var _ = Describe("Machine Controller", func() {
 			return name
 		}
 
+		newMachineWithImage := func(machineName, bootMAC string, imageRef keziov1alpha2.NameRef) types.NamespacedName {
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      machineName,
+					Namespace: "default",
+				},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: bootMAC,
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					ImageRef:       &imageRef,
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			})
+			return name
+		}
+
+		countRunsForMachine := func(machineName string) int {
+			GinkgoHelper()
+			var runs keziov1alpha2.DeployRunList
+			Expect(k8sClient.List(ctx, &runs, client.InNamespace("default"))).To(Succeed())
+			count := 0
+			for _, run := range runs.Items {
+				if run.Spec.MachineRef.Name == machineName {
+					count++
+				}
+			}
+			return count
+		}
+
 		It("in Available: deletes and recreates MachineHardware and emits an accepted event", func() {
 			machineName := fmt.Sprintf("reinspect-available-%d", GinkgoRandomSeed())
 			name := newBareMachine(machineName, nil)
@@ -2159,6 +2234,99 @@ var _ = Describe("Machine Controller", func() {
 
 			By("the walk still completes normally once the annotation is gone")
 			reconcileUntilState(reconciler, name, keziov1alpha2.MachineStateAvailable)
+		})
+
+		It("in Provisioned with an empty deploy payload: accepts, walks Inspecting to Available, and stays there", func() {
+			machineName := fmt.Sprintf("reinspect-provisioned-empty-%d", GinkgoRandomSeed())
+			imageRef := keziov1alpha2.NameRef{Name: "reinspect-image"}
+			name := newMachineWithImage(machineName, "aa:bb:cc:dd:ee:50", imageRef)
+
+			recorder := record.NewFakeRecorder(10)
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}, Recorder: recorder}
+
+			By("walking to Provisioned with a set deploy payload")
+			reconcileUntilState(reconciler, name, keziov1alpha2.MachineStateProvisioned)
+			Expect(countRunsForMachine(machineName)).To(Equal(1))
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			firstRunRef := machine.Status.LastSuccessfulRunRef.Name
+			Expect(machine.Status.CurrentRunRef.Name).To(Equal(firstRunRef))
+
+			var firstHW keziov1alpha2.MachineHardware
+			Expect(k8sClient.Get(ctx, name, &firstHW)).To(Succeed())
+
+			By("clearing the deploy payload and setting the re-inspect annotation")
+			machine.Spec.ImageRef = nil
+			machine.Annotations = map[string]string{keziov1alpha2.MachineAnnotationReInspect: ""}
+			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
+
+			By("reconciling once: the annotation is consumed and the machine moves to Inspecting")
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Annotations).NotTo(HaveKey(keziov1alpha2.MachineAnnotationReInspect))
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
+			Expect(<-recorder.Events).To(ContainSubstring("ReInspectAccepted"))
+			Expect(errors.IsNotFound(k8sClient.Get(ctx, name, &keziov1alpha2.MachineHardware{}))).To(BeTrue())
+
+			By("walking back to Available recreates MachineHardware with a new UID")
+			reconcileUntilState(reconciler, name, keziov1alpha2.MachineStateAvailable)
+
+			var secondHW keziov1alpha2.MachineHardware
+			Expect(k8sClient.Get(ctx, name, &secondHW)).To(Succeed())
+			Expect(secondHW.UID).NotTo(Equal(firstHW.UID), "re-inspection must recreate MachineHardware, not patch it")
+
+			By("the machine stays in Available: an empty payload never re-triggers provisioning")
+			for i := 0; i < 5; i++ {
+				result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result.RequeueAfter).To(BeZero())
+			}
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable))
+			Expect(countRunsForMachine(machineName)).To(Equal(1), "no spurious DeployRun on the way back to Available")
+
+			By("run history survives the re-inspection untouched")
+			Expect(machine.Status.LastSuccessfulRunRef.Name).To(Equal(firstRunRef))
+			Expect(machine.Status.CurrentRunRef.Name).To(Equal(firstRunRef))
+		})
+
+		It("in Provisioned with a set deploy payload: refuses re-inspection and leaves state and MachineHardware untouched", func() {
+			machineName := fmt.Sprintf("reinspect-provisioned-set-%d", GinkgoRandomSeed())
+			imageRef := keziov1alpha2.NameRef{Name: "reinspect-image"}
+			name := newMachineWithImage(machineName, "aa:bb:cc:dd:ee:51", imageRef)
+
+			recorder := record.NewFakeRecorder(10)
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}, Recorder: recorder}
+
+			By("walking to Provisioned with a set deploy payload")
+			reconcileUntilState(reconciler, name, keziov1alpha2.MachineStateProvisioned)
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			firstRunRef := machine.Status.LastSuccessfulRunRef.Name
+
+			var firstHW keziov1alpha2.MachineHardware
+			Expect(k8sClient.Get(ctx, name, &firstHW)).To(Succeed())
+
+			By("setting the re-inspect annotation while the deploy payload stays set")
+			machine.Annotations = map[string]string{keziov1alpha2.MachineAnnotationReInspect: ""}
+			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
+
+			By("reconciling once: the annotation is consumed and refused")
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Annotations).NotTo(HaveKey(keziov1alpha2.MachineAnnotationReInspect))
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioned))
+			Expect(<-recorder.Events).To(ContainSubstring("ReInspectRefused"))
+
+			var secondHW keziov1alpha2.MachineHardware
+			Expect(k8sClient.Get(ctx, name, &secondHW)).To(Succeed())
+			Expect(secondHW.UID).To(Equal(firstHW.UID), "a refused re-inspect must never touch MachineHardware")
+			Expect(machine.Status.LastSuccessfulRunRef.Name).To(Equal(firstRunRef))
+			Expect(countRunsForMachine(machineName)).To(Equal(1))
 		})
 	})
 
