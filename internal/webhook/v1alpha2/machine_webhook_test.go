@@ -20,9 +20,13 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
-	// TODO (user): Add any additional imports if needed
+	"github.com/tjjh89017/kezio/internal/bmc"
 )
+
+const unregisteredSchemeAddress = "unregistered-scheme://10.0.0.1"
 
 var _ = Describe("Machine Webhook", func() {
 	var (
@@ -32,40 +36,90 @@ var _ = Describe("Machine Webhook", func() {
 	)
 
 	BeforeEach(func() {
-		obj = &keziov1alpha2.Machine{}
-		oldObj = &keziov1alpha2.Machine{}
+		obj = &keziov1alpha2.Machine{
+			Spec: keziov1alpha2.MachineSpec{
+				BMC: keziov1alpha2.MachineBMC{
+					Address:              "webhooktest://10.0.0.1",
+					CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+				},
+				BootMACAddress: "aa:bb:cc:dd:ee:01",
+				SubnetRef:      keziov1alpha2.NameRef{Name: "subnet"},
+			},
+		}
+		oldObj = obj.DeepCopy()
 		validator = MachineCustomValidator{}
 		Expect(validator).NotTo(BeNil(), "Expected validator to be initialized")
 		Expect(oldObj).NotTo(BeNil(), "Expected oldObj to be initialized")
 		Expect(obj).NotTo(BeNil(), "Expected obj to be initialized")
-		// TODO (user): Add any setup logic common to all tests
+
+		if !bmc.IsSchemeRegistered("webhooktest") {
+			bmc.Register("webhooktest")
+		}
 	})
 
-	AfterEach(func() {
-		// TODO (user): Add any teardown logic common to all tests
+	Context("spec.bmc.address scheme", func() {
+		It("admits an address whose scheme is registered", func() {
+			Expect(validator.ValidateCreate(ctx, obj)).Error().NotTo(HaveOccurred())
+		})
+
+		It("denies an address with no scheme", func() {
+			obj.Spec.BMC.Address = "10.0.0.1"
+			Expect(validator.ValidateCreate(ctx, obj)).Error().To(HaveOccurred())
+		})
+
+		It("denies an address whose scheme has no registered driver", func() {
+			obj.Spec.BMC.Address = unregisteredSchemeAddress
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("unregistered-scheme"))
+		})
+
+		It("denies an unregistered scheme without echoing embedded credentials", func() {
+			obj.Spec.BMC.Address = "unregistered-scheme://user:s3cr3t@10.0.0.1"
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).NotTo(ContainSubstring("s3cr3t"))
+		})
+
+		It("checks the scheme again on update", func() {
+			obj.Spec.BMC.Address = unregisteredSchemeAddress
+			Expect(validator.ValidateUpdate(ctx, oldObj, obj)).Error().To(HaveOccurred())
+		})
+
+		It("skips validation for an update racing object deletion", func() {
+			obj.Spec.BMC.Address = unregisteredSchemeAddress
+			now := metav1.Now()
+			obj.DeletionTimestamp = &now
+			obj.Finalizers = []string{"kezio.kojuro.date/test"}
+			Expect(validator.ValidateUpdate(ctx, oldObj, obj)).Error().NotTo(HaveOccurred())
+		})
 	})
 
-	Context("When creating or updating Machine under Validating Webhook", func() {
-		// TODO (user): Add logic for validating webhooks
-		// Example:
-		// It("Should deny creation if a required field is missing", func() {
-		//     By("simulating an invalid creation scenario")
-		//     obj.SomeRequiredField = ""
-		//     Expect(validator.ValidateCreate(ctx, obj)).Error().To(HaveOccurred())
-		// })
-		//
-		// It("Should admit creation if all required fields are present", func() {
-		//     By("simulating an invalid creation scenario")
-		//     obj.SomeRequiredField = "valid_value"
-		//     Expect(validator.ValidateCreate(ctx, obj)).To(BeNil())
-		// })
-		//
-		// It("Should validate updates correctly", func() {
-		//     By("simulating a valid update scenario")
-		//     oldObj.SomeRequiredField = "updated_value"
-		//     obj.SomeRequiredField = "updated_value"
-		//     Expect(validator.ValidateUpdate(ctx, oldObj, obj)).To(BeNil())
-		// })
-	})
+	Context("annotation \"kezio.kojuro.date/inspect-disable\"", func() {
+		It("admits a Machine with the annotation and a boot MAC address", func() {
+			obj.Annotations = map[string]string{AnnotationInspectDisable: "true"}
+			Expect(validator.ValidateCreate(ctx, obj)).Error().NotTo(HaveOccurred())
+		})
 
+		It("denies the annotation set to a value other than \"true\"", func() {
+			obj.Annotations = map[string]string{AnnotationInspectDisable: "yes"}
+			Expect(validator.ValidateCreate(ctx, obj)).Error().To(HaveOccurred())
+		})
+
+		It("denies the annotation without a boot MAC address", func() {
+			obj.Annotations = map[string]string{AnnotationInspectDisable: "true"}
+			obj.Spec.BootMACAddress = ""
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("bootMACAddress"))
+		})
+
+		It("admits a missing boot MAC address when the annotation is absent", func() {
+			// api/v1alpha2 requires bootMACAddress unconditionally at the CRD
+			// schema level today; this direct validator call bypasses that
+			// schema layer to exercise the webhook's own conditional check.
+			obj.Spec.BootMACAddress = ""
+			Expect(validator.ValidateCreate(ctx, obj)).Error().NotTo(HaveOccurred())
+		})
+	})
 })

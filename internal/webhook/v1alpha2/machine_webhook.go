@@ -19,6 +19,8 @@ package v1alpha2
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -27,7 +29,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	"github.com/tjjh89017/kezio/internal/bmc"
 )
+
+// AnnotationInspectDisable, set to exactly "true" on a Machine, skips
+// hardware inspection: the controller trusts spec.bootMACAddress instead
+// of discovering it from an inspection boot, so that field cannot be
+// absent when this annotation is set.
+const AnnotationInspectDisable = "kezio.kojuro.date/inspect-disable"
 
 // nolint:unused
 // log is for logging in this package.
@@ -66,9 +75,7 @@ func (v *MachineCustomValidator) ValidateCreate(_ context.Context, obj runtime.O
 	}
 	machinelog.Info("Validation for Machine upon creation", "name", machine.GetName())
 
-	// TODO(user): fill in your validation logic upon object creation.
-
-	return nil, nil
+	return nil, validateMachine(machine)
 }
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type Machine.
@@ -79,9 +86,13 @@ func (v *MachineCustomValidator) ValidateUpdate(_ context.Context, oldObj, newOb
 	}
 	machinelog.Info("Validation for Machine upon update", "name", machine.GetName())
 
-	// TODO(user): fill in your validation logic upon object update.
-
-	return nil, nil
+	// Skip validation while the object is being deleted: finalizer removal
+	// completes as an update, and rejecting it would deadlock deletion of
+	// a Machine that predates a stricter rule.
+	if !machine.GetDeletionTimestamp().IsZero() {
+		return nil, nil
+	}
+	return nil, validateMachine(machine)
 }
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type Machine.
@@ -92,7 +103,66 @@ func (v *MachineCustomValidator) ValidateDelete(ctx context.Context, obj runtime
 	}
 	machinelog.Info("Validation for Machine upon deletion", "name", machine.GetName())
 
-	// TODO(user): fill in your validation logic upon object deletion.
-
 	return nil, nil
+}
+
+// validateMachine runs every admission-time check for a Machine spec that
+// this codebase can decide without reaching into the controller's
+// hardware-inventory matching.
+func validateMachine(machine *keziov1alpha2.Machine) error {
+	if err := validateMachineBMC(machine); err != nil {
+		return err
+	}
+	return validateInspectDisable(machine)
+}
+
+// validateMachineBMC rejects a spec.bmc.address whose scheme has no
+// driver registered in internal/bmc's registry: such an address is
+// certain to fail at connect time, so it is rejected before it reaches a
+// deploy attempt. Once url.Parse succeeds, every error reports address
+// through (*url.URL).Redacted(): a Machine author who embeds credentials
+// in the address (for example "redfish://user:pass@host/...") must never
+// see them echoed back in an admission rejection message.
+func validateMachineBMC(machine *keziov1alpha2.Machine) error {
+	address := machine.Spec.BMC.Address
+
+	parsed, err := url.Parse(address)
+	if err != nil {
+		return fmt.Errorf("spec.bmc.address is not a valid URL: %w", err)
+	}
+	if parsed.Scheme == "" {
+		return fmt.Errorf("spec.bmc.address %q has no scheme; a BMC address must be a URL like \"redfish://host/...\" or \"ipmi://host\"", parsed.Redacted())
+	}
+	if !bmc.IsSchemeRegistered(parsed.Scheme) {
+		known := bmc.RegisteredSchemes()
+		if len(known) == 0 {
+			return fmt.Errorf(
+				"spec.bmc.address %q has scheme %q, which has no registered BMC driver (no driver is registered in this binary)",
+				parsed.Redacted(), parsed.Scheme,
+			)
+		}
+		return fmt.Errorf(
+			"spec.bmc.address %q has scheme %q, which has no registered BMC driver (known: %s)",
+			parsed.Redacted(), parsed.Scheme, strings.Join(known, ", "),
+		)
+	}
+	return nil
+}
+
+// validateInspectDisable rejects an AnnotationInspectDisable value that is
+// not exactly "true", and rejects an empty spec.bootMACAddress once the
+// annotation disables inspection: the controller then trusts this field
+// instead of discovering it, so it cannot be absent.
+func validateInspectDisable(machine *keziov1alpha2.Machine) error {
+	value, ok := machine.Annotations[AnnotationInspectDisable]
+	if !ok {
+		return nil
+	}
+	if value != "true" {
+		return fmt.Errorf("annotation %q has value %q, expected exactly \"true\"", AnnotationInspectDisable, value)
+	}
+	if machine.Spec.BootMACAddress == "" {
+		return fmt.Errorf("spec.bootMACAddress is required when annotation %q is \"true\"", AnnotationInspectDisable)
+	}
+	return nil
 }

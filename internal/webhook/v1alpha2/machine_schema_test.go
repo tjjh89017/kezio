@@ -69,6 +69,12 @@ var _ = Describe("Machine CRD schema", func() {
 		Expect(k8sClient.Create(ctx, m)).To(HaveOccurred())
 	})
 
+	It("rejects a BMC address whose scheme has no registered driver", func() {
+		m := newMachine()
+		m.Spec.BMC.Address = "unregistered-scheme://10.0.0.10"
+		Expect(k8sClient.Create(ctx, m)).To(HaveOccurred())
+	})
+
 	It("rejects targetDisk hints where minSizeGigabytes exceeds maxSizeGigabytes", func() {
 		m := newMachine()
 		m.Spec.TargetDisk = &keziov1alpha2.TargetDiskHints{
