@@ -202,9 +202,11 @@ func (r *MachineReconciler) reconcilePoweringOff(ctx context.Context, machine *k
 // transient error (non-nil err) is returned unchanged, exactly like the
 // forward walk: no errorCount/state change, controller-runtime retries with
 // its own backoff. Complete advances to nextState (or releases the Machine
-// when nextState is empty). Continuing/Busy/Delayed requeue without
-// touching error state, matching applyNonCompleteOutcome. Failed goes
-// through recordDeleteStageFailure, which applies the give-up threshold.
+// when nextState is empty). Continuing/Busy go through clearDelayed so a
+// prior Delayed outcome does not outlive it, matching
+// applyNonCompleteOutcome; Delayed itself requeues without touching error
+// state. Failed goes through recordDeleteStageFailure, which applies the
+// give-up threshold.
 func (r *MachineReconciler) runDeleteStage(ctx context.Context, machine *keziov1alpha2.Machine, step func(context.Context, *keziov1alpha2.Machine) (deployer.Result, error), stageName, nextState string) (ctrl.Result, error) {
 	result, err := step(ctx, machine)
 	if err != nil {
@@ -215,13 +217,13 @@ func (r *MachineReconciler) runDeleteStage(ctx context.Context, machine *keziov1
 	case deployer.Complete:
 		return r.advanceDeleteStage(ctx, machine, nextState)
 	case deployer.Continuing:
-		return ctrl.Result{RequeueAfter: jitter(continuingRequeueInterval)}, nil
+		return r.clearDelayed(ctx, machine, ctrl.Result{RequeueAfter: jitter(continuingRequeueInterval)})
 	case deployer.Busy:
 		requeueAfter := jitter(defaultBusyRequeueInterval)
 		if result.RequeueAfter > 0 {
 			requeueAfter = result.RequeueAfter
 		}
-		return ctrl.Result{RequeueAfter: requeueAfter}, nil
+		return r.clearDelayed(ctx, machine, ctrl.Result{RequeueAfter: requeueAfter})
 	case deployer.Delayed:
 		return r.markDelayed(ctx, machine, delayedRequeueInterval)
 	case deployer.Failed:
