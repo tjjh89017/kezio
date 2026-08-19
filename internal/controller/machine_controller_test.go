@@ -51,7 +51,14 @@ var _ = Describe("Machine Controller", func() {
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: keziov1alpha2.MachineSpec{
+						BMC: keziov1alpha2.MachineBMC{
+							Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+							CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						},
+						BootMACAddress: "aa:bb:cc:dd:ee:01",
+						SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}

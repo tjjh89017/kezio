@@ -37,12 +37,362 @@ spec:
           metadata:
             type: object
           spec:
-            description: MachineSpec defines the desired state of Machine.
+            description: |-
+              MachineSpec defines the desired state of Machine. There is no power
+              intent field here: power follows the deploy lifecycle and the
+              AfterDeploy mechanism only.
             properties:
-              foo:
-                description: Foo is an example field of Machine. Edit machine_types.go
-                  to remove/update
+              afterDeploy:
+                default: Reboot
+                description: |-
+                  AfterDeploy selects what happens when a deployment finishes without
+                  an OS image to reboot into. Defaults to Reboot.
+                enum:
+                - Reboot
+                - PowerOff
                 type: string
+              bmc:
+                description: |-
+                  BMC identifies the board management controller that powers and
+                  boot-orders this machine. The controller uses it to power the
+                  machine on for inspection and deployment, and to set its power
+                  state afterward.
+                properties:
+                  address:
+                    description: |-
+                      Address is the BMC endpoint URL. Its scheme selects the driver, for
+                      example "redfish://" or "ipmi://".
+                    pattern: ^[a-zA-Z][a-zA-Z0-9+.-]*://.+
+                    type: string
+                  credentialsSecretRef:
+                    description: |-
+                      CredentialsSecretRef names the Secret holding the BMC username and
+                      password.
+                    properties:
+                      name:
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - address
+                - credentialsSecretRef
+                type: object
+              bootMACAddress:
+                description: |-
+                  BootMACAddress is the MAC address of the NIC the machine network
+                  boots from. The boot config server uses it to find this machine.
+                pattern: ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$
+                type: string
+              claimRef:
+                description: |-
+                  ClaimRef names the MachineClaim this machine is bound to. It lives
+                  in spec, not status, so the exactly-one-binding arbiter survives a
+                  status loss. Written by the claim controller and cleared by an
+                  operator during reclaim; nothing else touches it.
+                properties:
+                  name:
+                    description: |-
+                      Post-mutation admission always re-serialises this struct, so a
+                      zero-value Name would otherwise satisfy "required"; MinLength closes
+                      that gap.
+                    minLength: 1
+                    type: string
+                  namespace:
+                    type: string
+                required:
+                - name
+                type: object
+              dataImages:
+                description: |-
+                  DataImages is an ordered list of additional, non-OS images deployed
+                  alongside the OS image in the same live session (or by themselves,
+                  when ImageRef is absent).
+                items:
+                  description: |-
+                    MachineDataImage is one additional, non-OS image deployed alongside (or
+                    instead of) the machine's OS image in the same live session. Each entry
+                    resolves against its own TargetDisk hints; all resolved disks across a
+                    Machine's OS image and its DataImages must be distinct.
+                  properties:
+                    imageRef:
+                      description: |-
+                        ImageRef names the Image to deploy. It is typically a non-bootable
+                        image (a data disk or a scratch layout), since only the OS image
+                        gets a boot entry.
+                      properties:
+                        name:
+                          description: |-
+                            Post-mutation admission always re-serialises this struct, so a
+                            zero-value Name would otherwise satisfy "required"; MinLength closes
+                            that gap.
+                          minLength: 1
+                          type: string
+                        namespace:
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    targetDisk:
+                      description: TargetDisk selects the disk this image deploys
+                        to.
+                      properties:
+                        deviceName:
+                          description: |-
+                            DeviceName is the kernel device path, for example "/dev/nvme0n1".
+                            This is the last-choice hint: device names are not stable across
+                            boots.
+                          maxLength: 255
+                          type: string
+                        hctl:
+                          description: |-
+                            HCTL is the disk's SCSI host:channel:target:lun address, for example
+                            "0:0:0:0".
+                          pattern: ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$
+                          type: string
+                        maxSizeGigabytes:
+                          description: MaxSizeGigabytes rejects disks larger than
+                            this size.
+                          format: int64
+                          minimum: 1
+                          type: integer
+                        minSizeGigabytes:
+                          description: MinSizeGigabytes rejects disks smaller than
+                            this size.
+                          format: int64
+                          minimum: 1
+                          type: integer
+                        model:
+                          description: Model is the disk's reported model string.
+                          maxLength: 255
+                          type: string
+                        pciePath:
+                          description: |-
+                            PciePath is the disk's PCIe address, read by resolving
+                            /sys/block/<dev>.
+                          maxLength: 255
+                          type: string
+                        rotational:
+                          description: |-
+                            Rotational matches on whether the disk is a spinning disk (true) or
+                            solid-state (false), read from /sys/block/*/queue/rotational.
+                          type: boolean
+                        serialNumber:
+                          description: |-
+                            SerialNumber is the disk's serial number, read from
+                            /sys/block/*/device/serial or udev.
+                          maxLength: 255
+                          type: string
+                        slotNumber:
+                          description: |-
+                            SlotNumber is the disk's NVMe namespace or PCIe slot number, read
+                            best-effort from DMI.
+                          format: int32
+                          type: integer
+                        vendor:
+                          description: Vendor is the disk's reported vendor string.
+                          maxLength: 255
+                          type: string
+                        wwn:
+                          description: WWN is the disk's World Wide Name, read from
+                            udev's ID_WWN.
+                          maxLength: 255
+                          type: string
+                      type: object
+                      x-kubernetes-validations:
+                      - message: minSizeGigabytes must be less than or equal to maxSizeGigabytes
+                        rule: '!has(self.minSizeGigabytes) || !has(self.maxSizeGigabytes)
+                          || self.minSizeGigabytes <= self.maxSizeGigabytes'
+                  required:
+                  - imageRef
+                  type: object
+                maxItems: 32
+                type: array
+              ezio:
+                description: |-
+                  Ezio overrides the operator's cluster-wide default EZIO tuning for
+                  this machine's leecher.
+                properties:
+                  aioThreads:
+                    description: AioThreads overrides the EZIO daemon's async I/O
+                      thread count.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  cacheSizeMB:
+                    description: |-
+                      CacheSizeMB overrides the EZIO daemon's unified cache size, in
+                      megabytes.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  maxConnections:
+                    description: |-
+                      MaxConnections overrides the per-torrent maximum peer connection
+                      count (ezio's AddTorrent max_connections).
+                    format: int32
+                    maximum: 1024
+                    minimum: 1
+                    type: integer
+                  maxUploads:
+                    description: |-
+                      MaxUploads overrides the per-torrent maximum upload slot count
+                      (ezio's AddTorrent max_uploads).
+                    format: int32
+                    maximum: 1024
+                    minimum: 1
+                    type: integer
+                  port:
+                    description: Port overrides the EZIO daemon's listen port.
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                type: object
+              imageRef:
+                description: |-
+                  ImageRef names the Image to deploy as this machine's OS. It must be
+                  a bootable image. May be absent when the machine deploys only
+                  DataImages and keeps its existing OS.
+                properties:
+                  name:
+                    description: |-
+                      Post-mutation admission always re-serialises this struct, so a
+                      zero-value Name would otherwise satisfy "required"; MinLength closes
+                      that gap.
+                    minLength: 1
+                    type: string
+                  namespace:
+                    type: string
+                required:
+                - name
+                type: object
+              params:
+                description: |-
+                  Params is schemaless input for the attached hooks' templating.
+                  Merge order: the deployed Image's own params first, then this
+                  field; later entries override earlier ones.
+                x-kubernetes-preserve-unknown-fields: true
+              postHookRefs:
+                description: |-
+                  PostHookRefs is an ordered list of PostHook resources attached to
+                  this machine. Execution order: the attached Image's own
+                  postHookRefs run first, then this list; within this list, the
+                  given order holds.
+                items:
+                  description: |-
+                    NameRef is a reference to a resource by name, optionally in another
+                    namespace. When Namespace is empty, the namespace of the referencing
+                    resource is used. Field names that hold a NameRef end in "Ref"; ordered
+                    lists of NameRef end in "Refs".
+                  properties:
+                    name:
+                      description: |-
+                        Post-mutation admission always re-serialises this struct, so a
+                        zero-value Name would otherwise satisfy "required"; MinLength closes
+                        that gap.
+                      minLength: 1
+                      type: string
+                    namespace:
+                      type: string
+                  required:
+                  - name
+                  type: object
+                maxItems: 64
+                type: array
+              subnetRef:
+                description: |-
+                  SubnetRef names the Subnet this machine network boots through -
+                  the broadcast domain whose bootd instance answers this machine's
+                  PXE boot. Required: a Machine with no Subnet cannot be
+                  network-booted.
+                properties:
+                  name:
+                    description: |-
+                      Post-mutation admission always re-serialises this struct, so a
+                      zero-value Name would otherwise satisfy "required"; MinLength closes
+                      that gap.
+                    minLength: 1
+                    type: string
+                  namespace:
+                    type: string
+                required:
+                - name
+                type: object
+              targetDisk:
+                description: |-
+                  TargetDisk selects the disk the OS image deploys to. Ignored when
+                  ImageRef is absent.
+                properties:
+                  deviceName:
+                    description: |-
+                      DeviceName is the kernel device path, for example "/dev/nvme0n1".
+                      This is the last-choice hint: device names are not stable across
+                      boots.
+                    maxLength: 255
+                    type: string
+                  hctl:
+                    description: |-
+                      HCTL is the disk's SCSI host:channel:target:lun address, for example
+                      "0:0:0:0".
+                    pattern: ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$
+                    type: string
+                  maxSizeGigabytes:
+                    description: MaxSizeGigabytes rejects disks larger than this size.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  minSizeGigabytes:
+                    description: MinSizeGigabytes rejects disks smaller than this
+                      size.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  model:
+                    description: Model is the disk's reported model string.
+                    maxLength: 255
+                    type: string
+                  pciePath:
+                    description: |-
+                      PciePath is the disk's PCIe address, read by resolving
+                      /sys/block/<dev>.
+                    maxLength: 255
+                    type: string
+                  rotational:
+                    description: |-
+                      Rotational matches on whether the disk is a spinning disk (true) or
+                      solid-state (false), read from /sys/block/*/queue/rotational.
+                    type: boolean
+                  serialNumber:
+                    description: |-
+                      SerialNumber is the disk's serial number, read from
+                      /sys/block/*/device/serial or udev.
+                    maxLength: 255
+                    type: string
+                  slotNumber:
+                    description: |-
+                      SlotNumber is the disk's NVMe namespace or PCIe slot number, read
+                      best-effort from DMI.
+                    format: int32
+                    type: integer
+                  vendor:
+                    description: Vendor is the disk's reported vendor string.
+                    maxLength: 255
+                    type: string
+                  wwn:
+                    description: WWN is the disk's World Wide Name, read from udev's
+                      ID_WWN.
+                    maxLength: 255
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: minSizeGigabytes must be less than or equal to maxSizeGigabytes
+                  rule: '!has(self.minSizeGigabytes) || !has(self.maxSizeGigabytes)
+                    || self.minSizeGigabytes <= self.maxSizeGigabytes'
+            required:
+            - bmc
+            - bootMACAddress
+            - subnetRef
             type: object
           status:
             description: MachineStatus defines the observed state of Machine.
