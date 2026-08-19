@@ -181,14 +181,16 @@ runs:
         UPDATE_COUNT: ${{ inputs.update-count }}
       run: |
         set -euo pipefail
-        after_count="$(kubectl exec -n "${NAMESPACE}" watch-churn-sampler -- curl -skf \
+        raw="$(kubectl exec -n "${NAMESPACE}" watch-churn-sampler -- curl -skf \
           -H "Authorization: Bearer ${TOKEN}" \
-          "https://${METRICS_SERVICE_NAME}.${MANAGER_NAMESPACE}.svc:8443/metrics" \
-          | awk '/^controller_runtime_reconcile_total\{.*controller="machine"/ {sum+=$NF} END {print sum+0}')"
+          "https://${METRICS_SERVICE_NAME}.${MANAGER_NAMESPACE}.svc:8443/metrics")"
+        after_count="$(awk '/^controller_runtime_reconcile_total\{.*controller="machine"/ {sum+=$NF} END {print sum+0}' <<<"${raw}")"
         echo "Machine reconcile count after the DeployRun updates: ${after_count}"
         if [ "${after_count}" != "${BEFORE_COUNT}" ]; then
           echo "Machine reconcile count moved from ${BEFORE_COUNT} to ${after_count} while the DeployRun" \
-            "received progress-only status updates; the Owns(DeployRun) watch must stay delete-only" >&2
+            "received progress-only status updates; the Owns(DeployRun) watch must stay delete-only." \
+            "Raw scrape output:" >&2
+          echo "${raw}" >&2
           exit 1
         fi
         echo "Machine reconcile count stayed flat at ${BEFORE_COUNT} across ${UPDATE_COUNT} progress-only DeployRun updates"
