@@ -2489,7 +2489,9 @@ var _ = Describe("Machine Controller", func() {
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 			Expect(machine.Annotations).NotTo(HaveKey(keziov1alpha2.MachineAnnotationReInspect))
 			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioned))
-			Expect(<-recorder.Events).To(ContainSubstring("ReInspectRefused"))
+			event := <-recorder.Events
+			Expect(event).To(ContainSubstring("ReInspectRefused"))
+			Expect(event).To(ContainSubstring(`re-inspect annotation refused: machine is in state "Provisioned"; re-inspect is accepted in "Available", or in "Provisioned" with an empty deploy payload`))
 
 			var secondHW keziov1alpha2.MachineHardware
 			Expect(k8sClient.Get(ctx, name, &secondHW)).To(Succeed())

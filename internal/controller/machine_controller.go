@@ -603,7 +603,8 @@ func (r *MachineReconciler) reconcileReInspect(ctx context.Context, machine *kez
 
 	if !accepted {
 		r.Recorder.Eventf(machine, corev1.EventTypeWarning, "ReInspectRefused",
-			"re-inspect annotation refused: machine is in state %q, not %q", machine.Status.State, keziov1alpha2.MachineStateAvailable)
+			"re-inspect annotation refused: machine is in state %q; re-inspect is accepted in %q, or in %q with an empty deploy payload",
+			machine.Status.State, keziov1alpha2.MachineStateAvailable, keziov1alpha2.MachineStateProvisioned)
 		return ctrl.Result{}, nil
 	}
 
