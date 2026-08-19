@@ -1,0 +1,61 @@
+name: Check runner resources
+
+description: >-
+  Fails the job fast when the runner has fewer CPUs or less RAM than the
+  calling lane needs, instead of letting it run for minutes and time out or
+  OOM deep inside a later step. Always prints nproc/free -h/df -h first, so
+  a failure (or a slow lane that turns out fine) still has the raw numbers
+  in the log. The disk check is optional: pass min-disk-gb to enable it, or
+  omit it (default "0") to skip - disk usage does not gate every lane.
+
+inputs:
+  min-cpus:
+    description: 'Minimum CPU count the calling lane needs.'
+    required: true
+  min-mem-mb:
+    description: 'Minimum RAM in MiB the calling lane needs.'
+    required: true
+  min-disk-gb:
+    description: 'Minimum free disk space in GiB on / the calling lane needs. "0" (the default) skips the disk check entirely.'
+    default: "0"
+  context-label:
+    description: 'Phrase naming the calling lane in the CPU/RAM error messages, e.g. "kezio e2e" or "the BMC e2e stage".'
+    required: true
+  disk-context-label:
+    description: 'Phrase naming the calling lane in the disk error message. Defaults to context-label.'
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Resource check (fail fast if the runner is under-resourced)
+      shell: bash
+      env:
+        MIN_CPUS: ${{ inputs.min-cpus }}
+        MIN_MEM_MB: ${{ inputs.min-mem-mb }}
+        MIN_DISK_GB: ${{ inputs.min-disk-gb }}
+        CONTEXT_LABEL: ${{ inputs.context-label }}
+        DISK_CONTEXT_LABEL: ${{ inputs.disk-context-label }}
+      run: |
+        set -euo pipefail
+        nproc
+        free -h
+        df -h
+        disk_context_label="${DISK_CONTEXT_LABEL:-${CONTEXT_LABEL}}"
+        cpus="$(nproc)"
+        mem_mb="$(free -m | awk '/^Mem:/{print $2}')"
+        if [ "$cpus" -lt "$MIN_CPUS" ]; then
+          echo "::error::Runner has only ${cpus} CPU(s); ${CONTEXT_LABEL} needs at least ${MIN_CPUS}." >&2
+          exit 1
+        fi
+        if [ "$mem_mb" -lt "$MIN_MEM_MB" ]; then
+          echo "::error::Runner has only ${mem_mb} MiB RAM; ${CONTEXT_LABEL} needs at least ${MIN_MEM_MB} MiB." >&2
+          exit 1
+        fi
+        if [ "$MIN_DISK_GB" -gt 0 ]; then
+          disk_avail_gb="$(df -BG --output=avail / | tail -1 | tr -dc '0-9')"
+          if [ "$disk_avail_gb" -lt "$MIN_DISK_GB" ]; then
+            echo "::error::Runner has only ${disk_avail_gb} GiB free disk; ${disk_context_label} needs at least ${MIN_DISK_GB} GiB." >&2
+            exit 1
+          fi
+        fi
