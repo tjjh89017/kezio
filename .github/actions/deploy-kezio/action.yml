@@ -1,0 +1,45 @@
+name: Deploy kezio CRDs and controller-manager
+
+description: >-
+  Installs the kezio CRDs (make install, always from config/crd), sets the
+  controller-manager image and applies the given kustomize overlay, then
+  waits for the controller-manager Deployment to become ready. The
+  Deployment is located by its control-plane=controller-manager label
+  rather than a fixed name, since kustomize's namePrefix can change it.
+
+inputs:
+  manager-image:
+    description: 'Controller-manager image, e.g. "ghcr.io/tjjh89017/kezio:main".'
+    required: true
+  namespace:
+    description: 'Namespace the kustomize overlay deploys the controller-manager into.'
+    required: false
+    default: "scaffold-system"
+  kustomize-dir:
+    description: 'Kustomize overlay directory to apply after CRD install.'
+    required: false
+    default: "config/default"
+  timeout:
+    description: 'Timeout for the controller-manager rollout wait, e.g. "180s".'
+    required: false
+    default: "180s"
+
+runs:
+  using: composite
+  steps:
+    - name: Deploy CRDs and the controller-manager
+      shell: bash
+      env:
+        MANAGER_IMAGE: ${{ inputs.manager-image }}
+        NAMESPACE: ${{ inputs.namespace }}
+        KUSTOMIZE_DIR: ${{ inputs.kustomize-dir }}
+        TIMEOUT: ${{ inputs.timeout }}
+      run: |
+        set -euo pipefail
+        make install
+        make kustomize
+        (cd config/manager && ../../bin/kustomize edit set image controller="${MANAGER_IMAGE}")
+        bin/kustomize build "${KUSTOMIZE_DIR}" | kubectl apply -f -
+        deployment="$(kubectl get deployment -n "${NAMESPACE}" -l control-plane=controller-manager \
+          -o jsonpath='{.items[0].metadata.name}')"
+        kubectl rollout status deployment/"${deployment}" -n "${NAMESPACE}" --timeout="${TIMEOUT}"

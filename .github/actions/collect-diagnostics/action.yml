@@ -1,0 +1,53 @@
+name: Collect kezio diagnostics on failure
+
+description: >-
+  On job failure, dumps the kezio custom resources (Machine, DeployRun,
+  MachineHardware), the controller-manager logs (current and, best-effort,
+  the previous crashed attempt), and cluster events into the given
+  directory for upload as a CI artifact. Every command runs under `set +e`
+  and best-effort: a resource that never got created (the lane failed
+  before reaching it) must not fail this step.
+
+inputs:
+  namespace:
+    description: 'Namespace to collect the controller-manager logs and events from.'
+    required: false
+    default: "scaffold-system"
+  output-path:
+    description: 'Directory the collected files are written into (created if missing).'
+    required: false
+    default: "diagnostics"
+
+runs:
+  using: composite
+  steps:
+    - name: Collect diagnostics
+      if: failure()
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        OUTPUT_PATH: ${{ inputs.output-path }}
+      run: |
+        set +e
+        mkdir -p "${OUTPUT_PATH}"
+
+        echo "===== Machine CRs ====="
+        kubectl get machines.kezio.kojuro.date -n "${NAMESPACE}" -o yaml >"${OUTPUT_PATH}/machines.yaml" 2>&1
+        echo "===== DeployRun CRs ====="
+        kubectl get deployruns.kezio.kojuro.date -n "${NAMESPACE}" -o yaml >"${OUTPUT_PATH}/deployruns.yaml" 2>&1
+        echo "===== MachineHardware CRs ====="
+        kubectl get machinehardwares.kezio.kojuro.date -n "${NAMESPACE}" -o yaml \
+          >"${OUTPUT_PATH}/machinehardwares.yaml" 2>&1
+
+        echo "===== controller-manager logs ====="
+        kubectl logs -n "${NAMESPACE}" -l control-plane=controller-manager --all-containers --tail=1000 \
+          >"${OUTPUT_PATH}/manager-logs.txt" 2>&1
+        # --previous only has content after a restart; failure is expected
+        # and silenced when the container never crashed.
+        kubectl logs -n "${NAMESPACE}" -l control-plane=controller-manager --all-containers --previous --tail=1000 \
+          >"${OUTPUT_PATH}/manager-logs-previous.txt" 2>&1
+
+        echo "===== events ====="
+        kubectl get events -n "${NAMESPACE}" --sort-by=.lastTimestamp >"${OUTPUT_PATH}/events.txt" 2>&1
+
+        exit 0
