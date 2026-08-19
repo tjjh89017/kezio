@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -290,9 +291,8 @@ func (r *MachineReconciler) recordFailure(ctx context.Context, machine *keziov1a
 }
 
 // createDeployRun creates the DeployRun for one provisioning pass, copying
-// this stage's minimal snapshot (imageRef, dataImages) from machine.spec.
-// ResolvedDisks and HooksHash are left empty: disk and hook resolution are
-// not part of this stage's deployer contract.
+// imageRef and dataImages from machine.spec. ResolvedDisks and HooksHash
+// are left empty: disk and hook resolution are not implemented yet.
 func (r *MachineReconciler) createDeployRun(ctx context.Context, machine *keziov1alpha2.Machine) (*keziov1alpha2.DeployRun, error) {
 	run := &keziov1alpha2.DeployRun{
 		ObjectMeta: metav1.ObjectMeta{
@@ -341,17 +341,45 @@ func (r *MachineReconciler) getRun(ctx context.Context, machine *keziov1alpha2.M
 	return &run, nil
 }
 
-// shouldProvision is this stage's provisioning trigger: spec.imageRef alone,
-// compared against the last successful run's resolved snapshot. An absent
-// spec.imageRef never triggers.
+// shouldProvision is the provisioning trigger. It fires only when
+// spec.imageRef/spec.dataImages describe some deploy intent and that
+// intent's subset differs from the last successful run's recorded
+// snapshot. A missing lastRun - no lastSuccessfulRunRef yet, or one whose
+// DeployRun was deleted - is "no successful run known": a non-empty
+// payload triggers once, and the resulting run's own success writes a
+// fresh lastSuccessfulRunRef, so this path cannot repeat into a storm.
 func shouldProvision(machine *keziov1alpha2.Machine, lastRun *keziov1alpha2.DeployRun) bool {
-	if machine.Spec.ImageRef == nil {
+	if isEmptyDeployPayload(machine) {
 		return false
 	}
 	if lastRun == nil {
 		return true
 	}
-	return !nameRefEqual(machine.Spec.ImageRef, lastRun.Spec.ImageRef)
+	return !intentSubsetEqual(machine, lastRun)
+}
+
+// isEmptyDeployPayload reports whether machine.spec carries no deploy
+// intent at all: no OS image and no data images. An empty payload never
+// triggers a run - clearing intent means "nothing to do", not "wipe".
+func isEmptyDeployPayload(machine *keziov1alpha2.Machine) bool {
+	return machine.Spec.ImageRef == nil && len(machine.Spec.DataImages) == 0
+}
+
+// intentSubsetEqual compares the provisioning trigger's intent subset -
+// imageRef, dataImages, hooksHash - against the last successful run's
+// recorded spec. This is full equality, not a superset check, so removing
+// a dataImages entry triggers correctly. resolvedDisks is deliberately
+// excluded: device names are not stable across boots, and a
+// re-resolution must never diff into a disk-wiping redeploy. PostHook
+// resolution does not exist yet, so the Machine side of hooksHash is
+// always empty; createDeployRun likewise never sets
+// DeployRun.spec.hooksHash, so both sides agree until hook resolution
+// lands and both must be wired together.
+func intentSubsetEqual(machine *keziov1alpha2.Machine, lastRun *keziov1alpha2.DeployRun) bool {
+	const machineHooksHash = ""
+	return nameRefEqual(machine.Spec.ImageRef, lastRun.Spec.ImageRef) &&
+		reflect.DeepEqual(machine.Spec.DataImages, lastRun.Spec.DataImages) &&
+		machineHooksHash == lastRun.Spec.HooksHash
 }
 
 func nameRefEqual(a, b *keziov1alpha2.NameRef) bool {

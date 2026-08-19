@@ -107,6 +107,104 @@ func TestHasUnknownErrorType(t *testing.T) {
 	}
 }
 
+func TestShouldProvision(t *testing.T) {
+	image1 := keziov1alpha2.NameRef{Name: "image-1"}
+	image2 := keziov1alpha2.NameRef{Name: "image-2"}
+	data1 := []keziov1alpha2.MachineDataImage{{ImageRef: keziov1alpha2.NameRef{Name: "data-1"}}}
+	data2 := []keziov1alpha2.MachineDataImage{
+		{ImageRef: keziov1alpha2.NameRef{Name: "data-1"}},
+		{ImageRef: keziov1alpha2.NameRef{Name: "data-2"}},
+	}
+
+	cases := []struct {
+		name    string
+		spec    keziov1alpha2.MachineSpec
+		lastRun *keziov1alpha2.DeployRun
+		want    bool
+	}{
+		{
+			name:    "empty payload, no last run, never triggers",
+			spec:    keziov1alpha2.MachineSpec{},
+			lastRun: nil,
+			want:    false,
+		},
+		{
+			name:    "non-empty payload, no last run, triggers once",
+			spec:    keziov1alpha2.MachineSpec{ImageRef: &image1},
+			lastRun: nil,
+			want:    true,
+		},
+		{
+			name:    "dataImages-only payload, no last run, triggers",
+			spec:    keziov1alpha2.MachineSpec{DataImages: data1},
+			lastRun: nil,
+			want:    true,
+		},
+		{
+			name: "identical subset does not trigger",
+			spec: keziov1alpha2.MachineSpec{ImageRef: &image1, DataImages: data1},
+			lastRun: &keziov1alpha2.DeployRun{Spec: keziov1alpha2.DeployRunSpec{
+				ImageRef:   &image1,
+				DataImages: data1,
+			}},
+			want: false,
+		},
+		{
+			name: "imageRef change triggers",
+			spec: keziov1alpha2.MachineSpec{ImageRef: &image2, DataImages: data1},
+			lastRun: &keziov1alpha2.DeployRun{Spec: keziov1alpha2.DeployRunSpec{
+				ImageRef:   &image1,
+				DataImages: data1,
+			}},
+			want: true,
+		},
+		{
+			name: "dataImages addition triggers",
+			spec: keziov1alpha2.MachineSpec{ImageRef: &image1, DataImages: data2},
+			lastRun: &keziov1alpha2.DeployRun{Spec: keziov1alpha2.DeployRunSpec{
+				ImageRef:   &image1,
+				DataImages: data1,
+			}},
+			want: true,
+		},
+		{
+			name: "dataImages removal triggers",
+			spec: keziov1alpha2.MachineSpec{ImageRef: &image1, DataImages: data1},
+			lastRun: &keziov1alpha2.DeployRun{Spec: keziov1alpha2.DeployRunSpec{
+				ImageRef:   &image1,
+				DataImages: data2,
+			}},
+			want: true,
+		},
+		{
+			name: "resolvedDisks-only difference does not trigger",
+			spec: keziov1alpha2.MachineSpec{ImageRef: &image1, DataImages: data1},
+			lastRun: &keziov1alpha2.DeployRun{Spec: keziov1alpha2.DeployRunSpec{
+				ImageRef:   &image1,
+				DataImages: data1,
+				ResolvedDisks: []keziov1alpha2.DeployRunResolvedDisk{
+					{ImageRef: image1, TargetDisk: "/dev/sda"},
+				},
+			}},
+			want: false,
+		},
+		{
+			name:    "empty payload never triggers even against a non-empty last run",
+			spec:    keziov1alpha2.MachineSpec{},
+			lastRun: &keziov1alpha2.DeployRun{Spec: keziov1alpha2.DeployRunSpec{ImageRef: &image1, DataImages: data1}},
+			want:    false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			machine := &keziov1alpha2.Machine{Spec: tc.spec}
+			if got := shouldProvision(machine, tc.lastRun); got != tc.want {
+				t.Errorf("shouldProvision() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 var _ = Describe("Machine Controller", func() {
 	Context("When reconciling a resource", func() {
 		const resourceName = "test-resource"
@@ -265,6 +363,162 @@ var _ = Describe("Machine Controller", func() {
 			secondRunName := types.NamespacedName{Name: machine.Status.LastSuccessfulRunRef.Name, Namespace: "default"}
 			Expect(k8sClient.Get(ctx, secondRunName, &secondRun)).To(Succeed())
 			Expect(secondRun.Spec.ImageRef.Name).To(Equal("other-image"))
+			By("adding a dataImages entry and confirming a third DeployRun is created")
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			thirdRunPredecessor := machine.Status.LastSuccessfulRunRef.Name
+			machine.Spec.DataImages = []keziov1alpha2.MachineDataImage{
+				{ImageRef: keziov1alpha2.NameRef{Name: "data-image-1"}},
+			}
+			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
+
+			reconcileUntilStable(reconciler, name)
+
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioned))
+			Expect(machine.Status.LastSuccessfulRunRef.Name).NotTo(Equal(thirdRunPredecessor))
+
+			var thirdRun keziov1alpha2.DeployRun
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: machine.Status.LastSuccessfulRunRef.Name, Namespace: "default"}, &thirdRun)).To(Succeed())
+			Expect(thirdRun.Spec.DataImages).To(HaveLen(1))
+
+			By("removing the dataImages entry and confirming a fourth DeployRun is created")
+			fourthRunPredecessor := machine.Status.LastSuccessfulRunRef.Name
+			machine.Spec.DataImages = nil
+			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
+
+			reconcileUntilStable(reconciler, name)
+
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioned))
+			Expect(machine.Status.LastSuccessfulRunRef.Name).NotTo(Equal(fourthRunPredecessor))
+
+			var fourthRun keziov1alpha2.DeployRun
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: machine.Status.LastSuccessfulRunRef.Name, Namespace: "default"}, &fourthRun)).To(Succeed())
+			Expect(fourthRun.Spec.DataImages).To(BeEmpty())
+		})
+	})
+	Context("When the provisioning trigger's intent subset is unchanged or empty", func() {
+		ctx := context.Background()
+		var machineName string
+
+		reconcileUntilStable := func(reconciler *MachineReconciler, name types.NamespacedName) {
+			GinkgoHelper()
+			for range 50 {
+				result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+				if result.RequeueAfter == 0 {
+					var m keziov1alpha2.Machine
+					Expect(k8sClient.Get(ctx, name, &m)).To(Succeed())
+					if m.Status.State == keziov1alpha2.MachineStateProvisioned {
+						return
+					}
+				}
+			}
+		}
+
+		BeforeEach(func() {
+			machineName = fmt.Sprintf("trigger-%d", time.Now().UnixNano())
+			imageRef := keziov1alpha2.NameRef{Name: "test-image"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      machineName,
+					Namespace: "default",
+				},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:0d",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					ImageRef:       &imageRef,
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			resource := &keziov1alpha2.Machine{}
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			if err := k8sClient.Get(ctx, name, resource); err == nil {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			}
+		})
+
+		It("does not create a new run when the intent subset is unchanged, and does not create one when spec.imageRef is cleared to empty", func() {
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			reconciler := &MachineReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Deployer: &deployer.FakeDeployer{Client: k8sClient},
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			reconcileUntilStable(reconciler, name)
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			firstRunName := machine.Status.LastSuccessfulRunRef.Name
+
+			By("reconciling again with an unchanged spec: no new run")
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result).To(Equal(reconcile.Result{}))
+
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Status.LastSuccessfulRunRef.Name).To(Equal(firstRunName))
+			Expect(machine.Status.CurrentRunRef.Name).To(Equal(firstRunName))
+
+			By("clearing spec.imageRef to the empty payload: still no new run")
+			machine.Spec.ImageRef = nil
+			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
+
+			result, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result).To(Equal(reconcile.Result{}))
+
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioned))
+			Expect(machine.Status.LastSuccessfulRunRef.Name).To(Equal(firstRunName))
+			Expect(machine.Status.CurrentRunRef.Name).To(Equal(firstRunName))
+		})
+
+		It("treats a deleted lastSuccessfulRunRef DeployRun as no known run: it redeploys once instead of erroring or wedging", func() {
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			reconciler := &MachineReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Deployer: &deployer.FakeDeployer{Client: k8sClient},
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			reconcileUntilStable(reconciler, name)
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			firstRunName := machine.Status.LastSuccessfulRunRef.Name
+
+			By("deleting the run the status still references")
+			staleRun := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: firstRunName, Namespace: "default"}}
+			Expect(k8sClient.Delete(ctx, staleRun)).To(Succeed())
+
+			By("reconciling: no error, and the machine redeploys exactly once")
+			reconcileUntilStable(reconciler, name)
+
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioned))
+			Expect(machine.Status.LastSuccessfulRunRef.Name).NotTo(Equal(firstRunName))
+			secondRunName := machine.Status.LastSuccessfulRunRef.Name
+
+			By("reconciling again: the fresh lastSuccessfulRunRef stops it from repeating")
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result).To(Equal(reconcile.Result{}))
+
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Status.LastSuccessfulRunRef.Name).To(Equal(secondRunName))
 		})
 	})
 
