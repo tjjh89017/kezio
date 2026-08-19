@@ -1,0 +1,199 @@
+name: Run watch-churn check
+
+description: >-
+  Asserts that the Machine controller's reconcile count stays flat while a
+  settled Machine's DeployRun receives progress-only status updates. Reads
+  controller_runtime_reconcile_total{controller="machine"} off the manager's
+  secure metrics endpoint (an authenticated ServiceAccount token bound to
+  the metrics-reader ClusterRole, curled from inside the cluster - the
+  metrics service has no external route), samples it before and after N
+  DeployRun status.partitions patches, and fails if the count moves at all.
+  A Provisioned+OK Machine has no pending requeue (reconcileIdle returns
+  ctrl.Result{} once shouldProvision is false), and the Owns(DeployRun)
+  watch only forwards delete events, so an unrelated reconcile in the
+  sampling window is the only thing that could move the count - flat is the
+  exact expectation, not a tolerance.
+
+inputs:
+  namespace:
+    description: 'Namespace the target Machine and its DeployRun live in.'
+    required: false
+    default: "default"
+  machine-name:
+    description: >-
+      Name of an already-Provisioned Machine to use, e.g. the one
+      run-fake-deploy-walk leaves behind. Not created here: reusing a
+      settled Machine avoids paying for a second full state walk.
+    required: false
+    default: "fake-deploy-walk"
+  manager-namespace:
+    description: 'Namespace the controller-manager and its metrics Service are deployed into.'
+    required: false
+    default: "scaffold-system"
+  metrics-service-name:
+    description: 'Name of the controller-manager metrics Service, from config/default/metrics_service.yaml plus the kustomize namePrefix.'
+    required: false
+    default: "scaffold-controller-manager-metrics-service"
+  metrics-reader-clusterrole:
+    description: 'Name of the metrics-reader ClusterRole, from config/rbac/metrics_reader_role.yaml plus the kustomize namePrefix.'
+    required: false
+    default: "scaffold-metrics-reader"
+  sampler-image:
+    description: 'Image for the throwaway pod used to curl the metrics endpoint from inside the cluster.'
+    required: false
+    default: "curlimages/curl:8.11.0"
+  update-count:
+    description: 'Number of progress-only DeployRun status updates to issue between samples.'
+    required: false
+    default: "10"
+  settle-seconds:
+    description: >-
+      Seconds to wait before the first sample, so any requeue still in
+      flight from an earlier step's walk (e.g. reconcileIdle's one-time
+      re-check on entering Provisioned) has already run.
+    required: false
+    default: "15"
+  observe-seconds:
+    description: 'Seconds to wait after the last status update before the second sample, for any fan-out to materialize.'
+    required: false
+    default: "10"
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve the target DeployRun
+      id: resolve
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+      run: |
+        set -euo pipefail
+        kubectl wait "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.state}'=Provisioned --timeout=30s
+        run_name="$(kubectl get "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
+          -o jsonpath='{.status.lastSuccessfulRunRef.name}')"
+        if [ -z "${run_name}" ]; then
+          echo "machine/${MACHINE_NAME} is Provisioned but status.lastSuccessfulRunRef is unset" >&2
+          exit 1
+        fi
+        echo "run_name=${run_name}" >>"${GITHUB_OUTPUT}"
+
+    - name: Create a metrics-reader ServiceAccount and bind it to the metrics-reader ClusterRole
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        CLUSTERROLE: ${{ inputs.metrics-reader-clusterrole }}
+      run: |
+        set -euo pipefail
+        kubectl create serviceaccount watch-churn-reader -n "${NAMESPACE}" \
+          --dry-run=client -o yaml | kubectl apply -f -
+        kubectl create clusterrolebinding watch-churn-reader \
+          --clusterrole="${CLUSTERROLE}" \
+          --serviceaccount="${NAMESPACE}:watch-churn-reader" \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: Launch a metrics-sampling pod
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        SAMPLER_IMAGE: ${{ inputs.sampler-image }}
+      run: |
+        set -euo pipefail
+        kubectl run watch-churn-sampler -n "${NAMESPACE}" \
+          --image="${SAMPLER_IMAGE}" --restart=Never \
+          --overrides='{"spec":{"serviceAccountName":"watch-churn-reader"}}' \
+          -- sleep 3600
+        kubectl wait pod/watch-churn-sampler -n "${NAMESPACE}" --for=condition=Ready --timeout=60s
+
+    - name: Mint a metrics-reader bearer token
+      id: token
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+      run: |
+        set -euo pipefail
+        token="$(kubectl create token watch-churn-reader -n "${NAMESPACE}" --duration=15m)"
+        echo "::add-mask::${token}"
+        echo "token=${token}" >>"${GITHUB_OUTPUT}"
+
+    - name: Wait for the Machine to go idle before the first sample
+      shell: bash
+      env:
+        SETTLE_SECONDS: ${{ inputs.settle-seconds }}
+      run: |
+        set -euo pipefail
+        sleep "${SETTLE_SECONDS}"
+
+    - name: Sample the Machine reconcile count (before)
+      id: before
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MANAGER_NAMESPACE: ${{ inputs.manager-namespace }}
+        METRICS_SERVICE_NAME: ${{ inputs.metrics-service-name }}
+        TOKEN: ${{ steps.token.outputs.token }}
+      run: |
+        set -euo pipefail
+        count="$(kubectl exec -n "${NAMESPACE}" watch-churn-sampler -- curl -sk \
+          -H "Authorization: Bearer ${TOKEN}" \
+          "https://${METRICS_SERVICE_NAME}.${MANAGER_NAMESPACE}.svc:8443/metrics" \
+          | awk '/^controller_runtime_reconcile_total\{.*controller="machine"/ {sum+=$NF} END {print sum+0}')"
+        echo "Machine reconcile count before the DeployRun updates: ${count}"
+        echo "count=${count}" >>"${GITHUB_OUTPUT}"
+
+    - name: Issue progress-only DeployRun status updates
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        RUN_NAME: ${{ steps.resolve.outputs.run_name }}
+        UPDATE_COUNT: ${{ inputs.update-count }}
+      run: |
+        set -euo pipefail
+        for i in $(seq 1 "${UPDATE_COUNT}"); do
+          kubectl patch "deployrun/${RUN_NAME}" -n "${NAMESPACE}" --subresource=status --type=merge \
+            -p "{\"status\":{\"partitions\":[{\"number\":1,\"percent\":${i}}]}}"
+        done
+
+    - name: Wait for any fan-out to materialize
+      shell: bash
+      env:
+        OBSERVE_SECONDS: ${{ inputs.observe-seconds }}
+      run: |
+        set -euo pipefail
+        sleep "${OBSERVE_SECONDS}"
+
+    - name: Sample the Machine reconcile count (after) and assert it did not move
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MANAGER_NAMESPACE: ${{ inputs.manager-namespace }}
+        METRICS_SERVICE_NAME: ${{ inputs.metrics-service-name }}
+        TOKEN: ${{ steps.token.outputs.token }}
+        BEFORE_COUNT: ${{ steps.before.outputs.count }}
+        UPDATE_COUNT: ${{ inputs.update-count }}
+      run: |
+        set -euo pipefail
+        after_count="$(kubectl exec -n "${NAMESPACE}" watch-churn-sampler -- curl -sk \
+          -H "Authorization: Bearer ${TOKEN}" \
+          "https://${METRICS_SERVICE_NAME}.${MANAGER_NAMESPACE}.svc:8443/metrics" \
+          | awk '/^controller_runtime_reconcile_total\{.*controller="machine"/ {sum+=$NF} END {print sum+0}')"
+        echo "Machine reconcile count after the DeployRun updates: ${after_count}"
+        if [ "${after_count}" != "${BEFORE_COUNT}" ]; then
+          echo "Machine reconcile count moved from ${BEFORE_COUNT} to ${after_count} while the DeployRun" \
+            "received progress-only status updates; the Owns(DeployRun) watch must stay delete-only" >&2
+          exit 1
+        fi
+        echo "Machine reconcile count stayed flat at ${BEFORE_COUNT} across ${UPDATE_COUNT} progress-only DeployRun updates"
+
+    - name: Clean up the sampler pod and metrics-reader RBAC
+      if: always()
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+      run: |
+        set +e
+        kubectl delete pod watch-churn-sampler -n "${NAMESPACE}" --ignore-not-found --wait=false
+        kubectl delete clusterrolebinding watch-churn-reader --ignore-not-found
+        kubectl delete serviceaccount watch-churn-reader -n "${NAMESPACE}" --ignore-not-found
+        exit 0
