@@ -25,6 +25,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -389,6 +390,173 @@ var _ = Describe("Machine Controller", func() {
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable))
 			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+		})
+
+		It("increases errorCount monotonically across N consecutive failures without ever changing state", func() {
+			machineName := fmt.Sprintf("monotonic-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:06",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			})
+
+			var failCount int
+			failingDeployer := &deployer.FakeDeployer{
+				Client: k8sClient,
+				InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+					failCount++
+					return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeTransient, ErrorMessage: "boom"}, nil
+				},
+			}
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: failingDeployer}
+
+			By("driving through the finalizer add and the Enrolling to Inspecting transition")
+			for i := 0; i < 10 && failCount == 0; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			const wantFailures = 5
+			for failCount < wantFailures {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+
+				var machine keziov1alpha2.Machine
+				Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+				Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
+				Expect(machine.Status.ErrorCount).To(Equal(int32(failCount)), "errorCount must equal the number of consecutive failures seen so far")
+			}
+		})
+
+		It("does not reset errorCount or operationalStatus on Continuing/Busy outcomes within the same state", func() {
+			machineName := fmt.Sprintf("no-reset-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:07",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			})
+
+			// The sequence deliberately interleaves Continuing/Busy between two
+			// Failed outcomes: neither must touch errorCount/operationalStatus,
+			// since only a state transition may clear them.
+			outcomes := []deployer.Result{
+				{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeTransient, ErrorMessage: "first failure"},
+				{Outcome: deployer.Continuing},
+				{Outcome: deployer.Busy, RequeueAfter: time.Millisecond},
+				{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeTransient, ErrorMessage: "second failure"},
+			}
+			var idx int
+			scriptedDeployer := &deployer.FakeDeployer{
+				Client: k8sClient,
+				InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+					result := outcomes[idx]
+					idx++
+					return result, nil
+				},
+			}
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: scriptedDeployer}
+
+			By("driving through the finalizer add, the Enrolling to Inspecting transition, and the first failure")
+			for i := 0; i < 10 && idx == 0; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			var mid keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &mid)).To(Succeed())
+			Expect(mid.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
+			Expect(mid.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusError))
+			Expect(mid.Status.ErrorCount).To(Equal(int32(1)))
+
+			By("reconciling the remaining scripted outcomes: Continuing, Busy, then a second Failed")
+			wantErrorCount := []int32{1, 1, 2}
+			for _, want := range wantErrorCount {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+
+				var machine keziov1alpha2.Machine
+				Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+				Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
+				Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusError))
+				Expect(machine.Status.ErrorCount).To(Equal(want))
+			}
+		})
+
+		It("resets errorCount and operationalStatus to OK when the machine transitions out of the failed state", func() {
+			machineName := fmt.Sprintf("reset-on-exit-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:08",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			})
+
+			var calls int
+			recoveringDeployer := &deployer.FakeDeployer{
+				Client: k8sClient,
+				InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+					calls++
+					if calls == 1 {
+						return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeTransient, ErrorMessage: "boom"}, nil
+					}
+					return deployer.Result{Outcome: deployer.Complete}, nil
+				},
+			}
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: recoveringDeployer}
+
+			By("reconciling through the finalizer add, Enrolling, and the failing Inspect call")
+			for i := 0; i < 10 && calls < 1; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			var mid keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &mid)).To(Succeed())
+			Expect(mid.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
+			Expect(mid.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusError))
+			Expect(mid.Status.ErrorCount).To(Equal(int32(1)))
+
+			By("reconciling the successful retry that exits Inspecting")
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+			Expect(machine.Status.ErrorCount).To(Equal(int32(0)))
 		})
 	})
 })
