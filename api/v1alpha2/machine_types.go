@@ -212,10 +212,129 @@ type MachineSpec struct {
 	ClaimRef *NameRef `json:"claimRef,omitempty"`
 }
 
+// Machine state enum values for MachineStatus.State. These are the
+// top-level states only; provisioning sub-steps are reported through
+// conditions, not as top-level states. There is no Error state: an error
+// is reported on the OperationalStatus axis instead, so a failure never
+// erases where the machine was in the workflow.
+const (
+	// MachineStateEnrolling is the initial state: the machine is
+	// registered but not yet inspected.
+	MachineStateEnrolling = "Enrolling"
+	// MachineStateInspecting means the controller is powering on the
+	// machine to collect its hardware inventory.
+	MachineStateInspecting = "Inspecting"
+	// MachineStateAvailable means inspection succeeded and the machine is
+	// idle, ready for a deployment.
+	MachineStateAvailable = "Available"
+	// MachineStateProvisioning means a deployment is in progress.
+	MachineStateProvisioning = "Provisioning"
+	// MachineStateProvisioned means the deployment succeeded and the
+	// machine has booted the deployed OS (or, for a dataImages-only
+	// deployment, reached its post-deployment power state).
+	MachineStateProvisioned = "Provisioned"
+)
+
+// MachineOperationalStatus enum values for MachineStatus.OperationalStatus,
+// the axis orthogonal to State: an error, a delay, or a detach never
+// changes State.
+const (
+	// MachineOperationalStatusOK means nothing is wrong.
+	MachineOperationalStatusOK = "OK"
+	// MachineOperationalStatusError means the machine hit an error in its
+	// current state. ErrorType, ErrorCount, and ErrorMessage carry the
+	// detail.
+	MachineOperationalStatusError = "error"
+	// MachineOperationalStatusDelayed means progress is intentionally
+	// held back (for example, an unresolved reference), not failed.
+	MachineOperationalStatusDelayed = "delayed"
+	// MachineOperationalStatusDetached means the detached annotation is
+	// stopping the controller from acting on this machine.
+	MachineOperationalStatusDetached = "detached"
+)
+
+// Condition types set on MachineStatus.Conditions.
+const (
+	// MachineConditionReady summarizes whether the machine is in a
+	// stable, usable state.
+	MachineConditionReady = "Ready"
+	// MachineConditionProgressing reports whether the machine is moving
+	// toward a goal state (inspecting or provisioning) right now.
+	MachineConditionProgressing = "Progressing"
+	// MachineConditionAgentCompatible reports whether the kezio-agent
+	// currently polling for a deploy plan advertises a schema version the
+	// server accepts.
+	MachineConditionAgentCompatible = "AgentCompatible"
+)
+
+// MachineCredentialsStatus records one BMC Secret observation: the Secret
+// referenced and its resourceVersion at that observation. A resourceVersion
+// mismatch against the live Secret means the credentials changed since this
+// status was recorded.
+type MachineCredentialsStatus struct {
+	// SecretRef names the observed BMC credentials Secret.
+	// +optional
+	SecretRef *SecretReference `json:"secretRef,omitempty"`
+	// ResourceVersion is the named Secret's resourceVersion at the time of
+	// this observation.
+	// +optional
+	ResourceVersion string `json:"resourceVersion,omitempty"`
+}
+
 // MachineStatus defines the observed state of Machine.
 type MachineStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// State is the machine's position in the state machine.
+	// +kubebuilder:validation:Enum=Enrolling;Inspecting;Available;Provisioning;Provisioned
+	// +optional
+	State string `json:"state,omitempty"`
+	// OperationalStatus is the axis orthogonal to State: it reports an
+	// error, a delay, or a detach without disturbing State.
+	// +kubebuilder:validation:Enum=OK;error;delayed;detached
+	// +optional
+	OperationalStatus string `json:"operationalStatus,omitempty"`
+	// ErrorType classifies the most recent error, when OperationalStatus
+	// is "error".
+	// +optional
+	ErrorType string `json:"errorType,omitempty"`
+	// ErrorCount counts consecutive errors since the last success in the
+	// current state. The controller uses it to compute backoff.
+	// +optional
+	ErrorCount int32 `json:"errorCount,omitempty"`
+	// ErrorMessage describes the most recent error, when OperationalStatus
+	// is "error".
+	// +optional
+	ErrorMessage string `json:"errorMessage,omitempty"`
+	// GoodCredentials records the last BMC Secret observation the
+	// controller successfully authenticated with.
+	// +optional
+	GoodCredentials MachineCredentialsStatus `json:"goodCredentials,omitempty"`
+	// TriedCredentials records the BMC Secret observation of the most
+	// recent connection attempt, successful or not.
+	// +optional
+	TriedCredentials MachineCredentialsStatus `json:"triedCredentials,omitempty"`
+	// CurrentRunRef names the DeployRun for a deployment in progress.
+	// +optional
+	CurrentRunRef *NameRef `json:"currentRunRef,omitempty"`
+	// LastSuccessfulRunRef names the most recent DeployRun that completed
+	// successfully. The provisioning trigger compares the current deploy
+	// intent against this run's resolved snapshot.
+	// +optional
+	LastSuccessfulRunRef *NameRef `json:"lastSuccessfulRunRef,omitempty"`
+	// PoweredOn reports the machine's last observed power state.
+	// +optional
+	PoweredOn *bool `json:"poweredOn,omitempty"`
+	// LastUpdated is when this status was last written. Its absence
+	// despite a set spec.imageRef is the signal that status was lost
+	// (rather than never provisioned).
+	// +optional
+	LastUpdated *metav1.Time `json:"lastUpdated,omitempty"`
+	// Conditions report the current state of the machine.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	// +patchMergeKey=type
+	// +patchStrategy=merge
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
 
 // +kubebuilder:object:root=true
