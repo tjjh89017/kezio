@@ -51,6 +51,11 @@ const (
 	// proceed - not a transient infrastructure hiccup. The caller records
 	// Result.ErrorType/ErrorMessage on the Machine and applies backoff.
 	Failed
+	// Delayed means the step cannot make progress yet for a reason that is
+	// not an error (for example an unresolved reference, or an image not
+	// ready to serve): the caller requeues after its own fixed short
+	// interval and must not touch Machine error state.
+	Delayed
 )
 
 // String renders o for logs and events. An unrecognized value (including
@@ -65,6 +70,8 @@ func (o Outcome) String() string {
 		return "Busy"
 	case Failed:
 		return "Failed"
+	case Delayed:
+		return "Delayed"
 	default:
 		return "Unknown"
 	}

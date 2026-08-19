@@ -268,6 +268,180 @@ var _ = Describe("Machine Controller", func() {
 		})
 	})
 
+	Context("When a Deployer step is delayed", func() {
+		ctx := context.Background()
+
+		It("sets operationalStatus=delayed without touching state, errorType, or errorCount, and requeues after the fixed interval", func() {
+			machineName := fmt.Sprintf("delayed-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:0a",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			})
+
+			origInterval := delayedRequeueInterval
+			delayedRequeueInterval = time.Millisecond
+			DeferCleanup(func() { delayedRequeueInterval = origInterval })
+
+			var calls int
+			delayingDeployer := &deployer.FakeDeployer{
+				Client: k8sClient,
+				InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+					calls++
+					if calls == 1 {
+						return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeTransient, ErrorMessage: "boom"}, nil
+					}
+					return deployer.Result{Outcome: deployer.Delayed}, nil
+				},
+			}
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: delayingDeployer}
+
+			By("reconciling through the finalizer add, Enrolling, and the failing Inspect call")
+			for i := 0; i < 10 && calls < 1; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			var mid keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &mid)).To(Succeed())
+			Expect(mid.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusError))
+			Expect(mid.Status.ErrorCount).To(Equal(int32(1)))
+
+			By("reconciling the Delayed outcome")
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(delayedRequeueInterval))
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusDelayed))
+			Expect(machine.Status.ErrorType).To(Equal(keziov1alpha2.MachineErrorTypeTransient), "delayed must not clear a prior error's errorType")
+			Expect(machine.Status.ErrorCount).To(Equal(int32(1)), "delayed must not increase errorCount")
+		})
+
+		It("clears delayed back to OK when a subsequent Continuing outcome arrives in the same state", func() {
+			machineName := fmt.Sprintf("delayed-clears-continuing-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:0b",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			})
+
+			var calls int
+			scriptedDeployer := &deployer.FakeDeployer{
+				Client: k8sClient,
+				InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+					calls++
+					switch calls {
+					case 1:
+						return deployer.Result{Outcome: deployer.Delayed}, nil
+					case 2:
+						return deployer.Result{Outcome: deployer.Continuing}, nil
+					default:
+						return deployer.Result{Outcome: deployer.Complete}, nil
+					}
+				},
+			}
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: scriptedDeployer}
+
+			By("reconciling through the finalizer add, Enrolling, and the Delayed Inspect call")
+			for i := 0; i < 10 && calls < 1; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			var mid keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &mid)).To(Succeed())
+			Expect(mid.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusDelayed))
+
+			By("reconciling the Continuing outcome that follows")
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+		})
+
+		It("clears delayed back to OK and lets the walk proceed once the deployer succeeds", func() {
+			machineName := fmt.Sprintf("delayed-clears-success-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:0c",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			})
+
+			var calls int
+			scriptedDeployer := &deployer.FakeDeployer{
+				Client: k8sClient,
+				InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+					calls++
+					if calls == 1 {
+						return deployer.Result{Outcome: deployer.Delayed}, nil
+					}
+					return deployer.Result{Outcome: deployer.Complete}, nil
+				},
+			}
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: scriptedDeployer}
+
+			By("reconciling through the finalizer add, Enrolling, and the Delayed Inspect call")
+			for i := 0; i < 10 && calls < 1; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			var mid keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &mid)).To(Succeed())
+			Expect(mid.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
+			Expect(mid.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusDelayed))
+
+			By("reconciling the successful retry that exits Inspecting")
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+			Expect(machine.Status.ErrorCount).To(Equal(int32(0)))
+		})
+	})
+
 	Context("When spec references name kinds that do not exist yet", func() {
 		ctx := context.Background()
 

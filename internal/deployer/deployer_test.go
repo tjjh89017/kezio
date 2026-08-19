@@ -37,6 +37,7 @@ func TestOutcomeString(t *testing.T) {
 		{Continuing, "Continuing"},
 		{Busy, "Busy"},
 		{Failed, "Failed"},
+		{Delayed, "Delayed"},
 		{Outcome(99), "Unknown"},
 	}
 	for _, tc := range cases {

@@ -42,6 +42,11 @@ const (
 	failedRequeueInterval      = 30 * time.Second
 )
 
+// delayedRequeueInterval is the fixed requeue delay for
+// deployer.Delayed - a package variable, not a const, so a test can
+// shorten it instead of waiting out the real interval.
+var delayedRequeueInterval = 15 * time.Second
+
 // MachineReconciler reconciles a Machine object
 type MachineReconciler struct {
 	client.Client
@@ -223,17 +228,52 @@ func hasUnknownErrorType(machine *keziov1alpha2.Machine) bool {
 func (r *MachineReconciler) applyNonCompleteOutcome(ctx context.Context, machine *keziov1alpha2.Machine, result deployer.Result) (ctrl.Result, error) {
 	switch result.Outcome {
 	case deployer.Continuing:
-		return ctrl.Result{RequeueAfter: continuingRequeueInterval}, nil
+		return r.clearDelayed(ctx, machine, ctrl.Result{RequeueAfter: continuingRequeueInterval})
 	case deployer.Busy:
+		requeueAfter := defaultBusyRequeueInterval
 		if result.RequeueAfter > 0 {
-			return ctrl.Result{RequeueAfter: result.RequeueAfter}, nil
+			requeueAfter = result.RequeueAfter
 		}
-		return ctrl.Result{RequeueAfter: defaultBusyRequeueInterval}, nil
+		return r.clearDelayed(ctx, machine, ctrl.Result{RequeueAfter: requeueAfter})
+	case deployer.Delayed:
+		return r.recordDelayed(ctx, machine)
 	case deployer.Failed:
 		return r.recordFailure(ctx, machine, result)
 	default:
 		return ctrl.Result{}, fmt.Errorf("machine %q: deployer step returned unrecognized outcome %v", machine.Name, result.Outcome)
 	}
+}
+
+// recordDelayed marks machine delayed: state, errorType, and errorCount are
+// left untouched - delayed is not an error, so it never joins the error
+// backoff/reset accounting. The caller always requeues after
+// delayedRequeueInterval, a fixed delay independent of any error backoff.
+func (r *MachineReconciler) recordDelayed(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+	patch := client.MergeFrom(machine.DeepCopy())
+	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusDelayed
+	stampLastUpdated(machine)
+	if err := r.Status().Patch(ctx, machine, patch); err != nil {
+		return ctrl.Result{}, fmt.Errorf("machine %q: recording delayed status: %w", machine.Name, err)
+	}
+	return ctrl.Result{RequeueAfter: delayedRequeueInterval}, nil
+}
+
+// clearDelayed clears a previously recorded delayed status on any outcome
+// other than Delayed itself, so "delayed" never outlives the condition that
+// caused it. It is a no-op (result returned unchanged) when the machine is
+// not currently delayed, including when it is in error: only Failed's own
+// path overwrites an error status.
+func (r *MachineReconciler) clearDelayed(ctx context.Context, machine *keziov1alpha2.Machine, result ctrl.Result) (ctrl.Result, error) {
+	if machine.Status.OperationalStatus != keziov1alpha2.MachineOperationalStatusDelayed {
+		return result, nil
+	}
+	patch := client.MergeFrom(machine.DeepCopy())
+	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusOK
+	stampLastUpdated(machine)
+	if err := r.Status().Patch(ctx, machine, patch); err != nil {
+		return ctrl.Result{}, fmt.Errorf("machine %q: clearing delayed status: %w", machine.Name, err)
+	}
+	return result, nil
 }
 
 func (r *MachineReconciler) recordFailure(ctx context.Context, machine *keziov1alpha2.Machine, result deployer.Result) (ctrl.Result, error) {
