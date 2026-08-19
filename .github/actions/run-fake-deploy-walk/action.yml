@@ -1,0 +1,165 @@
+name: Run a fake-deployer Machine walk
+
+description: >-
+  Creates a Machine CR against a deployed kezio manager running the
+  FakeDeployer, with spec.imageRef already set so the reconciler drives it
+  straight through the full state walk (Enrolling -> Inspecting ->
+  Available -> Provisioning -> Provisioned) without a second patch, then
+  asserts the resulting DeployRun reached phase Succeeded with its
+  phaseTimings populated. A placeholder BMC credentials Secret is created
+  alongside the Machine: the webhook does not resolve credentialsSecretRef
+  (reference resolution is stubbed at this stage), but a real Secret costs
+  nothing and keeps the fixture honest for when resolution lands.
+
+inputs:
+  namespace:
+    description: >-
+      Namespace the Machine, its credentials Secret, and its DeployRun are
+      created in. Machines are namespaced and independent of the
+      controller-manager's own namespace (deploy-kezio's "namespace"
+      input), so this defaults to "default" rather than "scaffold-system".
+    required: false
+    default: "default"
+  machine-name:
+    description: 'Name of the Machine CR to create.'
+    required: false
+    default: "fake-deploy-walk"
+  boot-mac-address:
+    description: 'spec.bootMACAddress for the Machine (must match the MAC pattern the webhook/CRD schema enforce).'
+    required: false
+    default: "aa:bb:cc:dd:ee:01"
+  bmc-address:
+    description: >-
+      spec.bmc.address for the Machine. Must use a scheme registered with
+      the manager's compiled-in BMC driver registry (redfish, redfishs,
+      redfish+http, ipmi); the FakeDeployer never dials it, so any host in
+      that scheme is safe. Defaults to a TEST-NET-2 address (RFC 5737).
+    required: false
+    default: "redfish://198.51.100.10/redfish/v1/Systems/1"
+  credentials-secret-name:
+    description: 'Name of the placeholder BMC credentials Secret, referenced by spec.bmc.credentialsSecretRef.'
+    required: false
+    default: "fake-deploy-walk-bmc-creds"
+  subnet-name:
+    description: >-
+      spec.subnetRef name. Subnet does not exist as a kind at this stage,
+      so this is never resolved; any name satisfies the schema.
+    required: false
+    default: "fake-deploy-walk-subnet"
+  image-name:
+    description: >-
+      spec.imageRef name. Image does not exist as a kind at this stage, so
+      this is never resolved - it exists only to be non-nil: an absent
+      imageRef never triggers provisioning, so this is what provokes the
+      walk from Available into Provisioning and on to Provisioned.
+    required: false
+    default: "fake-deploy-walk-image"
+  timeout:
+    description: 'Timeout for the Machine to reach status.state=Provisioned, e.g. "120s".'
+    required: false
+    default: "120s"
+
+runs:
+  using: composite
+  steps:
+    - name: Create the placeholder BMC credentials Secret
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        SECRET_NAME: ${{ inputs.credentials-secret-name }}
+      run: |
+        set -euo pipefail
+        kubectl create secret generic "${SECRET_NAME}" \
+          --namespace "${NAMESPACE}" \
+          --from-literal=username=fake \
+          --from-literal=password=fake \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: Create the Machine
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        BOOT_MAC_ADDRESS: ${{ inputs.boot-mac-address }}
+        BMC_ADDRESS: ${{ inputs.bmc-address }}
+        CREDENTIALS_SECRET_NAME: ${{ inputs.credentials-secret-name }}
+        SUBNET_NAME: ${{ inputs.subnet-name }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha2
+        kind: Machine
+        metadata:
+          name: ${MACHINE_NAME}
+          namespace: ${NAMESPACE}
+        spec:
+          bmc:
+            address: ${BMC_ADDRESS}
+            credentialsSecretRef:
+              name: ${CREDENTIALS_SECRET_NAME}
+          bootMACAddress: ${BOOT_MAC_ADDRESS}
+          subnetRef:
+            name: ${SUBNET_NAME}
+          imageRef:
+            name: ${IMAGE_NAME}
+        EOF
+
+    - name: Wait for the Machine to reach state Provisioned
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        TIMEOUT: ${{ inputs.timeout }}
+      run: |
+        set -euo pipefail
+        kubectl wait "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.state}'=Provisioned --timeout="${TIMEOUT}"
+        kubectl get "machine/${MACHINE_NAME}" -n "${NAMESPACE}" -o yaml
+
+    - name: Assert the Machine's DeployRun succeeded with per-phase timings
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+      run: |
+        set -euo pipefail
+
+        operational_status="$(kubectl get "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
+          -o jsonpath='{.status.operationalStatus}')"
+        if [ "${operational_status}" != "OK" ]; then
+          echo "machine/${MACHINE_NAME} reached state Provisioned but status.operationalStatus is" \
+            "\"${operational_status}\", not \"OK\"" >&2
+          exit 1
+        fi
+
+        run_name="$(kubectl get "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
+          -o jsonpath='{.status.lastSuccessfulRunRef.name}')"
+        if [ -z "${run_name}" ]; then
+          echo "machine/${MACHINE_NAME} reached state Provisioned but status.lastSuccessfulRunRef is unset" >&2
+          exit 1
+        fi
+
+        run_json="$(kubectl get "deployrun/${run_name}" -n "${NAMESPACE}" -o json)"
+        echo "${run_json}" | jq .
+
+        phase="$(echo "${run_json}" | jq -r '.status.phase')"
+        if [ "${phase}" != "Succeeded" ]; then
+          echo "deployrun/${run_name} status.phase is \"${phase}\", expected \"Succeeded\"" >&2
+          exit 1
+        fi
+
+        timing_count="$(echo "${run_json}" | jq '.status.phaseTimings | length')"
+        if [ "${timing_count}" -lt 1 ]; then
+          echo "deployrun/${run_name} status.phaseTimings is empty, expected at least one entry" >&2
+          exit 1
+        fi
+
+        incomplete="$(echo "${run_json}" | jq -r \
+          '[.status.phaseTimings[] | select((.startedAt|not) or (.finishedAt|not)) | .phase] | join(", ")')"
+        if [ -n "${incomplete}" ]; then
+          echo "deployrun/${run_name} status.phaseTimings has phase(s) missing startedAt/finishedAt: ${incomplete}" >&2
+          exit 1
+        fi
+
+        echo "deployrun/${run_name} succeeded with ${timing_count} timed phase(s)"
