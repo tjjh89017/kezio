@@ -65,6 +65,48 @@ func TestIsDetached(t *testing.T) {
 	}
 }
 
+func TestReInspectRequested(t *testing.T) {
+	cases := []struct {
+		name        string
+		annotations map[string]string
+		want        bool
+	}{
+		{"absent", nil, false},
+		{"present empty value", map[string]string{keziov1alpha2.MachineAnnotationReInspect: ""}, true},
+		{"present non-empty value", map[string]string{keziov1alpha2.MachineAnnotationReInspect: "anything"}, true},
+		{"other annotation only", map[string]string{"other": "x"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			machine := &keziov1alpha2.Machine{ObjectMeta: metav1.ObjectMeta{Annotations: tc.annotations}}
+			if got := reInspectRequested(machine); got != tc.want {
+				t.Errorf("reInspectRequested() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestInspectDisabled(t *testing.T) {
+	cases := []struct {
+		name        string
+		annotations map[string]string
+		want        bool
+	}{
+		{"absent", nil, false},
+		{"exactly true", map[string]string{keziov1alpha2.MachineAnnotationInspectDisable: annotationValueTrue}, true},
+		{"non-true value", map[string]string{keziov1alpha2.MachineAnnotationInspectDisable: "yes"}, false},
+		{"empty value", map[string]string{keziov1alpha2.MachineAnnotationInspectDisable: ""}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			machine := &keziov1alpha2.Machine{ObjectMeta: metav1.ObjectMeta{Annotations: tc.annotations}}
+			if got := inspectDisabled(machine); got != tc.want {
+				t.Errorf("inspectDisabled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestIsRebootAnnotationKey(t *testing.T) {
 	cases := []struct {
 		key  string

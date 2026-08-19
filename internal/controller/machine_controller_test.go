@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
@@ -1492,7 +1493,7 @@ var _ = Describe("Machine Controller", func() {
 
 			var claimed corev1.Secret
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: "default"}, &claimed)).To(Succeed())
-			Expect(claimed.Labels).To(HaveKeyWithValue(keziov1alpha2.MachineCredentialsSecretLabel, "true"))
+			Expect(claimed.Labels).To(HaveKeyWithValue(keziov1alpha2.MachineCredentialsSecretLabel, annotationValueTrue))
 			Expect(claimed.Finalizers).To(ContainElement(keziov1alpha2.MachineCredentialsSecretFinalizer))
 
 			var ownerFound bool
@@ -2054,6 +2055,159 @@ var _ = Describe("Machine Controller", func() {
 			var machine keziov1alpha2.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 			Expect(machine.Annotations).NotTo(HaveKey(keziov1alpha2.MachineAnnotationRebootPrefix), "the suffixless annotation is cleared once acted on, even though its value was invalid")
+		})
+	})
+
+	Context("re-inspect annotation", func() {
+		reconcileUntilState := func(reconciler *MachineReconciler, name types.NamespacedName, want string) {
+			GinkgoHelper()
+			var machine keziov1alpha2.Machine
+			for i := 0; i < 20; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+				if machine.Status.State == want {
+					return
+				}
+			}
+			Fail(fmt.Sprintf("machine %q never reached state %q, stuck at %q", name.Name, want, machine.Status.State))
+		}
+
+		newBareMachine := func(machineName string, annotations map[string]string) types.NamespacedName {
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        machineName,
+					Namespace:   "default",
+					Annotations: annotations,
+				},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:40",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			})
+			return name
+		}
+
+		It("in Available: deletes and recreates MachineHardware and emits an accepted event", func() {
+			machineName := fmt.Sprintf("reinspect-available-%d", GinkgoRandomSeed())
+			name := newBareMachine(machineName, nil)
+
+			recorder := record.NewFakeRecorder(10)
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}, Recorder: recorder}
+
+			By("walking to Available with an empty deploy payload")
+			reconcileUntilState(reconciler, name, keziov1alpha2.MachineStateAvailable)
+
+			var firstHW keziov1alpha2.MachineHardware
+			Expect(k8sClient.Get(ctx, name, &firstHW)).To(Succeed())
+			Expect(firstHW.UID).NotTo(BeEmpty())
+
+			By("setting the re-inspect annotation")
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			machine.Annotations = map[string]string{keziov1alpha2.MachineAnnotationReInspect: ""}
+			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
+
+			By("reconciling once: the annotation is consumed and the machine moves to Inspecting")
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Annotations).NotTo(HaveKey(keziov1alpha2.MachineAnnotationReInspect))
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
+			Expect(<-recorder.Events).To(ContainSubstring("ReInspectAccepted"))
+
+			By("MachineHardware was deleted, not merely left in place")
+			Expect(errors.IsNotFound(k8sClient.Get(ctx, name, &keziov1alpha2.MachineHardware{}))).To(BeTrue())
+
+			By("walking back to Available recreates MachineHardware with a new UID")
+			reconcileUntilState(reconciler, name, keziov1alpha2.MachineStateAvailable)
+
+			var secondHW keziov1alpha2.MachineHardware
+			Expect(k8sClient.Get(ctx, name, &secondHW)).To(Succeed())
+			Expect(secondHW.UID).NotTo(Equal(firstHW.UID), "re-inspection must recreate MachineHardware, not patch it")
+		})
+
+		It("outside Available: consumes the annotation and emits a refused event without touching MachineHardware", func() {
+			machineName := fmt.Sprintf("reinspect-refused-%d", GinkgoRandomSeed())
+			name := newBareMachine(machineName, map[string]string{keziov1alpha2.MachineAnnotationReInspect: ""})
+
+			recorder := record.NewFakeRecorder(10)
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}, Recorder: recorder}
+
+			By("reconciling to add the finalizer")
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("reconciling again: state is still not Available, so the annotation is refused")
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Annotations).NotTo(HaveKey(keziov1alpha2.MachineAnnotationReInspect), "the annotation is consumed even on refusal")
+			Expect(<-recorder.Events).To(ContainSubstring("ReInspectRefused"))
+			Expect(errors.IsNotFound(k8sClient.Get(ctx, name, &keziov1alpha2.MachineHardware{}))).To(BeTrue(), "a refused re-inspect must never touch MachineHardware")
+
+			By("the walk still completes normally once the annotation is gone")
+			reconcileUntilState(reconciler, name, keziov1alpha2.MachineStateAvailable)
+		})
+	})
+
+	Context("inspect-disable annotation", func() {
+		It("skips Inspecting: no MachineHardware is created, and the walk still reaches Available", func() {
+			machineName := fmt.Sprintf("inspect-disable-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        machineName,
+					Namespace:   "default",
+					Annotations: map[string]string{keziov1alpha2.MachineAnnotationInspectDisable: annotationValueTrue},
+				},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:41",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			})
+
+			var inspectCalls int
+			fakeDeployer := &deployer.FakeDeployer{
+				Client: k8sClient,
+				InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+					inspectCalls++
+					return deployer.Result{Outcome: deployer.Complete}, nil
+				},
+			}
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: fakeDeployer}
+
+			var machine keziov1alpha2.Machine
+			for i := 0; i < 20; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+				if machine.Status.State == keziov1alpha2.MachineStateAvailable {
+					break
+				}
+			}
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable))
+			Expect(inspectCalls).To(Equal(0), "inspect-disable must skip the deployer's Inspect step entirely")
+			Expect(errors.IsNotFound(k8sClient.Get(ctx, name, &keziov1alpha2.MachineHardware{}))).To(BeTrue())
 		})
 	})
 })

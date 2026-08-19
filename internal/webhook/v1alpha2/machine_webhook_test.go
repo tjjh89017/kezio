@@ -107,17 +107,17 @@ var _ = Describe("Machine Webhook", func() {
 
 	Context("annotation \"kezio.kojuro.date/inspect-disable\"", func() {
 		It("admits a Machine with the annotation and a boot MAC address", func() {
-			obj.Annotations = map[string]string{AnnotationInspectDisable: "true"}
+			obj.Annotations = map[string]string{keziov1alpha2.MachineAnnotationInspectDisable: "true"}
 			Expect(validator.ValidateCreate(ctx, obj)).Error().NotTo(HaveOccurred())
 		})
 
 		It("denies the annotation set to a value other than \"true\"", func() {
-			obj.Annotations = map[string]string{AnnotationInspectDisable: "yes"}
+			obj.Annotations = map[string]string{keziov1alpha2.MachineAnnotationInspectDisable: "yes"}
 			Expect(validator.ValidateCreate(ctx, obj)).Error().To(HaveOccurred())
 		})
 
 		It("denies the annotation without a boot MAC address", func() {
-			obj.Annotations = map[string]string{AnnotationInspectDisable: "true"}
+			obj.Annotations = map[string]string{keziov1alpha2.MachineAnnotationInspectDisable: "true"}
 			obj.Spec.BootMACAddress = ""
 			_, err := validator.ValidateCreate(ctx, obj)
 			Expect(err).To(HaveOccurred())
@@ -125,9 +125,6 @@ var _ = Describe("Machine Webhook", func() {
 		})
 
 		It("admits a missing boot MAC address when the annotation is absent", func() {
-			// api/v1alpha2 requires bootMACAddress unconditionally at the CRD
-			// schema level today; this direct validator call bypasses that
-			// schema layer to exercise the webhook's own conditional check.
 			obj.Spec.BootMACAddress = ""
 			Expect(validator.ValidateCreate(ctx, obj)).Error().NotTo(HaveOccurred())
 		})

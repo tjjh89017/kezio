@@ -38,6 +38,25 @@ func isDetached(machine *keziov1alpha2.Machine) bool {
 	return ok
 }
 
+// annotationValueTrue is the "on" value shared by every boolean-flag
+// annotation and label in this package (inspect-disable, the BMC
+// credentials Secret label).
+const annotationValueTrue = "true"
+
+func reInspectRequested(machine *keziov1alpha2.Machine) bool {
+	_, ok := machine.Annotations[keziov1alpha2.MachineAnnotationReInspect]
+	return ok
+}
+
+// inspectDisabled reports whether machine carries the inspect-disable
+// annotation with exactly the value the webhook requires ("true"). A stale
+// or malformed value never reaches here on a webhook-admitted Machine, but
+// this stays exact rather than presence-only so a corrupt value does not
+// silently disable inspection.
+func inspectDisabled(machine *keziov1alpha2.Machine) bool {
+	return machine.Annotations[keziov1alpha2.MachineAnnotationInspectDisable] == annotationValueTrue
+}
+
 // isRebootAnnotationKey reports whether key is the suffixless reboot
 // annotation or a "-<client>" suffixed one.
 func isRebootAnnotationKey(key string) bool {

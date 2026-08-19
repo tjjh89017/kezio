@@ -82,6 +82,9 @@ spec:
                 description: |-
                   BootMACAddress is the MAC address of the NIC the machine network
                   boots from. The boot config server uses it to find this machine.
+                  Normally discovered by inspection; it is mandatory only when the
+                  inspect-disable annotation skips inspection, a rule the Machine
+                  webhook enforces.
                 pattern: ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$
                 type: string
               claimRef:
@@ -391,7 +394,6 @@ spec:
                     || self.minSizeGigabytes <= self.maxSizeGigabytes'
             required:
             - bmc
-            - bootMACAddress
             - subnetRef
             type: object
           status:

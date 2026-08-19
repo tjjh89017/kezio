@@ -212,8 +212,9 @@ func main() {
 	}
 
 	if err := (&controller.MachineReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("machine-controller"),
 		// FakeDeployer until a hardware-backed Deployer exists: it never
 		// dials a real BMC or agent.
 		Deployer: &deployer.FakeDeployer{Client: mgr.GetClient()},

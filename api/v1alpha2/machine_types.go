@@ -158,8 +158,12 @@ type MachineSpec struct {
 	BMC MachineBMC `json:"bmc"`
 	// BootMACAddress is the MAC address of the NIC the machine network
 	// boots from. The boot config server uses it to find this machine.
+	// Normally discovered by inspection; it is mandatory only when the
+	// inspect-disable annotation skips inspection, a rule the Machine
+	// webhook enforces.
 	// +kubebuilder:validation:Pattern=`^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$`
-	BootMACAddress string `json:"bootMACAddress"`
+	// +optional
+	BootMACAddress string `json:"bootMACAddress,omitempty"`
 	// ImageRef names the Image to deploy as this machine's OS. It must be
 	// a bootable image. May be absent when the machine deploys only
 	// DataImages and keeps its existing OS.
@@ -258,6 +262,20 @@ const (
 	// once it has acted; suffixed forms are cleared by the client that set
 	// them.
 	MachineAnnotationRebootPrefix = "kezio.kojuro.date/reboot"
+	// MachineAnnotationInspectDisable, set to exactly "true", skips
+	// hardware inspection: the controller trusts spec.bootMACAddress
+	// instead of discovering it from an inspection boot, so the Machine
+	// webhook requires that field non-empty whenever this annotation is
+	// "true".
+	MachineAnnotationInspectDisable = "kezio.kojuro.date/inspect-disable"
+	// MachineAnnotationReInspect, present with any value, asks the
+	// controller to redo hardware inspection. Consume-then-delete: the
+	// controller removes this annotation and emits a Kubernetes Event
+	// reporting what it did (accepted) or why not (refused) on every
+	// reconcile that observes it, exactly once. On acceptance the existing
+	// MachineHardware is deleted (never patched) and a fresh one is
+	// created by the normal inspection walk.
+	MachineAnnotationReInspect = "kezio.kojuro.date/re-inspect"
 )
 
 // MachineRebootMode is the JSON "mode" value inside a reboot annotation.

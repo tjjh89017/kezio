@@ -32,12 +32,6 @@ import (
 	"github.com/tjjh89017/kezio/internal/bmc"
 )
 
-// AnnotationInspectDisable, set to exactly "true" on a Machine, skips
-// hardware inspection: the controller trusts spec.bootMACAddress instead
-// of discovering it from an inspection boot, so that field cannot be
-// absent when this annotation is set.
-const AnnotationInspectDisable = "kezio.kojuro.date/inspect-disable"
-
 // nolint:unused
 // log is for logging in this package.
 var machinelog = logf.Log.WithName("machine-resource")
@@ -149,20 +143,22 @@ func validateMachineBMC(machine *keziov1alpha2.Machine) error {
 	return nil
 }
 
-// validateInspectDisable rejects an AnnotationInspectDisable value that is
-// not exactly "true", and rejects an empty spec.bootMACAddress once the
-// annotation disables inspection: the controller then trusts this field
-// instead of discovering it, so it cannot be absent.
+// validateInspectDisable rejects a MachineAnnotationInspectDisable value
+// that is not exactly "true", and rejects an empty spec.bootMACAddress
+// once the annotation disables inspection: the controller then trusts this
+// field instead of discovering it, so it cannot be absent. This is the
+// only place bootMACAddress presence is enforced - the CRD schema leaves it
+// optional, since it is not required when inspection is enabled.
 func validateInspectDisable(machine *keziov1alpha2.Machine) error {
-	value, ok := machine.Annotations[AnnotationInspectDisable]
+	value, ok := machine.Annotations[keziov1alpha2.MachineAnnotationInspectDisable]
 	if !ok {
 		return nil
 	}
 	if value != "true" {
-		return fmt.Errorf("annotation %q has value %q, expected exactly \"true\"", AnnotationInspectDisable, value)
+		return fmt.Errorf("annotation %q has value %q, expected exactly \"true\"", keziov1alpha2.MachineAnnotationInspectDisable, value)
 	}
 	if machine.Spec.BootMACAddress == "" {
-		return fmt.Errorf("spec.bootMACAddress is required when annotation %q is \"true\"", AnnotationInspectDisable)
+		return fmt.Errorf("spec.bootMACAddress is required when annotation %q is \"true\"", keziov1alpha2.MachineAnnotationInspectDisable)
 	}
 	return nil
 }

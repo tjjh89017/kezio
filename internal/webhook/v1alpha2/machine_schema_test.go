@@ -118,4 +118,17 @@ var _ = Describe("Machine CRD schema", func() {
 		Expect(k8sClient.Create(ctx, m)).To(Succeed())
 		Expect(m.Spec.AfterDeploy).To(Equal(keziov1alpha2.AfterDeployReboot))
 	})
+
+	It("admits an absent bootMACAddress when inspect-disable is absent", func() {
+		m := newMachine()
+		m.Spec.BootMACAddress = ""
+		Expect(k8sClient.Create(ctx, m)).To(Succeed())
+	})
+
+	It("rejects an absent bootMACAddress when inspect-disable is \"true\"", func() {
+		m := newMachine()
+		m.Spec.BootMACAddress = ""
+		m.Annotations = map[string]string{keziov1alpha2.MachineAnnotationInspectDisable: "true"}
+		Expect(k8sClient.Create(ctx, m)).To(HaveOccurred())
+	})
 })

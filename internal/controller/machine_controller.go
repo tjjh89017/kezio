@@ -29,6 +29,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -84,6 +85,9 @@ type MachineReconciler struct {
 	Scheme *runtime.Scheme
 	// Deployer drives hardware inspection and image provisioning. Required.
 	Deployer deployer.Deployer
+	// Recorder emits Kubernetes Events on Machine, notably the
+	// accept/refuse outcome of a re-inspect annotation. Required.
+	Recorder record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines,verbs=get;list;watch;create;update;patch;delete
@@ -91,6 +95,7 @@ type MachineReconciler struct {
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines/finalizers,verbs=update
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machinehardwares,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -280,6 +285,10 @@ func (r *MachineReconciler) onChange(ctx context.Context, machine *keziov1alpha2
 		return r.reconcileReboot(ctx, machine, hard)
 	}
 
+	if reInspectRequested(machine) {
+		return r.reconcileReInspect(ctx, machine)
+	}
+
 	if hasUnknownErrorType(machine) {
 		return r.setState(ctx, machine, keziov1alpha2.MachineStateEnrolling)
 	}
@@ -314,7 +323,15 @@ func (r *MachineReconciler) setState(ctx context.Context, machine *keziov1alpha2
 	return ctrl.Result{}, nil
 }
 
+// reconcileInspecting drives one step of hardware inspection, or - when the
+// inspect-disable annotation is set - skips inspection entirely: no
+// MachineHardware is created, and spec.bootMACAddress (mandatory in that
+// case, per the Machine webhook) carries the identity instead.
 func (r *MachineReconciler) reconcileInspecting(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+	if inspectDisabled(machine) {
+		return r.setState(ctx, machine, keziov1alpha2.MachineStateAvailable)
+	}
+
 	secret, blocked, gateResult, err := r.resolveCredentialsSecret(ctx, machine)
 	if blocked {
 		return gateResult, err
@@ -335,6 +352,67 @@ func (r *MachineReconciler) reconcileInspecting(ctx context.Context, machine *ke
 		return r.setState(ctx, machine, keziov1alpha2.MachineStateAvailable)
 	}
 	return r.applyNonCompleteOutcome(ctx, machine, result)
+}
+
+// reInspectAcceptable reports whether machine's current status.state honors
+// a re-inspect annotation right now. This stage implements only the
+// unambiguous case: Available. Extending this predicate (for example,
+// Provisioned with an empty deploy payload) is how a later stage widens
+// acceptance - the call site in reconcileReInspect does not change.
+func reInspectAcceptable(machine *keziov1alpha2.Machine) bool {
+	return machine.Status.State == keziov1alpha2.MachineStateAvailable
+}
+
+// reconcileReInspect handles the re-inspect annotation: consume-then-delete,
+// with a Kubernetes Event either way. The annotation is always removed here,
+// exactly once, regardless of whether it is honored - a Machine outside the
+// acceptable state must not keep re-triggering this branch on every
+// reconcile. On acceptance the existing MachineHardware is deleted (never
+// patched) and the machine moves to Inspecting, where the normal inspection
+// walk creates a fresh one.
+func (r *MachineReconciler) reconcileReInspect(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+	accepted := reInspectAcceptable(machine)
+	if err := r.consumeReInspectAnnotation(ctx, machine); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if !accepted {
+		r.Recorder.Eventf(machine, corev1.EventTypeWarning, "ReInspectRefused",
+			"re-inspect annotation refused: machine is in state %q, not %q", machine.Status.State, keziov1alpha2.MachineStateAvailable)
+		return ctrl.Result{}, nil
+	}
+
+	if err := r.deleteMachineHardware(ctx, machine); err != nil {
+		return ctrl.Result{}, err
+	}
+	r.Recorder.Event(machine, corev1.EventTypeNormal, "ReInspectAccepted",
+		"re-inspect annotation accepted: MachineHardware deleted, machine moving to Inspecting")
+	return r.setState(ctx, machine, keziov1alpha2.MachineStateInspecting)
+}
+
+// consumeReInspectAnnotation removes MachineAnnotationReInspect from
+// machine. Called exactly once per reconcile that observes the annotation,
+// before acting on it, so a crash or a refuse decision can never leave the
+// annotation to re-trigger this branch forever.
+func (r *MachineReconciler) consumeReInspectAnnotation(ctx context.Context, machine *keziov1alpha2.Machine) error {
+	patch := client.MergeFrom(machine.DeepCopy())
+	delete(machine.Annotations, keziov1alpha2.MachineAnnotationReInspect)
+	if err := r.Patch(ctx, machine, patch); err != nil {
+		return fmt.Errorf("machine %q: consuming re-inspect annotation: %w", machine.Name, err)
+	}
+	return nil
+}
+
+// deleteMachineHardware deletes the MachineHardware named after machine, if
+// any. It never patches: re-inspection always produces a genuinely new
+// object (a new UID) through the normal inspection walk's create call, not
+// an update of the old one.
+func (r *MachineReconciler) deleteMachineHardware(ctx context.Context, machine *keziov1alpha2.Machine) error {
+	hw := &keziov1alpha2.MachineHardware{ObjectMeta: metav1.ObjectMeta{Name: machine.Name, Namespace: machine.Namespace}}
+	if err := r.Delete(ctx, hw); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("machine %q: deleting MachineHardware for re-inspection: %w", machine.Name, err)
+	}
+	return nil
 }
 
 // reconcileIdle handles Available and Provisioned: both are idle states
@@ -757,11 +835,11 @@ func (r *MachineReconciler) claimCredentialsSecret(ctx context.Context, machine 
 	patch := client.MergeFrom(secret.DeepCopy())
 	changed := false
 
-	if secret.Labels[keziov1alpha2.MachineCredentialsSecretLabel] != "true" {
+	if secret.Labels[keziov1alpha2.MachineCredentialsSecretLabel] != annotationValueTrue {
 		if secret.Labels == nil {
 			secret.Labels = map[string]string{}
 		}
-		secret.Labels[keziov1alpha2.MachineCredentialsSecretLabel] = "true"
+		secret.Labels[keziov1alpha2.MachineCredentialsSecretLabel] = annotationValueTrue
 		changed = true
 	}
 
