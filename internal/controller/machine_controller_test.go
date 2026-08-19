@@ -1145,6 +1145,97 @@ var _ = Describe("Machine Controller", func() {
 		})
 	})
 
+	Context("When an unrecognized errorType fires while Provisioning", func() {
+		ctx := context.Background()
+
+		It("re-enrolls the machine and clears the dangling currentRunRef", func() {
+			machineName := fmt.Sprintf("unknown-errortype-provisioning-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			imageRef := keziov1alpha2.NameRef{Name: "test-image"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:0f",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					ImageRef:       &imageRef,
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			})
+
+			fakeDeployer := &deployer.FakeDeployer{Client: k8sClient}
+			// Never completes on its own: keeps the machine parked in
+			// Provisioning with a stable currentRunRef until the test scripts
+			// the unrecognized-errorType failure.
+			fakeDeployer.ProvisionFunc = func(context.Context, *keziov1alpha2.Machine, *keziov1alpha2.DeployRun, bool) (deployer.Result, error) {
+				return deployer.Result{Outcome: deployer.Continuing}, nil
+			}
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: fakeDeployer}
+
+			By("walking to Provisioning with a currentRunRef set, and no further")
+			var machine keziov1alpha2.Machine
+			for i := 0; i < 50; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+				if machine.Status.State == keziov1alpha2.MachineStateProvisioning && machine.Status.CurrentRunRef != nil {
+					break
+				}
+			}
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioning))
+			Expect(machine.Status.CurrentRunRef).NotTo(BeNil())
+			danglingRunName := machine.Status.CurrentRunRef.Name
+
+			By("the deployer reports an unrecognized errorType mid-run")
+			fakeDeployer.ProvisionFunc = func(context.Context, *keziov1alpha2.Machine, *keziov1alpha2.DeployRun, bool) (deployer.Result, error) {
+				return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorType("bogus"), ErrorMessage: "corrupt"}, nil
+			}
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioning))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusError))
+			Expect(machine.Status.ErrorType).To(Equal(keziov1alpha2.MachineErrorType("bogus")))
+			Expect(machine.Status.CurrentRunRef).NotTo(BeNil())
+			Expect(machine.Status.CurrentRunRef.Name).To(Equal(danglingRunName), "the run reference is still live until the fallback fires")
+
+			By("reconciling once more: the unrecognized errorType fallback re-enrolls the machine and clears the dangling currentRunRef")
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			var reenrolled keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &reenrolled)).To(Succeed())
+			Expect(reenrolled.Status.State).To(Equal(keziov1alpha2.MachineStateEnrolling))
+			Expect(reenrolled.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+			Expect(reenrolled.Status.ErrorCount).To(Equal(int32(0)))
+			Expect(reenrolled.Status.CurrentRunRef).To(BeNil(), "a dangling ref would leave the orphaned DeployRun mistaken for a live provisioning run")
+
+			By("walking the rest of the way back to a good state")
+			fakeDeployer.ProvisionFunc = nil
+			for i := 0; i < 50; i++ {
+				result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+				if result.RequeueAfter == 0 {
+					Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+					if machine.Status.State == keziov1alpha2.MachineStateProvisioned {
+						break
+					}
+				}
+			}
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioned))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+			Expect(machine.Status.CurrentRunRef).NotTo(BeNil())
+			Expect(machine.Status.CurrentRunRef.Name).NotTo(Equal(danglingRunName))
+		})
+	})
+
 	Context("When the current DeployRun disappears mid-Provisioning", func() {
 		ctx := context.Background()
 

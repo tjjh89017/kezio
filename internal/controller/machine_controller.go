@@ -318,6 +318,11 @@ func (r *MachineReconciler) onChange(ctx context.Context, machine *keziov1alpha2
 	}
 
 	if hasUnknownErrorType(machine) {
+		// A live currentRunRef only makes sense during an active
+		// Provisioning walk; re-enrolling abandons that walk, so the ref
+		// must go with it - otherwise the machine could reach
+		// Available/Provisioned still pointing at an orphaned DeployRun.
+		machine.Status.CurrentRunRef = nil
 		return r.setState(ctx, machine, keziov1alpha2.MachineStateEnrolling)
 	}
 
