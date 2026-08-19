@@ -382,6 +382,149 @@ func TestFakeGoSourceDoesNotImportBMC(t *testing.T) {
 	}
 }
 
+// TestFakeDeployerProvisionHonorsFakeFailAnnotation proves the
+// "provision:<count>" form of FakeFailAnnotation fails Provision while
+// machine.Status.ErrorCount is below count, then reverts to the default
+// walk once errorCount catches up - the same shape the Machine controller
+// itself produces by incrementing errorCount on every Failed outcome.
+func TestFakeDeployerProvisionHonorsFakeFailAnnotation(t *testing.T) {
+	c := newFakeClient(t)
+	machine := newTestMachine()
+	machine.Annotations = map[string]string{FakeFailAnnotation: "provision:2"}
+	run := newTestDeployRun(t, c, "m1-run1", machine)
+	f := &FakeDeployer{Client: c}
+
+	for wantErrorCount := int32(0); wantErrorCount < 2; wantErrorCount++ {
+		machine.Status.ErrorCount = wantErrorCount
+		result, err := f.Provision(context.Background(), machine, run, false)
+		if err != nil {
+			t.Fatalf("Provision() at errorCount=%d error = %v", wantErrorCount, err)
+		}
+		if result.Outcome != Failed {
+			t.Fatalf("Provision() at errorCount=%d outcome = %v, want Failed", wantErrorCount, result.Outcome)
+		}
+		if run.Status.Phase != "" {
+			t.Errorf("Provision() at errorCount=%d advanced run.Status.Phase to %q, want it untouched", wantErrorCount, run.Status.Phase)
+		}
+	}
+
+	machine.Status.ErrorCount = 2
+	result, err := f.Provision(context.Background(), machine, run, false)
+	if err != nil {
+		t.Fatalf("Provision() at errorCount=2 error = %v", err)
+	}
+	if result.Outcome != Continuing {
+		t.Fatalf("Provision() at errorCount=2 outcome = %v, want Continuing (default walk resumed)", result.Outcome)
+	}
+	if run.Status.Phase != keziov1alpha2.DeployRunPhasePending {
+		t.Errorf("Provision() at errorCount=2 run.Status.Phase = %q, want %q", run.Status.Phase, keziov1alpha2.DeployRunPhasePending)
+	}
+}
+
+// TestFakeDeployerProvisionFakeFailAnnotationForever proves the "forever"
+// count never lets Provision succeed, regardless of errorCount.
+func TestFakeDeployerProvisionFakeFailAnnotationForever(t *testing.T) {
+	machine := newTestMachine()
+	machine.Annotations = map[string]string{FakeFailAnnotation: "provision:forever"}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	f := &FakeDeployer{}
+
+	machine.Status.ErrorCount = 100
+	result, err := f.Provision(context.Background(), machine, run, false)
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	if result.Outcome != Failed {
+		t.Fatalf("Provision() outcome = %v, want Failed", result.Outcome)
+	}
+}
+
+// TestFakeDeployerDeprovisionHonorsFakeFailAnnotation mirrors
+// TestFakeDeployerProvisionHonorsFakeFailAnnotation for the
+// "deprovision:<count>" form, the mechanism the give-up delete-walk test
+// scripts a dead BMC with.
+func TestFakeDeployerDeprovisionHonorsFakeFailAnnotation(t *testing.T) {
+	machine := newTestMachine()
+	machine.Annotations = map[string]string{FakeFailAnnotation: "deprovision:1"}
+	f := &FakeDeployer{}
+
+	machine.Status.ErrorCount = 0
+	result, err := f.Deprovision(context.Background(), machine, false)
+	if err != nil {
+		t.Fatalf("Deprovision() at errorCount=0 error = %v", err)
+	}
+	if result.Outcome != Failed {
+		t.Fatalf("Deprovision() at errorCount=0 outcome = %v, want Failed", result.Outcome)
+	}
+
+	machine.Status.ErrorCount = 1
+	result, err = f.Deprovision(context.Background(), machine, false)
+	if err != nil {
+		t.Fatalf("Deprovision() at errorCount=1 error = %v", err)
+	}
+	if result.Outcome != Complete {
+		t.Fatalf("Deprovision() at errorCount=1 outcome = %v, want Complete (default behavior resumed)", result.Outcome)
+	}
+}
+
+// TestFakeDeployerDeprovisionFakeFailAnnotationForever is the "dead BMC"
+// shape the give-up e2e scenario needs: Deprovision never succeeds no
+// matter how high errorCount climbs.
+func TestFakeDeployerDeprovisionFakeFailAnnotationForever(t *testing.T) {
+	machine := newTestMachine()
+	machine.Annotations = map[string]string{FakeFailAnnotation: "deprovision:forever"}
+	f := &FakeDeployer{}
+
+	machine.Status.ErrorCount = 100
+	result, err := f.Deprovision(context.Background(), machine, false)
+	if err != nil {
+		t.Fatalf("Deprovision() error = %v", err)
+	}
+	if result.Outcome != Failed {
+		t.Fatalf("Deprovision() outcome = %v, want Failed", result.Outcome)
+	}
+}
+
+// TestFakeDeployerFakeFailAnnotationScopedToItsOwnStep proves a
+// "provision:..." annotation never bleeds into Deprovision's default
+// behavior - each step matches only its own verb.
+func TestFakeDeployerFakeFailAnnotationScopedToItsOwnStep(t *testing.T) {
+	machine := newTestMachine()
+	machine.Annotations = map[string]string{FakeFailAnnotation: "provision:forever"}
+	f := &FakeDeployer{}
+
+	result, err := f.Deprovision(context.Background(), machine, false)
+	if err != nil {
+		t.Fatalf("Deprovision() error = %v", err)
+	}
+	if result.Outcome != Complete {
+		t.Fatalf("Deprovision() outcome = %v, want Complete: a provision-scoped annotation must not affect Deprovision", result.Outcome)
+	}
+}
+
+// TestFakeDeployerFuncOverrideTakesPriorityOverFakeFailAnnotation proves
+// InspectFunc/ProvisionFunc/DeprovisionFunc (envtest's per-test scripting)
+// wins over FakeFailAnnotation when both are present - the annotation only
+// substitutes for the *default* behavior.
+func TestFakeDeployerFuncOverrideTakesPriorityOverFakeFailAnnotation(t *testing.T) {
+	machine := newTestMachine()
+	machine.Annotations = map[string]string{FakeFailAnnotation: "provision:forever"}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	f := &FakeDeployer{
+		ProvisionFunc: func(_ context.Context, _ *keziov1alpha2.Machine, _ *keziov1alpha2.DeployRun, _ bool) (Result, error) {
+			return Result{Outcome: Complete}, nil
+		},
+	}
+
+	result, err := f.Provision(context.Background(), machine, run, false)
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	if result.Outcome != Complete {
+		t.Fatalf("Provision() outcome = %v, want Complete: ProvisionFunc must win over FakeFailAnnotation", result.Outcome)
+	}
+}
+
 // TestFakeDeployerInspectIgnoresUnresolvedReferences proves the fake path
 // skips reference resolution: subnetRef, postHookRefs, and imageRef name
 // objects of kinds that do not exist yet, and Inspect must complete without

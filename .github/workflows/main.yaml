@@ -100,7 +100,8 @@ jobs:
 
   # Fast e2e lane: single-node RKE2, built entirely from composite
   # actions - install CRDs, deploy the manager, walk a Machine through
-  # the fake deployer to Provisioned, assert its DeployRun.
+  # the fake deployer to Provisioned, assert its DeployRun, then exercise
+  # the failure paths (retry-to-success, dead-BMC delete give-up).
   e2e-fast-lane:
     name: Fast lane
     needs: [images]
@@ -149,6 +150,11 @@ jobs:
 
       - name: Run a fake-deployer Machine walk
         uses: ./.github/actions/run-fake-deploy-walk
+        with:
+          namespace: "default"
+
+      - name: Run fake-deployer failure-path scenarios
+        uses: ./.github/actions/run-fake-failure-walk
         with:
           namespace: "default"
 

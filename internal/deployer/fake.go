@@ -19,6 +19,8 @@ package deployer
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -27,6 +29,53 @@ import (
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 )
+
+// FakeFailAnnotation is a test-only override, read only by FakeDeployer's
+// default (non-Func) behavior: it never affects a real deployer. Value
+// syntax is "<step>:<count>", where step is "provision" or "deprovision"
+// and count is a non-negative integer or the literal "forever". The
+// matching step fails (Result{Outcome: Failed}) while
+// machine.Status.ErrorCount is below count, then reverts to the default
+// always-succeed behavior once errorCount reaches it - "forever" fails
+// unconditionally. This lets the fast e2e lane script a failing step (and
+// a permanently dead BMC) from outside the manager process, entirely
+// through the Machine object the controller already reads every reconcile;
+// a Machine without this annotation is unaffected, so production's
+// always-succeed default is unchanged.
+const FakeFailAnnotation = "kezio.kojuro.date/fake-fail"
+
+// fakeFailForever is the FakeFailAnnotation count value that fails its step
+// unconditionally, instead of a bounded number of times.
+const fakeFailForever = "forever"
+
+// fakeFailOverride inspects machine's FakeFailAnnotation for step and, when
+// it applies, returns the scripted Failed Result to use instead of the
+// default behavior. The second return value is false when the annotation is
+// absent, names a different step, or has failed to parse - each of those
+// falls through to the default behavior unchanged.
+func fakeFailOverride(machine *keziov1alpha2.Machine, step string) (Result, bool) {
+	raw, ok := machine.Annotations[FakeFailAnnotation]
+	if !ok {
+		return Result{}, false
+	}
+	annStep, countRaw, found := strings.Cut(raw, ":")
+	if !found || annStep != step {
+		return Result{}, false
+	}
+
+	if countRaw != fakeFailForever {
+		count, err := strconv.Atoi(countRaw)
+		if err != nil || count < 0 || int(machine.Status.ErrorCount) >= count {
+			return Result{}, false
+		}
+	}
+
+	return Result{
+		Outcome:      Failed,
+		ErrorType:    keziov1alpha2.MachineErrorTypeTransient,
+		ErrorMessage: fmt.Sprintf("fake deployer: scripted failure via %s=%q", FakeFailAnnotation, raw),
+	}, true
+}
 
 // deployRunPhaseOrder is the sequence FakeDeployer.Provision walks a
 // DeployRun through by default, one phase per call. It excludes
@@ -114,6 +163,9 @@ func (f *FakeDeployer) Provision(ctx context.Context, machine *keziov1alpha2.Mac
 	if f.ProvisionFunc != nil {
 		return f.ProvisionFunc(ctx, machine, run, restartOnFailure)
 	}
+	if result, fail := fakeFailOverride(machine, "provision"); fail {
+		return result, nil
+	}
 
 	next, done, err := nextDeployRunPhase(run.Status.Phase)
 	if err != nil {
@@ -157,6 +209,9 @@ func (f *FakeDeployer) Provision(ctx context.Context, machine *keziov1alpha2.Mac
 func (f *FakeDeployer) Deprovision(ctx context.Context, machine *keziov1alpha2.Machine, restartOnFailure bool) (Result, error) {
 	if f.DeprovisionFunc != nil {
 		return f.DeprovisionFunc(ctx, machine, restartOnFailure)
+	}
+	if result, fail := fakeFailOverride(machine, "deprovision"); fail {
+		return result, nil
 	}
 	return Result{Outcome: Complete}, nil
 }

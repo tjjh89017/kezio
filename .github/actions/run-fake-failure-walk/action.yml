@@ -1,0 +1,261 @@
+name: Run fake-deployer failure-path scenarios
+
+description: >-
+  Exercises the Machine controller's failure paths against a deployed
+  kezio manager running the FakeDeployer, using the
+  kezio.kojuro.date/fake-fail annotation (internal/deployer.FakeFailAnnotation,
+  test-only) to script the fake instead of dialing real hardware. Scenario
+  A creates a Machine annotated to fail Provision twice: asserts
+  status.state stays "Provisioning" and status.operationalStatus becomes
+  "error" with errorCount>0 while failing, then asserts it retries to
+  status.state=Provisioned with operationalStatus=OK and errorCount=0.
+  Scenario B creates a Machine annotated so Deprovision never succeeds (a
+  dead BMC), deletes it, and asserts the Machine object is gone within a
+  bounded timeout that proves the delete walk's give-up threshold
+  (errorCount > 3 per stage) worked rather than hanging forever.
+
+inputs:
+  namespace:
+    description: 'Namespace the Machines, their credentials Secret, and Scenario A DeployRun are created in.'
+    required: false
+    default: "default"
+  credentials-secret-name:
+    description: 'Name of the placeholder BMC credentials Secret shared by both scenarios.'
+    required: false
+    default: "fake-failure-walk-bmc-creds"
+  subnet-name:
+    description: >-
+      spec.subnetRef name shared by both scenarios. Subnet does not exist
+      as a kind at this stage, so this is never resolved; any name
+      satisfies the schema.
+    required: false
+    default: "fake-failure-walk-subnet"
+  bmc-address:
+    description: >-
+      spec.bmc.address shared by both scenarios. Must use a scheme
+      registered with the manager's compiled-in BMC driver registry; the
+      FakeDeployer never dials it. Defaults to a TEST-NET-2 address (RFC 5737).
+    required: false
+    default: "redfish://198.51.100.11/redfish/v1/Systems/1"
+  retry-machine-name:
+    description: 'Name of the Scenario A (Provision retry-to-success) Machine CR.'
+    required: false
+    default: "fake-failure-retry"
+  retry-boot-mac-address:
+    description: 'spec.bootMACAddress for the Scenario A Machine.'
+    required: false
+    default: "aa:bb:cc:dd:ee:02"
+  retry-image-name:
+    description: >-
+      spec.imageRef name for the Scenario A Machine. Image does not exist
+      as a kind at this stage, so this is never resolved - it exists only
+      to be non-nil and provoke the walk into Provisioning.
+    required: false
+    default: "fake-failure-retry-image"
+  retry-error-observed-timeout:
+    description: >-
+      Timeout for the Scenario A Machine to report status.operationalStatus=error
+      after the first scripted Provision failure.
+    required: false
+    default: "90s"
+  retry-success-timeout:
+    description: >-
+      Timeout for the Scenario A Machine to reach status.state=Provisioned
+      after its scripted failures are exhausted and the walk retries to
+      success. Must cover two failedRequeueInterval (30s) backoffs plus the
+      DeployRun phase walk.
+    required: false
+    default: "180s"
+  giveup-machine-name:
+    description: 'Name of the Scenario B (dead-BMC delete give-up) Machine CR.'
+    required: false
+    default: "fake-failure-giveup"
+  giveup-boot-mac-address:
+    description: 'spec.bootMACAddress for the Scenario B Machine.'
+    required: false
+    default: "aa:bb:cc:dd:ee:03"
+  giveup-available-timeout:
+    description: 'Timeout for the Scenario B Machine to reach status.state=Available, before it is deleted.'
+    required: false
+    default: "60s"
+  giveup-delete-timeout:
+    description: >-
+      Timeout for the Scenario B Machine to be actually deleted after the
+      delete request. The delete-walk give-up threshold is errorCount > 3
+      at a 30s (failedRequeueInterval) backoff per delete stage, so the
+      deprovision stage alone needs 3 full backoffs (90s) before it gives
+      up and advances; this must exceed that with margin for reconcile
+      overhead.
+    required: false
+    default: "180s"
+
+runs:
+  using: composite
+  steps:
+    - name: Create the shared placeholder BMC credentials Secret
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        SECRET_NAME: ${{ inputs.credentials-secret-name }}
+      run: |
+        set -euo pipefail
+        kubectl create secret generic "${SECRET_NAME}" \
+          --namespace "${NAMESPACE}" \
+          --from-literal=username=fake \
+          --from-literal=password=fake \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: "Scenario A: create a Machine that fails Provision twice"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.retry-machine-name }}
+        BOOT_MAC_ADDRESS: ${{ inputs.retry-boot-mac-address }}
+        BMC_ADDRESS: ${{ inputs.bmc-address }}
+        CREDENTIALS_SECRET_NAME: ${{ inputs.credentials-secret-name }}
+        SUBNET_NAME: ${{ inputs.subnet-name }}
+        IMAGE_NAME: ${{ inputs.retry-image-name }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha2
+        kind: Machine
+        metadata:
+          name: ${MACHINE_NAME}
+          namespace: ${NAMESPACE}
+          annotations:
+            kezio.kojuro.date/fake-fail: "provision:2"
+        spec:
+          bmc:
+            address: ${BMC_ADDRESS}
+            credentialsSecretRef:
+              name: ${CREDENTIALS_SECRET_NAME}
+          bootMACAddress: ${BOOT_MAC_ADDRESS}
+          subnetRef:
+            name: ${SUBNET_NAME}
+          imageRef:
+            name: ${IMAGE_NAME}
+        EOF
+
+    - name: "Scenario A: wait for it to enter Provisioning"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.retry-machine-name }}
+      run: |
+        set -euo pipefail
+        kubectl wait "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.state}'=Provisioning --timeout=60s
+
+    - name: "Scenario A: assert it errors in place while failing"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.retry-machine-name }}
+        TIMEOUT: ${{ inputs.retry-error-observed-timeout }}
+      run: |
+        set -euo pipefail
+        kubectl wait "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.operationalStatus}'=error --timeout="${TIMEOUT}"
+
+        machine_json="$(kubectl get "machine/${MACHINE_NAME}" -n "${NAMESPACE}" -o json)"
+        echo "${machine_json}" | jq .
+
+        state="$(echo "${machine_json}" | jq -r '.status.state')"
+        if [ "${state}" != "Provisioning" ]; then
+          echo "machine/${MACHINE_NAME} operationalStatus=error but status.state is \"${state}\", want \"Provisioning\" (state must not change on a phase failure)" >&2
+          exit 1
+        fi
+
+        error_count="$(echo "${machine_json}" | jq -r '.status.errorCount')"
+        if [ -z "${error_count}" ] || [ "${error_count}" -lt 1 ]; then
+          echo "machine/${MACHINE_NAME} status.errorCount is \"${error_count}\", want >= 1" >&2
+          exit 1
+        fi
+
+        echo "machine/${MACHINE_NAME} errored in place: state=Provisioning operationalStatus=error errorCount=${error_count}"
+
+    - name: "Scenario A: assert it retries to success"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.retry-machine-name }}
+        TIMEOUT: ${{ inputs.retry-success-timeout }}
+      run: |
+        set -euo pipefail
+        kubectl wait "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.state}'=Provisioned --timeout="${TIMEOUT}"
+
+        machine_json="$(kubectl get "machine/${MACHINE_NAME}" -n "${NAMESPACE}" -o json)"
+        echo "${machine_json}" | jq .
+
+        operational_status="$(echo "${machine_json}" | jq -r '.status.operationalStatus')"
+        if [ "${operational_status}" != "OK" ]; then
+          echo "machine/${MACHINE_NAME} reached state Provisioned but status.operationalStatus is \"${operational_status}\", not \"OK\"" >&2
+          exit 1
+        fi
+
+        error_count="$(echo "${machine_json}" | jq -r '.status.errorCount')"
+        if [ "${error_count}" != "0" ]; then
+          echo "machine/${MACHINE_NAME} reached state Provisioned but status.errorCount is \"${error_count}\", not 0" >&2
+          exit 1
+        fi
+
+        echo "machine/${MACHINE_NAME} retried to success: state=Provisioned operationalStatus=OK errorCount=0"
+
+    - name: "Scenario B: create a Machine with a dead fake BMC"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.giveup-machine-name }}
+        BOOT_MAC_ADDRESS: ${{ inputs.giveup-boot-mac-address }}
+        BMC_ADDRESS: ${{ inputs.bmc-address }}
+        CREDENTIALS_SECRET_NAME: ${{ inputs.credentials-secret-name }}
+        SUBNET_NAME: ${{ inputs.subnet-name }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha2
+        kind: Machine
+        metadata:
+          name: ${MACHINE_NAME}
+          namespace: ${NAMESPACE}
+          annotations:
+            kezio.kojuro.date/fake-fail: "deprovision:forever"
+        spec:
+          bmc:
+            address: ${BMC_ADDRESS}
+            credentialsSecretRef:
+              name: ${CREDENTIALS_SECRET_NAME}
+          bootMACAddress: ${BOOT_MAC_ADDRESS}
+          subnetRef:
+            name: ${SUBNET_NAME}
+        EOF
+
+    - name: "Scenario B: wait for it to become Available"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.giveup-machine-name }}
+        TIMEOUT: ${{ inputs.giveup-available-timeout }}
+      run: |
+        set -euo pipefail
+        kubectl wait "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.state}'=Available --timeout="${TIMEOUT}"
+
+    - name: "Scenario B: delete it and assert the give-up bound"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.giveup-machine-name }}
+        TIMEOUT: ${{ inputs.giveup-delete-timeout }}
+      run: |
+        set -euo pipefail
+        kubectl delete "machine/${MACHINE_NAME}" -n "${NAMESPACE}" --wait=false
+        if ! kubectl wait "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
+          --for=delete --timeout="${TIMEOUT}"; then
+          echo "machine/${MACHINE_NAME} was not deleted within ${TIMEOUT} of the delete request;" \
+            "the delete-walk give-up (errorCount > 3 per stage) did not complete in time" >&2
+          exit 1
+        fi
+        echo "machine/${MACHINE_NAME} was deleted within ${TIMEOUT}: the dead-BMC delete stage gave up as bounded"
