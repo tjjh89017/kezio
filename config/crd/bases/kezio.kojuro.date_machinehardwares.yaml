@@ -17,7 +17,10 @@ spec:
   - name: v1alpha2
     schema:
       openAPIV3Schema:
-        description: MachineHardware is the Schema for the machinehardwares API.
+        description: |-
+          MachineHardware is the Schema for the machinehardwares API. It carries
+          no status: it is itself the observed hardware inventory, owned by and
+          name-aligned with its Machine.
         properties:
           apiVersion:
             description: |-
@@ -37,18 +40,109 @@ spec:
           metadata:
             type: object
           spec:
-            description: MachineHardwareSpec defines the desired state of MachineHardware.
+            description: |-
+              MachineHardwareSpec is the hardware inventory the agent reports at
+              registration. Every field is optional: a MachineHardware object starts
+              empty and the controller fills it in once inspection completes.
             properties:
-              foo:
-                description: Foo is an example field of MachineHardware. Edit machinehardware_types.go
-                  to remove/update
-                type: string
-            type: object
-          status:
-            description: MachineHardwareStatus defines the observed state of MachineHardware.
+              cpuCount:
+                description: CPUCount is the machine's logical CPU count.
+                format: int32
+                minimum: 0
+                type: integer
+              disks:
+                description: Disks lists the machine's disks.
+                items:
+                  description: |-
+                    MachineHardwareDisk records one disk from the agent-reported inventory.
+                    Field set matches TargetDiskHints so a hint can be matched against an
+                    entry here with no unit conversion.
+                  properties:
+                    deviceName:
+                      description: DeviceName is the kernel device path, for example
+                        "/dev/nvme0n1".
+                      maxLength: 255
+                      minLength: 1
+                      type: string
+                    hctl:
+                      description: |-
+                        HCTL is the disk's SCSI host:channel:target:lun address, for example
+                        "0:0:0:0".
+                      pattern: ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$
+                      type: string
+                    model:
+                      description: Model is the disk's reported model string.
+                      maxLength: 255
+                      type: string
+                    pciePath:
+                      description: |-
+                        PciePath is the disk's PCIe address, read by resolving
+                        /sys/block/<dev>.
+                      maxLength: 255
+                      type: string
+                    rotational:
+                      description: |-
+                        Rotational reports whether the disk is a spinning disk (true) or
+                        solid-state (false), read from /sys/block/*/queue/rotational.
+                      type: boolean
+                    serialNumber:
+                      description: |-
+                        SerialNumber is the disk's serial number, read from
+                        /sys/block/*/device/serial or udev.
+                      maxLength: 255
+                      type: string
+                    sizeBytes:
+                      description: SizeBytes is the disk's size, from blockdev --getsize64.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    slotNumber:
+                      description: |-
+                        SlotNumber is the disk's NVMe namespace or PCIe slot number, read
+                        best-effort from DMI.
+                      format: int32
+                      type: integer
+                    vendor:
+                      description: Vendor is the disk's reported vendor string.
+                      maxLength: 255
+                      type: string
+                    wwn:
+                      description: WWN is the disk's World Wide Name, read from udev's
+                        ID_WWN.
+                      maxLength: 255
+                      type: string
+                  required:
+                  - deviceName
+                  type: object
+                maxItems: 64
+                type: array
+              memoryBytes:
+                description: MemoryBytes is the machine's total memory.
+                format: int64
+                minimum: 0
+                type: integer
+              nics:
+                description: Nics lists the machine's network interfaces.
+                items:
+                  description: |-
+                    MachineHardwareNIC records one network interface from the
+                    agent-reported inventory.
+                  properties:
+                    macAddress:
+                      description: MACAddress is the interface's MAC address.
+                      pattern: ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$
+                      type: string
+                    name:
+                      description: Name is the interface name, for example "eth0".
+                      maxLength: 255
+                      minLength: 1
+                      type: string
+                  required:
+                  - name
+                  type: object
+                maxItems: 64
+                type: array
             type: object
         type: object
     served: true
     storage: true
-    subresources:
-      status: {}
