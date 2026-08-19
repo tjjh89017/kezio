@@ -98,10 +98,74 @@ jobs:
           cache-scope: ${{ matrix.name }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+  # Fast e2e lane: single-node RKE2, built entirely from composite
+  # actions - install CRDs, deploy the manager, walk a Machine through
+  # the fake deployer to Provisioned, assert its DeployRun.
+  e2e-fast-lane:
+    name: Fast lane
+    needs: [images]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Resource check (fail fast if the runner is under-resourced)
+        uses: ./.github/actions/check-runner-resources
+        with:
+          min-cpus: "2"
+          min-mem-mb: "7000"
+          context-label: "the kezio fast e2e lane"
+
+      - name: Download the manager image tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: image-tar-manager
+          path: /tmp/images
+
+      - name: Install RKE2
+        uses: ./.github/actions/install-rke2
+        with:
+          rke2-version: "v1.36.2+rke2r1"
+          enable-multus: "false"
+
+      - name: Import the manager image into RKE2 containerd
+        uses: ./.github/actions/import-image-tarballs
+        with:
+          images: manager
+
+      - name: Install cert-manager
+        uses: ./.github/actions/install-cert-manager
+
+      # The manager-image tag must match the local-tag the images job
+      # baked into the tarball above, so the manager Deployment resolves
+      # it from containerd instead of pulling from a registry.
+      - name: Deploy kezio CRDs and controller-manager
+        uses: ./.github/actions/deploy-kezio
+        with:
+          manager-image: example.com/kezio:e2e
+
+      - name: Run a fake-deployer Machine walk
+        uses: ./.github/actions/run-fake-deploy-walk
+
+      - name: Collect diagnostics
+        if: failure()
+        uses: ./.github/actions/collect-diagnostics
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-lane-diagnostics
+          path: diagnostics
+          retention-days: 7
+          if-no-files-found: ignore
+
   # Stable required-check names for the branch ruleset. The real jobs
   # hang off these through `needs`; the ruleset references "Build" and
-  # "E2E" so the graph can grow without ruleset edits. The e2e lane
-  # lands behind "E2E" next; until then it gates on the test job.
+  # "E2E" so the graph can grow without ruleset edits.
   build-required:
     name: Build
     runs-on: ubuntu-latest
@@ -116,7 +180,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs:
-      - test
-      - images
+      - e2e-fast-lane
     steps:
       - run: "true"
