@@ -347,10 +347,24 @@ func (r *MachineReconciler) onChange(ctx context.Context, machine *keziov1alpha2
 // against the whole resource's schema, and a zero-valued required Spec
 // fails that validation. A distinct type with no Spec field sidesteps this
 // rather than fighting it field by field.
+//
+// Metadata is a narrow stand-in for metav1.ObjectMeta (name/namespace only,
+// the only fields this body ever sets), not the real type: controller-gen's
+// CRD generator treats any type embedding both metav1.TypeMeta and
+// metav1.ObjectMeta as a Kubernetes object needing a CRD, and this package
+// carries no group/version to give one, which produced a stray empty
+// config/crd/bases/_.yaml on every `make manifests` run.
 type machineStatusApplyBody struct {
-	metav1.TypeMeta   `json:",inline"`
-	metav1.ObjectMeta `json:"metadata,omitempty"`
-	Status            keziov1alpha2.MachineStatus `json:"status"`
+	metav1.TypeMeta `json:",inline"`
+	Metadata        machineStatusApplyBodyMetadata `json:"metadata,omitempty"`
+	Status          keziov1alpha2.MachineStatus    `json:"status"`
+}
+
+// machineStatusApplyBodyMetadata mirrors the JSON shape of the
+// metav1.ObjectMeta fields machineStatusApplyBody actually sets.
+type machineStatusApplyBodyMetadata struct {
+	Name      string `json:"name,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
 }
 
 // applyMachineStatus writes machine.Status through Server-Side Apply under
@@ -373,9 +387,9 @@ type machineStatusApplyBody struct {
 // of disjoint fields needs a narrower patch shape than this one.
 func (r *MachineReconciler) applyMachineStatus(ctx context.Context, machine *keziov1alpha2.Machine, onSuccess ...func()) error {
 	body := machineStatusApplyBody{
-		TypeMeta:   metav1.TypeMeta{APIVersion: keziov1alpha2.GroupVersion.String(), Kind: "Machine"},
-		ObjectMeta: metav1.ObjectMeta{Name: machine.Name, Namespace: machine.Namespace},
-		Status:     machine.Status,
+		TypeMeta: metav1.TypeMeta{APIVersion: keziov1alpha2.GroupVersion.String(), Kind: "Machine"},
+		Metadata: machineStatusApplyBodyMetadata{Name: machine.Name, Namespace: machine.Namespace},
+		Status:   machine.Status,
 	}
 	data, err := json.Marshal(body)
 	if err != nil {
