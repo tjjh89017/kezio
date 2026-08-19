@@ -207,6 +207,26 @@ func TestShouldProvision(t *testing.T) {
 }
 
 var _ = Describe("Machine Controller", func() {
+	// Every Context below that references the BMC credentials Secret by
+	// its literal name "bmc-creds" relies on this shared, idempotently
+	// created Secret existing before any reconcile runs the credentials
+	// gate. Contexts that need to control the Secret's own lifecycle
+	// (naming, deletion, mismatch) create and manage their own Secret
+	// instead.
+	BeforeEach(func() {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "bmc-creds", Namespace: "default"},
+			Type:       corev1.SecretTypeBasicAuth,
+			Data: map[string][]byte{
+				"username": []byte("admin"),
+				"password": []byte("hunter2"),
+			},
+		}
+		if err := k8sClient.Create(context.Background(), secret); err != nil && !errors.IsAlreadyExists(err) {
+			Expect(err).NotTo(HaveOccurred())
+		}
+	})
+
 	Context("When reconciling a resource", func() {
 		const resourceName = "test-resource"
 
@@ -1177,11 +1197,29 @@ var _ = Describe("Machine Controller", func() {
 			}
 		}
 
+		// deleteCredentialsSecret strips MachineCredentialsSecretFinalizer
+		// before deleting, standing in for the Machine's onDelete release
+		// step: a raw client Delete against a still-finalized Secret only
+		// marks it for deletion, which would leave it (and its name)
+		// occupied for the next spec that reuses the name.
+		deleteCredentialsSecret := func(name string) {
+			var current corev1.Secret
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &current); err != nil {
+				Expect(errors.IsNotFound(err)).To(BeTrue())
+				return
+			}
+			if len(current.Finalizers) > 0 {
+				current.Finalizers = nil
+				Expect(k8sClient.Update(ctx, &current)).To(Succeed())
+			}
+			Expect(k8sClient.Delete(ctx, &current)).To(Succeed())
+		}
+
 		It("records triedCredentials before the attempt and goodCredentials once the deployer answers", func() {
-			secretName := fmt.Sprintf("bmc-creds-%d", GinkgoRandomSeed())
+			secretName := fmt.Sprintf("bmc-creds-%d", time.Now().UnixNano())
 			secret := newCredentialsSecret(secretName)
 			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
-			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, secret)).To(Succeed()) })
+			DeferCleanup(func() { deleteCredentialsSecret(secretName) })
 
 			machineName := fmt.Sprintf("creds-tried-good-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
@@ -1231,10 +1269,10 @@ var _ = Describe("Machine Controller", func() {
 		})
 
 		It("clears goodCredentials on a resourceVersion mismatch and re-establishes it on the next successful attempt, without ever changing state", func() {
-			secretName := fmt.Sprintf("bmc-creds-%d", GinkgoRandomSeed())
+			secretName := fmt.Sprintf("bmc-creds-%d", time.Now().UnixNano())
 			secret := newCredentialsSecret(secretName)
 			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
-			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, secret)).To(Succeed()) })
+			DeferCleanup(func() { deleteCredentialsSecret(secretName) })
 
 			machineName := fmt.Sprintf("creds-mismatch-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
@@ -1326,7 +1364,7 @@ var _ = Describe("Machine Controller", func() {
 			Expect(machine.Status.GoodCredentials.ResourceVersion).To(Equal(live.ResourceVersion))
 		})
 
-		It("does not block the walk when the credentials secret is absent", func() {
+		It("requeues after credentialsSecretAbsentRequeueInterval, marks delayed, and never escalates to an error when the credentials secret does not exist", func() {
 			machineName := fmt.Sprintf("creds-absent-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
 			resource := &keziov1alpha2.Machine{
@@ -1345,16 +1383,187 @@ var _ = Describe("Machine Controller", func() {
 
 			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}}
 
-			for i := 0; i < 10; i++ {
-				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			By("reconciling through the finalizer add and the Enrolling to Inspecting transition")
+			var result reconcile.Result
+			var err error
+			for i := 0; i < 10 && result.RequeueAfter != credentialsSecretAbsentRequeueInterval; i++ {
+				result, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 				Expect(err).NotTo(HaveOccurred())
 			}
+			Expect(result.RequeueAfter).To(Equal(credentialsSecretAbsentRequeueInterval))
 
 			var machine keziov1alpha2.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable))
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusDelayed))
+			Expect(machine.Status.ErrorCount).To(Equal(int32(0)))
 			Expect(machine.Status.TriedCredentials.SecretRef).To(BeNil())
 			Expect(machine.Status.GoodCredentials.SecretRef).To(BeNil())
+		})
+
+		It("does not requeue when credentialsSecretRef.Name is empty, and waits for a spec edit instead", func() {
+			machineName := fmt.Sprintf("creds-spec-invalid-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: ""},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:13",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, resource)).To(Succeed()) })
+
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}}
+
+			By("reconciling through the finalizer add and the Enrolling to Inspecting transition")
+			var machine keziov1alpha2.Machine
+			for i := 0; i < 10; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+				if machine.Status.State == keziov1alpha2.MachineStateInspecting {
+					break
+				}
+			}
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
+
+			By("reconciling the blocked Inspecting step: no requeue, no error, no error escalation")
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result).To(Equal(reconcile.Result{}))
+
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
+			Expect(machine.Status.OperationalStatus).NotTo(Equal(keziov1alpha2.MachineOperationalStatusError))
+			Expect(machine.Status.ErrorCount).To(Equal(int32(0)))
+			Expect(machine.Status.TriedCredentials.SecretRef).To(BeNil())
+		})
+
+		It("claims the credentials secret with a label, a non-controller owner reference, and a finalizer, and picks up a subsequent secret edit", func() {
+			secretName := fmt.Sprintf("bmc-creds-%d", time.Now().UnixNano())
+			secret := newCredentialsSecret(secretName)
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			DeferCleanup(func() { deleteCredentialsSecret(secretName) })
+
+			machineName := fmt.Sprintf("creds-claim-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: secretName},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:14",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, resource)).To(Succeed()) })
+
+			// Continuing on the first Inspect call keeps the machine in
+			// Inspecting - and the credentials gate live - long enough to
+			// observe a second, edited-secret attempt in the same state.
+			var calls int
+			scriptedDeployer := &deployer.FakeDeployer{
+				Client: k8sClient,
+				InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+					calls++
+					if calls == 1 {
+						return deployer.Result{Outcome: deployer.Continuing}, nil
+					}
+					return deployer.Result{Outcome: deployer.Complete}, nil
+				},
+			}
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: scriptedDeployer}
+
+			By("reconciling through the finalizer add, Enrolling, and the first Inspect call that claims the secret")
+			for i := 0; i < 10 && calls < 1; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+			}
+			Expect(calls).To(Equal(1))
+
+			var claimed corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: "default"}, &claimed)).To(Succeed())
+			Expect(claimed.Labels).To(HaveKeyWithValue(keziov1alpha2.MachineCredentialsSecretLabel, "true"))
+			Expect(claimed.Finalizers).To(ContainElement(keziov1alpha2.MachineCredentialsSecretFinalizer))
+
+			var ownerFound bool
+			for _, ref := range claimed.OwnerReferences {
+				if ref.Kind == "Machine" && ref.Name == machineName {
+					ownerFound = true
+					Expect(ref.Controller).To(BeNil(), "the BMC credentials secret owner reference must not be a controller reference")
+				}
+			}
+			Expect(ownerFound).To(BeTrue(), "the BMC credentials secret must carry an owner reference to the Machine")
+
+			By("editing the secret and reconciling the next Inspect attempt: the new resourceVersion is picked up")
+			claimed.Data["password"] = []byte("new-password")
+			Expect(k8sClient.Update(ctx, &claimed)).To(Succeed())
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(calls).To(Equal(2))
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Status.TriedCredentials.ResourceVersion).To(Equal(claimed.ResourceVersion))
+		})
+
+		It("releases the credentials secret finalizer when the Machine is deleted, leaving the Secret itself in place", func() {
+			secretName := fmt.Sprintf("bmc-creds-%d", time.Now().UnixNano())
+			secret := newCredentialsSecret(secretName)
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			DeferCleanup(func() { deleteCredentialsSecret(secretName) })
+
+			machineName := fmt.Sprintf("creds-release-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: secretName},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:15",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}}
+
+			By("reconciling until the secret is claimed")
+			var claimed corev1.Secret
+			for i := 0; i < 10; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: "default"}, &claimed)).To(Succeed())
+				if len(claimed.Finalizers) > 0 {
+					break
+				}
+			}
+			Expect(claimed.Finalizers).To(ContainElement(keziov1alpha2.MachineCredentialsSecretFinalizer))
+
+			By("deleting the Machine and reconciling its delete path")
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &machine)).To(Succeed())
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, name, &machine)).To(MatchError(errors.IsNotFound, "the Machine must be gone once its own finalizer is removed"))
+
+			var released corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: "default"}, &released)).To(Succeed())
+			Expect(released.Finalizers).NotTo(ContainElement(keziov1alpha2.MachineCredentialsSecretFinalizer))
 		})
 	})
 })

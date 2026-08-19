@@ -52,6 +52,11 @@ const (
 // shorten it instead of waiting out the real interval.
 var delayedRequeueInterval = 15 * time.Second
 
+// credentialsSecretAbsentRequeueInterval is the fixed requeue delay when
+// the BMC credentials Secret a Machine references does not exist yet - a
+// package variable, not a const, so a test can shorten it.
+var credentialsSecretAbsentRequeueInterval = 10 * time.Second
+
 // MachineReconciler reconciles a Machine object
 type MachineReconciler struct {
 	client.Client
@@ -64,7 +69,7 @@ type MachineReconciler struct {
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines/finalizers,verbs=update
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machinehardwares,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;update;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -90,6 +95,13 @@ func (r *MachineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 }
 
 func (r *MachineReconciler) onDelete(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+	// Release the credentials Secret's sub-finalizer before the Machine's
+	// own finalizer: once the Machine is actually removed, nothing maps a
+	// dangling Secret owner reference back to a live reconcile that could
+	// still clear it.
+	if err := r.releaseCredentialsSecretFinalizer(ctx, machine); err != nil {
+		return ctrl.Result{}, err
+	}
 	controllerutil.RemoveFinalizer(machine, keziov1alpha2.MachineFinalizer)
 	return ctrl.Result{}, r.Update(ctx, machine)
 }
@@ -135,7 +147,11 @@ func (r *MachineReconciler) setState(ctx context.Context, machine *keziov1alpha2
 }
 
 func (r *MachineReconciler) reconcileInspecting(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
-	if err := r.recordTriedCredentials(ctx, machine); err != nil {
+	secret, blocked, gateResult, err := r.resolveCredentialsSecret(ctx, machine)
+	if blocked {
+		return gateResult, err
+	}
+	if err := r.recordTriedCredentials(ctx, machine, secret); err != nil {
 		return ctrl.Result{}, err
 	}
 	result, err := r.Deployer.Inspect(ctx, machine, restartOnFailure(machine))
@@ -206,7 +222,11 @@ func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *
 		return ctrl.Result{}, fmt.Errorf("machine %q: getting DeployRun %q: %w", machine.Name, machine.Status.CurrentRunRef.Name, err)
 	}
 
-	if err := r.recordTriedCredentials(ctx, machine); err != nil {
+	secret, blocked, gateResult, err := r.resolveCredentialsSecret(ctx, machine)
+	if blocked {
+		return gateResult, err
+	}
+	if err := r.recordTriedCredentials(ctx, machine, secret); err != nil {
 		return ctrl.Result{}, err
 	}
 	result, err := r.Deployer.Provision(ctx, machine, run, restartOnFailure(machine))
@@ -281,18 +301,24 @@ func (r *MachineReconciler) applyNonCompleteOutcome(ctx context.Context, machine
 	}
 }
 
-// recordDelayed marks machine delayed: state, errorType, and errorCount are
-// left untouched - delayed is not an error, so it never joins the error
-// backoff/reset accounting. The caller always requeues after
-// delayedRequeueInterval, a fixed delay independent of any error backoff.
+// recordDelayed marks machine delayed and requeues after
+// delayedRequeueInterval, the fixed delay for a deployer.Delayed outcome.
 func (r *MachineReconciler) recordDelayed(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+	return r.markDelayed(ctx, machine, delayedRequeueInterval)
+}
+
+// markDelayed marks machine delayed: state, errorType, and errorCount are
+// left untouched - delayed is not an error, so it never joins the error
+// backoff/reset accounting. The caller always requeues after requeueAfter,
+// a fixed delay independent of any error backoff.
+func (r *MachineReconciler) markDelayed(ctx context.Context, machine *keziov1alpha2.Machine, requeueAfter time.Duration) (ctrl.Result, error) {
 	patch := client.MergeFrom(machine.DeepCopy())
 	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusDelayed
 	stampLastUpdated(machine)
 	if err := r.Status().Patch(ctx, machine, patch); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: recording delayed status: %w", machine.Name, err)
 	}
-	return ctrl.Result{RequeueAfter: delayedRequeueInterval}, nil
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
 // clearDelayed clears a previously recorded delayed status on any outcome
@@ -454,24 +480,133 @@ func nameRefEqual(a, b *keziov1alpha2.NameRef) bool {
 	return a.Name == b.Name && a.Namespace == b.Namespace
 }
 
-// recordTriedCredentials fetches the BMC credentials Secret named by
-// spec.bmc.credentialsSecretRef and records its name and resourceVersion as
-// status.triedCredentials, before an attempt (Inspect/Provision) that would
-// use it. A missing Secret is not an error at this stage - the full
-// secret-lifecycle rules (label, owner reference, requeue behavior) are a
-// separate concern - so this simply skips credential tracking for the
-// attempt. A goodCredentials resourceVersion mismatch against the current
-// Secret forces re-registration: goodCredentials is cleared here, in the
-// same patch, without touching status.state.
-func (r *MachineReconciler) recordTriedCredentials(ctx context.Context, machine *keziov1alpha2.Machine) error {
-	secret, err := r.getCredentialsSecret(ctx, machine)
-	if err != nil {
-		return err
+// resolveCredentialsSecret resolves, labels, owns, and finalizes the BMC
+// credentials Secret named by spec.bmc.credentialsSecretRef, before an
+// attempt (Inspect/Provision) that needs it.
+//
+// An empty credentialsSecretRef.Name is a spec-invalid condition: the walk
+// cannot proceed and never will until an operator edits the spec, which
+// triggers its own reconcile through the generation-change update
+// predicate. This returns (nil, true, ctrl.Result{}, nil) - blocked, no
+// requeue, no error, and no status change (no errorCount increase): there
+// is nothing to retry.
+//
+// A NotFound Secret is a transient, resolvable condition: this returns
+// (nil, true, <requeue after credentialsSecretAbsentRequeueInterval>, nil)
+// and marks the machine delayed, the same "unresolved reference" treatment
+// as any other delayed outcome - it clears on its own once a subsequent
+// Deployer call succeeds or reports Continuing/Busy.
+//
+// Otherwise this claims the Secret (label, owner reference, finalizer) and
+// returns (secret, false, ctrl.Result{}, nil): the caller proceeds.
+func (r *MachineReconciler) resolveCredentialsSecret(ctx context.Context, machine *keziov1alpha2.Machine) (*corev1.Secret, bool, ctrl.Result, error) {
+	name := machine.Spec.BMC.CredentialsSecretRef.Name
+	if name == "" {
+		return nil, true, ctrl.Result{}, nil
 	}
-	if secret == nil {
+
+	var secret corev1.Secret
+	key := client.ObjectKey{Namespace: machine.Namespace, Name: name}
+	if err := r.Get(ctx, key, &secret); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return nil, true, ctrl.Result{}, fmt.Errorf("machine %q: getting BMC credentials secret %q: %w", machine.Name, name, err)
+		}
+		result, err := r.markDelayed(ctx, machine, credentialsSecretAbsentRequeueInterval)
+		return nil, true, result, err
+	}
+
+	if err := r.claimCredentialsSecret(ctx, machine, &secret); err != nil {
+		return nil, true, ctrl.Result{}, err
+	}
+	return &secret, false, ctrl.Result{}, nil
+}
+
+// claimCredentialsSecret stamps secret with the kezio BMC-credentials
+// label, a non-controller owner reference to machine, and
+// MachineCredentialsSecretFinalizer, patching only what is missing.
+//
+// The owner reference is deliberately non-controller
+// (controllerutil.SetOwnerReference, not SetControllerReference): the
+// Secret is user-created and this claim must never fail with "already
+// owned by a different controller" if more than one Machine names the same
+// Secret. Kubernetes garbage collection honors any owner reference
+// (controller or not) once this Machine is actually deleted, cascading the
+// Secret's own deletion - releaseCredentialsSecretFinalizer (run from
+// onDelete) is what lets that deletion complete.
+func (r *MachineReconciler) claimCredentialsSecret(ctx context.Context, machine *keziov1alpha2.Machine, secret *corev1.Secret) error {
+	patch := client.MergeFrom(secret.DeepCopy())
+	changed := false
+
+	if secret.Labels[keziov1alpha2.MachineCredentialsSecretLabel] != "true" {
+		if secret.Labels == nil {
+			secret.Labels = map[string]string{}
+		}
+		secret.Labels[keziov1alpha2.MachineCredentialsSecretLabel] = "true"
+		changed = true
+	}
+
+	hasOwner, err := controllerutil.HasOwnerReference(secret.OwnerReferences, machine, r.Scheme)
+	if err != nil {
+		return fmt.Errorf("machine %q: checking BMC credentials secret %q owner reference: %w", machine.Name, secret.Name, err)
+	}
+	if !hasOwner {
+		if err := controllerutil.SetOwnerReference(machine, secret, r.Scheme); err != nil {
+			return fmt.Errorf("machine %q: setting BMC credentials secret %q owner reference: %w", machine.Name, secret.Name, err)
+		}
+		changed = true
+	}
+
+	if controllerutil.AddFinalizer(secret, keziov1alpha2.MachineCredentialsSecretFinalizer) {
+		changed = true
+	}
+
+	if !changed {
+		return nil
+	}
+	if err := r.Patch(ctx, secret, patch); err != nil {
+		return fmt.Errorf("machine %q: claiming BMC credentials secret %q: %w", machine.Name, secret.Name, err)
+	}
+	return nil
+}
+
+// releaseCredentialsSecretFinalizer removes MachineCredentialsSecretFinalizer
+// from the BMC credentials Secret machine references, if any. An empty
+// credentialsSecretRef.Name or an already-gone Secret are both no-ops. This
+// is a forward-only release for the one Machine that owned the finalizer
+// removal call, not a check against other Machines that might name the
+// same Secret - sharing one BMC credentials Secret across Machines is not
+// guarded here.
+func (r *MachineReconciler) releaseCredentialsSecretFinalizer(ctx context.Context, machine *keziov1alpha2.Machine) error {
+	name := machine.Spec.BMC.CredentialsSecretRef.Name
+	if name == "" {
 		return nil
 	}
 
+	var secret corev1.Secret
+	key := client.ObjectKey{Namespace: machine.Namespace, Name: name}
+	if err := r.Get(ctx, key, &secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("machine %q: getting BMC credentials secret %q for finalizer release: %w", machine.Name, name, err)
+	}
+
+	if !controllerutil.RemoveFinalizer(&secret, keziov1alpha2.MachineCredentialsSecretFinalizer) {
+		return nil
+	}
+	if err := r.Update(ctx, &secret); err != nil {
+		return fmt.Errorf("machine %q: releasing BMC credentials secret %q finalizer: %w", machine.Name, name, err)
+	}
+	return nil
+}
+
+// recordTriedCredentials records secret's name and resourceVersion as
+// status.triedCredentials, before an attempt (Inspect/Provision) that would
+// use it. secret is the Secret resolveCredentialsSecret already resolved
+// and claimed for this attempt. A goodCredentials resourceVersion mismatch
+// against the current Secret forces re-registration: goodCredentials is
+// cleared here, in the same patch, without touching status.state.
+func (r *MachineReconciler) recordTriedCredentials(ctx context.Context, machine *keziov1alpha2.Machine, secret *corev1.Secret) error {
 	observed := keziov1alpha2.MachineCredentialsStatus{
 		SecretRef:       &keziov1alpha2.SecretReference{Name: secret.Name},
 		ResourceVersion: secret.ResourceVersion,
@@ -498,8 +633,7 @@ func (r *MachineReconciler) recordTriedCredentials(ctx context.Context, machine 
 // status.goodCredentials once a Deployer call returns without a transient
 // error and without Outcome == Failed - the modeled stand-in for "the BMC
 // answered" in a codebase whose fake path never dials a real BMC. A no-op
-// when no Secret was resolved for the attempt (recordTriedCredentials found
-// none) or when goodCredentials is already up to date.
+// when goodCredentials is already up to date.
 func (r *MachineReconciler) recordGoodCredentials(ctx context.Context, machine *keziov1alpha2.Machine) error {
 	if machine.Status.TriedCredentials.SecretRef == nil {
 		return nil
@@ -515,21 +649,6 @@ func (r *MachineReconciler) recordGoodCredentials(ctx context.Context, machine *
 		return fmt.Errorf("machine %q: recording good BMC credentials: %w", machine.Name, err)
 	}
 	return nil
-}
-
-// getCredentialsSecret fetches spec.bmc.credentialsSecretRef in machine's
-// own namespace. A NotFound Secret returns (nil, nil): the caller treats
-// "secret absent" as nothing to track yet, not an error.
-func (r *MachineReconciler) getCredentialsSecret(ctx context.Context, machine *keziov1alpha2.Machine) (*corev1.Secret, error) {
-	var secret corev1.Secret
-	key := client.ObjectKey{Namespace: machine.Namespace, Name: machine.Spec.BMC.CredentialsSecretRef.Name}
-	if err := r.Get(ctx, key, &secret); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("machine %q: getting BMC credentials secret %q: %w", machine.Name, key.Name, err)
-	}
-	return &secret, nil
 }
 
 // credentialsStatusEqual compares two MachineCredentialsStatus values by
@@ -569,6 +688,10 @@ func (r *MachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&keziov1alpha2.Machine{}).
 		Owns(&keziov1alpha2.DeployRun{}, builder.WithPredicates(deployRunDeletionOnly)).
+		// MatchEveryOwner: claimCredentialsSecret sets a non-controller
+		// owner reference on the BMC credentials Secret, so the default
+		// controller-only owner match would never see it.
+		Owns(&corev1.Secret{}, builder.MatchEveryOwner).
 		Named("machine").
 		Complete(r)
 }

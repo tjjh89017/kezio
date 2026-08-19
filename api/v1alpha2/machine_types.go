@@ -217,6 +217,20 @@ type MachineSpec struct {
 // DeployRun are garbage collected through their owner references.
 const MachineFinalizer = "kezio.kojuro.date/machine"
 
+// MachineCredentialsSecretLabel marks a Secret as a Machine's BMC
+// credentials Secret ("true" is the only value used). The controller sets
+// it the first time it claims the Secret, so operators and label selectors
+// can find these Secrets without reading every Machine spec.
+const MachineCredentialsSecretLabel = "kezio.kojuro.date/bmc-credentials-secret"
+
+// MachineCredentialsSecretFinalizer blocks deletion of a BMC credentials
+// Secret while a Machine still references it. The controller adds it the
+// first time it claims the Secret and removes it when the Machine is
+// deleted. It cannot reuse MachineFinalizer with a "/secret" suffix: a
+// Kubernetes finalizer allows only one "/" (an optional prefix before the
+// name), and MachineFinalizer already has one.
+const MachineCredentialsSecretFinalizer = "kezio.kojuro.date/bmc-credentials"
+
 // Machine state enum values for MachineStatus.State. These are the
 // top-level states only; provisioning sub-steps are reported through
 // conditions, not as top-level states. There is no Error state: an error
