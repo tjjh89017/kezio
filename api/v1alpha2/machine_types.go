@@ -276,6 +276,13 @@ const (
 	// MachineHardware is deleted (never patched) and a fresh one is
 	// created by the normal inspection walk.
 	MachineAnnotationReInspect = "kezio.kojuro.date/re-inspect"
+	// MachineAnnotationConfirmStatusLoss, present with any value, releases
+	// the status-loss hold (MachineConditionStatusLossHold): an operator
+	// has checked the machine and confirms it is safe to resume the normal
+	// state walk from Enrolling. Consume-then-delete, like
+	// MachineAnnotationReInspect - a stale copy left on the object must
+	// never silently wave through a future, unrelated status loss.
+	MachineAnnotationConfirmStatusLoss = "kezio.kojuro.date/confirm-status-loss"
 )
 
 // MachineRebootMode is the JSON "mode" value inside a reboot annotation.
@@ -378,6 +385,14 @@ const (
 	// currently polling for a deploy plan advertises a schema version the
 	// server accepts.
 	MachineConditionAgentCompatible = "AgentCompatible"
+	// MachineConditionStatusLossHold is True while the controller refuses
+	// to provision a Machine it found with status never written
+	// (status.lastUpdated absent) but spec.imageRef/dataImages already set
+	// and DeployRuns already on record for it - the shape a status
+	// restore/reset leaves behind on a machine that may already be running
+	// a deployed workload. Cleared once MachineAnnotationConfirmStatusLoss
+	// is observed.
+	MachineConditionStatusLossHold = "StatusLossHold"
 )
 
 // MachineCredentialsStatus records one BMC Secret observation: the Secret

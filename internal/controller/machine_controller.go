@@ -27,6 +27,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
@@ -295,7 +296,7 @@ func (r *MachineReconciler) onChange(ctx context.Context, machine *keziov1alpha2
 
 	switch machine.Status.State {
 	case "":
-		return r.setState(ctx, machine, keziov1alpha2.MachineStateEnrolling)
+		return r.reconcileEmptyStatus(ctx, machine)
 	case keziov1alpha2.MachineStateEnrolling:
 		return r.setState(ctx, machine, keziov1alpha2.MachineStateInspecting)
 	case keziov1alpha2.MachineStateInspecting:
@@ -310,17 +311,126 @@ func (r *MachineReconciler) onChange(ctx context.Context, machine *keziov1alpha2
 }
 
 // setState patches machine.status.state and clears any error, leaving every
-// other status field untouched.
+// other status field untouched. It also clears MachineConditionStatusLossHold
+// if present: any forward move out of the empty state means the hold (if any)
+// has already been resolved by reconcileEmptyStatus/reconcileStatusLossHold.
 func (r *MachineReconciler) setState(ctx context.Context, machine *keziov1alpha2.Machine, state string) (ctrl.Result, error) {
 	patch := client.MergeFrom(machine.DeepCopy())
 	machine.Status.State = state
 	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusOK
 	machine.Status.ErrorCount = 0
+	meta.RemoveStatusCondition(&machine.Status.Conditions, keziov1alpha2.MachineConditionStatusLossHold)
 	stampLastUpdated(machine)
 	if err := r.Status().Patch(ctx, machine, patch); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: setting status.state to %q: %w", machine.Name, state, err)
 	}
 	return ctrl.Result{}, nil
+}
+
+// reconcileEmptyStatus handles status.state == "": either a Machine that has
+// never been reconciled before, or one already caught in the status-loss
+// hold from an earlier reconcile (statusLossHeld persists across reconciles
+// even after stampLastUpdated makes status.lastUpdated non-nil, since the
+// hold's own entry is itself a status write).
+//
+// Detecting the hold on a truly fresh Machine is the tension this guards
+// against: a Machine created with spec.imageRef already set looks
+// byte-for-byte identical, at this exact point, to one whose status a
+// restore just wiped (status.lastUpdated absent, spec carrying intent). The
+// two are told apart by asking whether any DeployRun already exists for this
+// Machine's name: a genuinely fresh Machine cannot have one (this
+// reconciler is the only thing that ever creates one, and it has not run
+// for this Machine yet), while a Machine that was actually provisioned
+// before the restore still owns its DeployRun history, GC retention aside.
+func (r *MachineReconciler) reconcileEmptyStatus(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+	if statusLossHeld(machine) {
+		return r.reconcileStatusLossHold(ctx, machine)
+	}
+
+	if machine.Status.LastUpdated == nil && !isEmptyDeployPayload(machine) {
+		suspect, err := r.hasPriorDeployRuns(ctx, machine)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if suspect {
+			return r.enterStatusLossHold(ctx, machine)
+		}
+	}
+
+	return r.setState(ctx, machine, keziov1alpha2.MachineStateEnrolling)
+}
+
+// hasPriorDeployRuns reports whether at least one DeployRun already names
+// machine in its spec.machineRef, in machine's own namespace.
+func (r *MachineReconciler) hasPriorDeployRuns(ctx context.Context, machine *keziov1alpha2.Machine) (bool, error) {
+	var runs keziov1alpha2.DeployRunList
+	if err := r.List(ctx, &runs, client.InNamespace(machine.Namespace)); err != nil {
+		return false, fmt.Errorf("machine %q: listing DeployRuns for status-loss detection: %w", machine.Name, err)
+	}
+	for _, run := range runs.Items {
+		if run.Spec.MachineRef.Name == machine.Name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// statusLossHeld reports whether machine currently carries an active
+// status-loss hold.
+func statusLossHeld(machine *keziov1alpha2.Machine) bool {
+	return meta.IsStatusConditionTrue(machine.Status.Conditions, keziov1alpha2.MachineConditionStatusLossHold)
+}
+
+// enterStatusLossHold records the hold and emits a Warning Event. No
+// requeue: nothing here resolves on its own, only an operator editing the
+// confirm annotation (or the spec) does, and that arrives through the
+// normal watch.
+func (r *MachineReconciler) enterStatusLossHold(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+	patch := client.MergeFrom(machine.DeepCopy())
+	meta.SetStatusCondition(&machine.Status.Conditions, metav1.Condition{
+		Type:    keziov1alpha2.MachineConditionStatusLossHold,
+		Status:  metav1.ConditionTrue,
+		Reason:  "PriorDeployRunsFound",
+		Message: "status was never recorded but spec carries deploy intent and DeployRuns already exist for this machine; holding until " + keziov1alpha2.MachineAnnotationConfirmStatusLoss + " is set",
+	})
+	stampLastUpdated(machine)
+	if err := r.Status().Patch(ctx, machine, patch); err != nil {
+		return ctrl.Result{}, fmt.Errorf("machine %q: entering status-loss hold: %w", machine.Name, err)
+	}
+	r.Recorder.Eventf(machine, corev1.EventTypeWarning, "StatusLossHold",
+		"status was never recorded but spec carries deploy intent and DeployRuns already exist for this machine; holding until the %q annotation is set", keziov1alpha2.MachineAnnotationConfirmStatusLoss)
+	return ctrl.Result{}, nil
+}
+
+// reconcileStatusLossHold is reached on every reconcile while
+// MachineConditionStatusLossHold is True. Absent the confirm annotation it
+// returns without any write or requeue - the hold only lifts through an
+// operator-driven annotation/spec edit, which retriggers this reconciler on
+// its own through the watch. Once observed, the annotation is consumed
+// (never left in place) before the walk resumes at Enrolling.
+func (r *MachineReconciler) reconcileStatusLossHold(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+	if _, confirmed := machine.Annotations[keziov1alpha2.MachineAnnotationConfirmStatusLoss]; !confirmed {
+		return ctrl.Result{}, nil
+	}
+
+	if err := r.consumeConfirmStatusLossAnnotation(ctx, machine); err != nil {
+		return ctrl.Result{}, err
+	}
+	r.Recorder.Event(machine, corev1.EventTypeNormal, "StatusLossHoldCleared",
+		"confirm-status-loss annotation accepted: resuming the normal state walk from Enrolling")
+	return r.setState(ctx, machine, keziov1alpha2.MachineStateEnrolling)
+}
+
+// consumeConfirmStatusLossAnnotation removes
+// MachineAnnotationConfirmStatusLoss from machine, mirroring
+// consumeReInspectAnnotation's consume-then-delete discipline.
+func (r *MachineReconciler) consumeConfirmStatusLossAnnotation(ctx context.Context, machine *keziov1alpha2.Machine) error {
+	patch := client.MergeFrom(machine.DeepCopy())
+	delete(machine.Annotations, keziov1alpha2.MachineAnnotationConfirmStatusLoss)
+	if err := r.Patch(ctx, machine, patch); err != nil {
+		return fmt.Errorf("machine %q: consuming confirm-status-loss annotation: %w", machine.Name, err)
+	}
+	return nil
 }
 
 // reconcileInspecting drives one step of hardware inspection, or - when the

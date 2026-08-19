@@ -32,6 +32,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -2377,5 +2378,129 @@ var _ = Describe("Machine Controller", func() {
 			Expect(inspectCalls).To(Equal(0), "inspect-disable must skip the deployer's Inspect step entirely")
 			Expect(errors.IsNotFound(k8sClient.Get(ctx, name, &keziov1alpha2.MachineHardware{}))).To(BeTrue())
 		})
+	})
+
+	Context("status-loss hold", func() {
+		reconcileUntilState := func(reconciler *MachineReconciler, name types.NamespacedName, want string) {
+			GinkgoHelper()
+			var machine keziov1alpha2.Machine
+			for i := 0; i < 20; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+				if machine.Status.State == want {
+					return
+				}
+			}
+			Fail(fmt.Sprintf("machine %q never reached state %q, stuck at %q", name.Name, want, machine.Status.State))
+		}
+
+		countRunsForMachine := func(machineName string) int {
+			GinkgoHelper()
+			var runs keziov1alpha2.DeployRunList
+			Expect(k8sClient.List(ctx, &runs, client.InNamespace("default"))).To(Succeed())
+			count := 0
+			for _, run := range runs.Items {
+				if run.Spec.MachineRef.Name == machineName {
+					count++
+				}
+			}
+			return count
+		}
+
+		It("provisions a freshly created Machine with imageRef already set, without any operator action", func() {
+			machineName := fmt.Sprintf("statusloss-fresh-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			imageRef := keziov1alpha2.NameRef{Name: "fresh-image"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:60",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					ImageRef:       &imageRef,
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			})
+
+			recorder := record.NewFakeRecorder(10)
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}, Recorder: recorder}
+
+			By("a Machine created with imageRef set is empty status + set imageRef on its first reconcile, exactly like a status-loss shape - it must still provision on its own")
+			reconcileUntilState(reconciler, name, keziov1alpha2.MachineStateProvisioned)
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(meta.IsStatusConditionTrue(machine.Status.Conditions, keziov1alpha2.MachineConditionStatusLossHold)).To(BeFalse())
+			Expect(countRunsForMachine(machineName)).To(Equal(1))
+		})
+
+		It("holds a Machine whose status was reset but whose DeployRuns still exist, until the confirm annotation is set", func() {
+			machineName := fmt.Sprintf("statusloss-restored-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			imageRef := keziov1alpha2.NameRef{Name: "restored-image"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:61",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					ImageRef:       &imageRef,
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			})
+
+			recorder := record.NewFakeRecorder(10)
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}, Recorder: recorder}
+
+			By("walking the machine to Provisioned once, the way a real deployment would")
+			reconcileUntilState(reconciler, name, keziov1alpha2.MachineStateProvisioned)
+			Expect(countRunsForMachine(machineName)).To(Equal(1))
+
+			By("simulating a status-only restore: status is wiped back to zero, spec (including the DeployRun-owning history) is untouched")
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			machine.Status = keziov1alpha2.MachineStatus{}
+			Expect(k8sClient.Status().Update(ctx, &machine)).To(Succeed())
+
+			By("reconciling: the machine must enter the hold instead of silently re-enrolling/re-provisioning")
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Status.State).To(BeEmpty(), "a held machine must not advance past its empty state")
+			Expect(meta.IsStatusConditionTrue(machine.Status.Conditions, keziov1alpha2.MachineConditionStatusLossHold)).To(BeTrue())
+			Expect(<-recorder.Events).To(ContainSubstring("StatusLossHold"))
+
+			By("reconciling again while held: no new DeployRun, no requeue, no repeated event")
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result).To(Equal(reconcile.Result{}))
+			Expect(countRunsForMachine(machineName)).To(Equal(1), "held must never start a new DeployRun")
+			Consistently(recorder.Events).ShouldNot(Receive())
+
+			By("confirming the hold releases it and the machine resumes the normal walk, re-provisioning")
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			machine.Annotations = map[string]string{keziov1alpha2.MachineAnnotationConfirmStatusLoss: ""}
+			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
+
+			reconcileUntilState(reconciler, name, keziov1alpha2.MachineStateProvisioned)
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Annotations).NotTo(HaveKey(keziov1alpha2.MachineAnnotationConfirmStatusLoss), "the confirm annotation is consumed once acted on")
+			Expect(meta.IsStatusConditionTrue(machine.Status.Conditions, keziov1alpha2.MachineConditionStatusLossHold)).To(BeFalse())
+			Expect(countRunsForMachine(machineName)).To(Equal(2), "confirmation resumes the walk, which re-provisions since no successful run is on record")
+		})
+
 	})
 })
