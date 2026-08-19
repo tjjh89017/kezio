@@ -120,7 +120,7 @@ func (r *MachineReconciler) setState(ctx context.Context, machine *keziov1alpha2
 }
 
 func (r *MachineReconciler) reconcileInspecting(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
-	result, err := r.Deployer.Inspect(ctx, machine)
+	result, err := r.Deployer.Inspect(ctx, machine, restartOnFailure(machine))
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -168,7 +168,7 @@ func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *
 		return ctrl.Result{}, fmt.Errorf("machine %q: getting DeployRun %q: %w", machine.Name, machine.Status.CurrentRunRef.Name, err)
 	}
 
-	result, err := r.Deployer.Provision(ctx, machine, run)
+	result, err := r.Deployer.Provision(ctx, machine, run, restartOnFailure(machine))
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -186,6 +186,16 @@ func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *
 		return ctrl.Result{}, fmt.Errorf("machine %q: setting status.state to Provisioned: %w", machine.Name, err)
 	}
 	return ctrl.Result{}, nil
+}
+
+// restartOnFailure derives the deployer's restartOnFailure argument from
+// the previous attempt's recorded error: only a live error (OK is never
+// stale-restart) with errorType MachineErrorTypeRestart asks the deployer
+// to discard in-progress step state; every other case, including an
+// unrecognized errorType, resumes the step in place.
+func restartOnFailure(machine *keziov1alpha2.Machine) bool {
+	return machine.Status.OperationalStatus == keziov1alpha2.MachineOperationalStatusError &&
+		machine.Status.ErrorType == keziov1alpha2.MachineErrorTypeRestart
 }
 
 // applyNonCompleteOutcome handles every deployer.Result.Outcome except

@@ -55,9 +55,9 @@ type FakeDeployer struct {
 	Client client.Client
 
 	// InspectFunc, when set, replaces the default Inspect behavior.
-	InspectFunc func(ctx context.Context, machine *keziov1alpha2.Machine) (Result, error)
+	InspectFunc func(ctx context.Context, machine *keziov1alpha2.Machine, restartOnFailure bool) (Result, error)
 	// ProvisionFunc, when set, replaces the default Provision behavior.
-	ProvisionFunc func(ctx context.Context, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun) (Result, error)
+	ProvisionFunc func(ctx context.Context, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun, restartOnFailure bool) (Result, error)
 }
 
 var _ Deployer = (*FakeDeployer)(nil)
@@ -66,9 +66,9 @@ var _ Deployer = (*FakeDeployer)(nil)
 // stub: it fabricates one disk and one NIC rather than reading real
 // hardware, and never resolves machine.spec.subnetRef (Subnet does not
 // exist yet in this stage).
-func (f *FakeDeployer) Inspect(ctx context.Context, machine *keziov1alpha2.Machine) (Result, error) {
+func (f *FakeDeployer) Inspect(ctx context.Context, machine *keziov1alpha2.Machine, restartOnFailure bool) (Result, error) {
 	if f.InspectFunc != nil {
-		return f.InspectFunc(ctx, machine)
+		return f.InspectFunc(ctx, machine, restartOnFailure)
 	}
 
 	hw := &keziov1alpha2.MachineHardware{
@@ -104,9 +104,9 @@ func (f *FakeDeployer) Inspect(ctx context.Context, machine *keziov1alpha2.Machi
 // each step, and never resolves machine.spec.imageRef/dataImages/
 // postHookRefs (Image and PostHook do not exist yet in this stage) - it
 // treats every run as trivially deployable.
-func (f *FakeDeployer) Provision(ctx context.Context, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun) (Result, error) {
+func (f *FakeDeployer) Provision(ctx context.Context, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun, restartOnFailure bool) (Result, error) {
 	if f.ProvisionFunc != nil {
-		return f.ProvisionFunc(ctx, machine, run)
+		return f.ProvisionFunc(ctx, machine, run, restartOnFailure)
 	}
 
 	next, done, err := nextDeployRunPhase(run.Status.Phase)

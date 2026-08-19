@@ -81,7 +81,7 @@ func TestFakeDeployerInspectWritesSyntheticMachineHardware(t *testing.T) {
 	machine := newTestMachine()
 	f := &FakeDeployer{Client: c}
 
-	result, err := f.Inspect(context.Background(), machine)
+	result, err := f.Inspect(context.Background(), machine, false)
 	if err != nil {
 		t.Fatalf("Inspect() error = %v", err)
 	}
@@ -109,10 +109,10 @@ func TestFakeDeployerInspectIsIdempotent(t *testing.T) {
 	machine := newTestMachine()
 	f := &FakeDeployer{Client: c}
 
-	if _, err := f.Inspect(context.Background(), machine); err != nil {
+	if _, err := f.Inspect(context.Background(), machine, false); err != nil {
 		t.Fatalf("first Inspect() error = %v", err)
 	}
-	result, err := f.Inspect(context.Background(), machine)
+	result, err := f.Inspect(context.Background(), machine, false)
 	if err != nil {
 		t.Fatalf("second Inspect() error = %v", err)
 	}
@@ -137,7 +137,7 @@ func TestFakeDeployerProvisionWalksPhasesToSucceeded(t *testing.T) {
 	}
 
 	for i, wantPhase := range wantPhases {
-		result, err := f.Provision(context.Background(), machine, run)
+		result, err := f.Provision(context.Background(), machine, run, false)
 		if err != nil {
 			t.Fatalf("Provision() call %d error = %v", i, err)
 		}
@@ -191,12 +191,12 @@ func TestFakeDeployerProvisionRejectsCallAfterTerminal(t *testing.T) {
 	f := &FakeDeployer{Client: c}
 
 	for i := 0; i < 6; i++ {
-		if _, err := f.Provision(context.Background(), machine, run); err != nil {
+		if _, err := f.Provision(context.Background(), machine, run, false); err != nil {
 			t.Fatalf("Provision() call %d error = %v", i, err)
 		}
 	}
 
-	if _, err := f.Provision(context.Background(), machine, run); err == nil {
+	if _, err := f.Provision(context.Background(), machine, run, false); err == nil {
 		t.Fatal("Provision() after the run reached Succeeded returned no error, want a transient error")
 	}
 }
@@ -205,15 +205,18 @@ func TestFakeDeployerInspectFuncOverride(t *testing.T) {
 	machine := newTestMachine()
 	wantErr := errors.New("simulated transient failure")
 	f := &FakeDeployer{
-		InspectFunc: func(_ context.Context, m *keziov1alpha2.Machine) (Result, error) {
+		InspectFunc: func(_ context.Context, m *keziov1alpha2.Machine, restartOnFailure bool) (Result, error) {
 			if m.Name != machine.Name {
 				t.Errorf("InspectFunc received machine %q, want %q", m.Name, machine.Name)
+			}
+			if !restartOnFailure {
+				t.Error("InspectFunc received restartOnFailure = false, want true")
 			}
 			return Result{}, wantErr
 		},
 	}
 
-	_, err := f.Inspect(context.Background(), machine)
+	_, err := f.Inspect(context.Background(), machine, true)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("Inspect() error = %v, want %v", err, wantErr)
 	}
@@ -231,17 +234,20 @@ func TestFakeDeployerProvisionFuncOverrideCanScriptEveryOutcome(t *testing.T) {
 		{"complete", Result{Outcome: Complete}, nil},
 		{"continuing", Result{Outcome: Continuing}, nil},
 		{"busy", Result{Outcome: Busy, RequeueAfter: 5 * time.Second}, nil},
-		{"failed", Result{Outcome: Failed, ErrorType: "SimulatedFailure", ErrorMessage: "boom"}, nil},
+		{"failed", Result{Outcome: Failed, ErrorType: keziov1alpha2.MachineErrorTypeRestart, ErrorMessage: "boom"}, nil},
 		{"transient", Result{}, errors.New("simulated transient failure")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &FakeDeployer{
-				ProvisionFunc: func(context.Context, *keziov1alpha2.Machine, *keziov1alpha2.DeployRun) (Result, error) {
+				ProvisionFunc: func(_ context.Context, _ *keziov1alpha2.Machine, _ *keziov1alpha2.DeployRun, restartOnFailure bool) (Result, error) {
+					if !restartOnFailure {
+						t.Error("ProvisionFunc received restartOnFailure = false, want true")
+					}
 					return tc.result, tc.err
 				},
 			}
-			result, err := f.Provision(context.Background(), machine, run)
+			result, err := f.Provision(context.Background(), machine, run, true)
 			if !errors.Is(err, tc.err) && (err == nil) != (tc.err == nil) {
 				t.Fatalf("Provision() error = %v, want %v", err, tc.err)
 			}
@@ -288,7 +294,7 @@ func TestFakeDeployerInspectIgnoresUnresolvedReferences(t *testing.T) {
 	machine.Spec.ImageRef = &imageRef
 	f := &FakeDeployer{Client: c}
 
-	result, err := f.Inspect(context.Background(), machine)
+	result, err := f.Inspect(context.Background(), machine, false)
 	if err != nil {
 		t.Fatalf("Inspect() error = %v, want nil: the fake deployer must not resolve subnetRef/postHookRefs/imageRef", err)
 	}

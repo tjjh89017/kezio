@@ -61,6 +61,28 @@ func TestMachineControllerGoSourceDoesNotImportBMC(t *testing.T) {
 	}
 }
 
+func TestRestartOnFailure(t *testing.T) {
+	cases := []struct {
+		name   string
+		status keziov1alpha2.MachineStatus
+		want   bool
+	}{
+		{"zero value status", keziov1alpha2.MachineStatus{}, false},
+		{"OK with stale Restart errorType", keziov1alpha2.MachineStatus{OperationalStatus: keziov1alpha2.MachineOperationalStatusOK, ErrorType: keziov1alpha2.MachineErrorTypeRestart}, false},
+		{"error with Restart errorType", keziov1alpha2.MachineStatus{OperationalStatus: keziov1alpha2.MachineOperationalStatusError, ErrorType: keziov1alpha2.MachineErrorTypeRestart}, true},
+		{"error with Transient errorType", keziov1alpha2.MachineStatus{OperationalStatus: keziov1alpha2.MachineOperationalStatusError, ErrorType: keziov1alpha2.MachineErrorTypeTransient}, false},
+		{"error with unrecognized errorType", keziov1alpha2.MachineStatus{OperationalStatus: keziov1alpha2.MachineOperationalStatusError, ErrorType: keziov1alpha2.MachineErrorType("bogus")}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			machine := &keziov1alpha2.Machine{Status: tc.status}
+			if got := restartOnFailure(machine); got != tc.want {
+				t.Errorf("restartOnFailure() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 var _ = Describe("Machine Controller", func() {
 	Context("When reconciling a resource", func() {
 		const resourceName = "test-resource"
@@ -298,8 +320,8 @@ var _ = Describe("Machine Controller", func() {
 
 			failingDeployer := &deployer.FakeDeployer{
 				Client: k8sClient,
-				InspectFunc: func(context.Context, *keziov1alpha2.Machine) (deployer.Result, error) {
-					return deployer.Result{Outcome: deployer.Failed, ErrorType: "SimulatedFailure", ErrorMessage: "boom"}, nil
+				InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+					return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeTransient, ErrorMessage: "boom"}, nil
 				},
 			}
 			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: failingDeployer}
@@ -316,9 +338,57 @@ var _ = Describe("Machine Controller", func() {
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
 			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusError))
-			Expect(machine.Status.ErrorType).To(Equal("SimulatedFailure"))
+			Expect(machine.Status.ErrorType).To(Equal(keziov1alpha2.MachineErrorTypeTransient))
 			Expect(machine.Status.ErrorMessage).To(Equal("boom"))
 			Expect(machine.Status.ErrorCount).To(Equal(int32(1)))
+		})
+
+		It("passes restartOnFailure=true into the next Inspect call after a MachineErrorTypeRestart failure", func() {
+			machineName := fmt.Sprintf("restart-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:05",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			})
+
+			var seenRestartOnFailure []bool
+			fakeDeployer := &deployer.FakeDeployer{
+				Client: k8sClient,
+				InspectFunc: func(_ context.Context, _ *keziov1alpha2.Machine, restartOnFailure bool) (deployer.Result, error) {
+					seenRestartOnFailure = append(seenRestartOnFailure, restartOnFailure)
+					if len(seenRestartOnFailure) == 1 {
+						return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeRestart, ErrorMessage: "boom"}, nil
+					}
+					return deployer.Result{Outcome: deployer.Complete}, nil
+				},
+			}
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: fakeDeployer}
+
+			By("reconciling through the finalizer add, Enrolling, and both Inspect calls")
+			for i := 0; i < 10 && len(seenRestartOnFailure) < 2; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			Expect(seenRestartOnFailure).To(HaveLen(2))
+			Expect(seenRestartOnFailure[0]).To(BeFalse(), "the first Inspect call has no prior error, so restartOnFailure must be false")
+			Expect(seenRestartOnFailure[1]).To(BeTrue(), "the retry after a MachineErrorTypeRestart failure must ask the deployer to restart")
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
 		})
 	})
 })

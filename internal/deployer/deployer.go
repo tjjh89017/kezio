@@ -79,7 +79,7 @@ type Result struct {
 	RequeueAfter time.Duration
 	// ErrorType and ErrorMessage are set only when Outcome is Failed, and
 	// map directly onto Machine.status.errorType/errorMessage.
-	ErrorType    string
+	ErrorType    keziov1alpha2.MachineErrorType
 	ErrorMessage string
 }
 
@@ -102,11 +102,17 @@ type Result struct {
 type Deployer interface {
 	// Inspect drives one step of hardware inspection for machine. On
 	// Complete, a MachineHardware object named after machine exists and
-	// carries the discovered inventory.
-	Inspect(ctx context.Context, machine *keziov1alpha2.Machine) (Result, error)
+	// carries the discovered inventory. restartOnFailure is true when the
+	// prior attempt at this step recorded
+	// Machine.status.errorType == MachineErrorTypeRestart: the
+	// implementation must discard any in-progress inspection state and
+	// start over rather than resume it.
+	Inspect(ctx context.Context, machine *keziov1alpha2.Machine, restartOnFailure bool) (Result, error)
 
 	// Provision drives one step of deploying run to machine. On Complete,
 	// the machine has booted the deployed image, or - for a
 	// dataImages-only run - reached its after-deploy power state.
-	Provision(ctx context.Context, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun) (Result, error)
+	// restartOnFailure carries the same meaning as in Inspect, scoped to
+	// this Provision step.
+	Provision(ctx context.Context, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun, restartOnFailure bool) (Result, error)
 }

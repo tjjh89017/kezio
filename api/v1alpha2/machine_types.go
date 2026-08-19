@@ -258,6 +258,26 @@ const (
 	MachineOperationalStatusDetached = "detached"
 )
 
+// MachineErrorType classifies the most recent phase failure recorded on
+// MachineStatus.ErrorType. The reconciler maps it to the restartOnFailure
+// argument passed into the deployer's next Inspect/Provision call for this
+// Machine: MachineErrorTypeRestart means the deployer must discard any
+// in-progress step state and start the step over; MachineErrorTypeTransient
+// means the deployer resumes the step where it left off. A recorded value
+// outside this set is possible (a stale value from an older controller
+// version, or corrupt data) and must not be assumed to match either
+// constant.
+type MachineErrorType string
+
+const (
+	// MachineErrorTypeTransient means the failure does not invalidate any
+	// in-progress step state; the deployer resumes in place.
+	MachineErrorTypeTransient MachineErrorType = "Transient"
+	// MachineErrorTypeRestart means any in-progress step state may be
+	// invalid; the deployer must start the step over from its beginning.
+	MachineErrorTypeRestart MachineErrorType = "Restart"
+)
+
 // Condition types set on MachineStatus.Conditions.
 const (
 	// MachineConditionReady summarizes whether the machine is in a
@@ -300,7 +320,7 @@ type MachineStatus struct {
 	// ErrorType classifies the most recent error, when OperationalStatus
 	// is "error".
 	// +optional
-	ErrorType string `json:"errorType,omitempty"`
+	ErrorType MachineErrorType `json:"errorType,omitempty"`
 	// ErrorCount counts consecutive errors since the last success in the
 	// current state. The controller uses it to compute backoff.
 	// +optional
