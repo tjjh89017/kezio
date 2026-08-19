@@ -17,6 +17,9 @@ limitations under the License.
 package v1alpha2
 
 import (
+	"context"
+	"net/url"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -25,6 +28,13 @@ import (
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 	"github.com/tjjh89017/kezio/internal/bmc"
 )
+
+// webhookTestDriver is a stub bmc.Driver registered under the
+// "webhooktest" scheme purely so the webhook's scheme check has something
+// to recognize; nothing in this suite ever calls it.
+func webhookTestDriver(context.Context, *url.URL, bmc.Credentials, bmc.Options) (bmc.BMC, error) {
+	return nil, nil
+}
 
 const unregisteredSchemeAddress = "unregistered-scheme://10.0.0.1"
 
@@ -53,7 +63,7 @@ var _ = Describe("Machine Webhook", func() {
 		Expect(obj).NotTo(BeNil(), "Expected obj to be initialized")
 
 		if !bmc.IsSchemeRegistered("webhooktest") {
-			bmc.Register("webhooktest")
+			bmc.Register("webhooktest", webhookTestDriver)
 		}
 	})
 

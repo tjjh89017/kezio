@@ -40,6 +40,13 @@ import (
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 	"github.com/tjjh89017/kezio/internal/controller"
 	webhookv1alpha2 "github.com/tjjh89017/kezio/internal/webhook/v1alpha2"
+
+	// Blank-imported so their init() registers "redfish"/"ipmi" (and
+	// related schemes) with internal/bmc's registry: the Machine webhook
+	// validates spec.bmc.address against it, and nothing else in this
+	// binary references these packages directly.
+	_ "github.com/tjjh89017/kezio/internal/bmc/ipmi"
+	_ "github.com/tjjh89017/kezio/internal/bmc/redfish"
 	// +kubebuilder:scaffold:imports
 )
 

@@ -17,45 +17,164 @@ limitations under the License.
 package bmc
 
 import (
-	"slices"
+	"context"
+	"errors"
+	"net/url"
+	"strings"
 	"testing"
 )
 
-func TestRegisterAndIsSchemeRegistered(t *testing.T) {
-	scheme := "test-registry-scheme"
-	if IsSchemeRegistered(scheme) {
-		t.Fatalf("scheme %q reported registered before Register was called", scheme)
-	}
+// stubBMC is a no-op BMC used to verify Connect wiring without a real
+// driver.
+type stubBMC struct{}
 
-	Register(scheme)
+func (stubBMC) PowerOn(context.Context) error                     { return nil }
+func (stubBMC) PowerOff(context.Context) error                    { return nil }
+func (stubBMC) ForcePowerOff(context.Context) error               { return nil }
+func (stubBMC) PowerCycle(context.Context) error                  { return nil }
+func (stubBMC) GetPowerState(context.Context) (PowerState, error) { return PowerStateOn, nil }
+func (stubBMC) SetOneTimePXEBoot(context.Context) error           { return nil }
+
+// registerTestDriver registers driver under a scheme unique to the calling
+// test (derived from t.Name()) and unregisters it on cleanup, so tests can
+// run with -count>1 or in parallel without colliding on the shared
+// registry or tripping Register's duplicate-registration panic.
+func registerTestDriver(t *testing.T, driver Driver) string {
+	t.Helper()
+	scheme := "test-" + strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-"))
+	Register(scheme, driver)
+	t.Cleanup(func() {
+		registryMu.Lock()
+		delete(registry, scheme)
+		registryMu.Unlock()
+	})
+	return scheme
+}
+
+func TestConnectDispatchesToRegisteredDriver(t *testing.T) {
+	var gotAddress *url.URL
+	var gotCreds Credentials
+	var gotOpts Options
+
+	scheme := registerTestDriver(t, func(_ context.Context, address *url.URL, creds Credentials, opts Options) (BMC, error) {
+		gotAddress, gotCreds, gotOpts = address, creds, opts
+		return stubBMC{}, nil
+	})
+
+	creds := Credentials{Username: "admin", Password: "hunter2"}
+	opts := Options{InsecureSkipVerify: true}
+	b, err := Connect(context.Background(), scheme+"://10.0.0.10/redfish/v1/Systems/1", creds, opts)
+	if err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	if b == nil {
+		t.Fatal("Connect() returned a nil BMC with no error")
+	}
+	if gotAddress == nil || gotAddress.Host != "10.0.0.10" || gotAddress.Path != "/redfish/v1/Systems/1" {
+		t.Errorf("driver received address = %+v, want host=10.0.0.10 path=/redfish/v1/Systems/1", gotAddress)
+	}
+	if gotCreds != creds {
+		t.Errorf("driver received creds = %+v, want %+v", gotCreds, creds)
+	}
+	if gotOpts != opts {
+		t.Errorf("driver received opts = %+v, want %+v", gotOpts, opts)
+	}
+}
+
+func TestConnectUnknownSchemeReturnsClearError(t *testing.T) {
+	_, err := Connect(context.Background(), "does-not-exist://host/path", Credentials{}, Options{})
+	if err == nil {
+		t.Fatal("Connect() with an unregistered scheme succeeded, want an error")
+	}
+	if !strings.Contains(err.Error(), "does-not-exist") {
+		t.Errorf("Connect() error = %q, want it to name the unknown scheme", err.Error())
+	}
+}
+
+func TestConnectRejectsUnparsableAddress(t *testing.T) {
+	_, err := Connect(context.Background(), "://not a url", Credentials{}, Options{})
+	if err == nil {
+		t.Fatal("Connect() with an unparsable address succeeded, want an error")
+	}
+}
+
+func TestConnectRejectsAddressWithoutScheme(t *testing.T) {
+	_, err := Connect(context.Background(), "10.0.0.10/redfish/v1/Systems/1", Credentials{}, Options{})
+	if err == nil {
+		t.Fatal("Connect() with a schemeless address succeeded, want an error")
+	}
+}
+
+func TestConnectWrapsDriverErrorWithoutLeakingCredentials(t *testing.T) {
+	const password = "hunter2"
+	scheme := registerTestDriver(t, func(context.Context, *url.URL, Credentials, Options) (BMC, error) {
+		return nil, errors.New("simulated dial failure")
+	})
+
+	_, err := Connect(context.Background(), scheme+"://user:"+password+"@10.0.0.10/path", Credentials{Username: "user", Password: password}, Options{})
+	if err == nil {
+		t.Fatal("Connect() with a failing driver succeeded, want an error")
+	}
+	if strings.Contains(err.Error(), password) {
+		t.Errorf("Connect() error leaked the password embedded in the address: %q", err.Error())
+	}
+}
+
+func TestRegisterPanicsOnDuplicateScheme(t *testing.T) {
+	scheme := registerTestDriver(t, func(context.Context, *url.URL, Credentials, Options) (BMC, error) {
+		return stubBMC{}, nil
+	})
+
+	defer func() {
+		if recover() == nil {
+			t.Error("Register() with an already-registered scheme did not panic")
+		}
+	}()
+	Register(scheme, func(context.Context, *url.URL, Credentials, Options) (BMC, error) {
+		return stubBMC{}, nil
+	})
+}
+
+func TestRegisteredSchemesIncludesNewlyRegisteredScheme(t *testing.T) {
+	scheme := registerTestDriver(t, func(context.Context, *url.URL, Credentials, Options) (BMC, error) {
+		return stubBMC{}, nil
+	})
+
+	found := false
+	for _, s := range RegisteredSchemes() {
+		if s == scheme {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("RegisteredSchemes() = %v, want it to include %q", RegisteredSchemes(), scheme)
+	}
+}
+
+func TestIsSchemeRegistered(t *testing.T) {
+	scheme := registerTestDriver(t, func(context.Context, *url.URL, Credentials, Options) (BMC, error) {
+		return stubBMC{}, nil
+	})
+
 	if !IsSchemeRegistered(scheme) {
-		t.Fatalf("scheme %q reported unregistered after Register was called", scheme)
+		t.Errorf("IsSchemeRegistered(%q) = false, want true", scheme)
 	}
-	if !IsSchemeRegistered("TEST-REGISTRY-SCHEME") {
-		t.Fatalf("IsSchemeRegistered is not case-insensitive")
+	if !IsSchemeRegistered(strings.ToUpper(scheme)) {
+		t.Errorf("IsSchemeRegistered(%q) = false, want true (case-insensitive)", strings.ToUpper(scheme))
 	}
-
-	if got := RegisteredSchemes(); !slices.Contains(got, scheme) {
-		t.Fatalf("RegisteredSchemes() = %v, want it to contain %q", got, scheme)
+	if IsSchemeRegistered("does-not-exist") {
+		t.Error("IsSchemeRegistered(\"does-not-exist\") = true, want false")
 	}
 }
 
-func TestRegisterEmptySchemePanics(t *testing.T) {
+func TestRegisterPanicsOnEmptyScheme(t *testing.T) {
 	defer func() {
 		if recover() == nil {
-			t.Fatal("Register(\"\") did not panic")
+			t.Error("Register() with an empty scheme did not panic")
 		}
 	}()
-	Register("")
-}
-
-func TestRegisterTwicePanics(t *testing.T) {
-	scheme := "test-registry-scheme-dup"
-	Register(scheme)
-	defer func() {
-		if recover() == nil {
-			t.Fatal("second Register call for the same scheme did not panic")
-		}
-	}()
-	Register(scheme)
+	Register("", func(context.Context, *url.URL, Credentials, Options) (BMC, error) {
+		return stubBMC{}, nil
+	})
 }

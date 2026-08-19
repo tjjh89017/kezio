@@ -40,7 +40,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
-	"github.com/tjjh89017/kezio/internal/bmc"
+	// Blank-imported so their init() registers "redfish"/"ipmi" with
+	// internal/bmc's registry - the webhook's scheme check needs a real
+	// driver package linked in, same as the manager binary.
+	_ "github.com/tjjh89017/kezio/internal/bmc/ipmi"
+	_ "github.com/tjjh89017/kezio/internal/bmc/redfish"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -65,12 +69,6 @@ var _ = BeforeSuite(func() {
 	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))
 
 	ctx, cancel = context.WithCancel(context.TODO())
-
-	// No driver package is linked into this test binary yet, so the
-	// Machine webhook's BMC scheme check has nothing to recognize;
-	// register the schemes the fixtures in this suite use.
-	bmc.Register("redfish")
-	bmc.Register("ipmi")
 
 	var err error
 	err = keziov1alpha2.AddToScheme(scheme.Scheme)
