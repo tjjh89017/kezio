@@ -100,6 +100,12 @@ func (r *MachineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	// Absolute: paused returns immediately even while the Machine has a
+	// deletion timestamp, before the finalizer/onDelete dispatch below.
+	if isPaused(&machine) {
+		return ctrl.Result{}, nil
+	}
+
 	if !machine.DeletionTimestamp.IsZero() {
 		return r.onDelete(ctx, &machine)
 	}
@@ -137,14 +143,26 @@ func (r *MachineReconciler) onDelete(ctx context.Context, machine *keziov1alpha2
 	}
 }
 
+// reconcileDeprovisioning runs the deprovision delete stage, or skips it
+// straight to the next stage when the detached annotation is present: a
+// detached Machine never dials the BMC-adjacent deployer, on the forward
+// walk or the delete walk alike.
 func (r *MachineReconciler) reconcileDeprovisioning(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+	if isDetached(machine) {
+		return r.advanceDeleteStage(ctx, machine, keziov1alpha2.MachineStatePoweringOff)
+	}
 	step := func(ctx context.Context, m *keziov1alpha2.Machine) (deployer.Result, error) {
 		return r.Deployer.Deprovision(ctx, m, restartOnFailure(m))
 	}
 	return r.runDeleteStage(ctx, machine, step, "deprovision", keziov1alpha2.MachineStatePoweringOff)
 }
 
+// reconcilePoweringOff runs the power-off delete stage, or skips it straight
+// to release when detached - see reconcileDeprovisioning.
 func (r *MachineReconciler) reconcilePoweringOff(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+	if isDetached(machine) {
+		return r.advanceDeleteStage(ctx, machine, "")
+	}
 	step := func(ctx context.Context, m *keziov1alpha2.Machine) (deployer.Result, error) {
 		return r.Deployer.PowerOff(ctx, m)
 	}
@@ -251,6 +269,17 @@ func (r *MachineReconciler) releaseMachine(ctx context.Context, machine *keziov1
 // relying on the watch on Machine (state and status changes) or an explicit
 // RequeueAfter to drive the next step.
 func (r *MachineReconciler) onChange(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+	if isDetached(machine) {
+		return r.reconcileDetached(ctx, machine)
+	}
+	if machine.Status.OperationalStatus == keziov1alpha2.MachineOperationalStatusDetached {
+		return r.clearDetached(ctx, machine)
+	}
+
+	if requested, hard := rebootRequested(ctx, machine); requested {
+		return r.reconcileReboot(ctx, machine, hard)
+	}
+
 	if hasUnknownErrorType(machine) {
 		return r.setState(ctx, machine, keziov1alpha2.MachineStateEnrolling)
 	}
@@ -417,6 +446,58 @@ func hasUnknownErrorType(machine *keziov1alpha2.Machine) bool {
 	default:
 		return true
 	}
+}
+
+// reconcileDetached keeps operationalStatus=detached current while the
+// detached annotation is present, without ever calling the deployer: state,
+// errorType, errorCount, and every deployer-derived field are frozen
+// exactly as they were the moment detached was set.
+func (r *MachineReconciler) reconcileDetached(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+	if machine.Status.OperationalStatus == keziov1alpha2.MachineOperationalStatusDetached {
+		return ctrl.Result{}, nil
+	}
+	patch := client.MergeFrom(machine.DeepCopy())
+	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusDetached
+	stampLastUpdated(machine)
+	if err := r.Status().Patch(ctx, machine, patch); err != nil {
+		return ctrl.Result{}, fmt.Errorf("machine %q: recording detached status: %w", machine.Name, err)
+	}
+	return ctrl.Result{}, nil
+}
+
+// clearDetached resumes normal operation once the detached annotation is
+// removed: it restores operationalStatus to OK in its own patch, so the
+// next reconcile's state walk starts from a clean status - the same
+// one-step-per-reconcile discipline as clearDelayed.
+func (r *MachineReconciler) clearDetached(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+	patch := client.MergeFrom(machine.DeepCopy())
+	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusOK
+	stampLastUpdated(machine)
+	if err := r.Status().Patch(ctx, machine, patch); err != nil {
+		return ctrl.Result{}, fmt.Errorf("machine %q: clearing detached status: %w", machine.Name, err)
+	}
+	return ctrl.Result{}, nil
+}
+
+// reconcileReboot honors a reboot annotation outside deletion, regardless
+// of machine.status.state: a BMC reboot command does not depend on which
+// workflow step the machine is in. Complete clears the suffixless
+// annotation; every other outcome goes through applyNonCompleteOutcome
+// (the same two-axis error/delay bookkeeping as Inspect/Provision) and
+// leaves every reboot annotation untouched, so the reboot is retried as-is
+// on the next reconcile.
+func (r *MachineReconciler) reconcileReboot(ctx context.Context, machine *keziov1alpha2.Machine, hard bool) (ctrl.Result, error) {
+	result, err := r.Deployer.Reboot(ctx, machine, hard)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if result.Outcome != deployer.Complete {
+		return r.applyNonCompleteOutcome(ctx, machine, result)
+	}
+	if err := r.clearSuffixlessRebootAnnotation(ctx, machine); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
 }
 
 // applyNonCompleteOutcome handles every deployer.Result.Outcome except

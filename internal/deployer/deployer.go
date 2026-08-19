@@ -134,4 +134,10 @@ type Deployer interface {
 	// last live action before the Machine object is released. On
 	// Complete, the machine is (or is believed to be) powered off.
 	PowerOff(ctx context.Context, machine *keziov1alpha2.Machine) (Result, error)
+
+	// Reboot drives one step of rebooting machine in response to a reboot
+	// annotation. hard selects a hard (forced) reboot over a soft
+	// (graceful) one. On Complete, the machine has been commanded to
+	// reboot; this does not wait for the machine to finish booting.
+	Reboot(ctx context.Context, machine *keziov1alpha2.Machine, hard bool) (Result, error)
 }

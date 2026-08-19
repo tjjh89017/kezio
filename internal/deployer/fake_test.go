@@ -323,6 +323,42 @@ func TestFakeDeployerPowerOffFuncOverride(t *testing.T) {
 	}
 }
 
+func TestFakeDeployerRebootDefaultsToInstantComplete(t *testing.T) {
+	machine := newTestMachine()
+	f := &FakeDeployer{}
+
+	result, err := f.Reboot(context.Background(), machine, true)
+	if err != nil {
+		t.Fatalf("Reboot() error = %v", err)
+	}
+	if result.Outcome != Complete {
+		t.Fatalf("Reboot() outcome = %v, want Complete", result.Outcome)
+	}
+}
+
+func TestFakeDeployerRebootFuncOverride(t *testing.T) {
+	machine := newTestMachine()
+	wantErr := errors.New("simulated transient failure")
+	var gotHard bool
+	f := &FakeDeployer{
+		RebootFunc: func(_ context.Context, m *keziov1alpha2.Machine, hard bool) (Result, error) {
+			if m.Name != machine.Name {
+				t.Errorf("RebootFunc received machine %q, want %q", m.Name, machine.Name)
+			}
+			gotHard = hard
+			return Result{}, wantErr
+		},
+	}
+
+	_, err := f.Reboot(context.Background(), machine, true)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Reboot() error = %v, want %v", err, wantErr)
+	}
+	if !gotHard {
+		t.Error("RebootFunc received hard = false, want true")
+	}
+}
+
 // TestFakeGoSourceDoesNotImportBMC guards the doc comment on FakeDeployer:
 // this stage's fast lane must never dial a BMC, and this parses fake.go's
 // own import list rather than trusting the comment to stay accurate.

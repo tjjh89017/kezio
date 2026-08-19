@@ -231,6 +231,54 @@ const MachineCredentialsSecretLabel = "kezio.kojuro.date/bmc-credentials-secret"
 // name), and MachineFinalizer already has one.
 const MachineCredentialsSecretFinalizer = "kezio.kojuro.date/bmc-credentials"
 
+// Machine operational annotations, read directly off ObjectMeta.Annotations
+// - no defaulting or schema covers them.
+const (
+	// MachineAnnotationPaused, when present with any value, makes the
+	// reconciler return immediately: no status writes, no deployer calls,
+	// no requeue. This is absolute - it also blocks the delete walk while
+	// the Machine has a deletion timestamp.
+	MachineAnnotationPaused = "kezio.kojuro.date/paused"
+	// MachineAnnotationDetached, when present with any value, stops the
+	// controller from calling the deployer (no inspect, provision,
+	// deprovision, power, or reboot action) while it keeps updating
+	// status: operationalStatus reports MachineOperationalStatusDetached
+	// until the annotation is removed, at which point normal operation
+	// resumes.
+	MachineAnnotationDetached = "kezio.kojuro.date/detached"
+	// MachineAnnotationRebootPrefix is the reboot annotation key: either
+	// exactly this value (the suffixless, controller-owned form) or this
+	// value plus a "-<client>" suffix (a client-held form, for example
+	// "kezio.kojuro.date/reboot-fleetctl"). The value is JSON
+	// {"mode":"hard"|"soft"}; an empty value or invalid JSON is treated as
+	// a soft reboot request for that holder. Any number of
+	// suffixless/suffixed reboot annotations may be present at once - the
+	// machine reboots while any one is present, hard wins if any holder
+	// asks for hard, and the controller clears only the suffixless form
+	// once it has acted; suffixed forms are cleared by the client that set
+	// them.
+	MachineAnnotationRebootPrefix = "kezio.kojuro.date/reboot"
+)
+
+// MachineRebootMode is the JSON "mode" value inside a reboot annotation.
+type MachineRebootMode string
+
+const (
+	// MachineRebootModeSoft requests a graceful reboot. It is the default
+	// when a reboot annotation's value is empty or fails to parse as JSON.
+	MachineRebootModeSoft MachineRebootMode = "soft"
+	// MachineRebootModeHard requests a forced reboot. It wins over a soft
+	// request from any other holder.
+	MachineRebootModeHard MachineRebootMode = "hard"
+)
+
+// MachineRebootAnnotationArguments is the JSON payload of one reboot
+// annotation.
+type MachineRebootAnnotationArguments struct {
+	// +optional
+	Mode MachineRebootMode `json:"mode,omitempty"`
+}
+
 // Machine state enum values for MachineStatus.State. These are the
 // top-level states only; provisioning sub-steps are reported through
 // conditions, not as top-level states. There is no Error state: an error

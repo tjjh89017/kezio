@@ -62,6 +62,8 @@ type FakeDeployer struct {
 	DeprovisionFunc func(ctx context.Context, machine *keziov1alpha2.Machine, restartOnFailure bool) (Result, error)
 	// PowerOffFunc, when set, replaces the default PowerOff behavior.
 	PowerOffFunc func(ctx context.Context, machine *keziov1alpha2.Machine) (Result, error)
+	// RebootFunc, when set, replaces the default Reboot behavior.
+	RebootFunc func(ctx context.Context, machine *keziov1alpha2.Machine, hard bool) (Result, error)
 }
 
 var _ Deployer = (*FakeDeployer)(nil)
@@ -164,6 +166,15 @@ func (f *FakeDeployer) Deprovision(ctx context.Context, machine *keziov1alpha2.M
 func (f *FakeDeployer) PowerOff(ctx context.Context, machine *keziov1alpha2.Machine) (Result, error) {
 	if f.PowerOffFunc != nil {
 		return f.PowerOffFunc(ctx, machine)
+	}
+	return Result{Outcome: Complete}, nil
+}
+
+// Reboot implements Deployer. The default behavior is an instant Complete:
+// the default fake never dials a real BMC to reboot the machine.
+func (f *FakeDeployer) Reboot(ctx context.Context, machine *keziov1alpha2.Machine, hard bool) (Result, error) {
+	if f.RebootFunc != nil {
+		return f.RebootFunc(ctx, machine, hard)
 	}
 	return Result{Outcome: Complete}, nil
 }

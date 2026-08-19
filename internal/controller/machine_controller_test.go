@@ -1717,4 +1717,343 @@ var _ = Describe("Machine Controller", func() {
 			Expect(gone).To(BeTrue(), "deletion must not wedge on a missing BMC credentials secret")
 		})
 	})
+
+	Context("When the paused annotation is present", func() {
+		ctx := context.Background()
+
+		It("returns immediately: no finalizer, no status write, no requeue", func() {
+			machineName := fmt.Sprintf("paused-new-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        machineName,
+					Namespace:   "default",
+					Annotations: map[string]string{keziov1alpha2.MachineAnnotationPaused: ""},
+				},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:30",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			})
+
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}}
+
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result).To(Equal(reconcile.Result{}))
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Finalizers).To(BeEmpty(), "paused must return before the finalizer is added")
+			Expect(machine.Status.State).To(BeEmpty(), "paused must return before any status write")
+		})
+
+		It("blocks the delete walk while paused, and resumes deletion once unpaused", func() {
+			machineName := fmt.Sprintf("paused-delete-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:31",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}}
+
+			By("reconciling to add the finalizer")
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Finalizers).To(ContainElement(keziov1alpha2.MachineFinalizer))
+
+			By("pausing, then deleting")
+			machine.Annotations = map[string]string{keziov1alpha2.MachineAnnotationPaused: ""}
+			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &machine)).To(Succeed())
+
+			By("reconciling: the delete walk must not proceed while paused")
+			for i := 0; i < 5; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+			}
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed(), "the Machine must still exist while paused blocks its delete walk")
+			Expect(machine.Status.State).To(BeEmpty(), "paused must block even the delete walk's first status write")
+
+			By("unpausing: deletion proceeds and finishes")
+			machine.Annotations = nil
+			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
+
+			var gone bool
+			for i := 0; i < 20; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+				if err := k8sClient.Get(ctx, name, &machine); errors.IsNotFound(err) {
+					gone = true
+					break
+				}
+			}
+			Expect(gone).To(BeTrue(), "unpausing must let the delete walk finish")
+		})
+	})
+
+	Context("When the detached annotation is present", func() {
+		ctx := context.Background()
+
+		It("sets operationalStatus=detached, freezes state, skips deployer calls, and resumes once removed", func() {
+			machineName := fmt.Sprintf("detached-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:32",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			})
+
+			var inspectCalls int
+			fakeDeployer := &deployer.FakeDeployer{
+				Client: k8sClient,
+				InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+					inspectCalls++
+					return deployer.Result{Outcome: deployer.Complete}, nil
+				},
+			}
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: fakeDeployer}
+
+			By("reconciling to add the finalizer, then detaching before Enrolling ever runs")
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			machine.Annotations = map[string]string{keziov1alpha2.MachineAnnotationDetached: ""}
+			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
+
+			By("reconciling while detached: state stays frozen and the deployer is never called")
+			for i := 0; i < 5; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+			}
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusDetached))
+			Expect(machine.Status.State).To(BeEmpty(), "detached must freeze state progress")
+			Expect(inspectCalls).To(Equal(0), "detached must never call the deployer")
+
+			By("removing the annotation resumes normal operation")
+			machine.Annotations = nil
+			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
+
+			for i := 0; i < 10 && machine.Status.State != keziov1alpha2.MachineStateAvailable; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			}
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+			Expect(inspectCalls).To(Equal(1))
+		})
+
+		It("skips deprovision and power-off on delete while detached", func() {
+			machineName := fmt.Sprintf("detached-delete-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:33",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			var deprovisionCalls, powerOffCalls int
+			fakeDeployer := &deployer.FakeDeployer{
+				Client: k8sClient,
+				DeprovisionFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+					deprovisionCalls++
+					return deployer.Result{Outcome: deployer.Complete}, nil
+				},
+				PowerOffFunc: func(context.Context, *keziov1alpha2.Machine) (deployer.Result, error) {
+					powerOffCalls++
+					return deployer.Result{Outcome: deployer.Complete}, nil
+				},
+			}
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: fakeDeployer}
+
+			By("reconciling to add the finalizer")
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+
+			By("detaching, then deleting")
+			machine.Annotations = map[string]string{keziov1alpha2.MachineAnnotationDetached: ""}
+			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &machine)).To(Succeed())
+
+			var gone bool
+			for i := 0; i < 20; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+				if err := k8sClient.Get(ctx, name, &machine); errors.IsNotFound(err) {
+					gone = true
+					break
+				}
+			}
+			Expect(gone).To(BeTrue())
+			Expect(deprovisionCalls).To(Equal(0), "detached must skip deprovision on delete")
+			Expect(powerOffCalls).To(Equal(0), "detached must skip power-off on delete")
+		})
+	})
+
+	Context("When a reboot annotation is present", func() {
+		ctx := context.Background()
+
+		It("calls Deployer.Reboot with hard=true when any holder asks for hard, and clears only the suffixless annotation", func() {
+			machineName := fmt.Sprintf("reboot-multi-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      machineName,
+					Namespace: "default",
+					Annotations: map[string]string{
+						keziov1alpha2.MachineAnnotationRebootPrefix:        `{"mode":"soft"}`,
+						keziov1alpha2.MachineAnnotationRebootPrefix + "-a": `{"mode":"hard"}`,
+					},
+				},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:34",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			})
+
+			var rebootCalls int
+			var lastHard bool
+			fakeDeployer := &deployer.FakeDeployer{
+				Client: k8sClient,
+				RebootFunc: func(_ context.Context, _ *keziov1alpha2.Machine, hard bool) (deployer.Result, error) {
+					rebootCalls++
+					lastHard = hard
+					return deployer.Result{Outcome: deployer.Complete}, nil
+				},
+			}
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: fakeDeployer}
+
+			By("reconciling to add the finalizer")
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("reconciling the reboot: hard wins, and only the suffixless annotation is cleared")
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rebootCalls).To(Equal(1))
+			Expect(lastHard).To(BeTrue())
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Annotations).NotTo(HaveKey(keziov1alpha2.MachineAnnotationRebootPrefix))
+			Expect(machine.Annotations).To(HaveKey(keziov1alpha2.MachineAnnotationRebootPrefix + "-a"))
+			Expect(machine.Status.State).To(BeEmpty(), "the remaining suffixed hold keeps the machine rebooting instead of progressing")
+
+			By("the suffixed hold keeps triggering Reboot on every subsequent reconcile")
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rebootCalls).To(Equal(2))
+
+			By("releasing the suffixed hold lets the machine resume normal progress")
+			machine.Annotations = nil
+			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
+
+			for i := 0; i < 10 && machine.Status.State != keziov1alpha2.MachineStateAvailable; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			}
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable))
+		})
+
+		It("treats invalid JSON as a soft reboot request but still honors it, clearing the suffixless annotation after acting", func() {
+			machineName := fmt.Sprintf("reboot-invalid-json-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        machineName,
+					Namespace:   "default",
+					Annotations: map[string]string{keziov1alpha2.MachineAnnotationRebootPrefix: `{not json`},
+				},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:35",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			})
+
+			var rebootCalls int
+			var lastHard bool
+			fakeDeployer := &deployer.FakeDeployer{
+				Client: k8sClient,
+				RebootFunc: func(_ context.Context, _ *keziov1alpha2.Machine, hard bool) (deployer.Result, error) {
+					rebootCalls++
+					lastHard = hard
+					return deployer.Result{Outcome: deployer.Complete}, nil
+				},
+			}
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: fakeDeployer}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(rebootCalls).To(Equal(1))
+			Expect(lastHard).To(BeFalse(), "invalid JSON must be treated as a soft reboot request")
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Annotations).NotTo(HaveKey(keziov1alpha2.MachineAnnotationRebootPrefix), "the suffixless annotation is cleared once acted on, even though its value was invalid")
+		})
+	})
 })
