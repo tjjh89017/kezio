@@ -34,6 +34,9 @@ go.work
 # powerloop working files
 /.powerloop/
 
+# local planning documents
+/.plan/
+
 # build output
 bin/
 /dist/
