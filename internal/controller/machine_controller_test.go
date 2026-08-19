@@ -84,6 +84,29 @@ func TestRestartOnFailure(t *testing.T) {
 	}
 }
 
+func TestHasUnknownErrorType(t *testing.T) {
+	cases := []struct {
+		name   string
+		status keziov1alpha2.MachineStatus
+		want   bool
+	}{
+		{"zero value status", keziov1alpha2.MachineStatus{}, false},
+		{"OK with bogus errorType", keziov1alpha2.MachineStatus{OperationalStatus: keziov1alpha2.MachineOperationalStatusOK, ErrorType: keziov1alpha2.MachineErrorType("bogus")}, false},
+		{"error with empty errorType", keziov1alpha2.MachineStatus{OperationalStatus: keziov1alpha2.MachineOperationalStatusError}, false},
+		{"error with Transient errorType", keziov1alpha2.MachineStatus{OperationalStatus: keziov1alpha2.MachineOperationalStatusError, ErrorType: keziov1alpha2.MachineErrorTypeTransient}, false},
+		{"error with Restart errorType", keziov1alpha2.MachineStatus{OperationalStatus: keziov1alpha2.MachineOperationalStatusError, ErrorType: keziov1alpha2.MachineErrorTypeRestart}, false},
+		{"error with unrecognized errorType", keziov1alpha2.MachineStatus{OperationalStatus: keziov1alpha2.MachineOperationalStatusError, ErrorType: keziov1alpha2.MachineErrorType("bogus")}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			machine := &keziov1alpha2.Machine{Status: tc.status}
+			if got := hasUnknownErrorType(machine); got != tc.want {
+				t.Errorf("hasUnknownErrorType() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 var _ = Describe("Machine Controller", func() {
 	Context("When reconciling a resource", func() {
 		const resourceName = "test-resource"
@@ -551,6 +574,74 @@ var _ = Describe("Machine Controller", func() {
 			By("reconciling the successful retry that exits Inspecting")
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 			Expect(err).NotTo(HaveOccurred())
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+			Expect(machine.Status.ErrorCount).To(Equal(int32(0)))
+		})
+
+		It("re-enrolls a machine carrying an unrecognized errorType and walks it back to a good state", func() {
+			machineName := fmt.Sprintf("corrupt-errortype-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:09",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			})
+
+			var calls int
+			recoveringDeployer := &deployer.FakeDeployer{
+				Client: k8sClient,
+				InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+					calls++
+					if calls == 1 {
+						return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorType("bogus"), ErrorMessage: "corrupt"}, nil
+					}
+					return deployer.Result{Outcome: deployer.Complete}, nil
+				},
+			}
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: recoveringDeployer}
+
+			By("reconciling through the finalizer add, Enrolling, and the Inspect call that records the unknown errorType")
+			for i := 0; i < 10 && calls < 1; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			var mid keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &mid)).To(Succeed())
+			Expect(mid.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
+			Expect(mid.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusError))
+			Expect(mid.Status.ErrorType).To(Equal(keziov1alpha2.MachineErrorType("bogus")))
+			Expect(mid.Status.ErrorCount).To(Equal(int32(1)))
+
+			By("reconciling once more: the unrecognized errorType sends the machine back to Enrolling")
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			var reenrolled keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &reenrolled)).To(Succeed())
+			Expect(reenrolled.Status.State).To(Equal(keziov1alpha2.MachineStateEnrolling))
+			Expect(reenrolled.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+			Expect(reenrolled.Status.ErrorCount).To(Equal(int32(0)))
+
+			By("walking the rest of the way back to a good state")
+			for i := 0; i < 10; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+			}
 
 			var machine keziov1alpha2.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())

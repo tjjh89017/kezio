@@ -89,6 +89,10 @@ func (r *MachineReconciler) onDelete(ctx context.Context, machine *keziov1alpha2
 // relying on the watch on Machine (state and status changes) or an explicit
 // RequeueAfter to drive the next step.
 func (r *MachineReconciler) onChange(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+	if hasUnknownErrorType(machine) {
+		return r.setState(ctx, machine, keziov1alpha2.MachineStateEnrolling)
+	}
+
 	switch machine.Status.State {
 	case "":
 		return r.setState(ctx, machine, keziov1alpha2.MachineStateEnrolling)
@@ -196,6 +200,22 @@ func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *
 func restartOnFailure(machine *keziov1alpha2.Machine) bool {
 	return machine.Status.OperationalStatus == keziov1alpha2.MachineOperationalStatusError &&
 		machine.Status.ErrorType == keziov1alpha2.MachineErrorTypeRestart
+}
+
+// hasUnknownErrorType reports whether the machine is recorded as errored
+// with an errorType outside the known set (Transient, Restart): corrupt
+// data or a value written by an incompatible controller version. An empty
+// errorType is the no-error case, not unknown, so it does not match.
+func hasUnknownErrorType(machine *keziov1alpha2.Machine) bool {
+	if machine.Status.OperationalStatus != keziov1alpha2.MachineOperationalStatusError {
+		return false
+	}
+	switch machine.Status.ErrorType {
+	case "", keziov1alpha2.MachineErrorTypeTransient, keziov1alpha2.MachineErrorTypeRestart:
+		return false
+	default:
+		return true
+	}
 }
 
 // applyNonCompleteOutcome handles every deployer.Result.Outcome except
