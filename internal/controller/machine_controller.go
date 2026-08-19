@@ -239,7 +239,10 @@ func (r *MachineReconciler) recordDeleteStageFailure(ctx context.Context, machin
 // errorCount/operationalStatus the same way setState does for the forward
 // walk - stage exit is the reset point, whether the stage exited by
 // succeeding or by giving up. An empty nextState means there is no next
-// stage: release the Machine instead of writing a state.
+// stage: release the Machine instead of writing a state. The status write
+// that records nextState does not itself re-trigger the watch (the Machine
+// update predicate ignores status-only changes), so this requeues
+// explicitly to run the next delete stage.
 func (r *MachineReconciler) advanceDeleteStage(ctx context.Context, machine *keziov1alpha2.Machine, nextState string) (ctrl.Result, error) {
 	if nextState == "" {
 		return r.releaseMachine(ctx, machine)
@@ -253,7 +256,7 @@ func (r *MachineReconciler) advanceDeleteStage(ctx context.Context, machine *kez
 	if err := r.Status().Patch(ctx, machine, patch); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: advancing delete walk to %q: %w", machine.Name, nextState, err)
 	}
-	return ctrl.Result{}, nil
+	return ctrl.Result{Requeue: true}, nil
 }
 
 // releaseMachine is the delete walk's terminal step: release the
@@ -271,9 +274,9 @@ func (r *MachineReconciler) releaseMachine(ctx context.Context, machine *keziov1
 
 // onChange drives one step of the state walk per call: Enrolling ->
 // Inspecting -> Available -> Provisioning -> Provisioned, plus the
-// Available/Provisioned re-trigger. It never advances more than one step,
-// relying on the watch on Machine (state and status changes) or an explicit
-// RequeueAfter to drive the next step.
+// Available/Provisioned re-trigger. It never advances more than one step:
+// the status-only writes along the way do not re-trigger the Machine watch,
+// so every step that must run again returns an explicit requeue.
 func (r *MachineReconciler) onChange(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
 	if isDetached(machine) {
 		return r.reconcileDetached(ctx, machine)
@@ -314,6 +317,9 @@ func (r *MachineReconciler) onChange(ctx context.Context, machine *keziov1alpha2
 // other status field untouched. It also clears MachineConditionStatusLossHold
 // if present: any forward move out of the empty state means the hold (if any)
 // has already been resolved by reconcileEmptyStatus/reconcileStatusLossHold.
+// The status write itself does not re-trigger the watch (the Machine update
+// predicate ignores status-only changes), so this requeues explicitly to run
+// the next walk step.
 func (r *MachineReconciler) setState(ctx context.Context, machine *keziov1alpha2.Machine, state string) (ctrl.Result, error) {
 	patch := client.MergeFrom(machine.DeepCopy())
 	machine.Status.State = state
@@ -324,7 +330,7 @@ func (r *MachineReconciler) setState(ctx context.Context, machine *keziov1alpha2
 	if err := r.Status().Patch(ctx, machine, patch); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: setting status.state to %q: %w", machine.Name, state, err)
 	}
-	return ctrl.Result{}, nil
+	return ctrl.Result{Requeue: true}, nil
 }
 
 // reconcileEmptyStatus handles status.state == "": either a Machine that has
@@ -550,7 +556,9 @@ func (r *MachineReconciler) reconcileIdle(ctx context.Context, machine *keziov1a
 // startProvisioningRun creates a fresh DeployRun for machine and records it
 // as the current run, moving (or keeping) status.state at Provisioning.
 // Used both to enter Provisioning from an idle state and to recover from a
-// current run that disappeared mid-Provisioning.
+// current run that disappeared mid-Provisioning. The status write does not
+// itself re-trigger the watch (the Machine update predicate ignores
+// status-only changes), so this requeues explicitly to run the deployer.
 func (r *MachineReconciler) startProvisioningRun(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
 	run, err := r.createDeployRun(ctx, machine)
 	if err != nil {
@@ -566,7 +574,7 @@ func (r *MachineReconciler) startProvisioningRun(ctx context.Context, machine *k
 	if err := r.Status().Patch(ctx, machine, patch); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: setting status.state to Provisioning: %w", machine.Name, err)
 	}
-	return ctrl.Result{}, nil
+	return ctrl.Result{Requeue: true}, nil
 }
 
 func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
@@ -615,7 +623,11 @@ func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *
 	if err := r.Status().Patch(ctx, machine, patch); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: setting status.state to Provisioned: %w", machine.Name, err)
 	}
-	return ctrl.Result{}, nil
+	// The status write above does not itself re-trigger the watch, so this
+	// requeues explicitly - reconcileIdle re-checks the provisioning trigger
+	// once on entry to Provisioned, the same as it does on entry to
+	// Available.
+	return ctrl.Result{Requeue: true}, nil
 }
 
 // restartOnFailure derives the deployer's restartOnFailure argument from
@@ -664,7 +676,9 @@ func (r *MachineReconciler) reconcileDetached(ctx context.Context, machine *kezi
 // clearDetached resumes normal operation once the detached annotation is
 // removed: it restores operationalStatus to OK in its own patch, so the
 // next reconcile's state walk starts from a clean status - the same
-// one-step-per-reconcile discipline as clearDelayed.
+// one-step-per-reconcile discipline as clearDelayed. The annotation removal
+// that reached this reconcile already happened; nothing further will
+// re-trigger the watch, so this requeues explicitly to resume the walk.
 func (r *MachineReconciler) clearDetached(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
 	patch := client.MergeFrom(machine.DeepCopy())
 	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusOK
@@ -672,7 +686,7 @@ func (r *MachineReconciler) clearDetached(ctx context.Context, machine *keziov1a
 	if err := r.Status().Patch(ctx, machine, patch); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: clearing detached status: %w", machine.Name, err)
 	}
-	return ctrl.Result{}, nil
+	return ctrl.Result{Requeue: true}, nil
 }
 
 // reconcileReboot honors a reboot annotation outside deletion, regardless
@@ -1099,14 +1113,57 @@ var deployRunDeletionOnly = predicate.Funcs{
 	GenericFunc: func(event.GenericEvent) bool { return false },
 }
 
+// finalizersChangedPredicate reports true only when metadata.finalizers
+// differs between the old and new object of an Update event, by set
+// membership - controller-runtime has no built-in equivalent to
+// GenerationChangedPredicate/AnnotationChangedPredicate for finalizers.
+var finalizersChangedPredicate = predicate.Funcs{
+	UpdateFunc: func(e event.UpdateEvent) bool {
+		return !finalizerSetsEqual(e.ObjectOld.GetFinalizers(), e.ObjectNew.GetFinalizers())
+	},
+}
+
+func finalizerSetsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	counts := make(map[string]int, len(a))
+	for _, f := range a {
+		counts[f]++
+	}
+	for _, f := range b {
+		counts[f]--
+	}
+	for _, n := range counts {
+		if n != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// machineUpdatePredicate restricts the Machine watch's Update events to a
+// generation, finalizers, or annotation change. A status-only self-write
+// (state-walk progress, error/delay bookkeeping, credential tracking) must
+// not re-trigger the reconciler on its own - every walk step that needs to
+// run again returns an explicit requeue instead of depending on this event.
+// Create/Delete/Generic events stay unfiltered: predicate.Or keeps each
+// branch predicate's default (true) for them.
+var machineUpdatePredicate = predicate.Or(
+	predicate.GenerationChangedPredicate{},
+	predicate.AnnotationChangedPredicate{},
+	finalizersChangedPredicate,
+)
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *MachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&keziov1alpha2.Machine{}).
+		For(&keziov1alpha2.Machine{}, builder.WithPredicates(machineUpdatePredicate)).
 		Owns(&keziov1alpha2.DeployRun{}, builder.WithPredicates(deployRunDeletionOnly)).
 		// MatchEveryOwner: claimCredentialsSecret sets a non-controller
 		// owner reference on the BMC credentials Secret, so the default
-		// controller-only owner match would never see it.
+		// controller-only owner match would never see it. No predicate:
+		// credential data edits must always reconcile the Machine.
 		Owns(&corev1.Secret{}, builder.MatchEveryOwner).
 		Named("machine").
 		Complete(r)
