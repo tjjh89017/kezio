@@ -39,6 +39,7 @@ import (
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 	"github.com/tjjh89017/kezio/internal/controller"
+	"github.com/tjjh89017/kezio/internal/deployer"
 	webhookv1alpha2 "github.com/tjjh89017/kezio/internal/webhook/v1alpha2"
 
 	// Blank-imported so their init() registers "redfish"/"ipmi" (and
@@ -213,6 +214,9 @@ func main() {
 	if err := (&controller.MachineReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		// FakeDeployer until a hardware-backed Deployer exists: it never
+		// dials a real BMC or agent.
+		Deployer: &deployer.FakeDeployer{Client: mgr.GetClient()},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Machine")
 		os.Exit(1)

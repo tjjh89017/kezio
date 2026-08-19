@@ -8,6 +8,7 @@ rules:
   - kezio.kojuro.date
   resources:
   - deployruns
+  - machinehardwares
   - machines
   verbs:
   - create

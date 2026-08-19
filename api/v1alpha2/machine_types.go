@@ -212,6 +212,11 @@ type MachineSpec struct {
 	ClaimRef *NameRef `json:"claimRef,omitempty"`
 }
 
+// MachineFinalizer blocks Machine deletion until the controller's cleanup
+// finishes. Today onDelete has no extra cleanup to do: MachineHardware and
+// DeployRun are garbage collected through their owner references.
+const MachineFinalizer = "kezio.kojuro.date/machine"
+
 // Machine state enum values for MachineStatus.State. These are the
 // top-level states only; provisioning sub-steps are reported through
 // conditions, not as top-level states. There is no Error state: an error
