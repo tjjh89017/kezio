@@ -122,4 +122,16 @@ type Deployer interface {
 	// restartOnFailure carries the same meaning as in Inspect, scoped to
 	// this Provision step.
 	Provision(ctx context.Context, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun, restartOnFailure bool) (Result, error)
+
+	// Deprovision drives one step of tearing down machine's deployed
+	// state as the first step of the delete walk. On Complete, machine
+	// carries no deployer-managed state that must survive the Machine
+	// object's removal. restartOnFailure carries the same meaning as in
+	// Inspect, scoped to this Deprovision step.
+	Deprovision(ctx context.Context, machine *keziov1alpha2.Machine, restartOnFailure bool) (Result, error)
+
+	// PowerOff drives one step of powering machine off, the delete walk's
+	// last live action before the Machine object is released. On
+	// Complete, the machine is (or is believed to be) powered off.
+	PowerOff(ctx context.Context, machine *keziov1alpha2.Machine) (Result, error)
 }

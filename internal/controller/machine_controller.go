@@ -18,10 +18,13 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,6 +34,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
@@ -56,6 +61,22 @@ var delayedRequeueInterval = 15 * time.Second
 // the BMC credentials Secret a Machine references does not exist yet - a
 // package variable, not a const, so a test can shorten it.
 var credentialsSecretAbsentRequeueInterval = 10 * time.Second
+
+// deleteStageMaxErrorCount is the delete walk's per-stage give-up
+// threshold: a stage gives up once its errorCount exceeds this value,
+// advancing to the next stage instead of retrying forever against a dead
+// BMC.
+const deleteStageMaxErrorCount = 3
+
+// machineDeleteStageGiveUpTotal counts every time a Machine delete stage
+// gave up after exceeding deleteStageMaxErrorCount and advanced anyway,
+// labeled by stage name. Registered once at package load: safe against the
+// duplicate-registration panic that a per-reconciler registration would
+// risk if more than one MachineReconciler is built in the same process.
+var machineDeleteStageGiveUpTotal = promauto.With(metrics.Registry).NewCounterVec(prometheus.CounterOpts{
+	Name: "kezio_machine_delete_stage_giveups_total",
+	Help: "Total number of Machine delete-walk stages that exceeded their retry limit and advanced anyway.",
+}, []string{"stage"})
 
 // MachineReconciler reconciles a Machine object
 type MachineReconciler struct {
@@ -94,11 +115,129 @@ func (r *MachineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	return r.onChange(ctx, &machine)
 }
 
+// onDelete drives the delete walk while machine has a deletion timestamp:
+// deprovision, then power off, then release. It never resolves the BMC
+// credentials Secret through the forward path's blocking gate - a
+// deletion in progress must proceed with empty credentials rather than
+// wedge on a secret that is absent or unreadable.
 func (r *MachineReconciler) onDelete(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
-	// Release the credentials Secret's sub-finalizer before the Machine's
-	// own finalizer: once the Machine is actually removed, nothing maps a
-	// dangling Secret owner reference back to a live reconcile that could
-	// still clear it.
+	if !controllerutil.ContainsFinalizer(machine, keziov1alpha2.MachineFinalizer) {
+		return ctrl.Result{}, nil
+	}
+
+	switch machine.Status.State {
+	case keziov1alpha2.MachineStateDeprovisioning:
+		return r.reconcileDeprovisioning(ctx, machine)
+	case keziov1alpha2.MachineStatePoweringOff:
+		return r.reconcilePoweringOff(ctx, machine)
+	default:
+		// Any other recorded state (including empty) means the delete
+		// walk has not started yet: enter it at the first stage.
+		return r.advanceDeleteStage(ctx, machine, keziov1alpha2.MachineStateDeprovisioning)
+	}
+}
+
+func (r *MachineReconciler) reconcileDeprovisioning(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+	step := func(ctx context.Context, m *keziov1alpha2.Machine) (deployer.Result, error) {
+		return r.Deployer.Deprovision(ctx, m, restartOnFailure(m))
+	}
+	return r.runDeleteStage(ctx, machine, step, "deprovision", keziov1alpha2.MachineStatePoweringOff)
+}
+
+func (r *MachineReconciler) reconcilePoweringOff(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+	step := func(ctx context.Context, m *keziov1alpha2.Machine) (deployer.Result, error) {
+		return r.Deployer.PowerOff(ctx, m)
+	}
+	// An empty nextState tells runDeleteStage/advanceDeleteStage this is
+	// the last stage: Complete or give-up both go straight to release.
+	return r.runDeleteStage(ctx, machine, step, "power-off", "")
+}
+
+// runDeleteStage calls one delete-walk step and applies its outcome. A
+// transient error (non-nil err) is returned unchanged, exactly like the
+// forward walk: no errorCount/state change, controller-runtime retries with
+// its own backoff. Complete advances to nextState (or releases the Machine
+// when nextState is empty). Continuing/Busy/Delayed requeue without
+// touching error state, matching applyNonCompleteOutcome. Failed goes
+// through recordDeleteStageFailure, which applies the give-up threshold.
+func (r *MachineReconciler) runDeleteStage(ctx context.Context, machine *keziov1alpha2.Machine, step func(context.Context, *keziov1alpha2.Machine) (deployer.Result, error), stageName, nextState string) (ctrl.Result, error) {
+	result, err := step(ctx, machine)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	switch result.Outcome {
+	case deployer.Complete:
+		return r.advanceDeleteStage(ctx, machine, nextState)
+	case deployer.Continuing:
+		return ctrl.Result{RequeueAfter: continuingRequeueInterval}, nil
+	case deployer.Busy:
+		requeueAfter := defaultBusyRequeueInterval
+		if result.RequeueAfter > 0 {
+			requeueAfter = result.RequeueAfter
+		}
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
+	case deployer.Delayed:
+		return r.markDelayed(ctx, machine, delayedRequeueInterval)
+	case deployer.Failed:
+		return r.recordDeleteStageFailure(ctx, machine, result, stageName, nextState)
+	default:
+		return ctrl.Result{}, fmt.Errorf("machine %q: delete stage %q returned unrecognized outcome %v", machine.Name, stageName, result.Outcome)
+	}
+}
+
+// recordDeleteStageFailure applies the same two-axis error bookkeeping as
+// the forward walk's recordFailure, then checks the give-up threshold: once
+// errorCount exceeds deleteStageMaxErrorCount, the stage gives up rather
+// than retry forever against, for example, a dead BMC. Giving up logs at
+// error level, bumps machineDeleteStageGiveUpTotal, and advances exactly as
+// a Complete outcome would - a dead stage must never block the machine's
+// removal.
+func (r *MachineReconciler) recordDeleteStageFailure(ctx context.Context, machine *keziov1alpha2.Machine, result deployer.Result, stageName, nextState string) (ctrl.Result, error) {
+	patch := client.MergeFrom(machine.DeepCopy())
+	applyFailure(machine, result.ErrorType, result.ErrorMessage)
+	giveUp := machine.Status.ErrorCount > deleteStageMaxErrorCount
+	stampLastUpdated(machine)
+	if err := r.Status().Patch(ctx, machine, patch); err != nil {
+		return ctrl.Result{}, fmt.Errorf("machine %q: recording delete stage %q failure: %w", machine.Name, stageName, err)
+	}
+	if !giveUp {
+		return ctrl.Result{RequeueAfter: failedRequeueInterval}, nil
+	}
+
+	logf.FromContext(ctx).Error(errors.New("delete stage exceeded its retry limit"),
+		"giving up on Machine delete stage and advancing", "machine", machine.Name, "stage", stageName, "errorCount", machine.Status.ErrorCount)
+	machineDeleteStageGiveUpTotal.WithLabelValues(stageName).Inc()
+	return r.advanceDeleteStage(ctx, machine, nextState)
+}
+
+// advanceDeleteStage moves the delete walk to nextState, resetting
+// errorCount/operationalStatus the same way setState does for the forward
+// walk - stage exit is the reset point, whether the stage exited by
+// succeeding or by giving up. An empty nextState means there is no next
+// stage: release the Machine instead of writing a state.
+func (r *MachineReconciler) advanceDeleteStage(ctx context.Context, machine *keziov1alpha2.Machine, nextState string) (ctrl.Result, error) {
+	if nextState == "" {
+		return r.releaseMachine(ctx, machine)
+	}
+
+	patch := client.MergeFrom(machine.DeepCopy())
+	machine.Status.State = nextState
+	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusOK
+	machine.Status.ErrorCount = 0
+	stampLastUpdated(machine)
+	if err := r.Status().Patch(ctx, machine, patch); err != nil {
+		return ctrl.Result{}, fmt.Errorf("machine %q: advancing delete walk to %q: %w", machine.Name, nextState, err)
+	}
+	return ctrl.Result{}, nil
+}
+
+// releaseMachine is the delete walk's terminal step: release the
+// credentials Secret's sub-finalizer before the Machine's own finalizer,
+// since once the Machine is actually removed nothing maps a dangling
+// Secret owner reference back to a live reconcile that could still clear
+// it.
+func (r *MachineReconciler) releaseMachine(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
 	if err := r.releaseCredentialsSecretFinalizer(ctx, machine); err != nil {
 		return ctrl.Result{}, err
 	}

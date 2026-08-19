@@ -29,6 +29,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1551,19 +1552,169 @@ var _ = Describe("Machine Controller", func() {
 			}
 			Expect(claimed.Finalizers).To(ContainElement(keziov1alpha2.MachineCredentialsSecretFinalizer))
 
-			By("deleting the Machine and reconciling its delete path")
+			By("deleting the Machine and reconciling its delete walk to completion")
 			var machine keziov1alpha2.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, &machine)).To(Succeed())
 
-			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
-			Expect(err).NotTo(HaveOccurred())
-
-			Expect(k8sClient.Get(ctx, name, &machine)).To(MatchError(errors.IsNotFound, "the Machine must be gone once its own finalizer is removed"))
+			var gone bool
+			for i := 0; i < 10; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+				if err := k8sClient.Get(ctx, name, &machine); errors.IsNotFound(err) {
+					gone = true
+					break
+				}
+			}
+			Expect(gone).To(BeTrue(), "the Machine must be gone once the delete walk finishes")
 
 			var released corev1.Secret
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: "default"}, &released)).To(Succeed())
 			Expect(released.Finalizers).NotTo(ContainElement(keziov1alpha2.MachineCredentialsSecretFinalizer))
+		})
+	})
+
+	Context("Machine delete walk", func() {
+		ctx := context.Background()
+
+		reconcileUntilGone := func(reconciler *MachineReconciler, name types.NamespacedName, machine *keziov1alpha2.Machine) bool {
+			GinkgoHelper()
+			for i := 0; i < 20; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+				if err := k8sClient.Get(ctx, name, machine); errors.IsNotFound(err) {
+					return true
+				}
+			}
+			return false
+		}
+
+		It("walks deprovision then power-off, in order, before releasing the Machine", func() {
+			machineName := fmt.Sprintf("delete-walk-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:20",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			var order []string
+			fakeDeployer := &deployer.FakeDeployer{
+				Client: k8sClient,
+				DeprovisionFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+					order = append(order, "deprovision")
+					return deployer.Result{Outcome: deployer.Complete}, nil
+				},
+				PowerOffFunc: func(context.Context, *keziov1alpha2.Machine) (deployer.Result, error) {
+					order = append(order, "power-off")
+					return deployer.Result{Outcome: deployer.Complete}, nil
+				},
+			}
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: fakeDeployer}
+
+			By("reconciling through the finalizer add and into a forward state")
+			for i := 0; i < 10; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &machine)).To(Succeed())
+
+			By("reconciling the delete walk to completion")
+			gone := reconcileUntilGone(reconciler, name, &machine)
+			Expect(gone).To(BeTrue(), "the Machine must be gone once the delete walk finishes")
+			Expect(order).To(Equal([]string{"deprovision", "power-off"}), "deprovision must run before power-off")
+		})
+
+		It("gives up a stage after errorCount exceeds 3, advances anyway, and bumps the give-up metric", func() {
+			machineName := fmt.Sprintf("delete-giveup-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:21",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			var deprovisionCalls int
+			fakeDeployer := &deployer.FakeDeployer{
+				Client: k8sClient,
+				// Models a dead BMC: deprovision never succeeds on its own.
+				DeprovisionFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+					deprovisionCalls++
+					return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeTransient, ErrorMessage: "dead bmc"}, nil
+				},
+			}
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: fakeDeployer}
+
+			for i := 0; i < 10; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &machine)).To(Succeed())
+
+			before := testutil.ToFloat64(machineDeleteStageGiveUpTotal.WithLabelValues("deprovision"))
+
+			By("reconciling the delete walk: bounded give-up must still finish it")
+			gone := reconcileUntilGone(reconciler, name, &machine)
+			Expect(gone).To(BeTrue(), "delete must complete within the bounded give-up even with a dead BMC")
+			Expect(deprovisionCalls).To(Equal(4), "the stage must give up on the 4th failure (errorCount > 3)")
+
+			after := testutil.ToFloat64(machineDeleteStageGiveUpTotal.WithLabelValues("deprovision"))
+			Expect(after).To(Equal(before + 1))
+		})
+
+		It("does not block deletion when the BMC credentials secret is missing", func() {
+			machineName := fmt.Sprintf("delete-no-secret-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "no-such-secret-for-delete"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:22",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}}
+
+			By("reconciling on the forward path, which stays blocked without a usable secret")
+			for i := 0; i < 5; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusDelayed))
+
+			Expect(k8sClient.Delete(ctx, &machine)).To(Succeed())
+
+			By("reconciling the delete walk: it proceeds with empty credentials instead of wedging")
+			gone := reconcileUntilGone(reconciler, name, &machine)
+			Expect(gone).To(BeTrue(), "deletion must not wedge on a missing BMC credentials secret")
 		})
 	})
 })

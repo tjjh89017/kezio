@@ -252,6 +252,14 @@ const (
 	// machine has booted the deployed OS (or, for a dataImages-only
 	// deployment, reached its post-deployment power state).
 	MachineStateProvisioned = "Provisioned"
+	// MachineStateDeprovisioning means the machine has a deletion
+	// timestamp and the controller is walking backwards through
+	// deprovisioning before it powers the machine off and releases it.
+	MachineStateDeprovisioning = "Deprovisioning"
+	// MachineStatePoweringOff means the machine has a deletion timestamp,
+	// deprovisioning finished (or gave up), and the controller is powering
+	// the machine off before releasing it.
+	MachineStatePoweringOff = "PoweringOff"
 )
 
 // MachineOperationalStatus enum values for MachineStatus.OperationalStatus,
@@ -323,7 +331,10 @@ type MachineCredentialsStatus struct {
 // MachineStatus defines the observed state of Machine.
 type MachineStatus struct {
 	// State is the machine's position in the state machine.
-	// +kubebuilder:validation:Enum=Enrolling;Inspecting;Available;Provisioning;Provisioned
+	// Deprovisioning/PoweringOff are the delete-only states: the
+	// controller enters them only once a deletion timestamp is set, and
+	// they never appear on the forward walk.
+	// +kubebuilder:validation:Enum=Enrolling;Inspecting;Available;Provisioning;Provisioned;Deprovisioning;PoweringOff
 	// +optional
 	State string `json:"state,omitempty"`
 	// OperationalStatus is the axis orthogonal to State: it reports an

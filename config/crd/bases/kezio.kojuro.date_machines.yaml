@@ -547,13 +547,19 @@ spec:
                 description: PoweredOn reports the machine's last observed power state.
                 type: boolean
               state:
-                description: State is the machine's position in the state machine.
+                description: |-
+                  State is the machine's position in the state machine.
+                  Deprovisioning/PoweringOff are the delete-only states: the
+                  controller enters them only once a deletion timestamp is set, and
+                  they never appear on the forward walk.
                 enum:
                 - Enrolling
                 - Inspecting
                 - Available
                 - Provisioning
                 - Provisioned
+                - Deprovisioning
+                - PoweringOff
                 type: string
               triedCredentials:
                 description: |-

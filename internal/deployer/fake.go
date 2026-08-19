@@ -58,6 +58,10 @@ type FakeDeployer struct {
 	InspectFunc func(ctx context.Context, machine *keziov1alpha2.Machine, restartOnFailure bool) (Result, error)
 	// ProvisionFunc, when set, replaces the default Provision behavior.
 	ProvisionFunc func(ctx context.Context, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun, restartOnFailure bool) (Result, error)
+	// DeprovisionFunc, when set, replaces the default Deprovision behavior.
+	DeprovisionFunc func(ctx context.Context, machine *keziov1alpha2.Machine, restartOnFailure bool) (Result, error)
+	// PowerOffFunc, when set, replaces the default PowerOff behavior.
+	PowerOffFunc func(ctx context.Context, machine *keziov1alpha2.Machine) (Result, error)
 }
 
 var _ Deployer = (*FakeDeployer)(nil)
@@ -141,6 +145,25 @@ func (f *FakeDeployer) Provision(ctx context.Context, machine *keziov1alpha2.Mac
 
 	if !done {
 		return Result{Outcome: Continuing}, nil
+	}
+	return Result{Outcome: Complete}, nil
+}
+
+// Deprovision implements Deployer. The default behavior is an instant
+// Complete: this stage has no deployer-managed deployed state (no real BMC
+// or agent session) for the default fake to tear down.
+func (f *FakeDeployer) Deprovision(ctx context.Context, machine *keziov1alpha2.Machine, restartOnFailure bool) (Result, error) {
+	if f.DeprovisionFunc != nil {
+		return f.DeprovisionFunc(ctx, machine, restartOnFailure)
+	}
+	return Result{Outcome: Complete}, nil
+}
+
+// PowerOff implements Deployer. The default behavior is an instant
+// Complete: the default fake never dials a real BMC to change power state.
+func (f *FakeDeployer) PowerOff(ctx context.Context, machine *keziov1alpha2.Machine) (Result, error) {
+	if f.PowerOffFunc != nil {
+		return f.PowerOffFunc(ctx, machine)
 	}
 	return Result{Outcome: Complete}, nil
 }

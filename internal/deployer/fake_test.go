@@ -258,6 +258,71 @@ func TestFakeDeployerProvisionFuncOverrideCanScriptEveryOutcome(t *testing.T) {
 	}
 }
 
+func TestFakeDeployerDeprovisionDefaultsToInstantComplete(t *testing.T) {
+	machine := newTestMachine()
+	f := &FakeDeployer{}
+
+	result, err := f.Deprovision(context.Background(), machine, false)
+	if err != nil {
+		t.Fatalf("Deprovision() error = %v", err)
+	}
+	if result.Outcome != Complete {
+		t.Fatalf("Deprovision() outcome = %v, want Complete", result.Outcome)
+	}
+}
+
+func TestFakeDeployerPowerOffDefaultsToInstantComplete(t *testing.T) {
+	machine := newTestMachine()
+	f := &FakeDeployer{}
+
+	result, err := f.PowerOff(context.Background(), machine)
+	if err != nil {
+		t.Fatalf("PowerOff() error = %v", err)
+	}
+	if result.Outcome != Complete {
+		t.Fatalf("PowerOff() outcome = %v, want Complete", result.Outcome)
+	}
+}
+
+func TestFakeDeployerDeprovisionFuncOverride(t *testing.T) {
+	machine := newTestMachine()
+	wantErr := errors.New("simulated transient failure")
+	f := &FakeDeployer{
+		DeprovisionFunc: func(_ context.Context, m *keziov1alpha2.Machine, restartOnFailure bool) (Result, error) {
+			if m.Name != machine.Name {
+				t.Errorf("DeprovisionFunc received machine %q, want %q", m.Name, machine.Name)
+			}
+			if !restartOnFailure {
+				t.Error("DeprovisionFunc received restartOnFailure = false, want true")
+			}
+			return Result{}, wantErr
+		},
+	}
+
+	_, err := f.Deprovision(context.Background(), machine, true)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Deprovision() error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestFakeDeployerPowerOffFuncOverride(t *testing.T) {
+	machine := newTestMachine()
+	wantErr := errors.New("simulated transient failure")
+	f := &FakeDeployer{
+		PowerOffFunc: func(_ context.Context, m *keziov1alpha2.Machine) (Result, error) {
+			if m.Name != machine.Name {
+				t.Errorf("PowerOffFunc received machine %q, want %q", m.Name, machine.Name)
+			}
+			return Result{}, wantErr
+		},
+	}
+
+	_, err := f.PowerOff(context.Background(), machine)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("PowerOff() error = %v, want %v", err, wantErr)
+	}
+}
+
 // TestFakeGoSourceDoesNotImportBMC guards the doc comment on FakeDeployer:
 // this stage's fast lane must never dial a BMC, and this parses fake.go's
 // own import list rather than trusting the comment to stay accurate.
