@@ -17,6 +17,8 @@ limitations under the License.
 package main
 
 import (
+	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,8 +28,11 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+
 	"github.com/tjjh89017/kezio/internal/ingest"
 	"github.com/tjjh89017/kezio/internal/seeder"
+	"github.com/tjjh89017/kezio/internal/seeder/ezioapi"
 	"github.com/tjjh89017/kezio/internal/seederdeploy"
 	"github.com/tjjh89017/kezio/internal/store"
 )
@@ -60,6 +65,172 @@ func writeContentDir(t *testing.T, dir string, info *store.TorrentInfo) {
 	defer f.Close() //nolint:errcheck // test fixture, nothing actionable on close failure
 	if err := store.WriteTorrentInfo(f, info); err != nil {
 		t.Fatalf("write torrent.info in %s: %v", dir, err)
+	}
+}
+
+// writeReconcileContentDir creates dir with a torrent.info parsing to
+// info and a placeholder content.torrent file, exactly what contentDirs
+// requires to include dir in a reconcile pass. It returns the info hash
+// reconcile will compute for dir, so a test can key its fake ezio server
+// and its index assertions off the same value reconcile uses.
+func writeReconcileContentDir(t *testing.T, dir string, info *store.TorrentInfo) string {
+	t.Helper()
+	writeContentDir(t, dir, info)
+	if err := os.WriteFile(store.ContentTorrentPath(dir), []byte("fake bencoded torrent bytes"), 0o644); err != nil {
+		t.Fatalf("write content.torrent in %s: %v", dir, err)
+	}
+	hash, err := store.ComputeInfoHash(info)
+	if err != nil {
+		t.Fatalf("compute info hash for %s: %v", dir, err)
+	}
+	return hash.String()
+}
+
+// fakeReconcileEZIO is a minimal in-memory ezioapi.EZIOServer for driving
+// reconcile end to end: it tracks which save_paths ezio has registered
+// and can be told to fail AddTorrent for specific ones, so a test can
+// assert what reconcile does with a mixed success/failure pass.
+type fakeReconcileEZIO struct {
+	ezioapi.UnimplementedEZIOServer
+
+	mu             sync.Mutex
+	hashBySavePath map[string]string
+	registered     map[string]bool
+	failSavePaths  map[string]bool
+}
+
+func newFakeReconcileEZIO(hashBySavePath map[string]string) *fakeReconcileEZIO {
+	return &fakeReconcileEZIO{
+		hashBySavePath: hashBySavePath,
+		registered:     make(map[string]bool),
+		failSavePaths:  make(map[string]bool),
+	}
+}
+
+func (f *fakeReconcileEZIO) AddTorrent(_ context.Context, req *ezioapi.AddRequest) (*ezioapi.AddResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failSavePaths[req.GetSavePath()] {
+		return &ezioapi.AddResponse{Result: false}, nil
+	}
+	f.registered[req.GetSavePath()] = true
+	return &ezioapi.AddResponse{Result: true}, nil
+}
+
+func (f *fakeReconcileEZIO) GetTorrentStatus(
+	_ context.Context, _ *ezioapi.UpdateRequest,
+) (*ezioapi.UpdateStatus, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := &ezioapi.UpdateStatus{Torrents: make(map[string]*ezioapi.Torrent)}
+	for savePath := range f.registered {
+		hash := f.hashBySavePath[savePath]
+		out.Torrents[hash] = &ezioapi.Torrent{Hash: hash}
+	}
+	return out, nil
+}
+
+// startFakeReconcileEZIO starts fake behind a real TCP listener (reconcile
+// dials cfg.EzioTarget with seeder.Dial, which needs a real address, not
+// an in-memory bufconn) and returns the address to put in cfg.EzioTarget.
+// The server stops when the test's Cleanup runs.
+func startFakeReconcileEZIO(t *testing.T, fake *fakeReconcileEZIO) string {
+	t.Helper()
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := grpc.NewServer()
+	ezioapi.RegisterEZIOServer(srv, fake)
+	go func() {
+		_ = srv.Serve(lis)
+	}()
+	t.Cleanup(srv.Stop)
+
+	return lis.Addr().String()
+}
+
+// TestReconcile_IndexServesOnlySuccessfullyRegisteredEntries is the
+// fix for the index-stale-before-registration race: the HTTP index must
+// serve a content only once ezio has actually confirmed it, never merely
+// because reconcile found it on disk.
+func TestReconcile_IndexServesOnlySuccessfullyRegisteredEntries(t *testing.T) {
+	root := t.TempDir()
+	goodDir := filepath.Join(root, "good")
+	badDir := filepath.Join(root, "bad")
+	goodHash := writeReconcileContentDir(t, goodDir, fixtureTorrentInfo(1))
+	badHash := writeReconcileContentDir(t, badDir, fixtureTorrentInfo(2))
+
+	fake := newFakeReconcileEZIO(map[string]string{
+		goodDir: goodHash,
+		badDir:  badHash,
+	})
+	fake.failSavePaths[badDir] = true
+	addr := startFakeReconcileEZIO(t, fake)
+
+	cfg := config{
+		ContentRoot:    root,
+		EzioTarget:     addr,
+		MaxUploads:     seeder.DefaultMaxUploads,
+		MaxConnections: seeder.DefaultMaxConnections,
+	}
+	idx := newTorrentIndex()
+
+	err := reconcile(context.Background(), cfg, idx)
+	if err == nil {
+		t.Fatal("reconcile: got nil error, want one reporting the bad entry's AddTorrent failure")
+	}
+	if !strings.Contains(err.Error(), badDir) {
+		t.Errorf("reconcile error %q does not name the failed directory %s", err, badDir)
+	}
+
+	if _, ok := idx.path(goodHash); !ok {
+		t.Errorf("index does not serve %s, want it served after successful registration", goodHash)
+	}
+	if _, ok := idx.path(badHash); ok {
+		t.Errorf("index serves %s, want it withheld since AddTorrent failed for it", badHash)
+	}
+}
+
+// TestReconcile_KeepsPriorlyRegisteredEntriesServedAcrossReconciles
+// covers the ordering fix's other half: content ezio already holds from
+// an earlier reconcile pass must stay in the index on a later pass, even
+// though that later pass never calls AddTorrent for it again (AddTorrent
+// is not idempotent - see reconcile's doc comment).
+func TestReconcile_KeepsPriorlyRegisteredEntriesServedAcrossReconciles(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "content")
+	hash := writeReconcileContentDir(t, dir, fixtureTorrentInfo(1))
+
+	fake := newFakeReconcileEZIO(map[string]string{dir: hash})
+	addr := startFakeReconcileEZIO(t, fake)
+
+	cfg := config{
+		ContentRoot:    root,
+		EzioTarget:     addr,
+		MaxUploads:     seeder.DefaultMaxUploads,
+		MaxConnections: seeder.DefaultMaxConnections,
+	}
+	idx := newTorrentIndex()
+
+	if err := reconcile(context.Background(), cfg, idx); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	if _, ok := idx.path(hash); !ok {
+		t.Fatalf("index does not serve %s after the first reconcile", hash)
+	}
+
+	// A second pass must not re-add (AddTorrent is not idempotent); if
+	// it tried, this would fail the pass since the fake only accepts
+	// each save_path's first AddTorrent as a success-causing registration
+	// and reconcile would skip calling AddTorrent again because the hash
+	// is already in existing - the entry must still be served regardless.
+	if err := reconcile(context.Background(), cfg, idx); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	if _, ok := idx.path(hash); !ok {
+		t.Errorf("index no longer serves %s after the second reconcile, want it to stay served", hash)
 	}
 }
 

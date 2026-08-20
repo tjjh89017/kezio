@@ -19,15 +19,14 @@ package seeder
 import (
 	"context"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
-	"k8s.io/utils/ptr"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 	"github.com/tjjh89017/kezio/internal/seeder/ezioapi"
 )
 
@@ -43,6 +42,10 @@ type fakeEZIO struct {
 	// addErr, when set, is returned by every AddTorrent call instead of
 	// the normal response.
 	addErr error
+	// addResultFalse, when true, makes AddTorrent return a
+	// gRPC-success-but-logical-failure response (Result: false) instead
+	// of the normal success response.
+	addResultFalse bool
 	// version is returned by GetVersion; a non-nil healthErr instead
 	// simulates the daemon being unreachable.
 	healthErr error
@@ -59,6 +62,9 @@ func (f *fakeEZIO) AddTorrent(_ context.Context, req *ezioapi.AddRequest) (*ezio
 		return nil, f.addErr
 	}
 	f.added = append(f.added, req)
+	if f.addResultFalse {
+		return &ezioapi.AddResponse{Result: false}, nil
+	}
 	return &ezioapi.AddResponse{Result: true}, nil
 }
 
@@ -166,6 +172,24 @@ func TestClient_AddTorrent_DaemonFailure(t *testing.T) {
 	}
 }
 
+// TestClient_AddTorrent_LogicalFailure covers ezio responding without a
+// gRPC error but with Result: false - a logical failure the RPC layer
+// alone would not surface as an error.
+func TestClient_AddTorrent_LogicalFailure(t *testing.T) {
+	fake := newFakeEZIO()
+	c := startFakeEZIO(t, fake)
+
+	fake.addResultFalse = true
+	const savePath = "/content/pc-deadbeef-content"
+	err := c.AddTorrent(context.Background(), []byte("x"), savePath, true, DefaultMaxUploads, DefaultMaxConnections)
+	if err == nil {
+		t.Fatal("AddTorrent: got nil error, want one for ezio's Result: false response")
+	}
+	if !strings.Contains(err.Error(), savePath) {
+		t.Errorf("AddTorrent error %q does not name save_path %s", err, savePath)
+	}
+}
+
 func TestClient_GetTorrentStatus_Empty(t *testing.T) {
 	fake := newFakeEZIO()
 	c := startFakeEZIO(t, fake)
@@ -234,31 +258,5 @@ func TestClient_Healthy_Unreachable(t *testing.T) {
 
 	if err := c.Healthy(context.Background()); err == nil {
 		t.Fatal("Healthy: got nil error, want one reflecting daemon failure")
-	}
-}
-
-func TestResolveMaxUploads(t *testing.T) {
-	if got := ResolveMaxUploads(nil); got != DefaultMaxUploads {
-		t.Errorf("ResolveMaxUploads(nil) = %d, want %d", got, DefaultMaxUploads)
-	}
-	if got := ResolveMaxUploads(&keziov1alpha2.MachineEzioTuning{}); got != DefaultMaxUploads {
-		t.Errorf("ResolveMaxUploads(no override) = %d, want %d", got, DefaultMaxUploads)
-	}
-	tuning := &keziov1alpha2.MachineEzioTuning{MaxUploads: ptr.To(int32(7))}
-	if got := ResolveMaxUploads(tuning); got != 7 {
-		t.Errorf("ResolveMaxUploads(override 7) = %d, want 7", got)
-	}
-}
-
-func TestResolveMaxConnections(t *testing.T) {
-	if got := ResolveMaxConnections(nil); got != DefaultMaxConnections {
-		t.Errorf("ResolveMaxConnections(nil) = %d, want %d", got, DefaultMaxConnections)
-	}
-	if got := ResolveMaxConnections(&keziov1alpha2.MachineEzioTuning{}); got != DefaultMaxConnections {
-		t.Errorf("ResolveMaxConnections(no override) = %d, want %d", got, DefaultMaxConnections)
-	}
-	tuning := &keziov1alpha2.MachineEzioTuning{MaxConnections: ptr.To(int32(8))}
-	if got := ResolveMaxConnections(tuning); got != 8 {
-		t.Errorf("ResolveMaxConnections(override 8) = %d, want 8", got)
 	}
 }

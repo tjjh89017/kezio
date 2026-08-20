@@ -29,7 +29,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 	"github.com/tjjh89017/kezio/internal/seeder/ezioapi"
 )
 
@@ -47,29 +46,6 @@ const DefaultMaxUploads = 3
 // stays below a LAN-style fan-out since more connections past that don't
 // find more peers.
 const DefaultMaxConnections = 10
-
-// AddRequest has no "unset" sentinel: passing 0 for max_uploads or
-// max_connections tells ezio to allow zero peers, not "use ezio's
-// default". ResolveMaxUploads/ResolveMaxConnections give every caller
-// the same real-positive-value fallback instead of each re-deriving one.
-
-// ResolveMaxUploads returns tuning's MaxUploads when set, else
-// DefaultMaxUploads. tuning may be nil.
-func ResolveMaxUploads(tuning *keziov1alpha2.MachineEzioTuning) int32 {
-	if tuning != nil && tuning.MaxUploads != nil {
-		return *tuning.MaxUploads
-	}
-	return DefaultMaxUploads
-}
-
-// ResolveMaxConnections returns tuning's MaxConnections when set, else
-// DefaultMaxConnections. tuning may be nil.
-func ResolveMaxConnections(tuning *keziov1alpha2.MachineEzioTuning) int32 {
-	if tuning != nil && tuning.MaxConnections != nil {
-		return *tuning.MaxConnections
-	}
-	return DefaultMaxConnections
-}
 
 // Torrent is one torrent's status, trimmed from ezioapi.Torrent to the
 // fields callers need. Hash is lowercase hex, matching both ezio's wire

@@ -210,6 +210,15 @@ func loadContentEntries(dirs []string) ([]contentEntry, []error) {
 // adds to ezio whichever content it does not already hold. Content
 // already present is left alone: AddTorrent is not idempotent in ezio,
 // and re-adding a seeding torrent is not a no-op.
+//
+// idx is only ever updated to entries this pass confirmed ezio already
+// holds or just registered successfully - never from the raw scan of
+// cfg.ContentRoot. The HTTP index otherwise would serve a .torrent for
+// content ezio does not yet hold: leech.FetchTorrent (internal/leech)
+// does a single GET with no retry, so a premature index entry is a hard
+// failure downstream, not a transient one. On a dial or list error, idx
+// is left untouched rather than cleared, so already-confirmed entries
+// stay served through a transient error.
 func reconcile(ctx context.Context, cfg config, idx *torrentIndex) error {
 	dirs, err := contentDirs(cfg.ContentRoot)
 	if err != nil {
@@ -220,7 +229,6 @@ func reconcile(ctx context.Context, cfg config, idx *torrentIndex) error {
 	}
 
 	entries, errs := loadContentEntries(dirs)
-	idx.set(entries)
 
 	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
@@ -238,6 +246,7 @@ func reconcile(ctx context.Context, cfg config, idx *torrentIndex) error {
 		return errors.Join(errs...)
 	}
 
+	served := make([]contentEntry, 0, len(entries))
 	for _, entry := range entries {
 		added, err := addContentDir(ctx, c, cfg, entry, existing)
 		if err != nil {
@@ -247,7 +256,9 @@ func reconcile(ctx context.Context, cfg config, idx *torrentIndex) error {
 		if added {
 			log.Printf("added content from %s", entry.dir)
 		}
+		served = append(served, entry)
 	}
+	idx.set(served)
 	return errors.Join(errs...)
 }
 
