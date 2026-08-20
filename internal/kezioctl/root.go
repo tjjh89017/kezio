@@ -17,8 +17,11 @@ limitations under the License.
 package kezioctl
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/spf13/cobra"
 )
@@ -81,8 +84,15 @@ func (f *globalFlags) resolveNamespace(kubeconfigNamespace string) string {
 // Execute runs kezioctl's root command against os.Args, writing errors to
 // os.Stderr. cmd/kezioctl's main calls this and exits non-zero on
 // failure.
+//
+// The command tree runs under a context that is canceled on SIGINT/SIGTERM,
+// so a Ctrl-C during a long-running command (e.g. `image delete --wait`)
+// cancels gracefully instead of killing the process outright.
 func Execute() {
-	if err := NewRootCmd().Execute(); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := NewRootCmd().ExecuteContext(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}

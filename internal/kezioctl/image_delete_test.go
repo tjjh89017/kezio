@@ -18,6 +18,7 @@ package kezioctl
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -69,6 +70,43 @@ func TestImageDelete_WaitReturnsOnceGone(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("ImageDelete() error = %v", err)
+	}
+}
+
+func TestImageDelete_WaitCanceledByOuterContext(t *testing.T) {
+	// A finalizer keeps the Image present past the delete call. The outer
+	// context is canceled well before WaitTimeout elapses, so the error
+	// must report cancellation, not a bogus timeout.
+	img := &keziov1alpha2.Image{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "outer-canceled",
+			Namespace:  "default",
+			Finalizers: []string{"kezio.kojuro.date/test-hold"},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(Scheme).WithObjects(img).Build()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		cancel()
+	}()
+
+	err := ImageDelete(ctx, c, ImageDeleteOptions{
+		Name:             "outer-canceled",
+		Namespace:        "default",
+		Wait:             true,
+		WaitPollInterval: time.Millisecond,
+		WaitTimeout:      time.Minute,
+	})
+	if err == nil {
+		t.Fatal("expected a cancellation error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error = %q, want it to wrap context.Canceled", err.Error())
+	}
+	if strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error = %q, must not claim a timeout when the outer context was canceled", err.Error())
 	}
 }
 

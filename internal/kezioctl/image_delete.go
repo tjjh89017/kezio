@@ -110,10 +110,10 @@ func waitForImageGone(ctx context.Context, c client.Client, opts ImageDeleteOpti
 
 		select {
 		case <-waitCtx.Done():
-			if opts.WaitTimeout > 0 {
+			if opts.WaitTimeout > 0 && errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
 				return fmt.Errorf("timed out after %s waiting for Image %s/%s to be removed", opts.WaitTimeout, opts.Namespace, opts.Name)
 			}
-			return waitCtx.Err()
+			return fmt.Errorf("canceled while waiting for Image %s/%s to be removed: %w", opts.Namespace, opts.Name, waitCtx.Err())
 		case <-ticker.C:
 		}
 	}

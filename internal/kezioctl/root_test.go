@@ -18,8 +18,11 @@ package kezioctl
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 func TestNewRootCmd_HasImageCommandTree(t *testing.T) {
@@ -76,6 +79,37 @@ func TestImageUploadCmd_RequiresExactlyOneFileArg(t *testing.T) {
 
 	if err := root.Execute(); err == nil {
 		t.Fatal("expected an error when the file argument is missing")
+	}
+}
+
+func TestNewRootCmd_ExecuteContextPropagatesCanceledContext(t *testing.T) {
+	// Execute() derives its context from signal.NotifyContext and runs the
+	// tree via ExecuteContext, so a canceled context must reach a
+	// subcommand's RunE through cmd.Context() - that is what lets
+	// ImageDelete's --wait cancellation path (see image_delete_test.go)
+	// actually be reachable from a Ctrl-C during interactive use.
+	root := NewRootCmd()
+
+	var probedCtxWasCanceled bool
+	root.AddCommand(&cobra.Command{
+		Use: "ctx-probe",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			probedCtxWasCanceled = cmd.Context().Err() == context.Canceled
+			return nil
+		},
+	})
+	root.SetArgs([]string{"ctx-probe"})
+	root.SetOut(new(bytes.Buffer))
+	root.SetErr(new(bytes.Buffer))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := root.ExecuteContext(ctx); err != nil {
+		t.Fatalf("ExecuteContext() error = %v", err)
+	}
+	if !probedCtxWasCanceled {
+		t.Error("subcommand's cmd.Context() was not the canceled context passed to ExecuteContext")
 	}
 }
 
