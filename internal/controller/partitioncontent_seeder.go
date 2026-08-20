@@ -26,6 +26,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -213,6 +214,21 @@ func (r *PartitionContentReconciler) buildSeederDeployment(pc *keziov1alpha2.Par
 							Command: []string{"/usr/local/bin/kezio-seeder-register"},
 							Ports: []corev1.ContainerPort{
 								{Name: "torrent", ContainerPort: seederdeploy.TorrentHTTPPort, Protocol: corev1.ProtocolTCP},
+							},
+							// Proves only that the .torrent HTTP server is
+							// bound and answering, not that any content has
+							// finished registering - AvailableReplicas (and
+							// thus SeederAvailable/seeders[]) must reflect
+							// "actually serving", not "torrent list
+							// complete", or a pod would stay unready for as
+							// long as registration is in progress.
+							ReadinessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path: seederdeploy.TorrentHealthzPath,
+										Port: intstr.FromString("torrent"),
+									},
+								},
 							},
 							SecurityContext: containerSecurityContext,
 							VolumeMounts:    mounts,

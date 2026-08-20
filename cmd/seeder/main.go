@@ -42,6 +42,7 @@ import (
 
 	"github.com/tjjh89017/kezio/internal/ingest"
 	"github.com/tjjh89017/kezio/internal/seeder"
+	"github.com/tjjh89017/kezio/internal/seederdeploy"
 	"github.com/tjjh89017/kezio/internal/store"
 )
 
@@ -77,7 +78,14 @@ func main() {
 	go func() {
 		log.Printf("serving .torrent files on %s", httpAddr)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("torrent http server: %v", err)
+			// The readiness probe (seederdeploy.TorrentHealthzPath, on
+			// this same server) is what tells Kubernetes this pod is fit
+			// to receive .torrent fetches; once the server that probe
+			// depends on is dead, silently logging leaves the pod Ready
+			// forever with nothing actually listening. Exiting lets the
+			// container restart - the honest recovery - instead of
+			// lying to consumers.
+			log.Fatalf("torrent http server: %v", err)
 		}
 	}()
 	defer func() { _ = httpSrv.Close() }()
@@ -312,6 +320,9 @@ const torrentsPathPrefix = "/torrents/"
 // by an exact map lookup on the hash the request names.
 func torrentMux(idx *torrentIndex) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc(seederdeploy.TorrentHealthzPath, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
 	mux.HandleFunc(torrentsPathPrefix, func(w http.ResponseWriter, r *http.Request) {
 		hash := r.URL.Path[len(torrentsPathPrefix):]
 		path, ok := idx.path(hash)

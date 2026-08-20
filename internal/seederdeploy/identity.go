@@ -27,6 +27,13 @@ import "github.com/tjjh89017/kezio/internal/store"
 // .torrent file - see cmd/seeder/main.go.
 const TorrentHTTPPort int32 = 8080
 
+// TorrentHealthzPath is the path on TorrentHTTPPort that only proves the
+// HTTP server itself is bound and answering, independent of whether any
+// content has been registered yet. cmd/seeder's torrentMux serves it,
+// and the seeder Deployment's readiness probe (internal/controller)
+// hits it.
+const TorrentHealthzPath = "/healthz"
+
 // namePrefix identifies a Deployment as a per-content seeder this
 // operator manages, at a glance in `kubectl get deployments`.
 const namePrefix = "kezio-seeder-"

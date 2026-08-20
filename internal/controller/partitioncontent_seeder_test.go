@@ -24,10 +24,12 @@ import (
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -143,6 +145,18 @@ var _ = Describe("PartitionContent Controller seeder lifecycle", func() {
 		Expect(dep.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim).NotTo(BeNil())
 		Expect(dep.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim.ClaimName).To(Equal(store.PVCName(hash)))
 		Expect(dep.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim.ReadOnly).To(BeTrue())
+
+		var registerContainer *corev1.Container
+		for i := range dep.Spec.Template.Spec.Containers {
+			if dep.Spec.Template.Spec.Containers[i].Name == "seeder-register" {
+				registerContainer = &dep.Spec.Template.Spec.Containers[i]
+			}
+		}
+		Expect(registerContainer).NotTo(BeNil())
+		Expect(registerContainer.ReadinessProbe).NotTo(BeNil())
+		Expect(registerContainer.ReadinessProbe.HTTPGet).NotTo(BeNil())
+		Expect(registerContainer.ReadinessProbe.HTTPGet.Path).To(Equal(seederdeploy.TorrentHealthzPath))
+		Expect(registerContainer.ReadinessProbe.HTTPGet.Port).To(Equal(intstr.FromString("torrent")))
 	})
 
 	It("creates no seeder Deployment when content is Ready but no seed-demand marker is set", func() {
