@@ -83,7 +83,10 @@ func (v *PartitionContentCustomValidator) ValidateUpdate(_ context.Context, oldO
 	}
 	partitioncontentlog.Info("Validation for PartitionContent upon update", "name", partitioncontent.GetName())
 
-	// TODO(user): fill in your validation logic upon object update.
+	// Nothing to validate: name is immutable in Kubernetes, so
+	// validatePartitionContentName never needs to re-run here, and
+	// PartitionContentSpec carries its own "self == oldSelf" CEL rule that
+	// enforces spec immutability at the schema level.
 
 	return nil, nil
 }
