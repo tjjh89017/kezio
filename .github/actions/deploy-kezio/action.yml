@@ -54,7 +54,15 @@ runs:
           -o jsonpath='{.items[0].metadata.name}')"
         kubectl rollout status deployment/"${deployment}" -n "${NAMESPACE}" --timeout="${TIMEOUT}"
         if [ -n "${EXTRA_ENV}" ]; then
-          mapfile -t env_pairs <<< "${EXTRA_ENV}"
+          # Drop blank lines: a YAML block-scalar input (as main.yaml's
+          # "extra-env: |" callers use) always ends in a trailing newline,
+          # which "<<<" turns into a trailing empty mapfile element -
+          # kubectl then reads that empty string as a second (invalid)
+          # resource argument instead of an env change.
+          env_pairs=()
+          while IFS= read -r pair; do
+            [ -n "${pair}" ] && env_pairs+=("${pair}")
+          done <<< "${EXTRA_ENV}"
           kubectl -n "${NAMESPACE}" set env deployment/"${deployment}" "${env_pairs[@]}"
           kubectl rollout status deployment/"${deployment}" -n "${NAMESPACE}" --timeout="${TIMEOUT}"
         fi
