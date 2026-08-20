@@ -63,6 +63,33 @@ func newTestPartitionContent(name string) *keziov1alpha2.PartitionContent {
 	}
 }
 
+// reconcileAddsFinalizer drives one Reconcile call whose only job is
+// adding PartitionContentFinalizer to a freshly created PartitionContent -
+// the reconciler's first step (see Reconcile) before onChange ever runs.
+// Tests call this once right after Create, so the "real" Reconcile calls
+// that follow drive the publish/seeder walk exactly as the
+// actually-finalized object would.
+func reconcileAddsFinalizer(ctx context.Context, r *PartitionContentReconciler, nn types.NamespacedName) {
+	_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+	Expect(err).NotTo(HaveOccurred())
+	var pc keziov1alpha2.PartitionContent
+	Expect(k8sClient.Get(ctx, nn, &pc)).To(Succeed())
+	Expect(pc.Finalizers).To(ContainElement(keziov1alpha2.PartitionContentFinalizer))
+}
+
+// deletePartitionContent deletes pc and drives the reconciler's onDelete
+// path once so PartitionContentFinalizer actually clears - a plain
+// k8sClient.Delete alone would leave the object stuck with a deletion
+// timestamp forever, since nothing else reconciles it in these tests. Safe
+// to call on an already-deleted object (Delete/Reconcile both tolerate
+// NotFound).
+func deletePartitionContent(ctx context.Context, pc *keziov1alpha2.PartitionContent) {
+	nn := types.NamespacedName{Name: pc.Name, Namespace: pc.Namespace}
+	_ = k8sClient.Delete(ctx, pc)
+	r := &PartitionContentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Recorder: record.NewFakeRecorder(16)}
+	_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+}
+
 var _ = Describe("PartitionContent Controller", func() {
 	var ctx context.Context
 
@@ -84,10 +111,12 @@ var _ = Describe("PartitionContent Controller", func() {
 		name := "pc-" + hashHex
 		pc := newTestPartitionContent(name)
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
-		DeferCleanup(func() { _ = k8sClient.Delete(ctx, pc) })
+		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
 
 		r := newReconciler(PartitionContentPublishConfig{})
-		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}})
+		nn := types.NamespacedName{Name: name, Namespace: "default"}
+		reconcileAddsFinalizer(ctx, r, nn)
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
 		hash, err := store.ParseInfoHash(hashHex)
@@ -112,14 +141,16 @@ var _ = Describe("PartitionContent Controller", func() {
 		name := "pc-" + hashHex
 		pc := newTestPartitionContent(name)
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
-		DeferCleanup(func() { _ = k8sClient.Delete(ctx, pc) })
+		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
 
 		r := newReconciler(PartitionContentPublishConfig{})
-		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}})
+		nn := types.NamespacedName{Name: name, Namespace: "default"}
+		reconcileAddsFinalizer(ctx, r, nn)
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
 		var got keziov1alpha2.PartitionContent
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &got)).To(Succeed())
+		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
 		Expect(got.Status.State).To(Equal(keziov1alpha2.PartitionContentStatePending))
 		cond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.PartitionContentConditionReady)
 		Expect(cond).NotTo(BeNil())
@@ -139,7 +170,7 @@ var _ = Describe("PartitionContent Controller", func() {
 		name := "pc-" + hashHex
 		pc := newTestPartitionContent(name)
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
-		DeferCleanup(func() { _ = k8sClient.Delete(ctx, pc) })
+		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
 
 		publish := PartitionContentPublishConfig{
 			Image:      "example.test/kezio-ingest:test",
@@ -147,6 +178,7 @@ var _ = Describe("PartitionContent Controller", func() {
 		}
 		r := newReconciler(publish)
 		nn := types.NamespacedName{Name: name, Namespace: "default"}
+		reconcileAddsFinalizer(ctx, r, nn)
 
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
@@ -227,7 +259,7 @@ var _ = Describe("PartitionContent Controller", func() {
 		name := "pc-" + hashHex
 		pc := newTestPartitionContent(name)
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
-		DeferCleanup(func() { _ = k8sClient.Delete(ctx, pc) })
+		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
 
 		publish := PartitionContentPublishConfig{
 			Image:      "example.test/kezio-ingest:test",
@@ -235,6 +267,7 @@ var _ = Describe("PartitionContent Controller", func() {
 		}
 		r := newReconciler(publish)
 		nn := types.NamespacedName{Name: name, Namespace: "default"}
+		reconcileAddsFinalizer(ctx, r, nn)
 
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())

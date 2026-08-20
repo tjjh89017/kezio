@@ -72,6 +72,8 @@ var _ = Describe("PartitionContent Controller seeder lifecycle", func() {
 	// lifecycle untouched - callers issue their own Reconcile calls after
 	// this to exercise it.
 	advancePartitionContentToReady := func(r *PartitionContentReconciler, nn types.NamespacedName, hashHex string) {
+		reconcileAddsFinalizer(ctx, r, nn)
+
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -112,7 +114,7 @@ var _ = Describe("PartitionContent Controller seeder lifecycle", func() {
 		pc := newTestPartitionContent(name)
 		pc.Annotations = map[string]string{keziov1alpha2.PartitionContentAnnotationSeedDemand: ""}
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
-		DeferCleanup(func() { _ = k8sClient.Delete(ctx, pc) })
+		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
 
 		seederImage := "example.test/kezio-seeder:test"
 		r := newSeederReconciler(PartitionContentSeederConfig{Image: seederImage})
@@ -149,7 +151,7 @@ var _ = Describe("PartitionContent Controller seeder lifecycle", func() {
 		nn := types.NamespacedName{Name: name, Namespace: "default"}
 		pc := newTestPartitionContent(name)
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
-		DeferCleanup(func() { _ = k8sClient.Delete(ctx, pc) })
+		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
 
 		r := newSeederReconciler(PartitionContentSeederConfig{Image: "example.test/kezio-seeder:test"})
 		advancePartitionContentToReady(r, nn, hashHex)
@@ -171,7 +173,7 @@ var _ = Describe("PartitionContent Controller seeder lifecycle", func() {
 		pc := newTestPartitionContent(name)
 		pc.Annotations = map[string]string{keziov1alpha2.PartitionContentAnnotationSeedDemand: ""}
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
-		DeferCleanup(func() { _ = k8sClient.Delete(ctx, pc) })
+		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
 
 		r := &PartitionContentReconciler{
 			Client:   k8sClient,
@@ -180,6 +182,7 @@ var _ = Describe("PartitionContent Controller seeder lifecycle", func() {
 			Publish:  PartitionContentPublishConfig{}, // not ready() -> stays Pending
 			Seeder:   PartitionContentSeederConfig{Image: "example.test/kezio-seeder:test"},
 		}
+		reconcileAddsFinalizer(ctx, r, nn)
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -201,7 +204,7 @@ var _ = Describe("PartitionContent Controller seeder lifecycle", func() {
 		pc := newTestPartitionContent(name)
 		pc.Annotations = map[string]string{keziov1alpha2.PartitionContentAnnotationSeedDemand: ""}
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
-		DeferCleanup(func() { _ = k8sClient.Delete(ctx, pc) })
+		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
 
 		r := newSeederReconciler(PartitionContentSeederConfig{}) // no image
 		advancePartitionContentToReady(r, nn, hashHex)
@@ -235,7 +238,7 @@ var _ = Describe("PartitionContent Controller seeder lifecycle", func() {
 		pc := newTestPartitionContent(name)
 		pc.Annotations = map[string]string{keziov1alpha2.PartitionContentAnnotationSeedDemand: ""}
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
-		DeferCleanup(func() { _ = k8sClient.Delete(ctx, pc) })
+		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
 
 		r := newSeederReconciler(PartitionContentSeederConfig{Image: "example.test/kezio-seeder:test"})
 		advancePartitionContentToReady(r, nn, hashHex)
@@ -278,7 +281,7 @@ var _ = Describe("PartitionContent Controller seeder lifecycle", func() {
 		pc := newTestPartitionContent(name)
 		pc.Annotations = map[string]string{keziov1alpha2.PartitionContentAnnotationSeedDemand: ""}
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
-		DeferCleanup(func() { _ = k8sClient.Delete(ctx, pc) })
+		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
 
 		clock := &testClock{t: time.Now()}
 		grace := 10 * time.Minute

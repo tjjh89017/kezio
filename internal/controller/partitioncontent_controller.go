@@ -31,6 +31,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
@@ -48,9 +51,10 @@ var publishPollInterval = 30 * time.Second
 // This reconciler owns the content PVC, the publish Job's lifecycle
 // (create, observe, reflect into status), and - once Ready - the seeder
 // Deployment's lifecycle (create-on-demand, grace-period shutdown, status
-// reflection; see reconcileSeeder). The deletion-blocking finalizer
-// against Image/DeployRun references is a separate reconciler
-// responsibility layered on later. It never mounts the content PVC's
+// reflection; see reconcileSeeder). It also carries
+// PartitionContentFinalizer, blocking actual removal while an Image slot
+// or an active DeployRun still references this content (see onDelete). It
+// never mounts the content PVC's
 // filesystem itself: the publish Job is the sole witness to whether
 // publishing succeeded (see outcomeOf), and status.torrentPath is set
 // from the store package's naming convention, not from anything this
@@ -79,6 +83,8 @@ type PartitionContentReconciler struct {
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=kezio.kojuro.date,resources=images,verbs=get;list;watch
+// +kubebuilder:rbac:groups=kezio.kojuro.date,resources=deployruns,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -88,13 +94,20 @@ func (r *PartitionContentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// No finalizer in this item: the content PVC and publish Job are
-	// owner-referenced to this object, so ordinary Kubernetes garbage
-	// collection reclaims them once this object is actually deleted.
-	// Blocking that deletion while an Image/DeployRun still references
-	// this content is a separate reconciler responsibility, added later.
+	// The content PVC and publish Job are owner-referenced to this object,
+	// so ordinary Kubernetes garbage collection reclaims them once this
+	// object is actually deleted; PartitionContentFinalizer only guards
+	// the object itself from being removed while still referenced.
 	if !pc.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, nil
+		return r.onDelete(ctx, &pc)
+	}
+
+	if !controllerutil.ContainsFinalizer(&pc, keziov1alpha2.PartitionContentFinalizer) {
+		controllerutil.AddFinalizer(&pc, keziov1alpha2.PartitionContentFinalizer)
+		if err := r.Update(ctx, &pc); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	hash, err := store.ParseInfoHash(strings.TrimPrefix(pc.Name, "pc-"))
@@ -224,13 +237,29 @@ var partitionContentUpdatePredicate = predicate.Or(
 	finalizersChangedPredicate,
 )
 
+// imageDeletionOnly restricts the Image watch to Delete events: ImageSpec
+// is immutable once created (see ImageSpec's type-level XValidation rule),
+// so only an Image's creation or removal can change what it references -
+// and only removal can ever unblock a PartitionContent's pending delete
+// (see onDelete), mirroring machine_controller's deployRunDeletionOnly.
+var imageDeletionOnly = predicate.Funcs{
+	CreateFunc:  func(event.CreateEvent) bool { return false },
+	UpdateFunc:  func(event.UpdateEvent) bool { return false },
+	DeleteFunc:  func(event.DeleteEvent) bool { return true },
+	GenericFunc: func(event.GenericEvent) bool { return false },
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *PartitionContentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &keziov1alpha2.Image{}, imageContentRefIndex, indexImageContentRefs); err != nil {
+		return err
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&keziov1alpha2.PartitionContent{}, builder.WithPredicates(partitionContentUpdatePredicate)).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&batchv1.Job{}).
 		Owns(&appsv1.Deployment{}).
+		Watches(&keziov1alpha2.Image{}, handler.EnqueueRequestsFromMapFunc(r.mapImageToPartitionContents), builder.WithPredicates(imageDeletionOnly)).
 		Named("partitioncontent").
 		Complete(r)
 }

@@ -103,7 +103,18 @@ const (
 	// fewer seeders than the operator considers safe, without affecting
 	// Ready.
 	PartitionContentConditionSeederDegraded = "SeederDegraded"
+	// PartitionContentConditionDeletionBlocked is True while this content
+	// has a deletion timestamp but PartitionContentFinalizer has not been
+	// removed yet, because an Image slot or an active DeployRun still
+	// references it. Absent otherwise (not set False - a content with no
+	// deletion in progress has nothing to report here).
+	PartitionContentConditionDeletionBlocked = "DeletionBlocked"
 )
+
+// PartitionContentFinalizer blocks a PartitionContent's actual removal
+// while an Image slot or an active DeployRun still references it - see
+// the PartitionContentReconciler's onDelete.
+const PartitionContentFinalizer = "kezio.kojuro.date/partitioncontent"
 
 // PartitionContent operational annotations, read directly off
 // ObjectMeta.Annotations - no defaulting or schema covers them.

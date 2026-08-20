@@ -107,3 +107,18 @@ func setPartitionContentSeederDegradedCondition(pc *keziov1alpha2.PartitionConte
 		Message:            message,
 	})
 }
+
+// setPartitionContentDeletionBlockedCondition sets the DeletionBlocked
+// condition on pc.Status.Conditions, stamping ObservedGeneration from
+// pc.Generation. Set only while a delete is actually blocked - onDelete
+// removes it entirely once the finalizer clears (see the type's doc
+// comment for why this is never set False).
+func setPartitionContentDeletionBlockedCondition(pc *keziov1alpha2.PartitionContent, reason, message string) {
+	meta.SetStatusCondition(&pc.Status.Conditions, metav1.Condition{
+		Type:               keziov1alpha2.PartitionContentConditionDeletionBlocked,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: pc.Generation,
+		Reason:             reason,
+		Message:            message,
+	})
+}
