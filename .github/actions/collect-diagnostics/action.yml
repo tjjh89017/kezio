@@ -2,11 +2,15 @@ name: Collect kezio diagnostics on failure
 
 description: >-
   On job failure, dumps the kezio custom resources (Machine, DeployRun,
-  MachineHardware), the controller-manager logs (current and, best-effort,
-  the previous crashed attempt), and cluster events into the given
-  directory for upload as a CI artifact. Every command runs under `set +e`
-  and best-effort: a resource that never got created (the lane failed
-  before reaching it) must not fail this step.
+  MachineHardware), every pod and PVC in `namespace` (not just the
+  controller-manager - a Pending image-service/ingest/publish pod is
+  exactly the kind of failure this exists to diagnose), the
+  controller-manager logs (current and, best-effort, the previous crashed
+  attempt), and cluster events from both `namespace` and
+  `workload-namespace` into the given directory for upload as a CI
+  artifact. Every command runs under `set +e` and best-effort: a resource
+  that never got created (the lane failed before reaching it) must not
+  fail this step.
 
 inputs:
   namespace:
@@ -54,8 +58,28 @@ runs:
 
         echo "===== pods ====="
         kubectl get pods -n "${NAMESPACE}" -o wide >"${OUTPUT_PATH}/pods.txt" 2>&1
-        kubectl describe pods -n "${NAMESPACE}" -l control-plane=controller-manager \
-          >"${OUTPUT_PATH}/pods-describe.txt" 2>&1
+        # Every pod, not just the controller-manager's own: a Pending
+        # image-service/ingest/publish pod's describe (its scheduling
+        # events, unbound volumes) is exactly what a rollout-status
+        # timeout gives no other way to see.
+        kubectl describe pods -n "${NAMESPACE}" >"${OUTPUT_PATH}/pods-describe.txt" 2>&1
+
+        echo "===== PersistentVolumeClaims ====="
+        kubectl get pvc -n "${NAMESPACE}" -o wide >"${OUTPUT_PATH}/pvcs.txt" 2>&1
+        kubectl describe pvc -n "${NAMESPACE}" >"${OUTPUT_PATH}/pvcs-describe.txt" 2>&1
+        kubectl get pv -o wide >"${OUTPUT_PATH}/pvs.txt" 2>&1
+
+        # nfs-provisioner (image-path lane's default StorageClass) runs in
+        # "default", not NAMESPACE - it must exist before scaffold-system
+        # does (install-nfs-provisioner runs ahead of the controller-manager
+        # that creates that namespace). A silently-failing provisioner
+        # leaves every RWX PVC in NAMESPACE Pending with no clue why unless
+        # its own logs are captured too.
+        echo "===== nfs-provisioner (namespace default) ====="
+        kubectl get pods -n default -l app=nfs-provisioner -o wide >"${OUTPUT_PATH}/nfs-provisioner-pods.txt" 2>&1
+        kubectl describe pods -n default -l app=nfs-provisioner >"${OUTPUT_PATH}/nfs-provisioner-pods-describe.txt" 2>&1
+        kubectl logs -n default -l app=nfs-provisioner --all-containers --tail=1000 \
+          >"${OUTPUT_PATH}/nfs-provisioner-logs.txt" 2>&1
 
         echo "===== controller-manager logs ====="
         kubectl logs -n "${NAMESPACE}" -l control-plane=controller-manager --all-containers --tail=1000 \
@@ -65,7 +89,9 @@ runs:
         kubectl logs -n "${NAMESPACE}" -l control-plane=controller-manager --all-containers --previous --tail=1000 \
           >"${OUTPUT_PATH}/manager-logs-previous.txt" 2>&1
 
-        echo "===== events ====="
+        echo "===== events (${NAMESPACE}) ====="
+        kubectl get events -n "${NAMESPACE}" --sort-by=.lastTimestamp >"${OUTPUT_PATH}/events-namespace.txt" 2>&1
+        echo "===== events (${WORKLOAD_NAMESPACE}) ====="
         kubectl get events -n "${WORKLOAD_NAMESPACE}" --sort-by=.lastTimestamp >"${OUTPUT_PATH}/events.txt" 2>&1
 
         exit 0
