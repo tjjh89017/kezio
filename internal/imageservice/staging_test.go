@@ -18,8 +18,12 @@ package imageservice
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -94,6 +98,59 @@ func TestStaging_RemoveUpload(t *testing.T) {
 	}
 	if err := staging.RemoveUpload("never-existed"); err != nil {
 		t.Errorf("RemoveUpload on never-existed upload: got %v, want nil", err)
+	}
+}
+
+// Receive's doc promises that a name is never silently repointed at
+// different content: concurrent same-name uploads must either agree
+// (idempotent) or be rejected with ErrNameConflict, never leave upload.bin
+// holding one upload's bytes while upload.sha256 records another's
+// checksum. Unserialized check/rename/writeMeta made that promise
+// breakable under concurrency; this pins it.
+func TestStaging_Receive_ConcurrentSameNameNeverCorrupts(t *testing.T) {
+	staging, root := newTestStaging(t)
+
+	const name = "race"
+	const workers = 50
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	results := make([]UploadResult, workers)
+	errs := make([]error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			body := []byte(fmt.Sprintf("content-from-worker-%d", i))
+			results[i], errs[i] = staging.Receive(name, bytes.NewReader(body), "")
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	finalBytes, err := os.ReadFile(filepath.Join(root, "uploads", name, uploadFileName))
+	if err != nil {
+		t.Fatalf("read final upload.bin: %v", err)
+	}
+	sum := sha256.Sum256(finalBytes)
+	wantChecksum := ChecksumAlgorithm + ":" + hex.EncodeToString(sum[:])
+
+	meta, err := readMeta(filepath.Join(root, "uploads", name))
+	if err != nil {
+		t.Fatalf("read upload.sha256: %v", err)
+	}
+	if meta.Checksum != wantChecksum {
+		t.Fatalf("upload.sha256 records %s, but upload.bin actually hashes to %s: name was silently repointed at mismatched content", meta.Checksum, wantChecksum)
+	}
+
+	// No caller may be told success (no error) for content that is not
+	// what ended up stored: a dishonest success is exactly the silent
+	// corruption Receive's doc rules out.
+	for i, err := range errs {
+		if err == nil && results[i].Checksum != wantChecksum {
+			t.Fatalf("worker %d got a successful result with checksum %s, but the name is actually stored with checksum %s: dishonest success", i, results[i].Checksum, wantChecksum)
+		}
 	}
 }
 

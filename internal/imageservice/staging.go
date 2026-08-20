@@ -30,6 +30,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"k8s.io/apimachinery/pkg/util/validation"
 )
@@ -84,6 +85,14 @@ var ErrNameConflict = errors.New("upload name already in use with different cont
 // crosses that boundary.
 type Staging struct {
 	root string
+
+	// finalizeMu serializes the check-existing/rename/writeMeta sequence
+	// in Receive, so two concurrent uploads of the same name can never
+	// interleave a rename from one with the metadata write from the
+	// other. It guards metadata-sized I/O only - body streaming and
+	// hashing happen before it is taken, so large uploads to different
+	// names are not serialized by it.
+	finalizeMu sync.Mutex
 }
 
 // NewStaging returns a Staging rooted at root. root must already exist;
@@ -279,6 +288,15 @@ func (s *Staging) Receive(name string, body io.Reader, wantChecksum string) (Upl
 	if wantChecksum != "" && !strings.EqualFold(got, wantChecksum) {
 		return UploadResult{}, fmt.Errorf("%w: computed %s, expected %s", ErrChecksumMismatch, got, wantChecksum)
 	}
+
+	// From here on this call decides whether name is already staged with
+	// this content, a conflicting name, or a brand new upload, and acts on
+	// that decision (rename + writeMeta). That check-then-act sequence
+	// must run without interleaving another Receive for the same name,
+	// or one call's rename can land after another's writeMeta and leave
+	// upload.bin and upload.sha256 pointing at different content.
+	s.finalizeMu.Lock()
+	defer s.finalizeMu.Unlock()
 
 	if existing, err := readMeta(dir); err == nil {
 		if strings.EqualFold(existing.Checksum, got) {
