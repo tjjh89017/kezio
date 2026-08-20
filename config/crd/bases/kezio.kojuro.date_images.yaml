@@ -313,9 +313,10 @@ spec:
                 x-kubernetes-list-type: map
               sourceChecksum:
                 description: |-
-                  SourceChecksum echoes spec.source.checksum once ingest has verified
-                  it, for audit. Absent for a composed image (no Source) or before
-                  verification.
+                  SourceChecksum is a verbatim echo of spec.source.checksum, for audit
+                  convenience. It carries no verification claim; ingest verification
+                  failures surface through the Image's state/conditions, not here.
+                  Absent for a composed image (no Source).
                 pattern: ^sha256:[0-9a-f]{64}$
                 type: string
               state:

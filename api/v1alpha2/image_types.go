@@ -237,9 +237,10 @@ type ImageStatus struct {
 	// +kubebuilder:validation:Enum=Pending;Ingesting;Ready;Failed
 	// +optional
 	State string `json:"state,omitempty"`
-	// SourceChecksum echoes spec.source.checksum once ingest has verified
-	// it, for audit. Absent for a composed image (no Source) or before
-	// verification.
+	// SourceChecksum is a verbatim echo of spec.source.checksum, for audit
+	// convenience. It carries no verification claim; ingest verification
+	// failures surface through the Image's state/conditions, not here.
+	// Absent for a composed image (no Source).
 	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
 	// +optional
 	SourceChecksum string `json:"sourceChecksum,omitempty"`
