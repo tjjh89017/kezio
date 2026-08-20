@@ -147,8 +147,13 @@ type PartitionContentSeederSite struct {
 	// serving this content.
 	// +kubebuilder:validation:MaxLength=253
 	Site string `json:"site"`
-	// MachineCount is the number of machines seeding this content at
-	// this site.
+	// MachineCount is the number of deploying machines seeding this
+	// content at this site via their agents - the controller's own
+	// seeder Deployment is infrastructure, not a counted machine. It
+	// stays 0 until per-machine demand tracking exists (a later item
+	// derives demand, and this count, from Machine/DeployRun state
+	// instead of the manual seed-demand annotation - see
+	// PartitionContentAnnotationSeedDemand).
 	// +kubebuilder:validation:Minimum=0
 	MachineCount int32 `json:"machineCount"`
 }

@@ -344,6 +344,8 @@ func (r *PartitionContentReconciler) recordSeederConfigMissing(ctx context.Conte
 func (r *PartitionContentReconciler) recordSeederStatus(ctx context.Context, pc *keziov1alpha2.PartitionContent, dep *appsv1.Deployment, demand bool) (ctrl.Result, error) {
 	available := dep != nil && dep.DeletionTimestamp.IsZero() && dep.Status.AvailableReplicas > 0
 	if available {
+		// MachineCount stays 0: no per-machine demand tracking exists yet
+		// to count deploying machines separately from this seeder pod.
 		pc.Status.Seeders = []keziov1alpha2.PartitionContentSeederSite{{Site: defaultSeederSite, MachineCount: 0}}
 	} else {
 		pc.Status.Seeders = nil
