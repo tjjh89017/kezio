@@ -367,6 +367,19 @@ jobs:
           partition-sha256: ${{ steps.ingest.outputs.partition-sha256 }}
           partition-size-bytes: ${{ steps.ingest.outputs.partition-size-bytes }}
 
+      # Closes out the lane: dedupe (a second Image sharing
+      # ingest-test-image's content), a composed (source-less) Image,
+      # seeder grace-period shutdown, and the PartitionContent deletion
+      # finalizer - see the action's own step-group comments for why the
+      # order among them is load-bearing.
+      - name: Assert Image/PartitionContent plane semantics
+        uses: ./.github/actions/assert-image-plane-semantics
+        with:
+          content-name: ${{ steps.ingest.outputs.content-ref }}
+          fixture-disk-path: ${{ steps.ingest.outputs.disk-path }}
+          fixture-layout-path: ${{ steps.ingest.outputs.layout-path }}
+          token: ${{ env.IMAGE_SERVICE_TOKEN }}
+
       - name: Collect diagnostics
         if: failure()
         uses: ./.github/actions/collect-diagnostics

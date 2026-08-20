@@ -1,0 +1,302 @@
+name: Assert Image/PartitionContent plane semantics
+
+description: >-
+  Proves, against the real cluster ingest-test-image and run-leecher just
+  walked through, the controller behaviors that are otherwise only
+  envtested: shared-content dedupe, composed (source-less) Images, the
+  PartitionContent deletion finalizer, and seeder grace-period shutdown.
+  Runs as four ordered step groups against the one PartitionContent
+  ingest-test-image produced (content-name); see each step's own comment
+  for why the order is load-bearing.
+
+inputs:
+  namespace:
+    description: 'Namespace every object below lives in.'
+    required: false
+    default: "scaffold-system"
+  content-name:
+    description: 'PartitionContent object name ("pc-<info hash>") ingest-test-image produced, e.g. its content-ref output.'
+    required: true
+  first-image-name:
+    description: 'Name of the Image ingest-test-image created (must match its image-name input).'
+    required: false
+    default: "kezio-e2e-fixture"
+  fixture-disk-path:
+    description: 'Runner-local fixture disk path, e.g. ingest-test-image''s disk-path output - re-uploaded byte-for-byte to exercise ingest-side dedupe.'
+    required: true
+  fixture-layout-path:
+    description: 'Runner-local layout JSON path, e.g. ingest-test-image''s layout-path output - describes the same fixture-disk-path bytes.'
+    required: true
+  token:
+    description: Bearer token kezioctl authenticates the re-upload with.
+    required: true
+  image-service-service-name:
+    description: 'Name of the image-service Service to port-forward for the re-upload.'
+    required: false
+    default: "kezio-image-service"
+  local-port:
+    description: 'Local port the image-service Service is port-forwarded to. Distinct from ingest-test-image''s own port so a slow-to-exit prior port-forward can never collide.'
+    required: false
+    default: "18081"
+  second-image-name:
+    description: 'Name given to the re-uploaded (dedupe) Image.'
+    required: false
+    default: "kezio-e2e-fixture-dup"
+  composed-image-name:
+    description: 'Name given to the hand-written, source-less (composed) Image.'
+    required: false
+    default: "kezio-e2e-fixture-composed"
+  wait-timeout-seconds:
+    description: 'How long to poll for an Image to reach Ready before failing.'
+    required: false
+    default: "300"
+  seeder-wait-timeout-seconds:
+    description: 'How long to wait for the seeder Deployment to become Available.'
+    required: false
+    default: "180"
+  grace-period-seconds:
+    description: 'Must match the cluster''s PARTITIONCONTENT_SEEDER_GRACE_PERIOD - the countdown the grace-shutdown step observes.'
+    required: false
+    default: "30"
+  teardown-wait-timeout-seconds:
+    description: 'Upper bound the grace-shutdown step waits for the seeder Deployment to disappear after demand clears - comfortably above grace-period-seconds so a real hang still fails loudly instead of hanging the job.'
+    required: false
+    default: "120"
+  deletion-wait-timeout-seconds:
+    description: 'Upper bound the deletion-semantics step waits for each delete/block/unblock transition.'
+    required: false
+    default: "120"
+
+runs:
+  using: composite
+  steps:
+    # --- Step group 1: shared-content dedupe -----------------------------
+    #
+    # Re-uploads the *identical* fixture bytes (fixture-disk-path,
+    # fixture-layout-path - built once by ingest-test-image, not rebuilt
+    # here) under a second Image name. Its layout declares the same
+    # contentRef (identical bytes hash identically), so its own ingest Job
+    # runs to completion and then, in ensurePartitionContent
+    # (image_ingest.go), finds content-name already existing and creates
+    # nothing: no second PartitionContent, no second content PVC, no
+    # second publish Job. Only the second Image's own ingest Job is new -
+    # a different object, a different label, not asserted against here.
+    - name: "Dedupe: re-upload the same fixture under a second Image name"
+      id: dedupe
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        CONTENT_NAME: ${{ inputs.content-name }}
+        SECOND_IMAGE_NAME: ${{ inputs.second-image-name }}
+        DISK_PATH: ${{ inputs.fixture-disk-path }}
+        LAYOUT_PATH: ${{ inputs.fixture-layout-path }}
+        TOKEN: ${{ inputs.token }}
+        SERVICE_NAME: ${{ inputs.image-service-service-name }}
+        LOCAL_PORT: ${{ inputs.local-port }}
+        WAIT_TIMEOUT_SECONDS: ${{ inputs.wait-timeout-seconds }}
+      run: |
+        set -euo pipefail
+        source "${GITHUB_ACTION_PATH}/lib.sh"
+
+        kubectl -n "${NAMESPACE}" port-forward "svc/${SERVICE_NAME}" "${LOCAL_PORT}:8080" &
+        pf_pid=$!
+        trap 'kill "${pf_pid}" 2>/dev/null || true' EXIT
+        for _ in $(seq 1 30); do
+          curl -sf -o /dev/null "http://127.0.0.1:${LOCAL_PORT}/healthz" && break
+          sleep 1
+        done
+
+        trap 'dump_image_diagnostics "${NAMESPACE}" "${SECOND_IMAGE_NAME}"; kill "${pf_pid}" 2>/dev/null || true' ERR
+        bin/kezioctl image upload "${DISK_PATH}" \
+          --name "${SECOND_IMAGE_NAME}" \
+          --namespace "${NAMESPACE}" \
+          --server "http://127.0.0.1:${LOCAL_PORT}" \
+          --token "${TOKEN}" \
+          --layout "${LAYOUT_PATH}"
+
+        wait_for_image_ready "${NAMESPACE}" "${SECOND_IMAGE_NAME}" "${WAIT_TIMEOUT_SECONDS}"
+        trap 'kill "${pf_pid}" 2>/dev/null || true' EXIT
+
+        echo "Asserting content-name ${CONTENT_NAME} was reused, not recreated"
+        assert_shared_content_singleton "${NAMESPACE}" "${CONTENT_NAME}"
+        echo "dedupe assertions passed: one PartitionContent, one content PVC, one publish Job"
+
+    # --- Step group 2: composed Image -------------------------------------
+    #
+    # A hand-written, source-less Image reusing content-name's layout
+    # (fetched off the already-Ready first Image, byte-identical
+    # sfdiskJSON/slots) must reach Ready through pure aggregation
+    # (ImageReconciler.onChange takes the composed branch whenever
+    # spec.source is absent) - no image-ingest-<name> Job is ever created
+    # for it.
+    - name: "Composed: a source-less Image over existing content reaches Ready with no ingest Job"
+      id: composed
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        CONTENT_NAME: ${{ inputs.content-name }}
+        FIRST_IMAGE_NAME: ${{ inputs.first-image-name }}
+        COMPOSED_IMAGE_NAME: ${{ inputs.composed-image-name }}
+        WAIT_TIMEOUT_SECONDS: ${{ inputs.wait-timeout-seconds }}
+      run: |
+        set -euo pipefail
+        source "${GITHUB_ACTION_PATH}/lib.sh"
+
+        layout="$(kubectl get images.kezio.kojuro.date "${FIRST_IMAGE_NAME}" -n "${NAMESPACE}" -o json | jq -c '.spec.layout')"
+
+        trap 'dump_image_diagnostics "${NAMESPACE}" "${COMPOSED_IMAGE_NAME}"' ERR
+        jq -n --arg name "${COMPOSED_IMAGE_NAME}" --arg ns "${NAMESPACE}" --argjson layout "${layout}" '{
+          apiVersion: "kezio.kojuro.date/v1alpha2",
+          kind: "Image",
+          metadata: {name: $name, namespace: $ns},
+          spec: {layout: $layout}
+        }' | kubectl apply -f -
+
+        wait_for_image_ready "${NAMESPACE}" "${COMPOSED_IMAGE_NAME}" "${WAIT_TIMEOUT_SECONDS}"
+
+        echo "Asserting no ingest Job was created for the composed Image"
+        if kubectl get job "image-ingest-${COMPOSED_IMAGE_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1; then
+          echo "::error::composed Image ${COMPOSED_IMAGE_NAME} unexpectedly has an ingest Job" >&2
+          dump_image_diagnostics "${NAMESPACE}" "${COMPOSED_IMAGE_NAME}"
+          exit 1
+        fi
+        echo "Asserting content-name ${CONTENT_NAME} still was not duplicated"
+        assert_shared_content_singleton "${NAMESPACE}" "${CONTENT_NAME}"
+        echo "composed-image assertions passed: Ready with no ingest Job, content still shared"
+
+    # --- Step group 3: seeder grace-period shutdown -----------------------
+    #
+    # Deliberately runs *before* the deletion-semantics group below: that
+    # group deletes every Image referencing content-name, which lets
+    # content-name's own deletion (and its owned seeder Deployment) proceed
+    # - nothing would be left to observe a grace shutdown on afterward. It
+    # also does not reuse run-leecher's own demand cycle: the dedupe/composed
+    # steps above run an unbounded amount of wall-clock time after
+    # run-leecher cleared its marker, which could already exceed
+    # grace-period-seconds by the time this step runs. Driving a fresh
+    # demand-on/demand-off cycle here removes that race instead of racing it.
+    - name: "Seeder: grace-period shutdown neither fires early nor hangs"
+      id: grace
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        CONTENT_NAME: ${{ inputs.content-name }}
+        SEEDER_WAIT_TIMEOUT_SECONDS: ${{ inputs.seeder-wait-timeout-seconds }}
+        GRACE_PERIOD_SECONDS: ${{ inputs.grace-period-seconds }}
+        TEARDOWN_WAIT_TIMEOUT_SECONDS: ${{ inputs.teardown-wait-timeout-seconds }}
+      run: |
+        set -euo pipefail
+        source "${GITHUB_ACTION_PATH}/lib.sh"
+
+        info_hash="${CONTENT_NAME#pc-}"
+        seeder_deployment="kezio-seeder-${info_hash}"
+
+        trap 'dump_seeder_diagnostics "${NAMESPACE}" "${seeder_deployment}"' ERR
+
+        echo "Setting seed-demand on ${CONTENT_NAME} for a fresh demand cycle"
+        kubectl annotate partitioncontents.kezio.kojuro.date "${CONTENT_NAME}" -n "${NAMESPACE}" \
+          "kezio.kojuro.date/seed-demand=true" --overwrite
+        kubectl wait --for=condition=Available "deployment/${seeder_deployment}" -n "${NAMESPACE}" \
+          --timeout="${SEEDER_WAIT_TIMEOUT_SECONDS}s"
+
+        echo "Clearing seed-demand on ${CONTENT_NAME}"
+        kubectl annotate partitioncontents.kezio.kojuro.date "${CONTENT_NAME}" -n "${NAMESPACE}" \
+          "kezio.kojuro.date/seed-demand-" --overwrite
+
+        early_check_delay=5
+        if [ "${early_check_delay}" -ge "${GRACE_PERIOD_SECONDS}" ]; then
+          early_check_delay=0
+        fi
+        sleep "${early_check_delay}"
+        echo "Asserting the seeder Deployment ${seeder_deployment} was not torn down before its grace period elapsed"
+        if ! kubectl get deployment "${seeder_deployment}" -n "${NAMESPACE}" >/dev/null 2>&1; then
+          echo "::error::seeder deployment ${seeder_deployment} was deleted before grace-period-seconds (${GRACE_PERIOD_SECONDS}s) could have elapsed" >&2
+          exit 1
+        fi
+
+        echo "Waiting up to ${TEARDOWN_WAIT_TIMEOUT_SECONDS}s for ${seeder_deployment} to be torn down after grace"
+        deadline=$(( $(date +%s) + TEARDOWN_WAIT_TIMEOUT_SECONDS ))
+        while kubectl get deployment "${seeder_deployment}" -n "${NAMESPACE}" >/dev/null 2>&1; do
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::seeder deployment ${seeder_deployment} was not torn down within ${TEARDOWN_WAIT_TIMEOUT_SECONDS}s of grace-period-seconds (${GRACE_PERIOD_SECONDS}s) elapsing" >&2
+            exit 1
+          fi
+          sleep 3
+        done
+        echo "grace-shutdown assertions passed: torn down neither early nor never"
+
+    # --- Step group 4: deletion semantics ----------------------------------
+    #
+    # Deletes the three Images created above one at a time, observing the
+    # PartitionContentFinalizer's contract at each step: the shared content
+    # survives while any Image still references it; a direct delete against
+    # the content itself while still referenced blocks (DeletionBlocked,
+    # deletionTimestamp set, object persists) rather than either succeeding
+    # or being silently ignored; and once the last referencing Image is
+    # gone, the pending delete completes on its own (the Image-deletion
+    # watch, not a poll) and ordinary garbage collection reclaims the
+    # content PVC.
+    - name: "Deletion: content survives partial dereference, blocks under a direct delete, completes once unreferenced"
+      id: deletion
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        CONTENT_NAME: ${{ inputs.content-name }}
+        FIRST_IMAGE_NAME: ${{ inputs.first-image-name }}
+        SECOND_IMAGE_NAME: ${{ inputs.second-image-name }}
+        COMPOSED_IMAGE_NAME: ${{ inputs.composed-image-name }}
+        DELETION_WAIT_TIMEOUT_SECONDS: ${{ inputs.deletion-wait-timeout-seconds }}
+      run: |
+        set -euo pipefail
+        source "${GITHUB_ACTION_PATH}/lib.sh"
+
+        trap 'dump_content_diagnostics "${NAMESPACE}" "${CONTENT_NAME}"' ERR
+
+        echo "Deleting the first Image (${FIRST_IMAGE_NAME}) - two other Images still reference ${CONTENT_NAME}"
+        kubectl delete images.kezio.kojuro.date "${FIRST_IMAGE_NAME}" -n "${NAMESPACE}" --wait=false
+        wait_for_gone "images.kezio.kojuro.date" "${FIRST_IMAGE_NAME}" "${NAMESPACE}" "${DELETION_WAIT_TIMEOUT_SECONDS}"
+
+        echo "Asserting ${CONTENT_NAME} survives, still Ready"
+        content_state="$(jp "${NAMESPACE}" partitioncontents.kezio.kojuro.date "${CONTENT_NAME}" '{.status.state}')"
+        if [ "${content_state}" != "Ready" ]; then
+          echo "::error::PartitionContent ${CONTENT_NAME} is ${content_state:-<gone>} after only one of its three referencing Images was deleted" >&2
+          exit 1
+        fi
+
+        echo "Attempting to delete ${CONTENT_NAME} directly while ${SECOND_IMAGE_NAME}/${COMPOSED_IMAGE_NAME} still reference it"
+        kubectl delete partitioncontents.kezio.kojuro.date "${CONTENT_NAME}" -n "${NAMESPACE}" --wait=false
+
+        deadline=$(( $(date +%s) + DELETION_WAIT_TIMEOUT_SECONDS ))
+        blocked=""
+        while [ "$(date +%s)" -lt "${deadline}" ]; do
+          deletion_ts="$(jp "${NAMESPACE}" partitioncontents.kezio.kojuro.date "${CONTENT_NAME}" '{.metadata.deletionTimestamp}')"
+          blocked_status="$(jp "${NAMESPACE}" partitioncontents.kezio.kojuro.date "${CONTENT_NAME}" '{.status.conditions[?(@.type=="DeletionBlocked")].status}')"
+          if [ -n "${deletion_ts}" ] && [ "${blocked_status}" = "True" ]; then
+            blocked="1"
+            break
+          fi
+          sleep 3
+        done
+        if [ -z "${blocked}" ]; then
+          echo "::error::PartitionContent ${CONTENT_NAME} did not report deletionTimestamp set with DeletionBlocked=True while still referenced" >&2
+          exit 1
+        fi
+        blocked_message="$(jp "${NAMESPACE}" partitioncontents.kezio.kojuro.date "${CONTENT_NAME}" '{.status.conditions[?(@.type=="DeletionBlocked")].message}')"
+        echo "DeletionBlocked message: ${blocked_message}"
+        case "${blocked_message}" in
+          *image/*) ;;
+          *) echo "::error::DeletionBlocked message does not name a blocking image: ${blocked_message}" >&2; exit 1 ;;
+        esac
+        # Still persists - the finalizer, not this delete call, decides.
+        kubectl get partitioncontents.kezio.kojuro.date "${CONTENT_NAME}" -n "${NAMESPACE}" >/dev/null
+
+        pvc_name="$(jp "${NAMESPACE}" partitioncontents.kezio.kojuro.date "${CONTENT_NAME}" '{.status.pvcRef.name}')"
+        echo "Deleting the two remaining Images (${SECOND_IMAGE_NAME}, ${COMPOSED_IMAGE_NAME})"
+        kubectl delete images.kezio.kojuro.date "${SECOND_IMAGE_NAME}" "${COMPOSED_IMAGE_NAME}" -n "${NAMESPACE}" --wait=false
+
+        echo "Asserting the pending PartitionContent delete now completes on its own"
+        wait_for_gone "partitioncontents.kezio.kojuro.date" "${CONTENT_NAME}" "${NAMESPACE}" "${DELETION_WAIT_TIMEOUT_SECONDS}"
+
+        echo "Asserting its content PVC (${pvc_name}) was garbage-collected"
+        wait_for_gone "pvc" "${pvc_name}" "${NAMESPACE}" "${DELETION_WAIT_TIMEOUT_SECONDS}"
+        echo "deletion-semantics assertions passed"

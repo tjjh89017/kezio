@@ -51,6 +51,12 @@ outputs:
   partition-size-bytes:
     description: 'Size in bytes of the fixture disk''s one partition.'
     value: ${{ steps.fixture.outputs.partition-size-bytes }}
+  disk-path:
+    description: 'Runner-local path to the fixture disk image, for a downstream re-upload of the identical bytes (e.g. assert-image-plane-semantics'' dedupe check) without rebuilding the fixture.'
+    value: ${{ steps.fixture.outputs.disk-path }}
+  layout-path:
+    description: 'Runner-local path to the layout JSON file (kezioctl image upload --layout''s input shape) describing the fixture, for reuse the same way as disk-path.'
+    value: ${{ steps.fixture.outputs.layout-path }}
 
 runs:
   using: composite
