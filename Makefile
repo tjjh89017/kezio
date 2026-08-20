@@ -170,6 +170,10 @@ build: manifests generate fmt vet ## Build manager binary.
 build-kezioctl: fmt vet ## Build the kezioctl CLI binary.
 	go build -o bin/kezioctl ./cmd/kezioctl
 
+.PHONY: build-ingest
+build-ingest: fmt vet ## Build the kezio-ingest binary (runs inside the Image/PartitionContent controllers' Jobs).
+	go build -o bin/kezio-ingest ./cmd/ingest
+
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go
@@ -201,6 +205,20 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
 	- $(CONTAINER_TOOL) buildx rm scaffold-builder
 	rm Dockerfile.cross
+
+# INGEST_IMG is the image tag for kezio-ingest. It is a separate image
+# from IMG (the controller manager) because it runs as a Job pod (not a
+# Deployment) and needs partclone/qemu-img/sfdisk/blkid installed; see
+# docker/ingest/Dockerfile.
+INGEST_IMG ?= $(IMAGE_TAG_BASE)-ingest:latest
+
+.PHONY: docker-build-ingest
+docker-build-ingest: ## Build docker image for kezio-ingest.
+	$(CONTAINER_TOOL) build -t ${INGEST_IMG} -f docker/ingest/Dockerfile .
+
+.PHONY: docker-push-ingest
+docker-push-ingest: ## Push docker image for kezio-ingest.
+	$(CONTAINER_TOOL) push ${INGEST_IMG}
 
 # SEEDER_IMG is the image tag for the ezio seeder container
 # (docker/seeder/Dockerfile). It ships no kezio Go binary build target of

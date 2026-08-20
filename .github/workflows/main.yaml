@@ -39,7 +39,9 @@ jobs:
 
   # Image <-> Dockerfile mapping grows one row per component as later
   # stages add it. Seeder is amd64-only: ezio's C++ build (cmake/boost/
-  # libtorrent) is too slow under QEMU emulation.
+  # libtorrent) is too slow under QEMU emulation. Ingest ships only apt
+  # packages (partclone/qemu-utils/util-linux/fdisk) plus a CGO_ENABLED=0
+  # Go binary, so it builds natively for both platforms.
   images:
     name: ${{ matrix.name }}
     needs: [lint, test]
@@ -57,6 +59,11 @@ jobs:
             dockerfile: Dockerfile
             platforms: linux/amd64,linux/arm64
             local-tag: example.com/kezio:e2e
+          - name: ingest
+            image: kezio-ingest
+            dockerfile: docker/ingest/Dockerfile
+            platforms: linux/amd64,linux/arm64
+            local-tag: example.com/kezio-ingest:e2e
           - name: seeder
             image: kezio-seeder
             dockerfile: docker/seeder/Dockerfile
