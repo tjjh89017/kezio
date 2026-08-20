@@ -264,7 +264,7 @@ var _ = Describe("Image Controller", func() {
 		Expect(got.Status.SourceChecksum).To(Equal(img.Spec.Source.Checksum))
 	})
 
-	It("holds source-bearing Images at Pending with IngestPending when ingest is configured but content is not ready", func() {
+	It("dispatches an ingest Job and records Ingesting when ingest is configured but content is not ready", func() {
 		img := newTestImageWithSlots("image-ingest-pending", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: "pc-" + imageTestHash(6)}},
 		}, &keziov1alpha2.ImageSource{URL: "https://example.test/disk.img", Checksum: imageTestChecksum(2)})
@@ -273,15 +273,20 @@ var _ = Describe("Image Controller", func() {
 
 		r := &ImageReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Ingest: ImageIngestConfig{Image: "example.test/kezio-ingest:test"}}
 		nn := types.NamespacedName{Name: img.Name, Namespace: "default"}
-		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
+		Expect(result.RequeueAfter).To(BeNumerically(">", 0))
 
 		var got keziov1alpha2.Image
 		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
-		Expect(got.Status.State).To(Equal(keziov1alpha2.ImageStatePending))
+		Expect(got.Status.State).To(Equal(keziov1alpha2.ImageStateIngesting))
 		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.ImageConditionReady)
 		Expect(readyCond).NotTo(BeNil())
-		Expect(readyCond.Reason).To(Equal("IngestPending"))
+		Expect(readyCond.Reason).To(Equal("IngestJobCreated"))
+
+		var job batchv1.Job
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ingestJobName(img), Namespace: "default"}, &job)).To(Succeed())
+		Expect(job.Spec.Template.Spec.Containers[0].Image).To(Equal("example.test/kezio-ingest:test"))
 	})
 
 	It("sets Valid=False and keeps Ready=False when a slot's sizeBytes is smaller than its content's lastExtentEnd, for an Image admitted before the content existed", func() {

@@ -21,6 +21,8 @@ import (
 	"reflect"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -44,12 +46,17 @@ var imageStaleContentRequeueInterval = 5 * time.Second
 
 // ImageReconciler reconciles a Image object.
 //
-// This reconciler is thin: it aggregates the readiness of an Image's
-// referenced PartitionContent objects into Ready/Valid conditions and
-// status.state. It owns no seeders and creates no PVCs of its own (see
-// ImageStatus's doc comment) - those belong to PartitionContent. A
-// composed Image (no spec.source) is create-only metadata over existing
-// content: reconciling it is pure aggregation, triggering no ingest.
+// This reconciler aggregates the readiness of an Image's referenced
+// PartitionContent objects into Ready/Valid conditions and status.state.
+// It owns no seeders (those belong to PartitionContent). A composed Image
+// (no spec.source) is create-only metadata over existing content:
+// reconciling it is pure aggregation, triggering no ingest. A
+// source-bearing Image additionally owns one ingest Job and its scratch
+// PVC (see image_ingest.go): reconcileIngesting creates or observes that
+// Job and, once it succeeds, creates the PartitionContent objects its
+// declared contentRef slots name (or reuses them, content-addressed, if
+// they already exist) - it never creates a PartitionContent's own
+// content PVC or publish Job itself, those stay PartitionContent's own.
 type ImageReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -62,7 +69,10 @@ type ImageReconciler struct {
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=images,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=images/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=images/finalizers,verbs=update
-// +kubebuilder:rbac:groups=kezio.kojuro.date,resources=partitioncontents,verbs=get;list;watch
+// +kubebuilder:rbac:groups=kezio.kojuro.date,resources=partitioncontents,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -183,6 +193,8 @@ func (r *ImageReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&keziov1alpha2.Image{}, builder.WithPredicates(imageUpdatePredicate)).
+		Owns(&batchv1.Job{}).
+		Owns(&corev1.PersistentVolumeClaim{}).
 		Watches(&keziov1alpha2.PartitionContent{}, handler.EnqueueRequestsFromMapFunc(r.mapPartitionContentToImages), builder.WithPredicates(partitionContentStatusChangedPredicate)).
 		Named("image").
 		Complete(r)

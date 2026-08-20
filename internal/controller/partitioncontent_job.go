@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -82,9 +83,18 @@ func (r *PartitionContentReconciler) createPublishJob(ctx context.Context, pc *k
 // publish step for pc's content: it mounts the content PVC at
 // ingest.ContentMountPath(hash) - the same mount-path convention the
 // seeder and the e2e lane use - and announces to r.Publish.TrackerURL.
-// The scratch volume holding the ingest-side source content is wired by
-// the Image-side ingest orchestration, out of scope here; this Job's
-// shape is otherwise complete and does not change once that lands.
+//
+// It also mounts, read-only, the ingest scratch PVC of the Image named
+// by pc.Spec.Source.ImageName (ingestScratchPVCName, image_ingest.go's
+// naming convention) at ingest.DefaultWorkDir: that is where the ingest
+// Job left this partition's already-sliced content directory
+// (content-<pc.Spec.Source.PartitionNumber>, see
+// internal/ingest/orchestrator.go's processPartition). SOURCE_CONTENT_DIR
+// names that directory so cmd/ingest's publish mode knows where to copy
+// from - PublishPartition.SourceDir (internal/ingest/publish.go). Every
+// PartitionContent this controller ever publishes was created by the
+// Image-side ingest orchestration (image_ingest.go's ensurePartitionContent),
+// so Source is always populated by the time a publish Job is built.
 func (r *PartitionContentReconciler) buildPublishJob(pc *keziov1alpha2.PartitionContent, hash store.InfoHash, pvcName string) *batchv1.Job {
 	backoffLimit := int32(publishJobBackoffLimit)
 	labels := map[string]string{
@@ -93,9 +103,13 @@ func (r *PartitionContentReconciler) buildPublishJob(pc *keziov1alpha2.Partition
 	}
 
 	const contentVolumeName = "content"
+	const scratchVolumeName = "scratch"
 	runAsUser := int64(65532)
 	trueVal := true
 	falseVal := false
+
+	scratchPVCName := ingestScratchPVCName(pc.Spec.Source.ImageName)
+	sourceContentDir := filepath.Join(ingest.DefaultWorkDir, fmt.Sprintf("content-%d", pc.Spec.Source.PartitionNumber))
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -125,11 +139,19 @@ func (r *PartitionContentReconciler) buildPublishJob(pc *keziov1alpha2.Partition
 							{Name: "INGEST_MODE", Value: "publish"},
 							{Name: "TRACKER_URL", Value: r.Publish.TrackerURL},
 							{Name: "PARTITION_CONTENT_HASH", Value: hash.String()},
+							{Name: "SOURCE_CONTENT_DIR", Value: sourceContentDir},
 						},
-						VolumeMounts: []corev1.VolumeMount{{
-							Name:      contentVolumeName,
-							MountPath: ingest.ContentMountPath(hash),
-						}},
+						VolumeMounts: []corev1.VolumeMount{
+							{
+								Name:      contentVolumeName,
+								MountPath: ingest.ContentMountPath(hash),
+							},
+							{
+								Name:      scratchVolumeName,
+								MountPath: ingest.DefaultWorkDir,
+								ReadOnly:  true,
+							},
+						},
 						TerminationMessagePath:   "/dev/termination-log",
 						TerminationMessagePolicy: corev1.TerminationMessageReadFile,
 						SecurityContext: &corev1.SecurityContext{
@@ -137,12 +159,20 @@ func (r *PartitionContentReconciler) buildPublishJob(pc *keziov1alpha2.Partition
 							Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 						},
 					}},
-					Volumes: []corev1.Volume{{
-						Name: contentVolumeName,
-						VolumeSource: corev1.VolumeSource{
-							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvcName},
+					Volumes: []corev1.Volume{
+						{
+							Name: contentVolumeName,
+							VolumeSource: corev1.VolumeSource{
+								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvcName},
+							},
 						},
-					}},
+						{
+							Name: scratchVolumeName,
+							VolumeSource: corev1.VolumeSource{
+								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: scratchPVCName, ReadOnly: true},
+							},
+						},
+					},
 				},
 			},
 		},

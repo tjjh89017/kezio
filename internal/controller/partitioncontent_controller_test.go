@@ -200,8 +200,16 @@ var _ = Describe("PartitionContent Controller", func() {
 			}
 		}
 		Expect(trackerEnv).To(Equal(publish.TrackerURL))
-		Expect(container.VolumeMounts).To(HaveLen(1))
-		Expect(container.VolumeMounts[0].MountPath).To(Equal(ingest.ContentMountPath(hash)))
+		Expect(container.VolumeMounts).To(HaveLen(2))
+		Expect(container.VolumeMounts).To(ContainElement(corev1.VolumeMount{
+			Name:      "content",
+			MountPath: ingest.ContentMountPath(hash),
+		}))
+		Expect(container.VolumeMounts).To(ContainElement(corev1.VolumeMount{
+			Name:      "scratch",
+			MountPath: ingest.DefaultWorkDir,
+			ReadOnly:  true,
+		}))
 
 		var afterCreate keziov1alpha2.PartitionContent
 		Expect(k8sClient.Get(ctx, nn, &afterCreate)).To(Succeed())

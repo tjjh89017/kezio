@@ -21,6 +21,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -310,9 +311,27 @@ func main() {
 // unset yields a config that is not ready(): the reconciler holds every
 // source-bearing Image at Pending with a condition explaining why.
 func imageIngestConfigFromEnv() controller.ImageIngestConfig {
-	return controller.ImageIngestConfig{
-		Image: os.Getenv("IMAGE_INGEST_IMAGE"),
+	cfg := controller.ImageIngestConfig{
+		Image:                   os.Getenv("IMAGE_INGEST_IMAGE"),
+		SourceFormat:            os.Getenv("IMAGE_INGEST_SOURCE_FORMAT"),
+		ServiceAccountName:      os.Getenv("IMAGE_INGEST_SERVICE_ACCOUNT"),
+		ScratchStorageClassName: os.Getenv("IMAGE_INGEST_SCRATCH_STORAGE_CLASS"),
+		StagingPVCName:          os.Getenv("IMAGE_INGEST_STAGING_PVC"),
 	}
+	if v := os.Getenv("IMAGE_INGEST_SCRATCH_SIZE_BYTES"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n <= 0 {
+			setupLog.Error(err, "invalid IMAGE_INGEST_SCRATCH_SIZE_BYTES, using default", "value", v)
+		} else {
+			cfg.ScratchSizeBytes = n
+		}
+	}
+	if modes := os.Getenv("IMAGE_INGEST_SCRATCH_ACCESS_MODES"); modes != "" {
+		for _, m := range strings.Split(modes, ",") {
+			cfg.ScratchAccessModes = append(cfg.ScratchAccessModes, corev1.PersistentVolumeAccessMode(strings.TrimSpace(m)))
+		}
+	}
+	return cfg
 }
 
 // partitionContentPublishConfigFromEnv builds the PartitionContent
