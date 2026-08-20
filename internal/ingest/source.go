@@ -20,14 +20,15 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/tjjh89017/kezio/internal/imageservice"
 )
 
 // StagedURLScheme is the URL scheme an Image's spec.source.url uses to
 // name an upload already sitting on a shared staging volume, in place of
-// an http(s):// URL to fetch. It is a plain string constant, not an
-// import, because the staging-side writer (image-service) has not been
-// ported into this tree yet; both sides must keep this value identical.
-const StagedURLScheme = "kezio-staged"
+// an http(s):// URL to fetch. imageservice, the staging-side writer, owns
+// this value; ingest only resolves it.
+const StagedURLScheme = imageservice.StagedURLScheme
 
 // Downloader fetches an http(s):// URL to a local file. The exec-backed
 // production implementation lives in cmd/ingest; tests use a fake.
