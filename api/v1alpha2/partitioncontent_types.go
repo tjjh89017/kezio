@@ -95,9 +95,16 @@ const (
 	// seeder's address - plan builders resolve the seeder Pod address at
 	// plan time, not from this status.
 	PartitionContentConditionReady = "Ready"
-	// PartitionContentConditionValid reports whether the ingested content
-	// passed validation (for example, that the recorded pieceLength
-	// actually hashes to this object's name).
+	// PartitionContentConditionValid reflects spec-level validity only:
+	// PartitionContentSpec is CEL-validated and immutable at admission, so
+	// this is trivially True for any admitted object. It exists so this
+	// kind satisfies the uniform cross-reference contract (referenced
+	// kinds expose Ready and Valid with a current observedGeneration) - it
+	// makes no content-integrity claim. Content bytes and piece hashes are
+	// taken on trust from ingest (see store.ValidateContentDir); integrity
+	// is established once, at ingest time, by the ingest pipeline's
+	// checksum verification (internal/ingest.VerifyChecksum, and the
+	// upload-time check in internal/imageservice), not rechecked here.
 	PartitionContentConditionValid = "Valid"
 	// PartitionContentConditionSeederDegraded is True when the content has
 	// fewer seeders than the operator considers safe, without affecting
