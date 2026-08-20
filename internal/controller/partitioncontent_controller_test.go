@@ -51,7 +51,17 @@ var _ = Describe("PartitionContent Controller", func() {
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: keziov1alpha2.PartitionContentSpec{
+						FSType:        "ext4",
+						UsedBytes:     1024,
+						SizeBytes:     2048,
+						LastExtentEnd: 2048,
+						PieceLength:   16384,
+						Source: keziov1alpha2.PartitionContentSource{
+							ImageName:       "image-a",
+							PartitionNumber: 1,
+						},
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}

@@ -14,10 +14,23 @@ spec:
     singular: partitioncontent
   scope: Namespaced
   versions:
-  - name: v1alpha2
+  - additionalPrinterColumns:
+    - jsonPath: .status.state
+      name: State
+      type: string
+    - jsonPath: .spec.fsType
+      name: FSType
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha2
     schema:
       openAPIV3Schema:
-        description: PartitionContent is the Schema for the partitioncontents API.
+        description: |-
+          PartitionContent is the Schema for the partitioncontents API. Its name
+          is the BitTorrent v1 info hash of its content, prefixed "pc-"; the
+          PartitionContent webhook enforces that name shape.
         properties:
           apiVersion:
             description: |-
@@ -37,15 +50,205 @@ spec:
           metadata:
             type: object
           spec:
-            description: PartitionContentSpec defines the desired state of PartitionContent.
+            description: |-
+              PartitionContentSpec defines the desired state of PartitionContent. It
+              is the immutable, content-addressed record of one partition's data (see
+              the type-level XValidation rule): every field describes the bytes
+              identified by the object's name, so none of them can change without
+              changing what the name identifies.
             properties:
-              foo:
-                description: Foo is an example field of PartitionContent. Edit partitioncontent_types.go
-                  to remove/update
+              fsType:
+                description: |-
+                  FSType is the filesystem type of the partition, for example "ext4"
+                  or "ntfs".
+                maxLength: 64
+                minLength: 1
                 type: string
+              lastExtentEnd:
+                description: |-
+                  LastExtentEnd is the end offset of the highest extent written at
+                  ingest. Extents write at absolute offsets, so a target partition
+                  must be at least this large; Image slot-size validation reads this
+                  field to enforce that.
+                format: int64
+                minimum: 0
+                type: integer
+              pieceLength:
+                description: |-
+                  PieceLength is the BitTorrent piece length used to hash this
+                  content. It is a pinned constant, recorded here only: a piece
+                  length that varies between ingests of identical bytes would fork
+                  them into different info hashes, breaking the content-addressed
+                  dedupe this object exists for.
+                format: int64
+                minimum: 1
+                type: integer
+              sizeBytes:
+                description: SizeBytes is the partition's size at capture.
+                format: int64
+                minimum: 0
+                type: integer
+              source:
+                description: |-
+                  Source records where this content was first ingested from, for
+                  audit only.
+                properties:
+                  imageName:
+                    description: ImageName is the name of the Image this content was
+                      captured from.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  partitionNumber:
+                    description: |-
+                      PartitionNumber is the partition number within that Image this
+                      content was captured from.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                required:
+                - imageName
+                - partitionNumber
+                type: object
+              usedBytes:
+                description: |-
+                  UsedBytes is the number of bytes of real data in the partition, as
+                  measured at capture.
+                format: int64
+                minimum: 0
+                type: integer
+            required:
+            - fsType
+            - lastExtentEnd
+            - pieceLength
+            - sizeBytes
+            - source
+            - usedBytes
             type: object
+            x-kubernetes-validations:
+            - message: spec is immutable
+              rule: self == oldSelf
           status:
             description: PartitionContentStatus defines the observed state of PartitionContent.
+            properties:
+              conditions:
+                description: Conditions report the current state of this content.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              pvcRef:
+                description: |-
+                  PVCRef names the PVC holding this content's bytes, in the same
+                  namespace as this object.
+                properties:
+                  name:
+                    description: |-
+                      Post-mutation admission always re-serialises this struct, so a
+                      zero-value Name would otherwise satisfy "required"; MinLength closes
+                      that gap.
+                    minLength: 1
+                    type: string
+                  namespace:
+                    type: string
+                required:
+                - name
+                type: object
+              seeders:
+                description: |-
+                  Seeders is the per-site seeder count for this content. It never
+                  carries a seeder's network address - plan builders resolve the
+                  seeder Pod address at plan time.
+                items:
+                  description: PartitionContentSeederSite counts seeders for this
+                    content at one site.
+                  properties:
+                    machineCount:
+                      description: |-
+                        MachineCount is the number of machines seeding this content at
+                        this site.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    site:
+                      description: Site identifies the seeding site, for example a
+                        rack or DC name.
+                      maxLength: 253
+                      type: string
+                  required:
+                  - machineCount
+                  - site
+                  type: object
+                maxItems: 64
+                type: array
+              state:
+                description: State is the object's position in the publish workflow.
+                enum:
+                - Pending
+                - Publishing
+                - Ready
+                - Failed
+                type: string
+              torrentPath:
+                description: |-
+                  TorrentPath is the path of the .torrent file within the PVC named
+                  by PVCRef. Only meaningful once State is Ready.
+                maxLength: 4096
+                type: string
             type: object
         type: object
     served: true

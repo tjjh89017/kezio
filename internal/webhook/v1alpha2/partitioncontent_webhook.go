@@ -19,6 +19,7 @@ package v1alpha2
 import (
 	"context"
 	"fmt"
+	"regexp"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -28,6 +29,11 @@ import (
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 )
+
+// partitionContentNamePattern matches "pc-" followed by a 40-character hex
+// BitTorrent v1 info hash. CRD schema CEL cannot reach metadata.name, so
+// this rule lives in the webhook instead of the CRD.
+var partitionContentNamePattern = regexp.MustCompile(`^pc-[0-9a-f]{40}$`)
 
 // nolint:unused
 // log is for logging in this package.
@@ -66,9 +72,7 @@ func (v *PartitionContentCustomValidator) ValidateCreate(_ context.Context, obj 
 	}
 	partitioncontentlog.Info("Validation for PartitionContent upon creation", "name", partitioncontent.GetName())
 
-	// TODO(user): fill in your validation logic upon object creation.
-
-	return nil, nil
+	return nil, validatePartitionContentName(partitioncontent)
 }
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type PartitionContent.
@@ -92,7 +96,15 @@ func (v *PartitionContentCustomValidator) ValidateDelete(ctx context.Context, ob
 	}
 	partitioncontentlog.Info("Validation for PartitionContent upon deletion", "name", partitioncontent.GetName())
 
-	// TODO(user): fill in your validation logic upon object deletion.
-
 	return nil, nil
+}
+
+// validatePartitionContentName rejects a name that is not "pc-" followed by
+// a 40-character hex BitTorrent v1 info hash. Name is immutable in
+// Kubernetes, so this check only needs to run on create.
+func validatePartitionContentName(pc *keziov1alpha2.PartitionContent) error {
+	if !partitionContentNamePattern.MatchString(pc.GetName()) {
+		return fmt.Errorf("metadata.name %q must match %q (a BitTorrent v1 info hash prefixed \"pc-\")", pc.GetName(), partitionContentNamePattern.String())
+	}
+	return nil
 }
