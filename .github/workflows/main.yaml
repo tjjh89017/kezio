@@ -41,7 +41,9 @@ jobs:
   # stages add it. Seeder is amd64-only: ezio's C++ build (cmake/boost/
   # libtorrent) is too slow under QEMU emulation. Ingest ships only apt
   # packages (partclone/qemu-utils/util-linux/fdisk) plus a CGO_ENABLED=0
-  # Go binary, so it builds natively for both platforms.
+  # Go binary, so it builds natively for both platforms. image-service is a
+  # plain CGO_ENABLED=0 Go binary with no external tools at all (no apt
+  # packages), so it also builds natively for both platforms.
   images:
     name: ${{ matrix.name }}
     needs: [lint, test]
@@ -69,6 +71,11 @@ jobs:
             dockerfile: docker/seeder/Dockerfile
             platforms: linux/amd64
             local-tag: example.com/kezio-seeder:e2e
+          - name: image-service
+            image: kezio-image-service
+            dockerfile: docker/image-service/Dockerfile
+            platforms: linux/amd64,linux/arm64
+            local-tag: example.com/kezio-image-service:e2e
     steps:
       - uses: actions/checkout@v4
 
@@ -228,16 +235,22 @@ jobs:
           name: image-tar-manager
           path: /tmp/images
 
+      - name: Download the image-service image tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: image-tar-image-service
+          path: /tmp/images
+
       - name: Install RKE2
         uses: ./.github/actions/install-rke2
         with:
           rke2-version: "v1.36.2+rke2r1"
           enable-multus: "false"
 
-      - name: Import the manager image into RKE2 containerd
+      - name: Import the manager and image-service images into RKE2 containerd
         uses: ./.github/actions/import-image-tarballs
         with:
-          images: manager
+          images: manager image-service
 
       - name: Install local-path-provisioner and mark it the default StorageClass
         uses: ./.github/actions/install-local-path-provisioner
@@ -253,10 +266,17 @@ jobs:
       # The manager-image tag must match the local-tag the images job
       # baked into the tarball above, so the manager Deployment resolves
       # it from containerd instead of pulling from a registry.
+      #
+      # IMAGE_INGEST_STAGING_PVC must name the PVC image-service actually
+      # deploys below (config/image-service's namePrefix "kezio-" applied
+      # to "image-service-staging"), so a kezio-staged:// source resolves
+      # in the same lane.
       - name: Deploy kezio CRDs and controller-manager
         uses: ./.github/actions/deploy-kezio
         with:
           manager-image: example.com/kezio:e2e
+          extra-env: |
+            IMAGE_INGEST_STAGING_PVC=kezio-image-service-staging
 
       - name: Deploy opentracker
         uses: ./.github/actions/deploy-opentracker
@@ -265,6 +285,17 @@ jobs:
         uses: ./.github/actions/create-image-service-token-secret
         with:
           token: ${{ env.IMAGE_SERVICE_TOKEN }}
+
+      # local-path-provisioner (installed above) only satisfies
+      # ReadWriteOnce, so this lane opts the staging PVC into RWO here -
+      # config/image-service's own default stays ReadWriteMany for every
+      # other deployer; see deploy-image-service's staging-access-mode
+      # input doc for why.
+      - name: Deploy image-service
+        uses: ./.github/actions/deploy-image-service
+        with:
+          image-service-image: example.com/kezio-image-service:e2e
+          staging-access-mode: "ReadWriteOnce"
 
       - name: Verify image-path prerequisites
         uses: ./.github/actions/verify-image-path-prerequisites

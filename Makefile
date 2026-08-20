@@ -234,6 +234,20 @@ docker-build-seeder: ## Build docker image for the ezio seeder.
 docker-push-seeder: ## Push docker image for the ezio seeder.
 	$(CONTAINER_TOOL) push ${SEEDER_IMG}
 
+# IMAGE_SERVICE_IMG is the image tag for image-service. It is a separate
+# image from IMG (the controller manager) because it mounts a different
+# volume (the staging PVC, not the slice store) and scales independently
+# of the reconcile loop; see docker/image-service/Dockerfile.
+IMAGE_SERVICE_IMG ?= $(IMAGE_TAG_BASE)-image-service:latest
+
+.PHONY: docker-build-image-service
+docker-build-image-service: ## Build docker image for image-service.
+	$(CONTAINER_TOOL) build -t ${IMAGE_SERVICE_IMG} -f docker/image-service/Dockerfile .
+
+.PHONY: docker-push-image-service
+docker-push-image-service: ## Push docker image for image-service.
+	$(CONTAINER_TOOL) push ${IMAGE_SERVICE_IMG}
+
 .PHONY: build-installer
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
 	mkdir -p dist

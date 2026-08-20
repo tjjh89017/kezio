@@ -1,0 +1,78 @@
+name: Deploy image-service
+
+description: >-
+  Points config/image-service's kustomize image at the calling job's
+  image-service image, applies it, and waits for the Deployment to become
+  ready. The image-service-token Secret must already exist in the target
+  namespace (see ./create-image-service-token-secret) - the Deployment
+  will not become Ready without it.
+
+inputs:
+  image-service-image:
+    description: 'image-service image reference, e.g. "ghcr.io/tjjh89017/kezio-image-service:main".'
+    required: true
+  namespace:
+    description: 'Namespace the kustomize overlay deploys image-service into.'
+    required: false
+    default: "scaffold-system"
+  kustomize-dir:
+    description: 'Kustomize overlay directory to apply.'
+    required: false
+    default: "config/image-service"
+  timeout:
+    description: 'Timeout for the image-service rollout wait, e.g. "180s".'
+    required: false
+    default: "180s"
+  staging-access-mode:
+    description: >-
+      Overrides the staging PVC's accessModes for this deployment only.
+      Empty (the default) applies config/image-service unmodified
+      (ReadWriteMany). Set to "ReadWriteOnce" for a lane whose
+      StorageClass cannot satisfy RWX (e.g. local-path-provisioner in the
+      image-path e2e lane) - production defaults are never patched this
+      way; only this action's caller opts in.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Deploy image-service
+      shell: bash
+      env:
+        IMAGE_SERVICE_IMG: ${{ inputs.image-service-image }}
+        NAMESPACE: ${{ inputs.namespace }}
+        KUSTOMIZE_DIR: ${{ inputs.kustomize-dir }}
+        TIMEOUT: ${{ inputs.timeout }}
+        STAGING_ACCESS_MODE: ${{ inputs.staging-access-mode }}
+      run: |
+        set -euo pipefail
+        make kustomize
+        (cd "${KUSTOMIZE_DIR}" && ../../bin/kustomize edit set image "image-service=${IMAGE_SERVICE_IMG}")
+
+        build_dir="${KUSTOMIZE_DIR}"
+        if [ -n "${STAGING_ACCESS_MODE}" ]; then
+          # e2e-only accommodation: some lanes (image-path, on
+          # local-path-provisioner) have no StorageClass that satisfies
+          # ReadWriteMany. This overlay exists only for that lane; it never
+          # touches config/image-service's own ReadWriteMany default.
+          # Kustomize forbids an absolute-path or out-of-tree resource
+          # reference, so the overlay must live inside the repo checkout;
+          # it's removed again once the build below has run.
+          overlay_dir="$(mktemp -d -p "$(pwd)")"
+          trap 'rm -rf "${overlay_dir}"' EXIT
+          (
+            cd "${overlay_dir}"
+            ../bin/kustomize create --resources "../${KUSTOMIZE_DIR}"
+            ../bin/kustomize edit add patch \
+              --kind PersistentVolumeClaim \
+              --label-selector "app.kubernetes.io/component=image-service" \
+              --patch "[{\"op\": \"replace\", \"path\": \"/spec/accessModes\", \"value\": [\"${STAGING_ACCESS_MODE}\"]}]"
+          )
+          build_dir="${overlay_dir}"
+        fi
+
+        bin/kustomize build "${build_dir}" | kubectl apply -f -
+        deployment="$(kubectl get deployment -n "${NAMESPACE}" -l app.kubernetes.io/component=image-service \
+          -o jsonpath='{.items[0].metadata.name}')"
+        kubectl rollout status deployment/"${deployment}" -n "${NAMESPACE}" --timeout="${TIMEOUT}"
