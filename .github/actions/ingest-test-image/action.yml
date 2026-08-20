@@ -136,10 +136,18 @@ runs:
           echo "::group::PartitionContents"
           kubectl get partitioncontents.kezio.kojuro.date -n "${NAMESPACE}" -o yaml || true
           echo "::endgroup::"
+          echo "::group::PersistentVolumeClaims"
+          kubectl get pvc -n "${NAMESPACE}" -o wide || true
+          echo "::endgroup::"
           echo "::group::ingest/publish Jobs"
           kubectl get jobs -n "${NAMESPACE}" -l "app.kubernetes.io/name=kezio" -o wide || true
           kubectl describe jobs -n "${NAMESPACE}" -l "app.kubernetes.io/component=image-ingest-job" || true
           kubectl describe jobs -n "${NAMESPACE}" -l "app.kubernetes.io/component=partition-content-publish" || true
+          echo "::endgroup::"
+          echo "::group::ingest/publish pods"
+          kubectl get pods -n "${NAMESPACE}" -l "app.kubernetes.io/name=kezio" -o wide || true
+          kubectl describe pods -n "${NAMESPACE}" -l "app.kubernetes.io/component=image-ingest-job" || true
+          kubectl describe pods -n "${NAMESPACE}" -l "app.kubernetes.io/component=partition-content-publish" || true
           echo "::endgroup::"
           echo "::group::ingest/publish pod logs"
           kubectl logs -n "${NAMESPACE}" -l "app.kubernetes.io/component=image-ingest-job" --all-containers --tail=1000 || true

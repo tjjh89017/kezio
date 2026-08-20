@@ -289,6 +289,13 @@ jobs:
       # manager's own qcow2 default (ImageIngestConfig.sourceFormat).
       # PARTITIONCONTENT_TRACKER_URL points at opentracker's Service,
       # deployed below - every published .torrent's announce URL.
+      #
+      # IMAGE_INGEST_SCRATCH_ACCESS_MODES and PARTITIONCONTENT_ACCESS_MODES
+      # both default to ReadWriteMany, which local-path-provisioner cannot
+      # satisfy (the same reason deploy-image-service's staging PVC is
+      # patched to ReadWriteOnce below) - the ingest scratch and content
+      # PVCs would otherwise stay Pending forever and the ingest/publish
+      # Job's pod would never leave Pending either.
       - name: Deploy kezio CRDs and controller-manager
         uses: ./.github/actions/deploy-kezio
         with:
@@ -297,8 +304,10 @@ jobs:
             IMAGE_INGEST_STAGING_PVC=kezio-image-service-staging
             IMAGE_INGEST_IMAGE=example.com/kezio-ingest:e2e
             IMAGE_INGEST_SOURCE_FORMAT=raw
+            IMAGE_INGEST_SCRATCH_ACCESS_MODES=ReadWriteOnce
             PARTITIONCONTENT_PUBLISH_IMAGE=example.com/kezio-ingest:e2e
             PARTITIONCONTENT_TRACKER_URL=http://opentracker.scaffold-system.svc.cluster.local:6969/announce
+            PARTITIONCONTENT_ACCESS_MODES=ReadWriteOnce
 
       - name: Deploy opentracker
         uses: ./.github/actions/deploy-opentracker
