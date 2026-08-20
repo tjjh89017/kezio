@@ -137,6 +137,15 @@ runs:
         parameters:
           server: nfs-server.${NAMESPACE}.svc.cluster.local
           share: /
+          # mountPermissions defaults to "0" (no chmod applied), so a
+          # freshly provisioned subdirectory keeps whatever the driver's
+          # own mkdir left it as - not writable by kezio's Job pods, which
+          # all run as a fixed non-root UID (65532, see
+          # image_ingest.go/partitioncontent_job.go's SecurityContext).
+          # fsGroup cannot fix this either: it has no effect on NFS
+          # volumes. "0777" is safe here - this StorageClass exists only
+          # for this throwaway e2e cluster.
+          mountPermissions: "0777"
         reclaimPolicy: Delete
         volumeBindingMode: Immediate
         EOF
