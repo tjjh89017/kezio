@@ -18,7 +18,9 @@ package controller
 
 import (
 	"context"
+	"sync"
 
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -26,9 +28,29 @@ import (
 )
 
 // imageContentRefIndex is the field index name registered on Image for
-// slot contentRef names: onDelete's reverse lookup lists against this
-// index instead of scanning every Image in the namespace.
+// slot contentRef names: PartitionContentReconciler's onDelete reverse
+// lookup and ImageReconciler's mapPartitionContentToImages both list
+// against this index instead of scanning every Image in the namespace.
 const imageContentRefIndex = "spec.layout.slots.contentRef.name"
+
+// imageContentRefIndexOnce guards ensureImageContentRefIndex: both
+// PartitionContentReconciler and ImageReconciler need this index, and
+// registering the same field name on the manager's field indexer twice
+// errors once the informer has started.
+var (
+	imageContentRefIndexOnce sync.Once
+	imageContentRefIndexErr  error
+)
+
+// ensureImageContentRefIndex registers imageContentRefIndex on the
+// manager's field indexer exactly once, regardless of how many
+// reconcilers' SetupWithManager call it or in what order.
+func ensureImageContentRefIndex(mgr ctrl.Manager) error {
+	imageContentRefIndexOnce.Do(func() {
+		imageContentRefIndexErr = mgr.GetFieldIndexer().IndexField(context.Background(), &keziov1alpha2.Image{}, imageContentRefIndex, indexImageContentRefs)
+	})
+	return imageContentRefIndexErr
+}
 
 // indexImageContentRefs extracts every PartitionContent name referenced by
 // obj's slots, for imageContentRefIndex.

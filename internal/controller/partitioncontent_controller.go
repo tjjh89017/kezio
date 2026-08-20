@@ -251,7 +251,7 @@ var imageDeletionOnly = predicate.Funcs{
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *PartitionContentReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &keziov1alpha2.Image{}, imageContentRefIndex, indexImageContentRefs); err != nil {
+	if err := ensureImageContentRefIndex(mgr); err != nil {
 		return err
 	}
 	return ctrl.NewControllerManagedBy(mgr).

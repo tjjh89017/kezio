@@ -242,6 +242,7 @@ func main() {
 	if err := (&controller.ImageReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		Ingest: imageIngestConfigFromEnv(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Image")
 		os.Exit(1)
@@ -301,6 +302,16 @@ func main() {
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
+	}
+}
+
+// imageIngestConfigFromEnv builds the Image reconciler's
+// ImageIngestConfig from the environment. Leaving IMAGE_INGEST_IMAGE
+// unset yields a config that is not ready(): the reconciler holds every
+// source-bearing Image at Pending with a condition explaining why.
+func imageIngestConfigFromEnv() controller.ImageIngestConfig {
+	return controller.ImageIngestConfig{
+		Image: os.Getenv("IMAGE_INGEST_IMAGE"),
 	}
 }
 
