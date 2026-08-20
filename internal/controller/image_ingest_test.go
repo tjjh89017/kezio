@@ -38,13 +38,22 @@ import (
 // real Job controller or kubelet, so this stands in for what a real
 // ingest Job pod would report (see readIngestResult).
 func fakeIngestJobSucceeded(ctx context.Context, image *keziov1alpha2.Image, result ingest.Result) {
+	data, err := ingest.MarshalResult(result)
+	Expect(err).NotTo(HaveOccurred())
+	fakeIngestJobSucceededWithMessage(ctx, image, string(data))
+}
+
+// fakeIngestJobSucceededWithMessage fakes the ingest Job named
+// ingestJobName(image) as succeeded, with a pod whose container
+// termination message is the raw string message - used to exercise
+// readIngestResult's error path for a malformed or non-JSON message,
+// which no real ingest binary would write but a corrupted transport
+// could.
+func fakeIngestJobSucceededWithMessage(ctx context.Context, image *keziov1alpha2.Image, message string) {
 	var job batchv1.Job
 	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ingestJobName(image), Namespace: image.Namespace}, &job)).To(Succeed())
 	job.Status.Succeeded = 1
 	Expect(k8sClient.Status().Update(ctx, &job)).To(Succeed())
-
-	data, err := ingest.MarshalResult(result)
-	Expect(err).NotTo(HaveOccurred())
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -61,10 +70,20 @@ func fakeIngestJobSucceeded(ctx context.Context, image *keziov1alpha2.Image, res
 	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
 		Name: "ingest",
 		State: corev1.ContainerState{
-			Terminated: &corev1.ContainerStateTerminated{Message: string(data)},
+			Terminated: &corev1.ContainerStateTerminated{Message: message},
 		},
 	}}
 	Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+}
+
+// fakeIngestJobSucceededNoPod fakes the ingest Job named
+// ingestJobName(image) as succeeded with no pod at all - readIngestResult
+// must still fail cleanly rather than leave the Image stuck.
+func fakeIngestJobSucceededNoPod(ctx context.Context, image *keziov1alpha2.Image) {
+	var job batchv1.Job
+	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ingestJobName(image), Namespace: image.Namespace}, &job)).To(Succeed())
+	job.Status.Succeeded = 1
+	Expect(k8sClient.Status().Update(ctx, &job)).To(Succeed())
 }
 
 // fakeIngestJobFailed fakes the ingest Job named ingestJobName(image) as
@@ -341,6 +360,126 @@ var _ = Describe("Image ingest Job orchestration", func() {
 		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.ImageConditionReady)
 		Expect(readyCond).NotTo(BeNil())
 		Expect(readyCond.Reason).To(Equal("IngestFailed"))
+	})
+
+	It("fails the Image with the ingest binary's own error message when the ingest job reports failure", func() {
+		img := newTestImageWithSlots("image-ingest-reported-failure", []keziov1alpha2.ImageSlot{
+			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: "pc-" + imageTestHash(30)}},
+		}, &keziov1alpha2.ImageSource{URL: "https://example.test/disk.img", Checksum: imageTestChecksum(30)})
+		Expect(k8sClient.Create(ctx, img)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
+
+		r := &ImageReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Ingest: ImageIngestConfig{Image: "example.test/kezio-ingest:test"}}
+		nn := types.NamespacedName{Name: img.Name, Namespace: "default"}
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		fakeIngestJobSucceeded(ctx, img, ingest.Result{Success: false, Error: "boom"})
+
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		var got keziov1alpha2.Image
+		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
+		Expect(got.Status.State).To(Equal(keziov1alpha2.ImageStateFailed))
+		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.ImageConditionReady)
+		Expect(readyCond).NotTo(BeNil())
+		Expect(readyCond.Reason).To(Equal("IngestFailed"))
+		Expect(readyCond.Message).To(ContainSubstring("ingest job reported failure: boom"))
+	})
+
+	It("fails the Image with a reading-ingest-result message when the ingest pod's termination message is not JSON", func() {
+		img := newTestImageWithSlots("image-ingest-malformed-result", []keziov1alpha2.ImageSlot{
+			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: "pc-" + imageTestHash(31)}},
+		}, &keziov1alpha2.ImageSource{URL: "https://example.test/disk.img", Checksum: imageTestChecksum(31)})
+		Expect(k8sClient.Create(ctx, img)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
+
+		r := &ImageReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Ingest: ImageIngestConfig{Image: "example.test/kezio-ingest:test"}}
+		nn := types.NamespacedName{Name: img.Name, Namespace: "default"}
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		fakeIngestJobSucceededWithMessage(ctx, img, "not json")
+
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		var got keziov1alpha2.Image
+		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
+		Expect(got.Status.State).To(Equal(keziov1alpha2.ImageStateFailed))
+		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.ImageConditionReady)
+		Expect(readyCond).NotTo(BeNil())
+		Expect(readyCond.Reason).To(Equal("IngestFailed"))
+		Expect(readyCond.Message).To(ContainSubstring("reading ingest result"))
+	})
+
+	It("fails the Image with a reading-ingest-result message when the ingest job's pod is missing entirely", func() {
+		img := newTestImageWithSlots("image-ingest-no-pod", []keziov1alpha2.ImageSlot{
+			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: "pc-" + imageTestHash(32)}},
+		}, &keziov1alpha2.ImageSource{URL: "https://example.test/disk.img", Checksum: imageTestChecksum(32)})
+		Expect(k8sClient.Create(ctx, img)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
+
+		r := &ImageReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Ingest: ImageIngestConfig{Image: "example.test/kezio-ingest:test"}}
+		nn := types.NamespacedName{Name: img.Name, Namespace: "default"}
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		fakeIngestJobSucceededNoPod(ctx, img)
+
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		var got keziov1alpha2.Image
+		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
+		Expect(got.Status.State).To(Equal(keziov1alpha2.ImageStateFailed))
+		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.ImageConditionReady)
+		Expect(readyCond).NotTo(BeNil())
+		Expect(readyCond.Reason).To(Equal("IngestFailed"))
+		Expect(readyCond.Message).To(ContainSubstring("reading ingest result"))
+	})
+
+	It("fails the Image, naming the slot, when the ingest result's partitions omit a declared contentRef slot", func() {
+		hash := imageTestHash(33)
+		img := newTestImageWithSlots("image-ingest-missing-slot", []keziov1alpha2.ImageSlot{
+			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: "pc-" + hash}},
+		}, &keziov1alpha2.ImageSource{URL: "https://example.test/disk.img", Checksum: imageTestChecksum(33)})
+		Expect(k8sClient.Create(ctx, img)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
+
+		r := &ImageReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Ingest: ImageIngestConfig{Image: "example.test/kezio-ingest:test"}}
+		nn := types.NamespacedName{Name: img.Name, Namespace: "default"}
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		result := ingest.Result{
+			Success: true,
+			Disk: &ingest.ResultDisk{
+				PartitionTable: keziov1alpha2.PartitionTableGPT,
+				Partitions:     []ingest.ResultPartition{},
+			},
+		}
+		fakeIngestJobSucceeded(ctx, img, result)
+
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		var got keziov1alpha2.Image
+		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
+		Expect(got.Status.State).To(Equal(keziov1alpha2.ImageStateFailed))
+		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.ImageConditionReady)
+		Expect(readyCond).NotTo(BeNil())
+		Expect(readyCond.Reason).To(Equal("IngestFailed"))
+		Expect(readyCond.Message).To(ContainSubstring("slot 1"))
+
+		var pc keziov1alpha2.PartitionContent
+		err = k8sClient.Get(ctx, types.NamespacedName{Name: "pc-" + hash, Namespace: "default"}, &pc)
+		Expect(apierrors.IsNotFound(err)).To(BeTrue())
 	})
 
 	It("never creates an ingest Job for a composed Image with no spec.source", func() {
