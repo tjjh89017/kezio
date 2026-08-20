@@ -198,6 +198,20 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	- $(CONTAINER_TOOL) buildx rm scaffold-builder
 	rm Dockerfile.cross
 
+# SEEDER_IMG is the image tag for the ezio seeder container
+# (docker/seeder/Dockerfile). It ships no kezio Go binary build target of
+# its own (the register binary builds as part of the image build), so
+# there is only a docker one.
+SEEDER_IMG ?= $(IMAGE_TAG_BASE)-seeder:latest
+
+.PHONY: docker-build-seeder
+docker-build-seeder: ## Build docker image for the ezio seeder.
+	$(CONTAINER_TOOL) build -t ${SEEDER_IMG} -f docker/seeder/Dockerfile .
+
+.PHONY: docker-push-seeder
+docker-push-seeder: ## Push docker image for the ezio seeder.
+	$(CONTAINER_TOOL) push ${SEEDER_IMG}
+
 .PHONY: build-installer
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
 	mkdir -p dist

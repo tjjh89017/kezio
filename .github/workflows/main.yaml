@@ -35,7 +35,8 @@ jobs:
       - run: make test
 
   # Image <-> Dockerfile mapping grows one row per component as later
-  # stages add it; this stage builds only the manager image.
+  # stages add it. Seeder is amd64-only: ezio's C++ build (cmake/boost/
+  # libtorrent) is too slow under QEMU emulation.
   images:
     name: ${{ matrix.name }}
     needs: [lint, test]
@@ -53,6 +54,11 @@ jobs:
             dockerfile: Dockerfile
             platforms: linux/amd64,linux/arm64
             local-tag: example.com/kezio:e2e
+          - name: seeder
+            image: kezio-seeder
+            dockerfile: docker/seeder/Dockerfile
+            platforms: linux/amd64
+            local-tag: example.com/kezio-seeder:e2e
     steps:
       - uses: actions/checkout@v4
 
