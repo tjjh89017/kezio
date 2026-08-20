@@ -1,0 +1,46 @@
+name: Deploy opentracker
+
+description: >-
+  Points config/opentracker's kustomize image at the calling job's
+  opentracker image, applies it, and waits for the Deployment to become
+  ready. Split out of legacy's mixed e2e-deploy-path-stack action, which
+  bundled opentracker together with image-service/seeder/ingest/boot-agent
+  wiring; this action carries only the opentracker piece - the rest is
+  later items' work.
+
+inputs:
+  opentracker-image:
+    description: 'opentracker image reference, e.g. "ghcr.io/tunisiano187/opentracker-docker:master".'
+    required: false
+    default: "ghcr.io/tunisiano187/opentracker-docker:master"
+  namespace:
+    description: 'Namespace the kustomize overlay deploys opentracker into.'
+    required: false
+    default: "scaffold-system"
+  kustomize-dir:
+    description: 'Kustomize overlay directory to apply.'
+    required: false
+    default: "config/opentracker"
+  timeout:
+    description: 'Timeout for the opentracker rollout wait, e.g. "180s".'
+    required: false
+    default: "180s"
+
+runs:
+  using: composite
+  steps:
+    - name: Deploy opentracker
+      shell: bash
+      env:
+        OPENTRACKER_IMG: ${{ inputs.opentracker-image }}
+        NAMESPACE: ${{ inputs.namespace }}
+        KUSTOMIZE_DIR: ${{ inputs.kustomize-dir }}
+        TIMEOUT: ${{ inputs.timeout }}
+      run: |
+        set -euo pipefail
+        make kustomize
+        (cd "${KUSTOMIZE_DIR}" && ../../bin/kustomize edit set image "ghcr.io/tunisiano187/opentracker-docker=${OPENTRACKER_IMG}")
+        bin/kustomize build "${KUSTOMIZE_DIR}" | kubectl apply -f -
+        deployment="$(kubectl get deployment -n "${NAMESPACE}" -l app.kubernetes.io/component=opentracker \
+          -o jsonpath='{.items[0].metadata.name}')"
+        kubectl rollout status deployment/"${deployment}" -n "${NAMESPACE}" --timeout="${TIMEOUT}"

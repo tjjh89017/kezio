@@ -1,0 +1,48 @@
+name: Verify image-path prerequisites
+
+description: >-
+  Asserts the image-path lane's scaffolding is actually healthy: the
+  opentracker Deployment is Available, a default StorageClass exists (for
+  the content PVCs later items add), and the image-service token Secret
+  is present with a non-empty token key. This is the lane's placeholder
+  final step - ingest-test-image/run-leecher (separate items) slot in
+  after this once the ingest/image-service containers exist.
+
+inputs:
+  namespace:
+    description: 'Namespace opentracker and the token Secret were deployed into.'
+    required: false
+    default: "scaffold-system"
+  token-secret-name:
+    description: 'Name of the image-service bearer token Secret.'
+    required: false
+    default: "kezio-image-service-token"
+
+runs:
+  using: composite
+  steps:
+    - name: Verify image-path prerequisites
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        TOKEN_SECRET_NAME: ${{ inputs.token-secret-name }}
+      run: |
+        set -euo pipefail
+
+        kubectl wait deployment -n "${NAMESPACE}" -l app.kubernetes.io/component=opentracker \
+          --for=condition=Available --timeout=60s
+
+        if ! kubectl get storageclass -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}' \
+          | grep -q .; then
+          echo "::error::no default StorageClass found" >&2
+          exit 1
+        fi
+
+        token_len="$(kubectl get secret "${TOKEN_SECRET_NAME}" -n "${NAMESPACE}" \
+          -o jsonpath='{.data.token}' | base64 -d | wc -c)"
+        if [ "${token_len}" -eq 0 ]; then
+          echo "::error::${TOKEN_SECRET_NAME} in ${NAMESPACE} has an empty token key" >&2
+          exit 1
+        fi
+
+        echo "image-path prerequisites healthy: opentracker Available, default StorageClass present, token Secret non-empty"

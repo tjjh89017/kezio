@@ -23,6 +23,15 @@ inputs:
     description: 'Timeout for the controller-manager rollout wait, e.g. "180s".'
     required: false
     default: "180s"
+  extra-env:
+    description: >-
+      Optional newline-separated NAME=VALUE pairs applied to the
+      controller-manager Deployment via "kubectl set env" after it first
+      rolls out, e.g. lane-specific PARTITIONCONTENT_*/IMAGE_INGEST_*
+      wiring. Empty (the default) leaves the Deployment exactly as the
+      kustomize overlay built it - the fast lane's current behavior.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -34,6 +43,7 @@ runs:
         NAMESPACE: ${{ inputs.namespace }}
         KUSTOMIZE_DIR: ${{ inputs.kustomize-dir }}
         TIMEOUT: ${{ inputs.timeout }}
+        EXTRA_ENV: ${{ inputs.extra-env }}
       run: |
         set -euo pipefail
         make install
@@ -43,3 +53,8 @@ runs:
         deployment="$(kubectl get deployment -n "${NAMESPACE}" -l control-plane=controller-manager \
           -o jsonpath='{.items[0].metadata.name}')"
         kubectl rollout status deployment/"${deployment}" -n "${NAMESPACE}" --timeout="${TIMEOUT}"
+        if [ -n "${EXTRA_ENV}" ]; then
+          mapfile -t env_pairs <<< "${EXTRA_ENV}"
+          kubectl -n "${NAMESPACE}" set env deployment/"${deployment}" "${env_pairs[@]}"
+          kubectl rollout status deployment/"${deployment}" -n "${NAMESPACE}" --timeout="${TIMEOUT}"
+        fi

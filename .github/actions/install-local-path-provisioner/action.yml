@@ -1,0 +1,26 @@
+name: Install local-path-provisioner and mark it the default StorageClass
+
+description: >-
+  Applies the upstream local-path-provisioner manifest at a pinned version,
+  waits for its Deployment to roll out, then patches the local-path
+  StorageClass as the cluster default. RKE2 ships no default StorageClass,
+  unlike k3s, so every RKE2-based lane that needs dynamic PVC binding
+  (e2e-image-path) runs this after "Install RKE2".
+
+inputs:
+  version:
+    description: 'local-path-provisioner release to install, e.g. "v0.0.37".'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install local-path-provisioner and mark it the default StorageClass
+      shell: bash
+      env:
+        LOCAL_PATH_PROVISIONER_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        kubectl apply -f "https://raw.githubusercontent.com/rancher/local-path-provisioner/${LOCAL_PATH_PROVISIONER_VERSION}/deploy/local-path-storage.yaml"
+        kubectl -n local-path-storage rollout status deployment/local-path-provisioner --timeout=180s
+        kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'

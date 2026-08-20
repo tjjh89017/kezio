@@ -1,0 +1,20 @@
+# Standalone kustomization for opentracker, the BitTorrent tracker every
+# per-Image seeder Deployment and leecher will announce to. Deliberately
+# not one of config/default's resources, mirroring legacy's config/seeder
+# split: opentracker has no per-Machine or per-Image identity of its own,
+# so it deploys once, independently of the seeder/ingest pieces that later
+# items add.
+#
+# Deploy as an addition once config/default is applied:
+#
+#   kustomize build config/opentracker | kubectl apply -f -
+namespace: scaffold-system
+
+labels:
+  - includeSelectors: true
+    pairs:
+      app.kubernetes.io/part-of: kezio
+
+resources:
+  - opentracker-deployment.yaml
+  - opentracker-service.yaml

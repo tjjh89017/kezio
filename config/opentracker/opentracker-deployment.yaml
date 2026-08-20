@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opentracker
+  namespace: system
+  labels:
+    app.kubernetes.io/name: kezio
+    app.kubernetes.io/component: opentracker
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kezio
+      app.kubernetes.io/component: opentracker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kezio
+        app.kubernetes.io/component: opentracker
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: opentracker
+          # opentracker (https://erdgeist.org/arts/software/opentracker/) has
+          # no first-party image; this is a maintained community build. If it
+          # goes stale, build opentracker from source into a from-scratch
+          # image (see docker/seeder/Dockerfile's two-stage shape).
+          image: ghcr.io/tunisiano187/opentracker-docker:master
+          # The image sets CMD but no ENTRYPOINT, so `args` alone would
+          # replace CMD outright and exec "-p" as argv[0]. `command` points
+          # at the opentracker binary directly so `args` passes flags to it.
+          command:
+            - /bin/opentracker
+          args:
+            - -p
+            - "6969"
+          ports:
+            - name: announce-tcp
+              containerPort: 6969
+              protocol: TCP
+            - name: announce-udp
+              containerPort: 6969
+              protocol: UDP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            # The image ships no USER metadata (defaults to root), and
+            # runAsNonRoot: true won't infer a non-root uid on its own
+            # (CreateContainerConfigError). opentracker needs no privilege -
+            # it only binds the unprivileged port set via `-p` - so an
+            # arbitrary non-root uid/gid (65534, "nobody") satisfies
+            # runAsNonRoot explicitly.
+            runAsUser: 65534
+            runAsGroup: 65534
+            capabilities:
+              drop:
+                - "ALL"
+          resources:
+            limits:
+              cpu: 250m
+              memory: 128Mi
+            requests:
+              cpu: 50m
+              memory: 32Mi

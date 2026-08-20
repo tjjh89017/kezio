@@ -10,6 +10,9 @@ env:
   GO_VERSION: "1.26.5"
   REGISTRY: ghcr.io
   IMAGE_NAMESPACE: tjjh89017
+  # RKE2 ships no default StorageClass, unlike k3s.
+  LOCAL_PATH_PROVISIONER_VERSION: "v0.0.37"
+  IMAGE_SERVICE_TOKEN: "kezio-e2e-image-path-token"
 
 jobs:
   lint:
@@ -187,6 +190,91 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  # Image-path lane skeleton: RKE2 + local-path-provisioner (RKE2 has no
+  # default StorageClass, unlike the fast lane which needs no PVCs) +
+  # opentracker + the image-service token Secret + the controller-manager,
+  # then a placeholder step that proves those prerequisites are actually
+  # healthy. ingest-test-image/run-leecher (separate items) slot in after
+  # "Verify image-path prerequisites" once the ingest/image-service
+  # containers exist.
+  e2e-image-path:
+    name: Image path
+    needs: [images]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Resource check (fail fast if the runner is under-resourced)
+        uses: ./.github/actions/check-runner-resources
+        with:
+          min-cpus: "2"
+          min-mem-mb: "7000"
+          context-label: "the kezio image-path e2e lane"
+
+      - name: Download the manager image tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: image-tar-manager
+          path: /tmp/images
+
+      - name: Install RKE2
+        uses: ./.github/actions/install-rke2
+        with:
+          rke2-version: "v1.36.2+rke2r1"
+          enable-multus: "false"
+
+      - name: Import the manager image into RKE2 containerd
+        uses: ./.github/actions/import-image-tarballs
+        with:
+          images: manager
+
+      - name: Install local-path-provisioner and mark it the default StorageClass
+        uses: ./.github/actions/install-local-path-provisioner
+        with:
+          version: ${{ env.LOCAL_PATH_PROVISIONER_VERSION }}
+
+      - name: Install cert-manager
+        uses: ./.github/actions/install-cert-manager
+
+      - name: Deploy opentracker
+        uses: ./.github/actions/deploy-opentracker
+
+      - name: Create the image-service bearer token Secret
+        uses: ./.github/actions/create-image-service-token-secret
+        with:
+          token: ${{ env.IMAGE_SERVICE_TOKEN }}
+
+      # The manager-image tag must match the local-tag the images job
+      # baked into the tarball above, so the manager Deployment resolves
+      # it from containerd instead of pulling from a registry.
+      - name: Deploy kezio CRDs and controller-manager
+        uses: ./.github/actions/deploy-kezio
+        with:
+          manager-image: example.com/kezio:e2e
+
+      - name: Verify image-path prerequisites
+        uses: ./.github/actions/verify-image-path-prerequisites
+
+      - name: Collect diagnostics
+        if: failure()
+        uses: ./.github/actions/collect-diagnostics
+        with:
+          namespace: "scaffold-system"
+          workload-namespace: "default"
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-path-lane-diagnostics
+          path: diagnostics
+          retention-days: 7
+          if-no-files-found: ignore
+
   # Stable required-check names for the branch ruleset. The real jobs
   # hang off these through `needs`; the ruleset references "Build" and
   # "E2E" so the graph can grow without ruleset edits.
@@ -205,5 +293,6 @@ jobs:
     timeout-minutes: 5
     needs:
       - e2e-fast-lane
+      - e2e-image-path
     steps:
       - run: "true"

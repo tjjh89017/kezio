@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: opentracker
+  namespace: system
+  labels:
+    app.kubernetes.io/name: kezio
+    app.kubernetes.io/component: opentracker
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # ClusterIP only, for cluster-internal reachability (e.g. health checks).
+  # Cross-site BitTorrent announce traffic is a later item's concern
+  # (a Multus-attached data-network address) - the seeder swarm wiring
+  # this Service alone cannot satisfy is not part of this deployment.
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kezio
+    app.kubernetes.io/component: opentracker
+  ports:
+    - name: announce-tcp
+      port: 6969
+      targetPort: announce-tcp
+      protocol: TCP
+    - name: announce-udp
+      port: 6969
+      targetPort: announce-udp
+      protocol: UDP
