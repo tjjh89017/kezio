@@ -17,7 +17,9 @@ limitations under the License.
 package store
 
 import (
+	"bytes"
 	"crypto/sha1" //nolint:gosec // test-only verification of the production package's own SHA-1 usage
+	"encoding/hex"
 	"fmt"
 	"testing"
 )
@@ -297,6 +299,64 @@ func TestParseInfoHash_Errors(t *testing.T) {
 				t.Fatalf("ParseInfoHash(%q): got nil error, want one", s)
 			}
 		})
+	}
+}
+
+// goldenInfoDictHex is the exact bencoded byte sequence BuildInfoDict
+// produces for fixtureTorrentInfo(), captured once from the current
+// implementation. BuildInfoDict's key order (files, name, piece length,
+// pieces) is part of the content identity contract (see ComputeInfoHash):
+// any byte-layout change here forks the info hash of every existing
+// content. If this test fails, a change altered that layout and must not
+// ship without a deliberate identity migration.
+const goldenInfoDictHex = "64353a66696c65736c64363a6c656e677468693865343a706174686c33323a3030" +
+	"303030303030303030303030303030303030303030303030303031303030656564" +
+	"363a6c656e677468693365343a706174686c33323a303030303030303030303030" +
+	"3030303030303030303030303030303032303030656564363a6c656e6774686935" +
+	"65343a706174686c33323a30303030303030303030303030303030303030303030" +
+	"30303030303033303030656565343a6e616d65373a636f6e74656e7431323a7069" +
+	"656365206c656e67746869313637373732313665363a70696563657334303a1111" +
+	"111111111111111111111111111111111111222222222222222222222222222222" +
+	"222222222265"
+
+// goldenInfoHashHex is the SHA-1 info hash of goldenInfoDictHex — the
+// content identity ComputeInfoHash(fixtureTorrentInfo()) must keep
+// producing. Pinned the same way and for the same reason as
+// goldenInfoDictHex: a mismatch forks every existing content's identity.
+const goldenInfoHashHex = "93aa15c7f3f0566a920616027c87c37cd44287d6"
+
+func TestBuildInfoDict_GoldenBytes(t *testing.T) {
+	info := fixtureTorrentInfo()
+
+	dict, err := BuildInfoDict(info)
+	if err != nil {
+		t.Fatalf("BuildInfoDict: %v", err)
+	}
+
+	want, err := hex.DecodeString(goldenInfoDictHex)
+	if err != nil {
+		t.Fatalf("decode golden hex: %v", err)
+	}
+
+	if !bytes.Equal(dict, want) {
+		t.Fatalf("BuildInfoDict byte layout changed:\n got  %x\n want %x\n"+
+			"this forks the info hash of every existing content; see goldenInfoDictHex's doc comment",
+			dict, want)
+	}
+}
+
+func TestComputeInfoHash_GoldenIdentity(t *testing.T) {
+	info := fixtureTorrentInfo()
+
+	got, err := ComputeInfoHash(info)
+	if err != nil {
+		t.Fatalf("ComputeInfoHash: %v", err)
+	}
+
+	if got.String() != goldenInfoHashHex {
+		t.Fatalf("ComputeInfoHash = %s, want golden %s; "+
+			"this forks the info hash of every existing content; see goldenInfoHashHex's doc comment",
+			got, goldenInfoHashHex)
 	}
 }
 
