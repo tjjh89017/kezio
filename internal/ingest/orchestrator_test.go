@@ -1,0 +1,340 @@
+/*
+Copyright 2026 Date Huang.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package ingest
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/tjjh89017/kezio/internal/store"
+)
+
+const fixtureSfdiskJSON = `{
+  "partitiontable": {
+    "label": "gpt",
+    "id": "11111111-1111-1111-1111-111111111111",
+    "device": "/dev/loop0",
+    "unit": "sectors",
+    "sectorsize": 512,
+    "partitions": [
+      {"node": "/dev/loop0p1", "start": 2048, "size": 2048, "type": "C12A7328-F81F-11D2-BA4B-00A0C93EC93B", "uuid": "AAAAAAAA-1111-1111-1111-111111111111"},
+      {"node": "/dev/loop0p2", "start": 4096, "size": 2048, "type": "0FC63DAF-8483-4772-8E79-3D69D8477DE4", "uuid": "BBBBBBBB-2222-2222-2222-222222222222"},
+      {"node": "/dev/loop0p3", "start": 6144, "size": 2048, "type": "0657FD6D-A4AB-43C4-84E5-0933C84B4F4F", "uuid": "CCCCCCCC-3333-3333-3333-333333333333"}
+    ]
+  }
+}`
+
+const fixtureRawSize = 8192 * 512 // 3 partitions of 2048 sectors starting past a 2048-sector gap
+
+func baseFakeBlkid() *fakeBlkid {
+	return &fakeBlkid{byPathSubstring: map[string]FSInfo{
+		"part-1": {FSType: "vfat"},
+		"part-2": {FSType: "ext4"},
+		"part-3": {FSType: "swap", UUID: "CCCC-UUID"},
+	}}
+}
+
+func baseDeps() Dependencies {
+	return Dependencies{
+		Downloader: &fakeDownloader{content: []byte("qcow2-body")},
+		QemuImg:    &fakeQemuImg{format: "qcow2", rawSize: fixtureRawSize},
+		Sfdisk:     &fakeSfdisk{json: []byte(fixtureSfdiskJSON)},
+		Blkid:      baseFakeBlkid(),
+		Partclone:  &fakePartclone{},
+	}
+}
+
+func TestRun_Success(t *testing.T) {
+	cfg := Config{
+		SourceURL:    "https://example.com/golden.qcow2",
+		SourceFormat: "qcow2",
+		WorkDir:      t.TempDir(),
+	}
+
+	res := Run(context.Background(), cfg, baseDeps())
+	if !res.Success {
+		t.Fatalf("expected success, got error %q", res.Error)
+	}
+	if res.Disk == nil {
+		t.Fatal("expected a non-nil Disk")
+	}
+	if res.Disk.SizeBytes != fixtureRawSize {
+		t.Errorf("SizeBytes = %d, want %d", res.Disk.SizeBytes, fixtureRawSize)
+	}
+	if res.Disk.PartitionTable != "gpt" {
+		t.Errorf("PartitionTable = %q, want gpt", res.Disk.PartitionTable)
+	}
+	if len(res.Disk.Partitions) != 3 {
+		t.Fatalf("got %d partitions, want 3", len(res.Disk.Partitions))
+	}
+
+	esp, data, swap := res.Disk.Partitions[0], res.Disk.Partitions[1], res.Disk.Partitions[2]
+	if esp.Role != "esp" || esp.FSType != "vfat" || esp.InfoHash == "" {
+		t.Errorf("esp partition = %+v", esp)
+	}
+	if data.Role != "data" || data.FSType != "ext4" || data.InfoHash == "" {
+		t.Errorf("data partition = %+v", data)
+	}
+	if swap.Role != "swap" || swap.FSType != "" || swap.UUID != "CCCC-UUID" || swap.InfoHash != "" {
+		t.Errorf("swap partition = %+v", swap)
+	}
+	if esp.PieceLength != store.PieceSize || data.PieceLength != store.PieceSize {
+		t.Errorf("expected content partitions to record store.PieceSize, got esp=%d data=%d", esp.PieceLength, data.PieceLength)
+	}
+	if esp.LastExtentEnd == 0 || data.LastExtentEnd == 0 {
+		t.Errorf("expected content partitions to record a non-zero LastExtentEnd, got esp=%d data=%d", esp.LastExtentEnd, data.LastExtentEnd)
+	}
+	if swap.PieceLength != 0 || swap.LastExtentEnd != 0 {
+		t.Errorf("swap partition should record no content fields, got %+v", swap)
+	}
+
+	// Both content partitions used identical fixture bytes, so they hash
+	// identically: the Image controller is the one that decides whether
+	// to dedup onto a single PartitionContent.
+	if esp.InfoHash != data.InfoHash {
+		t.Errorf("expected esp and data to hash identically for identical bytes, got %q and %q", esp.InfoHash, data.InfoHash)
+	}
+
+	// Each content-bearing partition gets its own scratch content
+	// directory under WorkDir, with extents already nested under
+	// content/ (see finalizeContent).
+	for _, num := range []int32{1, 2} {
+		contentDir := filepath.Join(cfg.WorkDir, fmt.Sprintf("content-%d", num))
+		if _, err := os.Stat(store.ContentDirTorrentInfoPath(contentDir)); err != nil {
+			t.Errorf("partition %d: missing torrent.info in scratch content dir: %v", num, err)
+		}
+		if _, err := os.Stat(filepath.Join(store.ContentDataDir(contentDir), store.ExtentFileName(0))); err != nil {
+			t.Errorf("partition %d: missing nested extent file: %v", num, err)
+		}
+	}
+}
+
+func TestRun_StagedSourceRemovedOnSuccess(t *testing.T) {
+	workDir := t.TempDir()
+	stagedPath := filepath.Join(workDir, "staged-upload.bin")
+	if err := os.WriteFile(stagedPath, []byte("qcow2-body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	staging := &fakeStaging{paths: map[string]string{"golden": stagedPath}}
+	deps := baseDeps()
+	deps.Staging = staging
+	deps.StagedRemover = staging
+
+	cfg := Config{
+		SourceURL:    "kezio-staged://golden",
+		SourceFormat: "qcow2",
+		WorkDir:      t.TempDir(),
+	}
+
+	res := Run(context.Background(), cfg, deps)
+	if !res.Success {
+		t.Fatalf("expected success, got error %q", res.Error)
+	}
+	if len(staging.removed) != 1 || staging.removed[0] != "golden" {
+		t.Errorf("staging.removed = %v, want [golden]", staging.removed)
+	}
+}
+
+func TestRun_ChecksumMismatch(t *testing.T) {
+	cfg := Config{
+		SourceURL:      "https://example.com/golden.qcow2",
+		SourceFormat:   "qcow2",
+		SourceChecksum: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+		WorkDir:        t.TempDir(),
+	}
+
+	res := Run(context.Background(), cfg, baseDeps())
+	if res.Success {
+		t.Fatal("expected failure on checksum mismatch")
+	}
+	if res.Error == "" {
+		t.Error("expected a non-empty Error message")
+	}
+}
+
+func TestRun_ChecksumMatchSucceeds(t *testing.T) {
+	content := []byte("qcow2-body")
+	sum := sha256.Sum256(content)
+	cfg := Config{
+		SourceURL:      "https://example.com/golden.qcow2",
+		SourceFormat:   "qcow2",
+		SourceChecksum: "sha256:" + hex.EncodeToString(sum[:]),
+		WorkDir:        t.TempDir(),
+	}
+	deps := baseDeps()
+	deps.Downloader = &fakeDownloader{content: content}
+
+	res := Run(context.Background(), cfg, deps)
+	if !res.Success {
+		t.Fatalf("expected success, got error %q", res.Error)
+	}
+}
+
+func TestRun_FormatMismatch(t *testing.T) {
+	deps := baseDeps()
+	deps.QemuImg = &fakeQemuImg{format: "raw", rawSize: fixtureRawSize}
+
+	cfg := Config{
+		SourceURL:    "https://example.com/golden.qcow2",
+		SourceFormat: "qcow2",
+		WorkDir:      t.TempDir(),
+	}
+
+	res := Run(context.Background(), cfg, deps)
+	if res.Success {
+		t.Fatal("expected failure on format mismatch")
+	}
+}
+
+// When the work directory does not have enough available space for even
+// the first partition's content, Run fails fast with a clear error
+// before partclone is ever invoked - not partway through with an
+// ENOSPC-shaped failure from partclone itself.
+func TestRun_InsufficientScratchSpaceFailsFast(t *testing.T) {
+	deps := baseDeps()
+	deps.Statfs = fakeIngestStatfs(1 << 10) // far too little for any real partition
+	partclone := &fakePartclone{}
+	deps.Partclone = partclone
+
+	cfg := Config{
+		SourceURL:    "https://example.com/golden.qcow2",
+		SourceFormat: "qcow2",
+		WorkDir:      t.TempDir(),
+	}
+
+	res := Run(context.Background(), cfg, deps)
+	if res.Success {
+		t.Fatal("expected failure when the work directory lacks scratch space")
+	}
+	if !strings.Contains(res.Error, "scratch space") {
+		t.Errorf("Error = %q, want it to mention scratch space", res.Error)
+	}
+	if len(partclone.calls) != 0 {
+		t.Errorf("partclone.calls = %v, want none: the space pre-flight must reject before partclone ever runs", partclone.calls)
+	}
+}
+
+func TestRun_UnsupportedSourceScheme(t *testing.T) {
+	cfg := Config{
+		SourceURL:    "ftp://example.com/golden.qcow2",
+		SourceFormat: "qcow2",
+		WorkDir:      t.TempDir(),
+	}
+
+	res := Run(context.Background(), cfg, baseDeps())
+	if res.Success {
+		t.Fatal("expected failure on an unsupported source URL scheme")
+	}
+}
+
+func TestRun_PartcloneFailurePropagates(t *testing.T) {
+	deps := baseDeps()
+	deps.Partclone = &fakePartclone{err: fmt.Errorf("boom")}
+
+	cfg := Config{
+		SourceURL:    "https://example.com/golden.qcow2",
+		SourceFormat: "qcow2",
+		WorkDir:      t.TempDir(),
+	}
+
+	res := Run(context.Background(), cfg, deps)
+	if res.Success {
+		t.Fatal("expected failure when partclone fails")
+	}
+}
+
+// writeFixtureContentDir writes a minimal, valid partclone content
+// directory (one extent file plus a matching torrent.info) at dir,
+// mirroring what fakePartclone.Clone produces - see its doc comment for
+// why an arbitrary piece hash is fine here.
+func writeFixtureContentDir(t *testing.T, dir string, content []byte) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	info := &store.TorrentInfo{
+		BlockSize:   4096,
+		BlocksTotal: 1,
+		Extents:     []store.Extent{{Offset: 0, Length: uint64(len(content))}}, //nolint:gosec // fixture length
+		PieceHashes: []store.PieceHash{{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}},
+	}
+	if err := os.WriteFile(filepath.Join(dir, store.ExtentFileName(0)), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(store.ContentDirTorrentInfoPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := store.WriteTorrentInfo(f, info); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFinalizeContent_ComputesHashAndNestsExtents(t *testing.T) {
+	contentDir := t.TempDir()
+	writeFixtureContentDir(t, contentDir, []byte("payload"))
+
+	hash, usedBytes, lastExtentEnd, err := finalizeContent(contentDir)
+	if err != nil {
+		t.Fatalf("finalizeContent: %v", err)
+	}
+	if usedBytes != int64(len("payload")) {
+		t.Errorf("usedBytes = %d, want %d", usedBytes, len("payload"))
+	}
+	if lastExtentEnd != int64(len("payload")) {
+		t.Errorf("lastExtentEnd = %d, want %d", lastExtentEnd, len("payload"))
+	}
+	if (hash == store.InfoHash{}) {
+		t.Error("expected a non-zero info hash")
+	}
+	if _, err := os.Stat(filepath.Join(store.ContentDataDir(contentDir), store.ExtentFileName(0))); err != nil {
+		t.Errorf("expected the extent file nested under content/, stat err = %v", err)
+	}
+}
+
+func TestFinalizeContent_IdenticalContentHashesIdentically(t *testing.T) {
+	dir1, dir2 := t.TempDir(), t.TempDir()
+	writeFixtureContentDir(t, dir1, []byte("same-bytes"))
+	writeFixtureContentDir(t, dir2, []byte("same-bytes"))
+
+	hash1, _, _, err := finalizeContent(dir1)
+	if err != nil {
+		t.Fatalf("finalizeContent(dir1): %v", err)
+	}
+	hash2, _, _, err := finalizeContent(dir2)
+	if err != nil {
+		t.Fatalf("finalizeContent(dir2): %v", err)
+	}
+	if hash1 != hash2 {
+		t.Errorf("expected identical content to hash identically, got %s and %s", hash1, hash2)
+	}
+}
+
+func TestFinalizeContent_MissingTorrentInfoFails(t *testing.T) {
+	contentDir := t.TempDir()
+	if _, _, _, err := finalizeContent(contentDir); err == nil {
+		t.Fatal("expected an error for a content dir with no torrent.info")
+	}
+}
