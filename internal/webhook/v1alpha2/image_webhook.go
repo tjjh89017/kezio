@@ -57,9 +57,14 @@ type ImageCustomValidator struct {
 	// is immutable (its own type-level XValidation rule enforces
 	// self == oldSelf), so a cached lastExtentEnd can never be stale
 	// relative to the object's current spec: whatever value is observed is
-	// the value that will ever exist for that name. A nil Client makes
-	// every validator method a no-op admit, which is only safe in tests
-	// that construct ImageCustomValidator directly without exercising the
+	// the value that will ever exist for that name.
+	// SetupImageWebhookWithManager always wires this to mgr.GetClient(), so
+	// a nil Client is a programming error, not a supported mode: the first
+	// slot with a ContentRef makes validateSlotContentSizes call a nil
+	// interface, which panics and, under this webhook's failurePolicy=fail,
+	// fails closed (denies) rather than admitting. Images with no
+	// ContentRef slots are unaffected. Tests that construct
+	// ImageCustomValidator directly with a nil Client must therefore avoid
 	// contentRef checks.
 	Client client.Client
 }
