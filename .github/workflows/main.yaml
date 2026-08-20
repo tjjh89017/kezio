@@ -204,12 +204,14 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-  # Image-path lane: RKE2 + local-path-provisioner (RKE2 has no default
-  # StorageClass, unlike the fast lane which needs no PVCs) + opentracker
-  # + the image-service token Secret + the controller-manager, verified
-  # healthy, then a real upload -> ingest -> publish -> Ready walk through
-  # kezioctl (ingest-test-image). run-leecher (a separate item) slots in
-  # after that once it exists.
+  # Image-path lane: RKE2 + an NFS-backed default StorageClass (RKE2 has
+  # no default StorageClass, unlike the fast lane which needs no PVCs;
+  # every controller-requested PVC here defaults to ReadWriteMany, which
+  # plain local-path-provisioner alone cannot satisfy) + opentracker + the
+  # image-service token Secret + the controller-manager, verified healthy,
+  # then a real upload -> ingest -> publish -> Ready walk through kezioctl
+  # (ingest-test-image). run-leecher (a separate item) slots in after that
+  # once it exists.
   e2e-image-path:
     name: Image path
     needs: [images]
@@ -260,10 +262,21 @@ jobs:
         with:
           images: manager image-service ingest
 
-      - name: Install local-path-provisioner and mark it the default StorageClass
+      # RKE2 ships no default StorageClass; local-path-provisioner alone
+      # only ever satisfies ReadWriteOnce. install-nfs-provisioner backs
+      # onto a local-path PVC and fronts it with an in-cluster NFS server,
+      # taking over as the default StorageClass so every PVC the lane's
+      # controllers request (the ingest scratch PVC, a PartitionContent's
+      # content PVC, image-service's staging PVC - all ReadWriteMany by
+      # production default) actually binds, with no lane-only access-mode
+      # overrides anywhere downstream.
+      - name: Install local-path-provisioner
         uses: ./.github/actions/install-local-path-provisioner
         with:
           version: ${{ env.LOCAL_PATH_PROVISIONER_VERSION }}
+
+      - name: Install an in-cluster NFS provisioner and mark it the default StorageClass
+        uses: ./.github/actions/install-nfs-provisioner
 
       - name: Install cert-manager
         uses: ./.github/actions/install-cert-manager
@@ -289,13 +302,6 @@ jobs:
       # manager's own qcow2 default (ImageIngestConfig.sourceFormat).
       # PARTITIONCONTENT_TRACKER_URL points at opentracker's Service,
       # deployed below - every published .torrent's announce URL.
-      #
-      # IMAGE_INGEST_SCRATCH_ACCESS_MODES and PARTITIONCONTENT_ACCESS_MODES
-      # both default to ReadWriteMany, which local-path-provisioner cannot
-      # satisfy (the same reason deploy-image-service's staging PVC is
-      # patched to ReadWriteOnce below) - the ingest scratch and content
-      # PVCs would otherwise stay Pending forever and the ingest/publish
-      # Job's pod would never leave Pending either.
       - name: Deploy kezio CRDs and controller-manager
         uses: ./.github/actions/deploy-kezio
         with:
@@ -304,10 +310,8 @@ jobs:
             IMAGE_INGEST_STAGING_PVC=kezio-image-service-staging
             IMAGE_INGEST_IMAGE=example.com/kezio-ingest:e2e
             IMAGE_INGEST_SOURCE_FORMAT=raw
-            IMAGE_INGEST_SCRATCH_ACCESS_MODES=ReadWriteOnce
             PARTITIONCONTENT_PUBLISH_IMAGE=example.com/kezio-ingest:e2e
             PARTITIONCONTENT_TRACKER_URL=http://opentracker.scaffold-system.svc.cluster.local:6969/announce
-            PARTITIONCONTENT_ACCESS_MODES=ReadWriteOnce
 
       - name: Deploy opentracker
         uses: ./.github/actions/deploy-opentracker
@@ -317,16 +321,14 @@ jobs:
         with:
           token: ${{ env.IMAGE_SERVICE_TOKEN }}
 
-      # local-path-provisioner (installed above) only satisfies
-      # ReadWriteOnce, so this lane opts the staging PVC into RWO here -
-      # config/image-service's own default stays ReadWriteMany for every
-      # other deployer; see deploy-image-service's staging-access-mode
-      # input doc for why.
+      # nfs-provisioner (installed above) satisfies ReadWriteMany, so
+      # config/image-service's own default (ReadWriteMany) applies here
+      # unmodified - unlike a local-path-provisioner-only cluster, this
+      # lane needs no staging-access-mode override.
       - name: Deploy image-service
         uses: ./.github/actions/deploy-image-service
         with:
           image-service-image: example.com/kezio-image-service:e2e
-          staging-access-mode: "ReadWriteOnce"
 
       - name: Verify image-path prerequisites
         uses: ./.github/actions/verify-image-path-prerequisites
