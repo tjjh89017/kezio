@@ -240,14 +240,9 @@ jobs:
       - name: Install cert-manager
         uses: ./.github/actions/install-cert-manager
 
-      - name: Deploy opentracker
-        uses: ./.github/actions/deploy-opentracker
-
-      - name: Create the image-service bearer token Secret
-        uses: ./.github/actions/create-image-service-token-secret
-        with:
-          token: ${{ env.IMAGE_SERVICE_TOKEN }}
-
+      # Creates the scaffold-system namespace (config/manager/manager.yaml)
+      # that opentracker and the token Secret deploy into below - it must
+      # run first.
       # The manager-image tag must match the local-tag the images job
       # baked into the tarball above, so the manager Deployment resolves
       # it from containerd instead of pulling from a registry.
@@ -255,6 +250,14 @@ jobs:
         uses: ./.github/actions/deploy-kezio
         with:
           manager-image: example.com/kezio:e2e
+
+      - name: Deploy opentracker
+        uses: ./.github/actions/deploy-opentracker
+
+      - name: Create the image-service bearer token Secret
+        uses: ./.github/actions/create-image-service-token-secret
+        with:
+          token: ${{ env.IMAGE_SERVICE_TOKEN }}
 
       - name: Verify image-path prerequisites
         uses: ./.github/actions/verify-image-path-prerequisites
