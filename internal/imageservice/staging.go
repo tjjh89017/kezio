@@ -97,11 +97,23 @@ type Staging struct {
 
 // NewStaging returns a Staging rooted at root. root must already exist;
 // NewStaging creates the uploads/ and uploads/.tmp/ subdirectories under
-// it if they are missing.
+// it if they are missing, and sweeps any temp files already in
+// uploads/.tmp/: since NewStaging runs before this process serves any
+// Receive call, nothing can legitimately be writing there yet, so every
+// entry found is an orphan a prior process crashed while writing.
 func NewStaging(root string) (*Staging, error) {
 	s := &Staging{root: root}
 	if err := os.MkdirAll(s.tmpDir(), 0o750); err != nil {
 		return nil, fmt.Errorf("create staging tmp dir: %w", err)
+	}
+	entries, err := os.ReadDir(s.tmpDir())
+	if err != nil {
+		return nil, fmt.Errorf("read staging tmp dir: %w", err)
+	}
+	for _, e := range entries {
+		if err := os.RemoveAll(filepath.Join(s.tmpDir(), e.Name())); err != nil {
+			return nil, fmt.Errorf("sweep orphaned staging tmp file %q: %w", e.Name(), err)
+		}
 	}
 	return s, nil
 }
@@ -264,12 +276,15 @@ func (s *Staging) Receive(name string, body io.Reader, wantChecksum string) (Upl
 		return UploadResult{}, fmt.Errorf("create temp file: %w", err)
 	}
 	tmpPath := tmp.Name()
-	// Any return path other than the final, successful rename must clean
-	// up the temp file: it must never be left behind, and it must never
-	// be mistaken for a completed upload (it never lives at dir).
-	succeeded := false
+	// Every path except the rename below leaves tmpPath behind unless this
+	// defer removes it: the idempotent-retry and conflict returns finish
+	// without ever renaming, and an error return may happen before or
+	// after the rename attempt. Track renamed, not "did this call
+	// succeed" - a successful idempotent retry never renames anything, so
+	// tying cleanup to success would skip removing its temp file.
+	renamed := false
 	defer func() {
-		if !succeeded {
+		if !renamed {
 			_ = tmp.Close()
 			_ = os.Remove(tmpPath)
 		}
@@ -300,7 +315,9 @@ func (s *Staging) Receive(name string, body io.Reader, wantChecksum string) (Upl
 
 	if existing, err := readMeta(dir); err == nil {
 		if strings.EqualFold(existing.Checksum, got) {
-			succeeded = true // no new write; nothing to clean up beyond the temp file above
+			// No new write: the just-hashed temp file is redundant with
+			// the already-staged upload.bin, and the defer above reclaims
+			// it since renamed stays false.
 			return UploadResult{
 				Name:       name,
 				Path:       filepath.Join(dir, uploadFileName),
@@ -321,6 +338,7 @@ func (s *Staging) Receive(name string, body io.Reader, wantChecksum string) (Upl
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		return UploadResult{}, fmt.Errorf("finalize upload: %w", err)
 	}
+	renamed = true
 	if err := writeMeta(dir, uploadMeta{SizeBytes: size, Checksum: got}); err != nil {
 		// The data file is in place but unmarked as complete; remove it
 		// rather than leave an unverifiable file a later reconcile might
@@ -329,7 +347,6 @@ func (s *Staging) Receive(name string, body io.Reader, wantChecksum string) (Upl
 		return UploadResult{}, fmt.Errorf("record upload metadata: %w", err)
 	}
 
-	succeeded = true
 	return UploadResult{
 		Name:      name,
 		Path:      finalPath,

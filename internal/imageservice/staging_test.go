@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -101,6 +102,33 @@ func TestStaging_RemoveUpload(t *testing.T) {
 	}
 }
 
+// NewStaging sweeps orphaned temp files left in uploads/.tmp/ by a prior
+// process that crashed mid-Receive: since NewStaging runs before this
+// process serves any upload, nothing can legitimately still be writing
+// there, so every leftover entry is safe to remove on startup.
+func TestNewStaging_SweepsOrphanedTempFiles(t *testing.T) {
+	root := t.TempDir()
+	tmpDir := filepath.Join(root, "uploads", ".tmp")
+	if err := os.MkdirAll(tmpDir, 0o750); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "upload-orphaned"), []byte("crash-orphaned bytes"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if _, err := NewStaging(root); err != nil {
+		t.Fatalf("NewStaging: %v", err)
+	}
+
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("ReadDir(.tmp): %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf(".tmp not swept on startup: %v", entries)
+	}
+}
+
 // Receive's doc promises that a name is never silently repointed at
 // different content: concurrent same-name uploads must either agree
 // (idempotent) or be rejected with ErrNameConflict, never leave upload.bin
@@ -152,6 +180,52 @@ func TestStaging_Receive_ConcurrentSameNameNeverCorrupts(t *testing.T) {
 			t.Fatalf("worker %d got a successful result with checksum %s, but the name is actually stored with checksum %s: dishonest success", i, results[i].Checksum, wantChecksum)
 		}
 	}
+}
+
+// Receive must never leave a temp file behind in uploads/.tmp, on any of
+// its three reachable outcomes: a fresh successful upload (renamed away),
+// an idempotent same-content retry, or a checksum-conflict rejection. A
+// leaked temp file is invisible to UsedBytes, so leaking on a common path
+// (a client retrying after a transient failure) silently eats staging
+// capacity forever.
+func TestStaging_Receive_NeverLeavesTempFile(t *testing.T) {
+	staging, root := newTestStaging(t)
+	tmpDir := filepath.Join(root, "uploads", ".tmp")
+
+	assertTmpDirEmpty := func(t *testing.T, when string) {
+		t.Helper()
+		entries, err := os.ReadDir(tmpDir)
+		if err != nil {
+			t.Fatalf("ReadDir(.tmp) %s: %v", when, err)
+		}
+		if len(entries) != 0 {
+			names := make([]string, len(entries))
+			for i, e := range entries {
+				names[i] = e.Name()
+			}
+			t.Errorf(".tmp not empty %s: %v", when, names)
+		}
+	}
+
+	body := []byte("golden image bytes")
+	if _, err := staging.Receive("golden", bytes.NewReader(body), ""); err != nil {
+		t.Fatalf("Receive(first upload): %v", err)
+	}
+	assertTmpDirEmpty(t, "after first successful upload")
+
+	result, err := staging.Receive("golden", bytes.NewReader(body), "")
+	if err != nil {
+		t.Fatalf("Receive(idempotent retry): %v", err)
+	}
+	if !result.Idempotent {
+		t.Fatalf("Receive(idempotent retry): got Idempotent = false, want true")
+	}
+	assertTmpDirEmpty(t, "after idempotent same-content retry")
+
+	if _, err := staging.Receive("golden", bytes.NewReader([]byte("different bytes")), ""); !errors.Is(err, ErrNameConflict) {
+		t.Fatalf("Receive(conflicting content): got err = %v, want ErrNameConflict", err)
+	}
+	assertTmpDirEmpty(t, "after checksum-conflict rejection")
 }
 
 // UsedBytes sums only completed uploads: an in-progress upload (under
