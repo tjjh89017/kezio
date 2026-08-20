@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -44,14 +45,16 @@ var publishPollInterval = 30 * time.Second
 
 // PartitionContentReconciler reconciles a PartitionContent object.
 //
-// This reconciler owns the content PVC and the publish Job's lifecycle
-// (create, observe, reflect into status) - the seeder Deployment/demand
-// marker and the deletion-blocking finalizer against Image/DeployRun
-// references are separate reconciler responsibilities layered on later.
-// It never mounts the content PVC's filesystem itself: the publish Job
-// is the sole witness to whether publishing succeeded (see outcomeOf),
-// and status.torrentPath is set from the store package's naming
-// convention, not from anything this reconciler read off disk.
+// This reconciler owns the content PVC, the publish Job's lifecycle
+// (create, observe, reflect into status), and - once Ready - the seeder
+// Deployment's lifecycle (create-on-demand, grace-period shutdown, status
+// reflection; see reconcileSeeder). The deletion-blocking finalizer
+// against Image/DeployRun references is a separate reconciler
+// responsibility layered on later. It never mounts the content PVC's
+// filesystem itself: the publish Job is the sole witness to whether
+// publishing succeeded (see outcomeOf), and status.torrentPath is set
+// from the store package's naming convention, not from anything this
+// reconciler read off disk.
 type PartitionContentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -62,6 +65,11 @@ type PartitionContentReconciler struct {
 	// value holds every PartitionContent at Pending - see
 	// PartitionContentPublishConfig's doc comment.
 	Publish PartitionContentPublishConfig
+	// Seeder configures the seeder Deployment's image and grace period.
+	// The zero value holds every seed-demanded content at
+	// SeederDegraded=True instead of creating a half-configured
+	// Deployment - see PartitionContentSeederConfig's doc comment.
+	Seeder PartitionContentSeederConfig
 }
 
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=partitioncontents,verbs=get;list;watch;create;update;patch;delete
@@ -69,6 +77,7 @@ type PartitionContentReconciler struct {
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=partitioncontents/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -97,10 +106,11 @@ func (r *PartitionContentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 }
 
 // onChange drives one step of the publish walk: ensure the content PVC,
-// then Pending -> Publishing -> Ready|Failed. An already-Ready object is
-// a no-op (see the early return below) - this is the dedupe guarantee a
-// later item's seeder lifecycle relies on: reaching Ready never
-// re-triggers a second publish Job for the same content hash.
+// then Pending -> Publishing -> Ready|Failed. An already-Ready object
+// never re-enters the publish walk (see the branch below) - this is the
+// dedupe guarantee the seeder lifecycle relies on: reaching Ready never
+// re-triggers a second publish Job for the same content hash. Once
+// Ready, reconcileSeeder takes over instead.
 func (r *PartitionContentReconciler) onChange(ctx context.Context, pc *keziov1alpha2.PartitionContent, hash store.InfoHash) (ctrl.Result, error) {
 	pvc, err := r.ensureContentPVC(ctx, pc, hash)
 	if err != nil {
@@ -108,7 +118,7 @@ func (r *PartitionContentReconciler) onChange(ctx context.Context, pc *keziov1al
 	}
 
 	if pc.Status.State == keziov1alpha2.PartitionContentStateReady {
-		return ctrl.Result{}, nil
+		return r.reconcileSeeder(ctx, pc, hash)
 	}
 
 	job, err := r.publishJobFor(ctx, pc, hash)
@@ -220,6 +230,7 @@ func (r *PartitionContentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&keziov1alpha2.PartitionContent{}, builder.WithPredicates(partitionContentUpdatePredicate)).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&batchv1.Job{}).
+		Owns(&appsv1.Deployment{}).
 		Named("partitioncontent").
 		Complete(r)
 }

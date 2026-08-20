@@ -105,9 +105,28 @@ const (
 	PartitionContentConditionSeederDegraded = "SeederDegraded"
 )
 
+// PartitionContent operational annotations, read directly off
+// ObjectMeta.Annotations - no defaulting or schema covers them.
+const (
+	// PartitionContentAnnotationSeedDemand, present with any value, asks
+	// the controller to run a seeder Deployment for this content (once
+	// Ready) on the default, site-unaware network - see
+	// PartitionContentSeederSite's Site doc comment for the "default"
+	// sentinel this stage reports. The e2e lane sets and clears it
+	// directly around a leecher run; a later item derives demand from
+	// Machine/DeployRun state instead, at which point this annotation
+	// becomes one input among several rather than the only one.
+	PartitionContentAnnotationSeedDemand = "kezio.kojuro.date/seed-demand"
+)
+
 // PartitionContentSeederSite counts seeders for this content at one site.
 type PartitionContentSeederSite struct {
 	// Site identifies the seeding site, for example a rack or DC name.
+	// Until seeding is site-aware, the controller reports exactly one
+	// entry here with Site set to the "default" sentinel
+	// (internal/controller's defaultSeederSite) rather than a real site
+	// name; a later item replaces that with one entry per site actually
+	// serving this content.
 	// +kubebuilder:validation:MaxLength=253
 	Site string `json:"site"`
 	// MachineCount is the number of machines seeding this content at

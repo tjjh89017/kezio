@@ -228,8 +228,13 @@ spec:
                       minimum: 0
                       type: integer
                     site:
-                      description: Site identifies the seeding site, for example a
-                        rack or DC name.
+                      description: |-
+                        Site identifies the seeding site, for example a rack or DC name.
+                        Until seeding is site-aware, the controller reports exactly one
+                        entry here with Site set to the "default" sentinel
+                        (internal/controller's defaultSeederSite) rather than a real site
+                        name; a later item replaces that with one entry per site actually
+                        serving this content.
                       maxLength: 253
                       type: string
                   required:

@@ -17,11 +17,12 @@ limitations under the License.
 package controller
 
 // Labels shared by every object the PartitionContent reconciler builds
-// (the content PVC and the publish Job).
+// (the content PVC, the publish Job, and the seeder Deployment).
 const (
-	partitionContentAppNameLabel      = "app.kubernetes.io/name"
-	partitionContentAppNameValue      = "kezio"
-	partitionContentAppComponentLabel = "app.kubernetes.io/component"
-	partitionContentPVCComponentValue = "partition-content"
-	partitionContentJobComponentValue = "partition-content-publish"
+	partitionContentAppNameLabel         = "app.kubernetes.io/name"
+	partitionContentAppNameValue         = "kezio"
+	partitionContentAppComponentLabel    = "app.kubernetes.io/component"
+	partitionContentPVCComponentValue    = "partition-content"
+	partitionContentJobComponentValue    = "partition-content-publish"
+	partitionContentSeederComponentValue = "partition-content-seeder"
 )

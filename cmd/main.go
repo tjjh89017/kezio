@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -250,6 +251,7 @@ func main() {
 		Scheme:   mgr.GetScheme(),
 		Recorder: mgr.GetEventRecorderFor("partitioncontent-controller"),
 		Publish:  partitionContentPublishConfigFromEnv(),
+		Seeder:   partitionContentSeederConfigFromEnv(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PartitionContent")
 		os.Exit(1)
@@ -318,6 +320,26 @@ func partitionContentPublishConfigFromEnv() controller.PartitionContentPublishCo
 	if modes := os.Getenv("PARTITIONCONTENT_ACCESS_MODES"); modes != "" {
 		for _, m := range strings.Split(modes, ",") {
 			cfg.AccessModes = append(cfg.AccessModes, corev1.PersistentVolumeAccessMode(strings.TrimSpace(m)))
+		}
+	}
+	return cfg
+}
+
+// partitionContentSeederConfigFromEnv builds the PartitionContent
+// reconciler's PartitionContentSeederConfig from the environment. Leaving
+// PARTITIONCONTENT_SEEDER_IMAGE unset yields a config that is not
+// ready(): a content whose seed-demand marker is set then holds
+// SeederDegraded=True (never Ready=False) until it is.
+func partitionContentSeederConfigFromEnv() controller.PartitionContentSeederConfig {
+	cfg := controller.PartitionContentSeederConfig{
+		Image: os.Getenv("PARTITIONCONTENT_SEEDER_IMAGE"),
+	}
+	if v := os.Getenv("PARTITIONCONTENT_SEEDER_GRACE_PERIOD"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			setupLog.Error(err, "invalid PARTITIONCONTENT_SEEDER_GRACE_PERIOD, using default", "value", v)
+		} else {
+			cfg.GracePeriod = d
 		}
 	}
 	return cfg

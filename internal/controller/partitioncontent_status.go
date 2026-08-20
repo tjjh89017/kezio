@@ -81,11 +81,26 @@ func (r *PartitionContentReconciler) applyPartitionContentStatus(ctx context.Con
 
 // setPartitionContentReadyCondition sets the Ready condition on
 // pc.Status.Conditions, stamping ObservedGeneration from pc.Generation.
-// This item only ever sets Ready - Valid and SeederDegraded are set by
-// later items - so this does not take a condition type parameter.
+// Valid is set by a later item - so this does not take a condition type
+// parameter; setPartitionContentSeederDegradedCondition is the other
+// condition setter this reconciler carries.
 func setPartitionContentReadyCondition(pc *keziov1alpha2.PartitionContent, status metav1.ConditionStatus, reason, message string) {
 	meta.SetStatusCondition(&pc.Status.Conditions, metav1.Condition{
 		Type:               keziov1alpha2.PartitionContentConditionReady,
+		Status:             status,
+		ObservedGeneration: pc.Generation,
+		Reason:             reason,
+		Message:            message,
+	})
+}
+
+// setPartitionContentSeederDegradedCondition sets the SeederDegraded
+// condition on pc.Status.Conditions, stamping ObservedGeneration from
+// pc.Generation. See recordSeederStatus for when this is set versus
+// removed entirely.
+func setPartitionContentSeederDegradedCondition(pc *keziov1alpha2.PartitionContent, status metav1.ConditionStatus, reason, message string) {
+	meta.SetStatusCondition(&pc.Status.Conditions, metav1.Condition{
+		Type:               keziov1alpha2.PartitionContentConditionSeederDegraded,
 		Status:             status,
 		ObservedGeneration: pc.Generation,
 		Reason:             reason,
