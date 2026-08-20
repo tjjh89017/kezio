@@ -10,8 +10,6 @@ env:
   GO_VERSION: "1.26.5"
   REGISTRY: ghcr.io
   IMAGE_NAMESPACE: tjjh89017
-  # RKE2 ships no default StorageClass, unlike k3s.
-  LOCAL_PATH_PROVISIONER_VERSION: "v0.0.37"
   IMAGE_SERVICE_TOKEN: "kezio-e2e-image-path-token"
 
 jobs:
@@ -262,21 +260,16 @@ jobs:
         with:
           images: manager image-service ingest
 
-      # RKE2 ships no default StorageClass; local-path-provisioner alone
-      # only ever satisfies ReadWriteOnce. install-nfs-provisioner backs
-      # onto a local-path PVC and fronts it with an in-cluster NFS server,
-      # taking over as the default StorageClass so every PVC the lane's
+      # RKE2 ships no default StorageClass, and every PVC the lane's
       # controllers request (the ingest scratch PVC, a PartitionContent's
-      # content PVC, image-service's staging PVC - all ReadWriteMany by
-      # production default) actually binds, with no lane-only access-mode
-      # overrides anywhere downstream.
-      - name: Install local-path-provisioner
-        uses: ./.github/actions/install-local-path-provisioner
-        with:
-          version: ${{ env.LOCAL_PATH_PROVISIONER_VERSION }}
-
-      - name: Install an in-cluster NFS provisioner and mark it the default StorageClass
-        uses: ./.github/actions/install-nfs-provisioner
+      # content PVC, image-service's staging PVC) defaults to
+      # ReadWriteMany in production. install-nfs-storage (csi-driver-nfs
+      # + a small in-cluster NFS server, hostPath-backed - no
+      # local-path-provisioner PVC needed underneath it) installs as the
+      # default StorageClass so every one of those PVCs actually binds,
+      # with no lane-only access-mode overrides anywhere downstream.
+      - name: Install csi-driver-nfs and mark it the default StorageClass
+        uses: ./.github/actions/install-nfs-storage
 
       - name: Install cert-manager
         uses: ./.github/actions/install-cert-manager
@@ -321,17 +314,17 @@ jobs:
         with:
           token: ${{ env.IMAGE_SERVICE_TOKEN }}
 
-      # nfs-provisioner (installed above) satisfies ReadWriteMany, so
+      # The nfs StorageClass (installed above) satisfies ReadWriteMany, so
       # config/image-service's own default access mode (ReadWriteMany)
       # applies here unmodified - this lane needs no staging-access-mode
       # override.
       #
-      # staging-size is overridden because nfs-provisioner reports the
-      # runner node's real free disk as available capacity (it has no
-      # quota of its own - see install-nfs-provisioner): config/image-service's
-      # 100Gi default production request exceeds what a GitHub-hosted
-      # runner actually has free, so the staging PVC would stay Pending
-      # forever. This fixture never uploads more than tens of MiB.
+      # staging-size is still capped well under config/image-service's
+      # 100Gi production default: the NFS export backing the "nfs"
+      # StorageClass sits on the same runner disk as everything else in
+      # the job, and this fixture never uploads more than tens of MiB
+      # anyway, so there is no reason to request anywhere near 100Gi of
+      # it.
       - name: Deploy image-service
         uses: ./.github/actions/deploy-image-service
         with:

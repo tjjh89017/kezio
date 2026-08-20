@@ -69,17 +69,25 @@ runs:
         kubectl describe pvc -n "${NAMESPACE}" >"${OUTPUT_PATH}/pvcs-describe.txt" 2>&1
         kubectl get pv -o wide >"${OUTPUT_PATH}/pvs.txt" 2>&1
 
-        # nfs-provisioner (image-path lane's default StorageClass) runs in
-        # "default", not NAMESPACE - it must exist before scaffold-system
-        # does (install-nfs-provisioner runs ahead of the controller-manager
-        # that creates that namespace). A silently-failing provisioner
-        # leaves every RWX PVC in NAMESPACE Pending with no clue why unless
-        # its own logs are captured too.
-        echo "===== nfs-provisioner (namespace default) ====="
-        kubectl get pods -n default -l app=nfs-provisioner -o wide >"${OUTPUT_PATH}/nfs-provisioner-pods.txt" 2>&1
-        kubectl describe pods -n default -l app=nfs-provisioner >"${OUTPUT_PATH}/nfs-provisioner-pods-describe.txt" 2>&1
-        kubectl logs -n default -l app=nfs-provisioner --all-containers --tail=1000 \
-          >"${OUTPUT_PATH}/nfs-provisioner-logs.txt" 2>&1
+        # csi-driver-nfs's controller/node run in kube-system, and the NFS
+        # server itself in "default" - neither is NAMESPACE, and both
+        # exist before scaffold-system does (install-nfs-storage runs
+        # ahead of the controller-manager that creates that namespace). A
+        # silently-failing driver or server leaves every RWX PVC in
+        # NAMESPACE unbound (or bound but unmountable) with no clue why
+        # unless their own logs are captured too.
+        echo "===== csi-driver-nfs (namespace kube-system) ====="
+        kubectl get pods -n kube-system -l 'app in (csi-nfs-controller,csi-nfs-node)' -o wide \
+          >"${OUTPUT_PATH}/csi-nfs-pods.txt" 2>&1
+        kubectl describe pods -n kube-system -l 'app in (csi-nfs-controller,csi-nfs-node)' \
+          >"${OUTPUT_PATH}/csi-nfs-pods-describe.txt" 2>&1
+        kubectl logs -n kube-system -l 'app in (csi-nfs-controller,csi-nfs-node)' --all-containers --tail=1000 \
+          >"${OUTPUT_PATH}/csi-nfs-logs.txt" 2>&1
+        echo "===== nfs-server (namespace default) ====="
+        kubectl get pods -n default -l app=nfs-server -o wide >"${OUTPUT_PATH}/nfs-server-pods.txt" 2>&1
+        kubectl describe pods -n default -l app=nfs-server >"${OUTPUT_PATH}/nfs-server-pods-describe.txt" 2>&1
+        kubectl logs -n default -l app=nfs-server --all-containers --tail=1000 \
+          >"${OUTPUT_PATH}/nfs-server-logs.txt" 2>&1
 
         echo "===== controller-manager logs ====="
         kubectl logs -n "${NAMESPACE}" -l control-plane=controller-manager --all-containers --tail=1000 \

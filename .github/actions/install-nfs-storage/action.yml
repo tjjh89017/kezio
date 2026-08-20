@@ -1,0 +1,150 @@
+name: Install csi-driver-nfs and mark it the default StorageClass
+
+description: >-
+  Installs the upstream kubernetes-csi/csi-driver-nfs controller and node
+  DaemonSet at a pinned version, deploys a small in-cluster NFS server
+  (the same server every CSI node-plugin pod on every node mounts from),
+  waits for both to roll out, then creates the "nfs" StorageClass backed
+  by the driver and marks it the cluster default. RKE2 ships no default
+  StorageClass, and every PVC the image-path lane's controllers request
+  defaults to ReadWriteMany in production - a plain
+  local-path-provisioner-only cluster can only ever satisfy
+  ReadWriteOnce.
+
+  csi-driver-nfs (not an all-in-one NFS-server-plus-provisioner image)
+  specifically because its node plugin bundles its own nfs-utils and
+  performs the mount from inside its own container: the classic
+  sig-storage/nfs-provisioner image relies on the *host's* in-tree NFS
+  volume plugin, which needs nfs-common installed on the node - not the
+  case on a bare GitHub-hosted runner, and the failure ("bad option; ...
+  you might need a /sbin/mount.<type> helper program") only shows up as
+  a kubelet mount error, not anywhere the provisioner's own logs would
+  catch it. Separating the NFS server from the CSI driver also means
+  either half's failure is diagnosable on its own.
+
+inputs:
+  csi-driver-nfs-version:
+    description: 'csi-driver-nfs release to install, e.g. "v4.13.4".'
+    required: false
+    default: "v4.13.4"
+  nfs-server-namespace:
+    description: 'Namespace to deploy the NFS server Service/Deployment into. Always exists (unlike scaffold-system, not yet created this early in the lane).'
+    required: false
+    default: "default"
+  nfs-server-image:
+    description: 'NFS server image (kernel nfsd in a container, exporting a hostPath directory) - the same image csi-driver-nfs''s own example manifest uses.'
+    required: false
+    default: "itsthenetwork/nfs-server-alpine:12"
+  timeout:
+    description: 'Timeout for the csi-nfs-controller/csi-nfs-node/nfs-server rollout waits, e.g. "180s".'
+    required: false
+    default: "180s"
+
+runs:
+  using: composite
+  steps:
+    - name: Install csi-driver-nfs
+      shell: bash
+      env:
+        VERSION: ${{ inputs.csi-driver-nfs-version }}
+        TIMEOUT: ${{ inputs.timeout }}
+      run: |
+        set -euo pipefail
+        base="https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/${VERSION}/deploy/${VERSION}"
+        kubectl apply -f "${base}/rbac-csi-nfs.yaml"
+        kubectl apply -f "${base}/csi-nfs-driverinfo.yaml"
+        kubectl apply -f "${base}/csi-nfs-controller.yaml"
+        kubectl apply -f "${base}/csi-nfs-node.yaml"
+        kubectl -n kube-system rollout status deployment/csi-nfs-controller --timeout="${TIMEOUT}"
+        kubectl -n kube-system rollout status daemonset/csi-nfs-node --timeout="${TIMEOUT}"
+
+    - name: Deploy the in-cluster NFS server
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.nfs-server-namespace }}
+        NFS_SERVER_IMAGE: ${{ inputs.nfs-server-image }}
+        TIMEOUT: ${{ inputs.timeout }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: nfs-server
+          namespace: ${NAMESPACE}
+          labels:
+            app: nfs-server
+        spec:
+          selector:
+            app: nfs-server
+          ports:
+            - {name: tcp-2049, port: 2049, protocol: TCP}
+            - {name: udp-111, port: 111, protocol: UDP}
+        ---
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: nfs-server
+          namespace: ${NAMESPACE}
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: nfs-server
+          template:
+            metadata:
+              labels:
+                app: nfs-server
+            spec:
+              nodeSelector:
+                kubernetes.io/os: linux
+              containers:
+                - name: nfs-server
+                  image: ${NFS_SERVER_IMAGE}
+                  env:
+                    - name: SHARED_DIRECTORY
+                      value: "/exports"
+                  volumeMounts:
+                    - mountPath: /exports
+                      name: nfs-vol
+                  securityContext:
+                    privileged: true
+                  ports:
+                    - {name: tcp-2049, containerPort: 2049, protocol: TCP}
+                    - {name: udp-111, containerPort: 111, protocol: UDP}
+              volumes:
+                - name: nfs-vol
+                  hostPath:
+                    path: /nfs-vol
+                    type: DirectoryOrCreate
+        EOF
+        kubectl -n "${NAMESPACE}" rollout status deployment/nfs-server --timeout="${TIMEOUT}"
+
+    - name: Create the nfs StorageClass and mark it the cluster default
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.nfs-server-namespace }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: storage.k8s.io/v1
+        kind: StorageClass
+        metadata:
+          name: nfs
+          annotations:
+            storageclass.kubernetes.io/is-default-class: "true"
+        provisioner: nfs.csi.k8s.io
+        parameters:
+          server: nfs-server.${NAMESPACE}.svc.cluster.local
+          share: /
+        reclaimPolicy: Delete
+        volumeBindingMode: Immediate
+        EOF
+
+        # Exactly one default StorageClass: local-path-provisioner (if
+        # already installed and marked default) must give that up now
+        # that "nfs" - the one that can actually satisfy ReadWriteMany -
+        # has taken over.
+        if kubectl get storageclass local-path >/dev/null 2>&1; then
+          kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}'
+        fi
