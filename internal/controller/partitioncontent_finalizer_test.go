@@ -388,3 +388,41 @@ func TestMapImageToPartitionContentsDeduplicatesSlotsAndSkipsBlankOnes(t *testin
 		}
 	}
 }
+
+func TestFormatBlockers(t *testing.T) {
+	cases := []struct {
+		name     string
+		blockers []string
+		want     string
+	}{
+		{
+			name:     "empty input",
+			blockers: nil,
+			want:     "",
+		},
+		{
+			name:     "under limit joins verbatim",
+			blockers: []string{"image/a", "image/b"},
+			want:     "image/a, image/b",
+		},
+		{
+			name:     "exactly at limit joins verbatim",
+			blockers: []string{"image/a", "image/b", "image/c", "image/d", "image/e"},
+			want:     "image/a, image/b, image/c, image/d, image/e",
+		},
+		{
+			name:     "over limit names first N and counts the rest",
+			blockers: []string{"image/a", "image/b", "image/c", "image/d", "image/e", "image/f", "image/g"},
+			want:     "image/a, image/b, image/c, image/d, image/e, and 2 more",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := formatBlockers(tc.blockers)
+			if got != tc.want {
+				t.Errorf("formatBlockers(%v) = %q, want %q", tc.blockers, got, tc.want)
+			}
+		})
+	}
+}
