@@ -224,5 +224,63 @@ var _ = Describe("Image Webhook", func() {
 			Expect(k8sClient.Create(ctx, created)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, created)).To(Succeed())
 		})
+
+		It("denies a slot whose sizeBytes is smaller than the referenced PartitionContent's lastExtentEnd", func() {
+			pc := &keziov1alpha2.PartitionContent{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "pc-abcdef0123456789abcdef0123456789abcdef01",
+					Namespace: "default",
+				},
+				Spec: keziov1alpha2.PartitionContentSpec{
+					FSType:        "ext4",
+					UsedBytes:     4096,
+					SizeBytes:     4096,
+					LastExtentEnd: 4096,
+					PieceLength:   16384,
+					Source: keziov1alpha2.PartitionContentSource{
+						ImageName:       "image-b",
+						PartitionNumber: 1,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pc)).To(Succeed())
+
+			// The webhook runs against the manager's cache-backed client
+			// (SetupImageWebhookWithManager wires mgr.GetClient()), not the
+			// k8sClient used above to create pc. That cache may not have
+			// synced the just-created PartitionContent by the time the first
+			// attempt below runs, in which case the content lookup 404s and
+			// the slot is admitted (with a warning) instead of denied. Retry
+			// with a fresh candidate name each attempt, so a prior accepted
+			// attempt's object can't mask the real assertion behind
+			// AlreadyExists, until the deny fires for the expected reason.
+			attempt := 0
+			Eventually(func(g Gomega) {
+				attempt++
+				candidate := &keziov1alpha2.Image{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      fmt.Sprintf("image-admission-roundtrip-deny-%d", attempt),
+						Namespace: "default",
+					},
+					Spec: keziov1alpha2.ImageSpec{
+						Layout: keziov1alpha2.ImageDiskLayout{
+							PartitionTable: keziov1alpha2.PartitionTableGPT,
+							SfdiskJSON:     `{"partitiontable":{"label":"gpt"}}`,
+							Slots: []keziov1alpha2.ImageSlot{
+								{
+									Number:     1,
+									Role:       keziov1alpha2.PartitionRoleData,
+									ContentRef: &keziov1alpha2.NameRef{Name: pc.Name},
+									SizeBytes:  2048,
+								},
+							},
+						},
+					},
+				}
+				err := k8sClient.Create(ctx, candidate)
+				g.Expect(err).To(HaveOccurred())
+				g.Expect(err.Error()).To(ContainSubstring("smaller than"))
+			}).Should(Succeed())
+		})
 	})
 })
