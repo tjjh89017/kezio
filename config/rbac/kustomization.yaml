@@ -22,6 +22,12 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the scaffold itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
+- partitioncontent_admin_role.yaml
+- partitioncontent_editor_role.yaml
+- partitioncontent_viewer_role.yaml
+- image_admin_role.yaml
+- image_editor_role.yaml
+- image_viewer_role.yaml
 - machinehardware_admin_role.yaml
 - machinehardware_editor_role.yaml
 - machinehardware_viewer_role.yaml

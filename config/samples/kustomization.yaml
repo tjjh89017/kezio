@@ -3,4 +3,6 @@ resources:
 - kezio_v1alpha2_machine.yaml
 - kezio_v1alpha2_deployrun.yaml
 - kezio_v1alpha2_machinehardware.yaml
+- kezio_v1alpha2_image.yaml
+- kezio_v1alpha2_partitioncontent.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

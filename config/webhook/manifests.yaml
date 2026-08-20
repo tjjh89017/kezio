@@ -10,6 +10,26 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
+      path: /validate-kezio-kojuro-date-v1alpha2-image
+  failurePolicy: Fail
+  name: vimage-v1alpha2.kb.io
+  rules:
+  - apiGroups:
+    - kezio.kojuro.date
+    apiVersions:
+    - v1alpha2
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - images
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
       path: /validate-kezio-kojuro-date-v1alpha2-machine
   failurePolicy: Fail
   name: vmachine-v1alpha2.kb.io
@@ -23,4 +43,24 @@ webhooks:
     - UPDATE
     resources:
     - machines
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-kezio-kojuro-date-v1alpha2-partitioncontent
+  failurePolicy: Fail
+  name: vpartitioncontent-v1alpha2.kb.io
+  rules:
+  - apiGroups:
+    - kezio.kojuro.date
+    apiVersions:
+    - v1alpha2
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - partitioncontents
   sideEffects: None

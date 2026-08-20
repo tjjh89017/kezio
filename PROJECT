@@ -40,4 +40,28 @@ resources:
   kind: MachineHardware
   path: github.com/tjjh89017/kezio/api/v1alpha2
   version: v1alpha2
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: kojuro.date
+  group: kezio
+  kind: Image
+  path: github.com/tjjh89017/kezio/api/v1alpha2
+  version: v1alpha2
+  webhooks:
+    validation: true
+    webhookVersion: v1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: kojuro.date
+  group: kezio
+  kind: PartitionContent
+  path: github.com/tjjh89017/kezio/api/v1alpha2
+  version: v1alpha2
+  webhooks:
+    validation: true
+    webhookVersion: v1
 version: "3"

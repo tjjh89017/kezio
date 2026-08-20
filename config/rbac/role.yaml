@@ -25,8 +25,10 @@ rules:
   - kezio.kojuro.date
   resources:
   - deployruns
+  - images
   - machinehardwares
   - machines
+  - partitioncontents
   verbs:
   - create
   - delete
@@ -39,14 +41,18 @@ rules:
   - kezio.kojuro.date
   resources:
   - deployruns/finalizers
+  - images/finalizers
   - machines/finalizers
+  - partitioncontents/finalizers
   verbs:
   - update
 - apiGroups:
   - kezio.kojuro.date
   resources:
   - deployruns/status
+  - images/status
   - machines/status
+  - partitioncontents/status
   verbs:
   - get
   - patch
