@@ -60,7 +60,7 @@ runs:
         # live, listening image-service pod - not just that the Deployment
         # object reports Available.
         kubectl run verify-image-service-healthz --rm -i --restart=Never \
-          --image=curlimages/curl:latest -n "${NAMESPACE}" \
+          --image=curlimages/curl:8.11.0 -n "${NAMESPACE}" \
           --command -- curl --fail --silent --show-error \
           "http://${IMAGE_SERVICE_SERVICE_NAME}.${NAMESPACE}.svc.cluster.local:8080/healthz"
 
