@@ -1,0 +1,188 @@
+name: Ingest a test image through kezioctl
+
+description: >-
+  Builds a small GPT+ext4 fixture disk directly on the runner (sfdisk +
+  loop device + mkfs.ext4, no privileged container needed - the same
+  regular-file-based approach internal/ingest itself uses once the Job
+  gets the uploaded bytes), hashes its one real partition locally with the
+  same partclone build the ingest Job runs so the layout's contentRef
+  names the PartitionContent the ingest Job will actually produce, then
+  builds kezioctl and drives it through a port-forwarded image-service to
+  upload the fixture and create the Image. Finally polls the Image until
+  it reaches Ready (or Failed, or the deadline), dumping the Image,
+  PartitionContent, and ingest/publish Job/pod state on either failure.
+
+inputs:
+  image-name:
+    description: 'Name to give the uploaded Image (and image-service upload).'
+    required: false
+    default: "kezio-e2e-fixture"
+  namespace:
+    description: 'Namespace the image-service Service and the Image live in.'
+    required: false
+    default: "scaffold-system"
+  token:
+    description: Bearer token kezioctl authenticates the upload with.
+    required: true
+  image-service-service-name:
+    description: 'Name of the image-service Service to port-forward.'
+    required: false
+    default: "kezio-image-service"
+  local-port:
+    description: 'Local port the image-service Service is port-forwarded to.'
+    required: false
+    default: "18080"
+  partition-size-mib:
+    description: 'Size in MiB of the fixture disk''s one ext4 partition.'
+    required: false
+    default: "60"
+  wait-timeout-seconds:
+    description: 'How long to poll for the Image to reach Ready before failing.'
+    required: false
+    default: "300"
+
+runs:
+  using: composite
+  steps:
+    - name: Install partclone (not preinstalled on the runner)
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends partclone
+
+    - name: Build kezioctl
+      shell: bash
+      run: go build -o bin/kezioctl ./cmd/kezioctl
+
+    - name: Build a GPT+ext4 fixture disk and compute its partition's content hash
+      id: fixture
+      shell: bash
+      env:
+        PART_MIB: ${{ inputs.partition-size-mib }}
+      run: |
+        set -euo pipefail
+
+        disk="${RUNNER_TEMP}/fixture.img"
+        total_mib=$(( PART_MIB + 8 ))
+        truncate -s "${total_mib}M" "${disk}"
+        printf 'label: gpt\nsize=%sMiB, type=L\n' "${PART_MIB}" | sfdisk "${disk}"
+        sfdisk --json "${disk}" >"${RUNNER_TEMP}/sfdisk.json"
+
+        loop="$(sudo losetup -P --find --show "${disk}")"
+        sudo mkfs.ext4 -F -q "${loop}p1"
+        mnt="$(mktemp -d)"
+        sudo mount "${loop}p1" "${mnt}"
+        sudo dd if=/dev/urandom of="${mnt}/fixture-content.bin" bs=1M count=2 status=none
+        sudo umount "${mnt}"
+        rmdir "${mnt}"
+        sudo losetup -d "${loop}"
+        # The fixture disk file itself was never chowned to root - only
+        # the loop device and its mount were - so it stays readable by
+        # the runner user for the plain dd/kezioctl steps below.
+
+        # Slice the one partition straight out of the fixture disk by
+        # byte offset - a plain file copy, exactly what
+        # internal/ingest.extractPartition does server-side - so the
+        # partclone run below sees the identical bytes the ingest Job
+        # will see.
+        start_sectors="$(jq -r '.partitiontable.partitions[0].start' "${RUNNER_TEMP}/sfdisk.json")"
+        size_sectors="$(jq -r '.partitiontable.partitions[0].size' "${RUNNER_TEMP}/sfdisk.json")"
+        sector_size="$(jq -r '.partitiontable.sectorsize // 512' "${RUNNER_TEMP}/sfdisk.json")"
+        start_bytes=$(( start_sectors * sector_size ))
+        size_bytes=$(( size_sectors * sector_size ))
+
+        slice="${RUNNER_TEMP}/fixture-part1.raw"
+        dd if="${disk}" of="${slice}" bs=1M iflag=skip_bytes,count_bytes \
+          skip="${start_bytes}" count="${size_bytes}" status=none
+
+        content_dir="${RUNNER_TEMP}/fixture-content"
+        mkdir -p "${content_dir}"
+        # Unprivileged: partclone opens a regular file exactly like a
+        # block device (see internal/ingest's package doc comment) - no
+        # sudo needed here even though mkfs/mount above did need it.
+        partclone.ext4 -c -F -s "${slice}" -o "${content_dir}" -T -L "${RUNNER_TEMP}/partclone.log"
+
+        content_ref="$(bin/kezioctl content hash "${content_dir}")"
+        echo "content-ref=${content_ref}" >>"${GITHUB_OUTPUT}"
+
+        jq -n --arg pt gpt --slurpfile sf "${RUNNER_TEMP}/sfdisk.json" --arg ref "${content_ref}" '{
+          partitionTable: $pt,
+          sfdisk: $sf[0],
+          slots: [{number: 1, role: "data", contentRef: {name: $ref}}]
+        }' >"${RUNNER_TEMP}/layout.json"
+
+        echo "disk-path=${disk}" >>"${GITHUB_OUTPUT}"
+        echo "layout-path=${RUNNER_TEMP}/layout.json" >>"${GITHUB_OUTPUT}"
+
+    - name: Upload the fixture and wait for its Image to reach Ready
+      shell: bash
+      env:
+        IMAGE_NAME: ${{ inputs.image-name }}
+        NAMESPACE: ${{ inputs.namespace }}
+        TOKEN: ${{ inputs.token }}
+        SERVICE_NAME: ${{ inputs.image-service-service-name }}
+        LOCAL_PORT: ${{ inputs.local-port }}
+        WAIT_TIMEOUT_SECONDS: ${{ inputs.wait-timeout-seconds }}
+        DISK_PATH: ${{ steps.fixture.outputs.disk-path }}
+        LAYOUT_PATH: ${{ steps.fixture.outputs.layout-path }}
+      run: |
+        set -euo pipefail
+
+        dump_diagnostics() {
+          echo "::group::Image ${IMAGE_NAME}"
+          kubectl get image "${IMAGE_NAME}" -n "${NAMESPACE}" -o yaml || true
+          echo "::endgroup::"
+          echo "::group::PartitionContents"
+          kubectl get partitioncontents.kezio.kojuro.date -n "${NAMESPACE}" -o yaml || true
+          echo "::endgroup::"
+          echo "::group::ingest/publish Jobs"
+          kubectl get jobs -n "${NAMESPACE}" -l "app.kubernetes.io/name=kezio" -o wide || true
+          kubectl describe jobs -n "${NAMESPACE}" -l "app.kubernetes.io/component=image-ingest-job" || true
+          kubectl describe jobs -n "${NAMESPACE}" -l "app.kubernetes.io/component=partition-content-publish" || true
+          echo "::endgroup::"
+          echo "::group::ingest/publish pod logs"
+          kubectl logs -n "${NAMESPACE}" -l "app.kubernetes.io/component=image-ingest-job" --all-containers --tail=1000 || true
+          kubectl logs -n "${NAMESPACE}" -l "app.kubernetes.io/component=partition-content-publish" --all-containers --tail=1000 || true
+          echo "::endgroup::"
+        }
+
+        kubectl -n "${NAMESPACE}" port-forward "svc/${SERVICE_NAME}" "${LOCAL_PORT}:8080" &
+        pf_pid=$!
+        trap 'kill "${pf_pid}" 2>/dev/null || true' EXIT
+
+        for _ in $(seq 1 30); do
+          curl -sf -o /dev/null "http://127.0.0.1:${LOCAL_PORT}/healthz" && break
+          sleep 1
+        done
+
+        trap 'dump_diagnostics; kill "${pf_pid}" 2>/dev/null || true' ERR
+        bin/kezioctl image upload "${DISK_PATH}" \
+          --name "${IMAGE_NAME}" \
+          --namespace "${NAMESPACE}" \
+          --server "http://127.0.0.1:${LOCAL_PORT}" \
+          --token "${TOKEN}" \
+          --layout "${LAYOUT_PATH}"
+
+        deadline=$(( $(date +%s) + WAIT_TIMEOUT_SECONDS ))
+        while true; do
+          state="$(kubectl get image "${IMAGE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || true)"
+          echo "image ${IMAGE_NAME} state=${state:-<none>}"
+          if [ "${state}" = "Ready" ]; then
+            break
+          fi
+          if [ "${state}" = "Failed" ]; then
+            echo "::error::Image ${IMAGE_NAME} reached Failed" >&2
+            dump_diagnostics
+            exit 1
+          fi
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::Image ${IMAGE_NAME} did not reach Ready within ${WAIT_TIMEOUT_SECONDS}s" >&2
+            dump_diagnostics
+            exit 1
+          fi
+          sleep 3
+        done
+        trap 'kill "${pf_pid}" 2>/dev/null || true' EXIT
+
+        echo "Image ${IMAGE_NAME} reached Ready"

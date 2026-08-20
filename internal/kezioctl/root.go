@@ -64,6 +64,7 @@ side with kezioctl.`,
 			"then to \"default\".")
 
 	root.AddCommand(newImageCmd(flags))
+	root.AddCommand(newContentCmd(flags))
 	return root
 }
 

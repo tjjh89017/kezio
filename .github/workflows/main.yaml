@@ -204,13 +204,12 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-  # Image-path lane skeleton: RKE2 + local-path-provisioner (RKE2 has no
-  # default StorageClass, unlike the fast lane which needs no PVCs) +
-  # opentracker + the image-service token Secret + the controller-manager,
-  # then a placeholder step that proves those prerequisites are actually
-  # healthy. ingest-test-image/run-leecher (separate items) slot in after
-  # "Verify image-path prerequisites" once the ingest/image-service
-  # containers exist.
+  # Image-path lane: RKE2 + local-path-provisioner (RKE2 has no default
+  # StorageClass, unlike the fast lane which needs no PVCs) + opentracker
+  # + the image-service token Secret + the controller-manager, verified
+  # healthy, then a real upload -> ingest -> publish -> Ready walk through
+  # kezioctl (ingest-test-image). run-leecher (a separate item) slots in
+  # after that once it exists.
   e2e-image-path:
     name: Image path
     needs: [images]
@@ -241,16 +240,25 @@ jobs:
           name: image-tar-image-service
           path: /tmp/images
 
+      # kezio-ingest is the same image the ingest and publish Jobs both
+      # run, selected by INGEST_MODE - see IMAGE_INGEST_IMAGE and
+      # PARTITIONCONTENT_PUBLISH_IMAGE below.
+      - name: Download the ingest image tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: image-tar-ingest
+          path: /tmp/images
+
       - name: Install RKE2
         uses: ./.github/actions/install-rke2
         with:
           rke2-version: "v1.36.2+rke2r1"
           enable-multus: "false"
 
-      - name: Import the manager and image-service images into RKE2 containerd
+      - name: Import the manager, image-service, and ingest images into RKE2 containerd
         uses: ./.github/actions/import-image-tarballs
         with:
-          images: manager image-service
+          images: manager image-service ingest
 
       - name: Install local-path-provisioner and mark it the default StorageClass
         uses: ./.github/actions/install-local-path-provisioner
@@ -271,12 +279,26 @@ jobs:
       # deploys below (config/image-service's namePrefix "kezio-" applied
       # to "image-service-staging"), so a kezio-staged:// source resolves
       # in the same lane.
+      #
+      # IMAGE_INGEST_IMAGE and PARTITIONCONTENT_PUBLISH_IMAGE both name
+      # the ingest tarball's local-tag: the Image controller's ingest Job
+      # and the PartitionContent controller's publish Job run the same
+      # kezio-ingest binary, selected by INGEST_MODE (ingest vs publish).
+      # IMAGE_INGEST_SOURCE_FORMAT=raw matches ingest-test-image's fixture
+      # disk, which the ingest Job would otherwise reject against the
+      # manager's own qcow2 default (ImageIngestConfig.sourceFormat).
+      # PARTITIONCONTENT_TRACKER_URL points at opentracker's Service,
+      # deployed below - every published .torrent's announce URL.
       - name: Deploy kezio CRDs and controller-manager
         uses: ./.github/actions/deploy-kezio
         with:
           manager-image: example.com/kezio:e2e
           extra-env: |
             IMAGE_INGEST_STAGING_PVC=kezio-image-service-staging
+            IMAGE_INGEST_IMAGE=example.com/kezio-ingest:e2e
+            IMAGE_INGEST_SOURCE_FORMAT=raw
+            PARTITIONCONTENT_PUBLISH_IMAGE=example.com/kezio-ingest:e2e
+            PARTITIONCONTENT_TRACKER_URL=http://opentracker.scaffold-system.svc.cluster.local:6969/announce
 
       - name: Deploy opentracker
         uses: ./.github/actions/deploy-opentracker
@@ -299,6 +321,11 @@ jobs:
 
       - name: Verify image-path prerequisites
         uses: ./.github/actions/verify-image-path-prerequisites
+
+      - name: Ingest a test image through kezioctl
+        uses: ./.github/actions/ingest-test-image
+        with:
+          token: ${{ env.IMAGE_SERVICE_TOKEN }}
 
       - name: Collect diagnostics
         if: failure()
