@@ -247,6 +247,28 @@ func TestReInspectAcceptable(t *testing.T) {
 	}
 }
 
+// ensureReadyTestImage idempotently creates a composed Image named name
+// (no slots, no source - see newTestImageWithSlots) and drives its status
+// straight to Ready with a fresh (matching-generation) Ready condition,
+// without running ImageReconciler - this file only exercises
+// MachineReconciler, which never writes Image status.
+func ensureReadyTestImage(ctx context.Context, name string) {
+	img := newTestImageWithSlots(name, []keziov1alpha2.ImageSlot{}, nil)
+	if err := k8sClient.Create(ctx, img); err != nil {
+		Expect(errors.IsAlreadyExists(err)).To(BeTrue())
+	}
+	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, img)).To(Succeed())
+	img.Status.State = keziov1alpha2.ImageStateReady
+	meta.SetStatusCondition(&img.Status.Conditions, metav1.Condition{
+		Type:               keziov1alpha2.ImageConditionReady,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: img.Generation,
+		Reason:             "Ready",
+		Message:            "test fixture",
+	})
+	Expect(k8sClient.Status().Update(ctx, img)).To(Succeed())
+}
+
 var _ = Describe("Machine Controller", func() {
 	// Every Context below that references the BMC credentials Secret by
 	// its literal name "bmc-creds" relies on this shared, idempotently
@@ -265,6 +287,20 @@ var _ = Describe("Machine Controller", func() {
 		}
 		if err := k8sClient.Create(context.Background(), secret); err != nil && !errors.IsAlreadyExists(err) {
 			Expect(err).NotTo(HaveOccurred())
+		}
+	})
+
+	// Every Context below that sets spec.imageRef to one of these fixed
+	// names relies on this shared, idempotently created, already-Ready
+	// Image existing before any reconcile runs
+	// MachineReconciler.imageReadyForProvisioning's gate - mirrors the
+	// "bmc-creds" Secret fixture above. The Context specifically exercising
+	// that gate (imageRef missing/not-Ready/stale) builds its own Images
+	// instead, since that is exactly the state this fixture never leaves an
+	// Image in.
+	BeforeEach(func() {
+		for _, name := range []string{"test-image", "other-image", "reinspect-image", "fresh-image", "restored-image"} {
+			ensureReadyTestImage(context.Background(), name)
 		}
 	})
 
@@ -765,10 +801,9 @@ var _ = Describe("Machine Controller", func() {
 	Context("When spec references name kinds that do not exist yet", func() {
 		ctx := context.Background()
 
-		It("still walks Enrolling to Provisioned, proving subnetRef/postHookRefs/imageRef are never resolved", func() {
+		It("still walks Enrolling to Provisioned, proving subnetRef/postHookRefs/dataImages are never resolved", func() {
 			machineName := fmt.Sprintf("unresolved-refs-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			imageRef := keziov1alpha2.NameRef{Name: "no-such-image"}
 			resource := &keziov1alpha2.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
 				Spec: keziov1alpha2.MachineSpec{
@@ -779,7 +814,12 @@ var _ = Describe("Machine Controller", func() {
 					BootMACAddress: "aa:bb:cc:dd:ee:04",
 					SubnetRef:      keziov1alpha2.NameRef{Name: "no-such-subnet"},
 					PostHookRefs:   []keziov1alpha2.NameRef{{Name: "no-such-hook"}},
-					ImageRef:       &imageRef,
+					// DataImages, unlike ImageRef, is not gated on any
+					// referenced Image's readiness in this stage - it keeps
+					// the deploy payload non-empty (so shouldProvision fires)
+					// without exercising the new imageRef gate this test
+					// predates.
+					DataImages: []keziov1alpha2.MachineDataImage{{ImageRef: keziov1alpha2.NameRef{Name: "no-such-data-image"}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -811,6 +851,141 @@ var _ = Describe("Machine Controller", func() {
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioned))
 			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+		})
+	})
+
+	Context("When spec.imageRef gates the provisioning trigger", func() {
+		ctx := context.Background()
+
+		// newGatedMachine creates and finalizer-reconciles a Machine with
+		// imageRef set to imageName, walking it to Available with an empty
+		// deploy payload first (imageRef is added only after Available is
+		// reached) so the provisioning-trigger gate this Context exercises
+		// is the first thing that ever reads imageRef for this Machine.
+		newGatedMachine := func(machineName, imageName string) types.NamespacedName {
+			GinkgoHelper()
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: fmt.Sprintf("aa:bb:cc:dd:80:%02x", time.Now().UnixNano()%256),
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, resource)).To(Succeed()) })
+
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}}
+			var machine keziov1alpha2.Machine
+			for i := 0; i < 20; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+				if machine.Status.State == keziov1alpha2.MachineStateAvailable {
+					break
+				}
+			}
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable))
+
+			machine.Spec.ImageRef = &keziov1alpha2.NameRef{Name: imageName}
+			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
+			return name
+		}
+
+		It("delays without bumping errorCount when the referenced Image does not exist", func() {
+			name := newGatedMachine(fmt.Sprintf("gate-missing-%d", GinkgoRandomSeed()), "no-such-image")
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}}
+
+			origInterval := delayedRequeueInterval
+			delayedRequeueInterval = time.Millisecond
+			DeferCleanup(func() { delayedRequeueInterval = origInterval })
+			origJitter := jitter
+			jitter = func(d time.Duration) time.Duration { return d }
+			DeferCleanup(func() { jitter = origJitter })
+
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(delayedRequeueInterval))
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable), "the gate must never advance state on its own")
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusDelayed))
+			Expect(machine.Status.ErrorCount).To(Equal(int32(0)), "an unresolved image reference is a delay, not an error")
+			progressing := meta.FindStatusCondition(machine.Status.Conditions, keziov1alpha2.MachineConditionProgressing)
+			Expect(progressing).NotTo(BeNil())
+			Expect(progressing.Status).To(Equal(metav1.ConditionFalse))
+			Expect(progressing.Reason).To(Equal("ImageNotFound"))
+		})
+
+		It("delays when the referenced Image exists but has no Ready condition yet", func() {
+			imageName := fmt.Sprintf("gate-notready-image-%d", GinkgoRandomSeed())
+			Expect(k8sClient.Create(ctx, newTestImageWithSlots(imageName, []keziov1alpha2.ImageSlot{}, nil))).To(Succeed())
+
+			name := newGatedMachine(fmt.Sprintf("gate-notready-%d", GinkgoRandomSeed()), imageName)
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}}
+
+			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).NotTo(BeZero())
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusDelayed))
+			Expect(machine.Status.ErrorCount).To(Equal(int32(0)))
+		})
+
+		It("delays when the referenced Image's Ready condition is stale (observedGeneration behind)", func() {
+			imageName := fmt.Sprintf("gate-stale-image-%d", GinkgoRandomSeed())
+			img := newTestImageWithSlots(imageName, []keziov1alpha2.ImageSlot{}, nil)
+			Expect(k8sClient.Create(ctx, img)).To(Succeed())
+			meta.SetStatusCondition(&img.Status.Conditions, metav1.Condition{
+				Type:               keziov1alpha2.ImageConditionReady,
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: img.Generation - 1,
+				Reason:             "Stale",
+				Message:            "stale fixture",
+			})
+			Expect(k8sClient.Status().Update(ctx, img)).To(Succeed())
+
+			name := newGatedMachine(fmt.Sprintf("gate-stale-%d", GinkgoRandomSeed()), imageName)
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusDelayed))
+			Expect(machine.Status.ErrorCount).To(Equal(int32(0)))
+			progressing := meta.FindStatusCondition(machine.Status.Conditions, keziov1alpha2.MachineConditionProgressing)
+			Expect(progressing).NotTo(BeNil())
+			Expect(progressing.Reason).To(Equal("ImageStatusStale"))
+		})
+
+		It("proceeds to Provisioning once the Image is Ready and fresh", func() {
+			imageName := fmt.Sprintf("gate-ready-image-%d", GinkgoRandomSeed())
+			ensureReadyTestImage(ctx, imageName)
+
+			name := newGatedMachine(fmt.Sprintf("gate-ready-%d", GinkgoRandomSeed()), imageName)
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}}
+
+			var machine keziov1alpha2.Machine
+			for i := 0; i < 20; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+				if machine.Status.State == keziov1alpha2.MachineStateProvisioning || machine.Status.State == keziov1alpha2.MachineStateProvisioned {
+					break
+				}
+			}
+			Expect(machine.Status.State).To(BeElementOf(keziov1alpha2.MachineStateProvisioning, keziov1alpha2.MachineStateProvisioned))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+			Expect(machine.Status.CurrentRunRef).NotTo(BeNil())
 		})
 	})
 

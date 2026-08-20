@@ -643,7 +643,11 @@ func (r *MachineReconciler) deleteMachineHardware(ctx context.Context, machine *
 }
 
 // reconcileIdle handles Available and Provisioned: both are idle states
-// that only leave through the same provisioning trigger.
+// that only leave through the same provisioning trigger. Before a
+// provisioning run actually starts, this gates on spec.imageRef's Image
+// being resolvable and Ready per the cross-reference contract (see
+// imageReadyForProvisioning) - a Machine with no imageRef never reaches
+// that gate at all.
 func (r *MachineReconciler) reconcileIdle(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
 	lastRun, err := r.lastSuccessfulRun(ctx, machine)
 	if err != nil {
@@ -653,7 +657,73 @@ func (r *MachineReconciler) reconcileIdle(ctx context.Context, machine *keziov1a
 		return ctrl.Result{}, nil
 	}
 
+	ready, reason, message, err := r.imageReadyForProvisioning(ctx, machine)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !ready {
+		return r.markDelayedForImage(ctx, machine, reason, message)
+	}
+
+	meta.RemoveStatusCondition(&machine.Status.Conditions, keziov1alpha2.MachineConditionProgressing)
 	return r.startProvisioningRun(ctx, machine)
+}
+
+// imageReadyForProvisioning gates the provisioning trigger on
+// spec.imageRef's referenced Image, applying the cross-reference contract
+// aggregateSlotContents documents (see conditionObservedGenerationStale):
+// a missing Image, one with no or non-True Ready condition, or one whose
+// Ready condition is stale all report not-ready, naming why in reason and
+// message. A nil ImageRef reports ready unconditionally with no lookup at
+// all - the fast lane (no OS image, or a dataImages-only deploy) never
+// depended on an Image existing and must keep working exactly as before.
+func (r *MachineReconciler) imageReadyForProvisioning(ctx context.Context, machine *keziov1alpha2.Machine) (ready bool, reason, message string, err error) {
+	ref := machine.Spec.ImageRef
+	if ref == nil {
+		return true, "", "", nil
+	}
+
+	namespace := ref.Namespace
+	if namespace == "" {
+		namespace = machine.Namespace
+	}
+	var image keziov1alpha2.Image
+	key := client.ObjectKey{Namespace: namespace, Name: ref.Name}
+	if err := r.Get(ctx, key, &image); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, "ImageNotFound", fmt.Sprintf("Image %q not found", ref.Name), nil
+		}
+		return false, "", "", fmt.Errorf("machine %q: getting Image %q: %w", machine.Name, ref.Name, err)
+	}
+
+	cond := meta.FindStatusCondition(image.Status.Conditions, keziov1alpha2.ImageConditionReady)
+	switch {
+	case cond == nil:
+		return false, "ImageNotReady", fmt.Sprintf("Image %q has no Ready condition yet", ref.Name), nil
+	case conditionObservedGenerationStale(cond, image.Generation):
+		return false, "ImageStatusStale", fmt.Sprintf("Image %q status has not caught up to its current generation", ref.Name), nil
+	case cond.Status != metav1.ConditionTrue:
+		return false, "ImageNotReady", fmt.Sprintf("Image %q is not Ready (%s)", ref.Name, cond.Reason), nil
+	default:
+		return true, "", "", nil
+	}
+}
+
+// markDelayedForImage records why the Machine is waiting on its imageRef's
+// Image as MachineConditionProgressing=False, then delegates to
+// markDelayed for the actual delayed-axis write. The condition uses
+// machine.Generation, not the Image's, per the same
+// observedGeneration-per-writer convention every other condition in this
+// codebase follows.
+func (r *MachineReconciler) markDelayedForImage(ctx context.Context, machine *keziov1alpha2.Machine, reason, message string) (ctrl.Result, error) {
+	meta.SetStatusCondition(&machine.Status.Conditions, metav1.Condition{
+		Type:               keziov1alpha2.MachineConditionProgressing,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: machine.Generation,
+		Reason:             reason,
+		Message:            message,
+	})
+	return r.markDelayed(ctx, machine, delayedRequeueInterval)
 }
 
 // startProvisioningRun creates a fresh DeployRun for machine and records it

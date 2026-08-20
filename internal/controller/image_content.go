@@ -105,7 +105,7 @@ func (r *ImageReconciler) aggregateSlotContents(ctx context.Context, image *kezi
 			agg.notReady = append(agg.notReady, fmt.Sprintf("slot %d: PartitionContent %q has no Ready condition yet", slot.Number, slot.ContentRef.Name))
 			continue
 		}
-		if cond.ObservedGeneration != content.Generation {
+		if conditionObservedGenerationStale(cond, content.Generation) {
 			agg.stale = true
 			continue
 		}

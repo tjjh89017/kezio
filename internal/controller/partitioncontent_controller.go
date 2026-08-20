@@ -129,6 +129,7 @@ func (r *PartitionContentReconciler) onChange(ctx context.Context, pc *keziov1al
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	setPartitionContentValidCondition(pc)
 
 	if pc.Status.State == keziov1alpha2.PartitionContentStateReady {
 		return r.reconcileSeeder(ctx, pc, hash)

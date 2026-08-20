@@ -248,6 +248,16 @@ var _ = Describe("PartitionContent Controller", func() {
 		Expect(readyCond).NotTo(BeNil())
 		Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
 
+		// Valid is trivially True on every reconcile (spec is
+		// CEL-validated at admission - see setPartitionContentValidCondition),
+		// but it must still be written and fresh: a reader applying the
+		// cross-reference contract needs a current observedGeneration to
+		// check.
+		validCond := meta.FindStatusCondition(ready.Status.Conditions, keziov1alpha2.PartitionContentConditionValid)
+		Expect(validCond).NotTo(BeNil())
+		Expect(validCond.Status).To(Equal(metav1.ConditionTrue))
+		Expect(validCond.ObservedGeneration).To(Equal(ready.Generation))
+
 		// Already-Ready reconcile is a no-op: it must not create a second
 		// publish Job for this content hash.
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})

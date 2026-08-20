@@ -94,6 +94,26 @@ func setPartitionContentReadyCondition(pc *keziov1alpha2.PartitionContent, statu
 	})
 }
 
+// setPartitionContentValidCondition sets the Valid condition on
+// pc.Status.Conditions, stamping ObservedGeneration from pc.Generation.
+// PartitionContentSpec is immutable and CEL-validated at admission (see
+// the spec's type-level XValidation rule), so there is no separate
+// validation step here: Valid is trivially True on every reconcile. It is
+// still written on every reconcile (mirroring setImageValidCondition)
+// rather than left unset, so a reader applying the cross-reference
+// contract (see aggregateSlotContents) always finds a Valid condition
+// with a current observedGeneration to check, instead of having to treat
+// "condition absent" as a separate case from "condition stale".
+func setPartitionContentValidCondition(pc *keziov1alpha2.PartitionContent) {
+	meta.SetStatusCondition(&pc.Status.Conditions, metav1.Condition{
+		Type:               keziov1alpha2.PartitionContentConditionValid,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: pc.Generation,
+		Reason:             "SpecValid",
+		Message:            "spec is CEL-validated at admission",
+	})
+}
+
 // setPartitionContentSeederDegradedCondition sets the SeederDegraded
 // condition on pc.Status.Conditions, stamping ObservedGeneration from
 // pc.Generation. See recordSeederStatus for when this is set versus
