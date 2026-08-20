@@ -166,6 +166,10 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
 
+.PHONY: build-kezioctl
+build-kezioctl: fmt vet ## Build the kezioctl CLI binary.
+	go build -o bin/kezioctl ./cmd/kezioctl
+
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go
