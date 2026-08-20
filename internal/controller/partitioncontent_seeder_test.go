@@ -343,4 +343,112 @@ var _ = Describe("PartitionContent Controller seeder lifecycle", func() {
 		err = k8sClient.Get(ctx, depKey, &dep)
 		Expect(apierrors.IsNotFound(err)).To(BeTrue())
 	})
+
+	It("tolerates a terminating seeder Deployment without recreating or re-deleting it, whether demand is present or absent", func() {
+		hashHex := partitionContentTestHash(106)
+		name := "pc-" + hashHex
+		nn := types.NamespacedName{Name: name, Namespace: "default"}
+		pc := newTestPartitionContent(name)
+		pc.Annotations = map[string]string{keziov1alpha2.PartitionContentAnnotationSeedDemand: ""}
+		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
+		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
+
+		r := newSeederReconciler(PartitionContentSeederConfig{Image: "example.test/kezio-seeder:test"})
+		advancePartitionContentToReady(r, nn, hashHex)
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		hash, err := store.ParseInfoHash(hashHex)
+		Expect(err).NotTo(HaveOccurred())
+		depKey := types.NamespacedName{Name: seederdeploy.Name(hash), Namespace: "default"}
+		var dep appsv1.Deployment
+		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
+
+		// Pin a finalizer on the Deployment so deleting it leaves it
+		// lingering with DeletionTimestamp set instead of removing it, the
+		// way real Kubernetes GC leaves an object mid-cleanup.
+		const testFinalizer = "kezio.kojuro.date/test-hold"
+		dep.Finalizers = append(dep.Finalizers, testFinalizer)
+		Expect(k8sClient.Update(ctx, &dep)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, &dep)).To(Succeed())
+
+		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
+		Expect(dep.DeletionTimestamp.IsZero()).To(BeFalse())
+		terminatingUID := dep.UID
+
+		// Demand still present: must not attempt to recreate under the same
+		// name while GC is still cleaning up (Create would fail
+		// AlreadyExists).
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
+		Expect(dep.UID).To(Equal(terminatingUID))
+		Expect(dep.DeletionTimestamp.IsZero()).To(BeFalse())
+
+		// Demand removed: must not attempt to force-delete or re-delete an
+		// already-terminating Deployment.
+		setSeedDemand(nn, false)
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
+		Expect(dep.UID).To(Equal(terminatingUID))
+		Expect(dep.DeletionTimestamp.IsZero()).To(BeFalse())
+
+		// Let it go.
+		dep.Finalizers = nil
+		Expect(k8sClient.Update(ctx, &dep)).To(Succeed())
+		Eventually(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx, depKey, &dep))
+		}).Should(BeTrue())
+	})
+
+	It("keeps seeders[] populated during a grace-period countdown while the Deployment still reports an available replica", func() {
+		hashHex := partitionContentTestHash(107)
+		name := "pc-" + hashHex
+		nn := types.NamespacedName{Name: name, Namespace: "default"}
+		pc := newTestPartitionContent(name)
+		pc.Annotations = map[string]string{keziov1alpha2.PartitionContentAnnotationSeedDemand: ""}
+		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
+		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
+
+		clock := &testClock{t: time.Now()}
+		grace := 10 * time.Minute
+		r := newSeederReconciler(PartitionContentSeederConfig{
+			Image:       "example.test/kezio-seeder:test",
+			GracePeriod: grace,
+			Now:         clock.now,
+		})
+		advancePartitionContentToReady(r, nn, hashHex)
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		hash, err := store.ParseInfoHash(hashHex)
+		Expect(err).NotTo(HaveOccurred())
+		depKey := types.NamespacedName{Name: seederdeploy.Name(hash), Namespace: "default"}
+		var dep appsv1.Deployment
+		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
+		dep.Status.Replicas = 1
+		dep.Status.ReadyReplicas = 1
+		dep.Status.AvailableReplicas = 1
+		Expect(k8sClient.Status().Update(ctx, &dep)).To(Succeed())
+
+		// Demand drops while the Deployment is already reporting an
+		// available replica: the grace-period countdown starts, but the
+		// Deployment itself is untouched, so Seeders must still reflect it.
+		setSeedDemand(nn, false)
+		result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.RequeueAfter).To(Equal(grace))
+
+		var got keziov1alpha2.PartitionContent
+		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
+		Expect(got.Status.Seeders).To(ConsistOf(keziov1alpha2.PartitionContentSeederSite{Site: defaultSeederSite, MachineCount: 0}))
+		// No demand means SeederDegraded does not apply - see
+		// recordSeederStatus's doc comment - so it must be absent, not
+		// False.
+		degraded := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.PartitionContentConditionSeederDegraded)
+		Expect(degraded).To(BeNil())
+	})
 })
