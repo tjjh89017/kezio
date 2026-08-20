@@ -28,9 +28,19 @@ inputs:
       Overrides the staging PVC's accessModes for this deployment only.
       Empty (the default) applies config/image-service unmodified
       (ReadWriteMany). Set to "ReadWriteOnce" for a lane whose
-      StorageClass cannot satisfy RWX (e.g. local-path-provisioner in the
-      image-path e2e lane) - production defaults are never patched this
-      way; only this action's caller opts in.
+      StorageClass cannot satisfy RWX at all - production defaults are
+      never patched this way; only this action's caller opts in.
+    required: false
+    default: ""
+  staging-size:
+    description: >-
+      Overrides the staging PVC's requested storage size for this
+      deployment only. Empty (the default) applies config/image-service
+      unmodified (100Gi). Set to a smaller size (e.g. "2Gi") for a lane
+      whose StorageClass reports real node disk as available capacity
+      (e.g. a CI runner's local-path-backed NFS export, which cannot
+      satisfy a 100Gi request) - production defaults are never patched
+      this way; only this action's caller opts in.
     required: false
     default: ""
 
@@ -45,29 +55,38 @@ runs:
         KUSTOMIZE_DIR: ${{ inputs.kustomize-dir }}
         TIMEOUT: ${{ inputs.timeout }}
         STAGING_ACCESS_MODE: ${{ inputs.staging-access-mode }}
+        STAGING_SIZE: ${{ inputs.staging-size }}
       run: |
         set -euo pipefail
         make kustomize
         (cd "${KUSTOMIZE_DIR}" && ../../bin/kustomize edit set image "image-service=${IMAGE_SERVICE_IMG}")
 
         build_dir="${KUSTOMIZE_DIR}"
-        if [ -n "${STAGING_ACCESS_MODE}" ]; then
-          # e2e-only accommodation: some lanes (image-path, on
-          # local-path-provisioner) have no StorageClass that satisfies
-          # ReadWriteMany. This overlay exists only for that lane; it never
-          # touches config/image-service's own ReadWriteMany default.
-          # Kustomize forbids an absolute-path or out-of-tree resource
-          # reference, so the overlay must live inside the repo checkout;
-          # it's removed again once the build below has run.
+        if [ -n "${STAGING_ACCESS_MODE}" ] || [ -n "${STAGING_SIZE}" ]; then
+          # e2e-only accommodation: some lanes' StorageClass cannot satisfy
+          # config/image-service's own ReadWriteMany/100Gi staging PVC
+          # request as-is. This overlay exists only for such a lane; it
+          # never touches config/image-service's own defaults. Kustomize
+          # forbids an absolute-path or out-of-tree resource reference, so
+          # the overlay must live inside the repo checkout; it's removed
+          # again once the build below has run.
           overlay_dir="$(mktemp -d -p "$(pwd)")"
           trap 'rm -rf "${overlay_dir}"' EXIT
           (
             cd "${overlay_dir}"
             ../bin/kustomize create --resources "../${KUSTOMIZE_DIR}"
-            ../bin/kustomize edit add patch \
-              --kind PersistentVolumeClaim \
-              --label-selector "app.kubernetes.io/component=image-service" \
-              --patch "[{\"op\": \"replace\", \"path\": \"/spec/accessModes\", \"value\": [\"${STAGING_ACCESS_MODE}\"]}]"
+            if [ -n "${STAGING_ACCESS_MODE}" ]; then
+              ../bin/kustomize edit add patch \
+                --kind PersistentVolumeClaim \
+                --label-selector "app.kubernetes.io/component=image-service" \
+                --patch "[{\"op\": \"replace\", \"path\": \"/spec/accessModes\", \"value\": [\"${STAGING_ACCESS_MODE}\"]}]"
+            fi
+            if [ -n "${STAGING_SIZE}" ]; then
+              ../bin/kustomize edit add patch \
+                --kind PersistentVolumeClaim \
+                --label-selector "app.kubernetes.io/component=image-service" \
+                --patch "[{\"op\": \"replace\", \"path\": \"/spec/resources/requests/storage\", \"value\": \"${STAGING_SIZE}\"}]"
+            fi
           )
           build_dir="${overlay_dir}"
         fi
@@ -75,4 +94,24 @@ runs:
         bin/kustomize build "${build_dir}" | kubectl apply -f -
         deployment="$(kubectl get deployment -n "${NAMESPACE}" -l app.kubernetes.io/component=image-service \
           -o jsonpath='{.items[0].metadata.name}')"
-        kubectl rollout status deployment/"${deployment}" -n "${NAMESPACE}" --timeout="${TIMEOUT}"
+        if ! kubectl rollout status deployment/"${deployment}" -n "${NAMESPACE}" --timeout="${TIMEOUT}"; then
+          # A rollout timeout alone ("error: timed out waiting for the
+          # condition") names no cause - the PVC/pod state that actually
+          # explains it (unbound volume, ImagePullBackOff, ...) only
+          # exists on the live cluster this step is about to tear down.
+          echo "::group::Deployment ${deployment}"
+          kubectl describe deployment/"${deployment}" -n "${NAMESPACE}" || true
+          echo "::endgroup::"
+          echo "::group::Pods (component=image-service)"
+          kubectl get pods -n "${NAMESPACE}" -l app.kubernetes.io/component=image-service -o wide || true
+          kubectl describe pods -n "${NAMESPACE}" -l app.kubernetes.io/component=image-service || true
+          echo "::endgroup::"
+          echo "::group::PersistentVolumeClaims"
+          kubectl get pvc -n "${NAMESPACE}" -o wide || true
+          kubectl describe pvc -n "${NAMESPACE}" || true
+          echo "::endgroup::"
+          echo "::group::Events"
+          kubectl get events -n "${NAMESPACE}" --sort-by=.lastTimestamp || true
+          echo "::endgroup::"
+          exit 1
+        fi

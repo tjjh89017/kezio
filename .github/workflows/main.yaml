@@ -322,13 +322,21 @@ jobs:
           token: ${{ env.IMAGE_SERVICE_TOKEN }}
 
       # nfs-provisioner (installed above) satisfies ReadWriteMany, so
-      # config/image-service's own default (ReadWriteMany) applies here
-      # unmodified - unlike a local-path-provisioner-only cluster, this
-      # lane needs no staging-access-mode override.
+      # config/image-service's own default access mode (ReadWriteMany)
+      # applies here unmodified - this lane needs no staging-access-mode
+      # override.
+      #
+      # staging-size is overridden because nfs-provisioner reports the
+      # runner node's real free disk as available capacity (it has no
+      # quota of its own - see install-nfs-provisioner): config/image-service's
+      # 100Gi default production request exceeds what a GitHub-hosted
+      # runner actually has free, so the staging PVC would stay Pending
+      # forever. This fixture never uploads more than tens of MiB.
       - name: Deploy image-service
         uses: ./.github/actions/deploy-image-service
         with:
           image-service-image: example.com/kezio-image-service:e2e
+          staging-size: "2Gi"
 
       - name: Verify image-path prerequisites
         uses: ./.github/actions/verify-image-path-prerequisites
