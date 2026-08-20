@@ -65,11 +65,20 @@ func blkidValue(ctx context.Context, path, tag string) (value string, found bool
 	cmd := exec.CommandContext(ctx, "blkid", "-o", "value", "-s", tag, path)
 	out, err := cmd.Output()
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == blkidNoSignatureExitCode {
-			return "", false, nil
-		}
-		return "", false, fmt.Errorf("blkid -s %s %s: %w", tag, path, err)
+		return interpretBlkidError(err, tag, path)
 	}
 	return strings.TrimSpace(string(out)), true, nil
+}
+
+// interpretBlkidError turns a blkid run's error into blkidValue's result:
+// runErr is blkidNoSignatureExitCode's *exec.ExitError treated as "no file
+// system found" (found=false, err=nil), everything else wrapped as a
+// failure. Split out from blkidValue so this interpretation is testable
+// without shelling out to blkid itself.
+func interpretBlkidError(runErr error, tag, path string) (value string, found bool, err error) {
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) && exitErr.ExitCode() == blkidNoSignatureExitCode {
+		return "", false, nil
+	}
+	return "", false, fmt.Errorf("blkid -s %s %s: %w", tag, path, runErr)
 }
