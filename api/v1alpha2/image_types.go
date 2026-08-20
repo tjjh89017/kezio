@@ -75,7 +75,10 @@ type ImageSlot struct {
 	// ContentRef names the PartitionContent this slot restores. Absent
 	// marks this a blank slot: nothing is restored here; the deploy agent
 	// creates the file system fresh (mkfs, using FSType) or, for a swap
-	// slot, runs mkswap using UUID.
+	// slot, runs mkswap using UUID. ContentRef.Namespace, if set, must
+	// equal this Image's own namespace - the webhook denies any other
+	// value, since PartitionContent's deletion finalizer only ever looks
+	// for a referencing Image within the content's own namespace.
 	// +kubebuilder:validation:XValidation:rule="self.name.matches('^pc-[0-9a-f]{40}$')",message="contentRef.name must look like a PartitionContent name (pc-<40 hex chars>)"
 	// +optional
 	ContentRef *NameRef `json:"contentRef,omitempty"`

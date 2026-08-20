@@ -181,6 +181,31 @@ var _ = Describe("Image Webhook", func() {
 			Expect(err.Error()).To(ContainSubstring(badContent.Name))
 		})
 
+		It("denies a slot whose contentRef.namespace differs from the Image's own namespace", func() {
+			pc := newPartitionContent(2048)
+			img := newImage("image-slot-cross-namespace", keziov1alpha2.ImageSlot{
+				Number:     1,
+				Role:       keziov1alpha2.PartitionRoleData,
+				ContentRef: &keziov1alpha2.NameRef{Name: pc.Name, Namespace: "other-namespace"},
+				SizeBytes:  2048,
+			})
+			_, err := validator.ValidateCreate(ctx, img)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("slot 1"))
+			Expect(err.Error()).To(ContainSubstring("other-namespace"))
+		})
+
+		It("admits a slot whose contentRef.namespace is explicitly set to the Image's own namespace", func() {
+			pc := newPartitionContent(2048)
+			img := newImage("image-slot-same-namespace-explicit", keziov1alpha2.ImageSlot{
+				Number:     1,
+				Role:       keziov1alpha2.PartitionRoleData,
+				ContentRef: &keziov1alpha2.NameRef{Name: pc.Name, Namespace: "default"},
+				SizeBytes:  2048,
+			})
+			Expect(validator.ValidateCreate(ctx, img)).Error().NotTo(HaveOccurred())
+		})
+
 		It("ignores blank and swap/uuid slots that carry no contentRef", func() {
 			img := newImage("image-slot-blank-and-swap",
 				keziov1alpha2.ImageSlot{

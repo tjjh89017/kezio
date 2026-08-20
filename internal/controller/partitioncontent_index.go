@@ -94,7 +94,10 @@ func imageReferencesContent(image *keziov1alpha2.Image, contentName string) bool
 // was blocking it is actually removed, without waiting on
 // deletionBlockRequeueInterval. On a Delete event this runs against the
 // Image's last known state, which is exactly the reference that needs
-// re-checking.
+// re-checking. Using image.Namespace for every request is correct, not
+// merely convenient: the Image webhook denies a slot contentRef naming any
+// namespace but the Image's own, so a referenced PartitionContent always
+// lives alongside the Image that references it.
 func (r *PartitionContentReconciler) mapImageToPartitionContents(_ context.Context, obj client.Object) []reconcile.Request {
 	image, ok := obj.(*keziov1alpha2.Image)
 	if !ok {

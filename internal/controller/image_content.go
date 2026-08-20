@@ -74,6 +74,12 @@ func (r *ImageReconciler) aggregateSlotContents(ctx context.Context, image *kezi
 			continue
 		}
 
+		// The Image webhook denies a slot contentRef naming any namespace
+		// but the Image's own, so namespace always resolves to
+		// image.Namespace here; this still reads slot.ContentRef.Namespace
+		// rather than assuming it, so an Image admitted before that rule
+		// existed (spec is immutable, so it never gets a chance to be
+		// re-validated) keeps resolving exactly as it always has.
 		namespace := slot.ContentRef.Namespace
 		if namespace == "" {
 			namespace = image.Namespace

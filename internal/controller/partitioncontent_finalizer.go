@@ -99,7 +99,10 @@ func (r *PartitionContentReconciler) blockingReferences(ctx context.Context, pc 
 
 // imagesReferencing lists every Image in pc's namespace whose layout has a
 // slot naming pc, via imageContentRefIndex - a List with a field selector
-// against that index instead of a full scan of every Image.
+// against that index instead of a full scan of every Image. Scoping to pc's
+// namespace is correct, not merely convenient: the Image webhook denies any
+// slot contentRef naming a namespace other than the Image's own, so no
+// Image outside pc's namespace can ever reference it.
 func (r *PartitionContentReconciler) imagesReferencing(ctx context.Context, pc *keziov1alpha2.PartitionContent) ([]keziov1alpha2.Image, error) {
 	var list keziov1alpha2.ImageList
 	if err := r.List(ctx, &list, client.InNamespace(pc.Namespace), client.MatchingFields{imageContentRefIndex: pc.Name}); err != nil {
@@ -158,6 +161,14 @@ func deployRunImageNames(run *keziov1alpha2.DeployRun) []client.ObjectKey {
 // reference pc", not as a block, since there is nothing left to name in
 // the blocking message and the Image's own deletion is the bigger
 // unresolved problem, not this content's.
+//
+// A resolved Image only ever counts as referencing pc (imageReferencesContent
+// below) if it truly does: the webhook denies a slot contentRef naming any
+// namespace but the Image's own, so a matching Image is always in pc's
+// namespace regardless of which namespace the Image lookup key names. This
+// List is still scoped to DeployRuns in pc's own namespace, an independent
+// assumption about where a run deploying pc's content lives that this
+// contentRef invariant does not establish or depend on.
 func (r *PartitionContentReconciler) activeDeployRunsReferencing(ctx context.Context, pc *keziov1alpha2.PartitionContent) ([]keziov1alpha2.DeployRun, error) {
 	var list keziov1alpha2.DeployRunList
 	if err := r.List(ctx, &list, client.InNamespace(pc.Namespace)); err != nil {

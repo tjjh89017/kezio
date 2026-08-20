@@ -110,7 +110,9 @@ func (v *ImageCustomValidator) ValidateDelete(_ context.Context, obj runtime.Obj
 // validateSlotContentSizes denies a slot whose declared sizeBytes is
 // smaller than its referenced PartitionContent's lastExtentEnd: extents
 // restore at absolute offsets, so a smaller slot would corrupt silently
-// instead of failing loudly.
+// instead of failing loudly. It also denies a slot whose contentRef names
+// a namespace other than the Image's own - see the contentRef-namespace
+// paragraph below.
 //
 // A slot with contentRef but no declared sizeBytes cannot be checked here:
 // SizeBytes is optional, deploy-time-resolvable metadata, not the
@@ -123,6 +125,15 @@ func (v *ImageCustomValidator) ValidateDelete(_ context.Context, obj runtime.Obj
 // PartitionContent objects it references is not guaranteed, and the Image
 // reconciler plus the cross-reference contract handle a not-ready
 // referent at read time.
+//
+// A slot's contentRef must stay in the Image's own namespace: a
+// PartitionContent's deletion finalizer (imagesReferencing,
+// activeDeployRunsReferencing) only lists referencing Images within its own
+// namespace, so a cross-namespace contentRef would be a live reference the
+// finalizer can never see, letting the content and its PVC free out from
+// under it. Denying it here at admission is what makes that namespace-scoped
+// List correct by construction, rather than requiring it to search every
+// namespace for a capability nothing uses.
 func (v *ImageCustomValidator) validateSlotContentSizes(ctx context.Context, image *keziov1alpha2.Image) (admission.Warnings, error) {
 	var warnings admission.Warnings
 	for _, slot := range image.Spec.Layout.Slots {
@@ -130,13 +141,14 @@ func (v *ImageCustomValidator) validateSlotContentSizes(ctx context.Context, ima
 			continue
 		}
 
-		namespace := slot.ContentRef.Namespace
-		if namespace == "" {
-			namespace = image.GetNamespace()
+		if slot.ContentRef.Namespace != "" && slot.ContentRef.Namespace != image.GetNamespace() {
+			return warnings, fmt.Errorf(
+				"slot %d references PartitionContent %q in namespace %q, but a slot's contentRef must stay in the Image's own namespace %q",
+				slot.Number, slot.ContentRef.Name, slot.ContentRef.Namespace, image.GetNamespace())
 		}
 
 		content := &keziov1alpha2.PartitionContent{}
-		key := client.ObjectKey{Namespace: namespace, Name: slot.ContentRef.Name}
+		key := client.ObjectKey{Namespace: image.GetNamespace(), Name: slot.ContentRef.Name}
 		if err := v.Client.Get(ctx, key, content); err != nil {
 			if apierrors.IsNotFound(err) {
 				warnings = append(warnings, fmt.Sprintf(
