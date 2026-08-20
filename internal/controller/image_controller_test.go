@@ -326,6 +326,65 @@ var _ = Describe("Image Controller", func() {
 		Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
 	})
 
+	It("becomes Failed and names the content when a referenced content is terminally Failed", func() {
+		contentName := "pc-" + imageTestHash(9)
+		pc := newTestPartitionContent(contentName)
+		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
+		setContentStatus(ctx, pc, keziov1alpha2.PartitionContentStateFailed, metav1.ConditionFalse, "PublishJobFailed", "publish job failed", pc.Generation)
+
+		img := newTestImageWithSlots("image-content-failed", []keziov1alpha2.ImageSlot{
+			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		}, nil)
+		Expect(k8sClient.Create(ctx, img)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
+
+		r := &ImageReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		nn := types.NamespacedName{Name: img.Name, Namespace: "default"}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		var got keziov1alpha2.Image
+		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
+		Expect(got.Status.State).To(Equal(keziov1alpha2.ImageStateFailed))
+		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.ImageConditionReady)
+		Expect(readyCond).NotTo(BeNil())
+		Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(readyCond.Reason).To(Equal("ContentFailed"))
+		Expect(readyCond.Message).To(ContainSubstring(contentName))
+	})
+
+	It("records Failed when one slot's content is Failed alongside another that is only not-ready, pinning failed's precedence over notReady", func() {
+		failedName := "pc-" + imageTestHash(10)
+		failedPC := newTestPartitionContent(failedName)
+		Expect(k8sClient.Create(ctx, failedPC)).To(Succeed())
+		setContentStatus(ctx, failedPC, keziov1alpha2.PartitionContentStateFailed, metav1.ConditionFalse, "PublishJobFailed", "publish job failed", failedPC.Generation)
+
+		notReadyName := "pc-" + imageTestHash(11)
+		notReadyPC := newTestPartitionContent(notReadyName)
+		Expect(k8sClient.Create(ctx, notReadyPC)).To(Succeed())
+		setContentStatus(ctx, notReadyPC, keziov1alpha2.PartitionContentStatePublishing, metav1.ConditionFalse, "Publishing", "publish job is running", notReadyPC.Generation)
+
+		img := newTestImageWithSlots("image-content-failed-and-not-ready", []keziov1alpha2.ImageSlot{
+			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: failedName}},
+			{Number: 2, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: notReadyName}},
+		}, nil)
+		Expect(k8sClient.Create(ctx, img)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
+
+		r := &ImageReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		nn := types.NamespacedName{Name: img.Name, Namespace: "default"}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		var got keziov1alpha2.Image
+		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
+		Expect(got.Status.State).To(Equal(keziov1alpha2.ImageStateFailed))
+		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.ImageConditionReady)
+		Expect(readyCond).NotTo(BeNil())
+		Expect(readyCond.Reason).To(Equal("ContentFailed"))
+		Expect(readyCond.Message).To(ContainSubstring(failedName))
+	})
+
 	It("propagates a content flipping to Ready onto the Image that references it, via the reverse index watch mapping", func() {
 		contentName := "pc-" + imageTestHash(8)
 		pc := newTestPartitionContent(contentName)
