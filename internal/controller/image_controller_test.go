@@ -51,7 +51,19 @@ var _ = Describe("Image Controller", func() {
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: keziov1alpha2.ImageSpec{
+						Layout: keziov1alpha2.ImageDiskLayout{
+							PartitionTable: keziov1alpha2.PartitionTableGPT,
+							SfdiskJSON:     `{"partitiontable":{"label":"gpt"}}`,
+							Slots: []keziov1alpha2.ImageSlot{
+								{
+									Number: 1,
+									Role:   keziov1alpha2.PartitionRoleData,
+									FSType: "ext4",
+								},
+							},
+						},
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}

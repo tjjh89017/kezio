@@ -14,10 +14,25 @@ spec:
     singular: image
   scope: Namespaced
   versions:
-  - name: v1alpha2
+  - additionalPrinterColumns:
+    - jsonPath: .status.state
+      name: State
+      type: string
+    - jsonPath: .spec.bootable
+      name: Bootable
+      type: boolean
+    - jsonPath: .spec.osFamily
+      name: OSFamily
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha2
     schema:
       openAPIV3Schema:
-        description: Image is the Schema for the images API.
+        description: |-
+          Image is the Schema for the images API. It binds a disk layout to
+          ordered slots that reference PartitionContent objects.
         properties:
           apiVersion:
             description: |-
@@ -37,15 +52,281 @@ spec:
           metadata:
             type: object
           spec:
-            description: ImageSpec defines the desired state of Image.
+            description: |-
+              ImageSpec defines the desired state of Image: a disk layout of ordered
+              slots, each optionally bound to a content-addressed PartitionContent.
+              The whole spec is immutable once created (see the type-level XValidation
+              rule): a slot's ContentRef binds into a BitTorrent swarm by that
+              content's fixed info hash, and allowing the layout to change afterward
+              would let an in-use Image silently start describing different content.
+              To publish a different layout or content set, create an Image with a
+              new name.
             properties:
-              foo:
-                description: Foo is an example field of Image. Edit image_types.go
-                  to remove/update
+              bootable:
+                default: true
+                description: |-
+                  Bootable marks this image as a bootable OS image: deploy expects an
+                  ESP slot and finalize creates a boot entry. Set to false for a
+                  non-bootable image (a data disk, a scratch layout). Defaults to
+                  true.
+                type: boolean
+              layout:
+                description: |-
+                  Layout is this image's disk-level partition table and ordered slot
+                  list.
+                properties:
+                  partitionTable:
+                    description: PartitionTable is the partition table type this layout
+                      writes.
+                    enum:
+                    - gpt
+                    - mbr
+                    type: string
+                  sfdiskJSON:
+                    description: |-
+                      SfdiskJSON is the sfdisk JSON dump describing the partition table:
+                      the same format `sfdisk --dump --json` produces, and `sfdisk` accepts
+                      back to recreate the table.
+                    maxLength: 65536
+                    minLength: 1
+                    type: string
+                  slots:
+                    description: |-
+                      Slots is the ordered list of partition slots, in partition-table
+                      order.
+                    items:
+                      description: |-
+                        ImageSlot is one position in the partition table: a partition number
+                        plus, optionally, either the content that fills it or the fsType to
+                        create fresh at deploy time. TypeGUID, PartUUID, and SizeBytes carry no
+                        restore semantics of their own; they exist so a future adopt mode can
+                        match this slot against partitions already present on a target disk.
+                      properties:
+                        contentRef:
+                          description: |-
+                            ContentRef names the PartitionContent this slot restores. Absent
+                            marks this a blank slot: nothing is restored here; the deploy agent
+                            creates the file system fresh (mkfs, using FSType) or, for a swap
+                            slot, runs mkswap using UUID.
+                          properties:
+                            name:
+                              description: |-
+                                Post-mutation admission always re-serialises this struct, so a
+                                zero-value Name would otherwise satisfy "required"; MinLength closes
+                                that gap. MaxLength mirrors the Kubernetes object name limit and
+                                bounds the CEL cost of any pattern-matching XValidation rule a
+                                field of this type carries (see ImageSlot.ContentRef).
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                            namespace:
+                              type: string
+                          required:
+                          - name
+                          type: object
+                          x-kubernetes-validations:
+                          - message: contentRef.name must look like a PartitionContent
+                              name (pc-<40 hex chars>)
+                            rule: self.name.matches('^pc-[0-9a-f]{40}$')
+                        fsType:
+                          description: |-
+                            FSType is the file system to create fresh at deploy time, for a
+                            blank slot with Role == data. Mutually exclusive with ContentRef:
+                            restored content already carries its own file system.
+                          maxLength: 64
+                          type: string
+                        number:
+                          description: |-
+                            Number is the partition number in the partition table (1-based, as
+                            sfdisk and the kernel report it). Unique within a Image's slots (see
+                            the list-map key on ImageDiskLayout.Slots).
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        partUUID:
+                          description: |-
+                            PartUUID is the GPT unique partition GUID this slot is written
+                            with; empty for an mbr partition table, which has no per-partition
+                            UUID.
+                          maxLength: 64
+                          type: string
+                        role:
+                          description: Role is the OS-neutral role of this slot.
+                          enum:
+                          - esp
+                          - data
+                          - swap
+                          - msr
+                          type: string
+                        sizeBytes:
+                          description: |-
+                            SizeBytes is this slot's size, when known ahead of deploy-time
+                            resolution.
+                          format: int64
+                          minimum: 0
+                          type: integer
+                        typeGUID:
+                          description: |-
+                            TypeGUID is the partition type identifier this slot is written
+                            with: a GPT partition type GUID, or an MBR partition type as two
+                            lowercase hex digits (for example "ef" for an EFI System
+                            Partition).
+                          maxLength: 64
+                          type: string
+                        uuid:
+                          description: |-
+                            UUID is the file-system UUID to restore by, for a swap slot
+                            (Role == swap) that has no content to restore.
+                          maxLength: 64
+                          type: string
+                      required:
+                      - number
+                      - role
+                      type: object
+                      x-kubernetes-validations:
+                      - message: 'a slot cannot set both contentRef and fsType: content
+                          already carries its own file system'
+                        rule: '!(has(self.contentRef) && has(self.fsType))'
+                    maxItems: 128
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - number
+                    x-kubernetes-list-type: map
+                required:
+                - partitionTable
+                - sfdiskJSON
+                - slots
+                type: object
+              osFamily:
+                default: Linux
+                description: |-
+                  OSFamily gates OS-specific validation and builtins (for example
+                  mkswap, which only applies to Linux). Defaults to Linux.
+                enum:
+                - Linux
+                - Windows
+                - FreeBSD
+                - Other
                 type: string
+              source:
+                description: |-
+                  Source describes where to fetch and verify a source disk image to
+                  ingest. Absent for an Image composed entirely from existing
+                  PartitionContent objects, which triggers no ingest.
+                properties:
+                  checksum:
+                    description: |-
+                      Checksum verifies the fetched source image before ingest converts
+                      it: "sha256:<hex digest>".
+                    pattern: ^sha256:[0-9a-f]{64}$
+                    type: string
+                  url:
+                    description: URL is the location the ingest job fetches the source
+                      image from.
+                    maxLength: 4096
+                    minLength: 1
+                    type: string
+                required:
+                - checksum
+                - url
+                type: object
+            required:
+            - layout
             type: object
+            x-kubernetes-validations:
+            - message: spec is immutable
+              rule: self == oldSelf
           status:
-            description: ImageStatus defines the observed state of Image.
+            description: |-
+              ImageStatus defines the observed state of Image.
+
+              The Image reconciler is thin: it aggregates the readiness of this
+              image's referenced PartitionContent objects and owns no seeders of its
+              own (those belong to PartitionContent). A composed image - one with no
+              Source - is create-only metadata over existing content: reconciling it
+              triggers no ingest, and the swarms of the content it references stay
+              valid and unaffected.
+            properties:
+              conditions:
+                description: |-
+                  Conditions report the current state of the image, including
+                  ImageConditionReady and ImageConditionValid. Every write carries
+                  observedGeneration (metav1.Condition's own field) set to the
+                  generation the write observed.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              sourceChecksum:
+                description: |-
+                  SourceChecksum echoes spec.source.checksum once ingest has verified
+                  it, for audit. Absent for a composed image (no Source) or before
+                  verification.
+                pattern: ^sha256:[0-9a-f]{64}$
+                type: string
+              state:
+                description: State is the object's position in the ingest/readiness
+                  workflow.
+                enum:
+                - Pending
+                - Ingesting
+                - Ready
+                - Failed
+                type: string
             type: object
         type: object
     served: true

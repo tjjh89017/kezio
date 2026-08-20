@@ -74,7 +74,10 @@ spec:
                           description: |-
                             Post-mutation admission always re-serialises this struct, so a
                             zero-value Name would otherwise satisfy "required"; MinLength closes
-                            that gap.
+                            that gap. MaxLength mirrors the Kubernetes object name limit and
+                            bounds the CEL cost of any pattern-matching XValidation rule a
+                            field of this type carries (see ImageSlot.ContentRef).
+                          maxLength: 253
                           minLength: 1
                           type: string
                         namespace:
@@ -174,7 +177,10 @@ spec:
                     description: |-
                       Post-mutation admission always re-serialises this struct, so a
                       zero-value Name would otherwise satisfy "required"; MinLength closes
-                      that gap.
+                      that gap. MaxLength mirrors the Kubernetes object name limit and
+                      bounds the CEL cost of any pattern-matching XValidation rule a
+                      field of this type carries (see ImageSlot.ContentRef).
+                    maxLength: 253
                     minLength: 1
                     type: string
                   namespace:
@@ -189,7 +195,10 @@ spec:
                     description: |-
                       Post-mutation admission always re-serialises this struct, so a
                       zero-value Name would otherwise satisfy "required"; MinLength closes
-                      that gap.
+                      that gap. MaxLength mirrors the Kubernetes object name limit and
+                      bounds the CEL cost of any pattern-matching XValidation rule a
+                      field of this type carries (see ImageSlot.ContentRef).
+                    maxLength: 253
                     minLength: 1
                     type: string
                   namespace:
@@ -215,7 +224,10 @@ spec:
                           description: |-
                             Post-mutation admission always re-serialises this struct, so a
                             zero-value Name would otherwise satisfy "required"; MinLength closes
-                            that gap.
+                            that gap. MaxLength mirrors the Kubernetes object name limit and
+                            bounds the CEL cost of any pattern-matching XValidation rule a
+                            field of this type carries (see ImageSlot.ContentRef).
+                          maxLength: 253
                           minLength: 1
                           type: string
                         namespace:

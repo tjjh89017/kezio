@@ -25,8 +25,11 @@ type NameRef struct {
 	Namespace string `json:"namespace,omitempty"`
 	// Post-mutation admission always re-serialises this struct, so a
 	// zero-value Name would otherwise satisfy "required"; MinLength closes
-	// that gap.
+	// that gap. MaxLength mirrors the Kubernetes object name limit and
+	// bounds the CEL cost of any pattern-matching XValidation rule a
+	// field of this type carries (see ImageSlot.ContentRef).
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
 }
 

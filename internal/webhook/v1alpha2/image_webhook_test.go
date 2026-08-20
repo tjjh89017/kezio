@@ -58,6 +58,19 @@ var _ = Describe("Image Webhook", func() {
 					Name:      "image-admission-roundtrip",
 					Namespace: "default",
 				},
+				Spec: keziov1alpha2.ImageSpec{
+					Layout: keziov1alpha2.ImageDiskLayout{
+						PartitionTable: keziov1alpha2.PartitionTableGPT,
+						SfdiskJSON:     `{"partitiontable":{"label":"gpt"}}`,
+						Slots: []keziov1alpha2.ImageSlot{
+							{
+								Number: 1,
+								Role:   keziov1alpha2.PartitionRoleData,
+								FSType: "ext4",
+							},
+						},
+					},
+				},
 			}
 			Expect(k8sClient.Create(ctx, created)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, created)).To(Succeed())
