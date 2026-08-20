@@ -21,11 +21,13 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -244,8 +246,10 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.PartitionContentReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("partitioncontent-controller"),
+		Publish:  partitionContentPublishConfigFromEnv(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PartitionContent")
 		os.Exit(1)
@@ -296,4 +300,25 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// partitionContentPublishConfigFromEnv builds the PartitionContent
+// reconciler's PartitionContentPublishConfig from the environment.
+// Leaving PARTITIONCONTENT_PUBLISH_IMAGE or PARTITIONCONTENT_TRACKER_URL
+// unset yields a config that is not ready() (see its doc comment): the
+// reconciler holds every PartitionContent at Pending rather than either
+// of them alone yielding half-configured behavior.
+func partitionContentPublishConfigFromEnv() controller.PartitionContentPublishConfig {
+	cfg := controller.PartitionContentPublishConfig{
+		Image:              os.Getenv("PARTITIONCONTENT_PUBLISH_IMAGE"),
+		TrackerURL:         os.Getenv("PARTITIONCONTENT_TRACKER_URL"),
+		ServiceAccountName: os.Getenv("PARTITIONCONTENT_PUBLISH_SERVICE_ACCOUNT"),
+		StorageClassName:   os.Getenv("PARTITIONCONTENT_STORAGE_CLASS"),
+	}
+	if modes := os.Getenv("PARTITIONCONTENT_ACCESS_MODES"); modes != "" {
+		for _, m := range strings.Split(modes, ",") {
+			cfg.AccessModes = append(cfg.AccessModes, corev1.PersistentVolumeAccessMode(strings.TrimSpace(m)))
+		}
+	}
+	return cfg
 }

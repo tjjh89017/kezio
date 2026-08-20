@@ -18,46 +18,208 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"strings"
+	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	"github.com/tjjh89017/kezio/internal/store"
 )
 
-// PartitionContentReconciler reconciles a PartitionContent object
+// publishPollInterval is the safety-net requeue interval while a publish
+// Job is running: the Job watch (Owns, unfiltered) normally retriggers a
+// reconcile the moment the Job's status changes, so this is a fallback
+// against a missed watch event rather than the primary progress signal.
+var publishPollInterval = 30 * time.Second
+
+// PartitionContentReconciler reconciles a PartitionContent object.
+//
+// This reconciler owns the content PVC and the publish Job's lifecycle
+// (create, observe, reflect into status) - the seeder Deployment/demand
+// marker and the deletion-blocking finalizer against Image/DeployRun
+// references are separate reconciler responsibilities layered on later.
+// It never mounts the content PVC's filesystem itself: the publish Job
+// is the sole witness to whether publishing succeeded (see outcomeOf),
+// and status.torrentPath is set from the store package's naming
+// convention, not from anything this reconciler read off disk.
 type PartitionContentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// Recorder emits Kubernetes Events on PartitionContent, notably a
+	// publish Job's success/failure. Required.
+	Recorder record.EventRecorder
+	// Publish configures the publish Job's image and tracker. The zero
+	// value holds every PartitionContent at Pending - see
+	// PartitionContentPublishConfig's doc comment.
+	Publish PartitionContentPublishConfig
 }
 
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=partitioncontents,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=partitioncontents/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=partitioncontents/finalizers,verbs=update
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the PartitionContent object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/reconcile
 func (r *PartitionContentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	var pc keziov1alpha2.PartitionContent
+	if err := r.Get(ctx, req.NamespacedName, &pc); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
 
-	// TODO(user): your logic here
+	// No finalizer in this item: the content PVC and publish Job are
+	// owner-referenced to this object, so ordinary Kubernetes garbage
+	// collection reclaims them once this object is actually deleted.
+	// Blocking that deletion while an Image/DeployRun still references
+	// this content is a separate reconciler responsibility, added later.
+	if !pc.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil
+	}
 
+	hash, err := store.ParseInfoHash(strings.TrimPrefix(pc.Name, "pc-"))
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("partitioncontent %q: name is not a valid content hash: %w", pc.Name, err)
+	}
+
+	return r.onChange(ctx, &pc, hash)
+}
+
+// onChange drives one step of the publish walk: ensure the content PVC,
+// then Pending -> Publishing -> Ready|Failed. An already-Ready object is
+// a no-op (see the early return below) - this is the dedupe guarantee a
+// later item's seeder lifecycle relies on: reaching Ready never
+// re-triggers a second publish Job for the same content hash.
+func (r *PartitionContentReconciler) onChange(ctx context.Context, pc *keziov1alpha2.PartitionContent, hash store.InfoHash) (ctrl.Result, error) {
+	pvc, err := r.ensureContentPVC(ctx, pc, hash)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if pc.Status.State == keziov1alpha2.PartitionContentStateReady {
+		return ctrl.Result{}, nil
+	}
+
+	job, err := r.publishJobFor(ctx, pc, hash)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if job == nil {
+		if !r.Publish.ready() {
+			return r.recordPending(ctx, pc, pvc)
+		}
+		if err := r.createPublishJob(ctx, pc, hash, pvc.Name); err != nil {
+			return ctrl.Result{}, err
+		}
+		return r.recordPublishing(ctx, pc, pvc)
+	}
+
+	switch outcomeOf(job) {
+	case publishJobSucceeded:
+		return r.recordReady(ctx, pc, pvc)
+	case publishJobFailed:
+		return r.recordFailed(ctx, pc, job)
+	default:
+		return r.recordPublishing(ctx, pc, pvc)
+	}
+}
+
+// recordPending records Pending with a condition explaining that the
+// manager has no publish image/tracker configured. This is a visible,
+// non-error hold, not a failure: it clears on its own, with no operator
+// action on this object, once the manager is configured and restarted
+// (Publish is read once from the environment at startup - see
+// PartitionContentPublishConfig).
+func (r *PartitionContentReconciler) recordPending(ctx context.Context, pc *keziov1alpha2.PartitionContent, pvc *corev1.PersistentVolumeClaim) (ctrl.Result, error) {
+	pc.Status.State = keziov1alpha2.PartitionContentStatePending
+	pc.Status.PVCRef = &keziov1alpha2.NameRef{Name: pvc.Name}
+	setPartitionContentReadyCondition(pc, metav1.ConditionFalse,
+		"PublishConfigMissing", "no publish Job image or tracker URL is configured on the manager; content stays Pending until it is")
+	if err := r.applyPartitionContentStatus(ctx, pc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("partitioncontent %q: recording Pending: %w", pc.Name, err)
+	}
 	return ctrl.Result{}, nil
 }
+
+// recordPublishing records Publishing: the publish Job exists and has
+// not yet reported success or failure.
+func (r *PartitionContentReconciler) recordPublishing(ctx context.Context, pc *keziov1alpha2.PartitionContent, pvc *corev1.PersistentVolumeClaim) (ctrl.Result, error) {
+	pc.Status.State = keziov1alpha2.PartitionContentStatePublishing
+	pc.Status.PVCRef = &keziov1alpha2.NameRef{Name: pvc.Name}
+	setPartitionContentReadyCondition(pc, metav1.ConditionFalse,
+		"Publishing", "publish job is running")
+	if err := r.applyPartitionContentStatus(ctx, pc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("partitioncontent %q: recording Publishing: %w", pc.Name, err)
+	}
+	return ctrl.Result{RequeueAfter: publishPollInterval}, nil
+}
+
+// recordReady records Ready: the publish Job succeeded, so status.torrentPath
+// is set to the store package's fixed .torrent file name - a path
+// relative to the content PVC's root (see PartitionContentStatus.TorrentPath's
+// doc comment: "within the PVC"), the same frame of reference a seeder
+// resolves against once it mounts that PVC.
+func (r *PartitionContentReconciler) recordReady(ctx context.Context, pc *keziov1alpha2.PartitionContent, pvc *corev1.PersistentVolumeClaim) (ctrl.Result, error) {
+	pc.Status.State = keziov1alpha2.PartitionContentStateReady
+	pc.Status.PVCRef = &keziov1alpha2.NameRef{Name: pvc.Name}
+	pc.Status.TorrentPath = store.ContentTorrentFileName
+	setPartitionContentReadyCondition(pc, metav1.ConditionTrue,
+		"PublishJobSucceeded", "publish job succeeded; the .torrent is present in the content PVC")
+	onSuccess := func() {
+		r.Recorder.Event(pc, corev1.EventTypeNormal, "PartitionContentReady", "publish job succeeded")
+	}
+	if err := r.applyPartitionContentStatus(ctx, pc, onSuccess); err != nil {
+		return ctrl.Result{}, fmt.Errorf("partitioncontent %q: recording Ready: %w", pc.Name, err)
+	}
+	return ctrl.Result{}, nil
+}
+
+// recordFailed records Failed: the publish Job failed terminally. There
+// is no automatic retry in this item - an operator (or a later item)
+// deleting the failed Job and/or this object is what re-enters the walk.
+func (r *PartitionContentReconciler) recordFailed(ctx context.Context, pc *keziov1alpha2.PartitionContent, job *batchv1.Job) (ctrl.Result, error) {
+	pc.Status.State = keziov1alpha2.PartitionContentStateFailed
+	message := fmt.Sprintf("publish job %q failed", job.Name)
+	setPartitionContentReadyCondition(pc, metav1.ConditionFalse,
+		"PublishJobFailed", message)
+	onSuccess := func() {
+		r.Recorder.Event(pc, corev1.EventTypeWarning, "PartitionContentPublishFailed", message)
+	}
+	if err := r.applyPartitionContentStatus(ctx, pc, onSuccess); err != nil {
+		return ctrl.Result{}, fmt.Errorf("partitioncontent %q: recording Failed: %w", pc.Name, err)
+	}
+	return ctrl.Result{}, nil
+}
+
+// partitionContentUpdatePredicate restricts the PartitionContent watch's
+// Update events to a generation, finalizer, or annotation change - a
+// status-only self-write (the publish walk's own progress) must not
+// re-trigger the reconciler on its own, mirroring
+// machineUpdatePredicate. Create/Delete/Generic events stay unfiltered.
+var partitionContentUpdatePredicate = predicate.Or(
+	predicate.GenerationChangedPredicate{},
+	predicate.AnnotationChangedPredicate{},
+	finalizersChangedPredicate,
+)
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *PartitionContentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&keziov1alpha2.PartitionContent{}).
+		For(&keziov1alpha2.PartitionContent{}, builder.WithPredicates(partitionContentUpdatePredicate)).
+		Owns(&corev1.PersistentVolumeClaim{}).
+		Owns(&batchv1.Job{}).
 		Named("partitioncontent").
 		Complete(r)
 }

@@ -18,77 +18,243 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"k8s.io/apimachinery/pkg/api/errors"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	"github.com/tjjh89017/kezio/internal/ingest"
+	"github.com/tjjh89017/kezio/internal/store"
 )
 
+// partitionContentTestHash returns a distinct, valid-looking 40-character
+// hex info hash for seq, so each test case gets its own PartitionContent
+// name ("pc-" + hash) with no collisions in the shared envtest apiserver.
+func partitionContentTestHash(seq int) string {
+	return fmt.Sprintf("%040x", seq+1)
+}
+
+func newTestPartitionContent(name string) *keziov1alpha2.PartitionContent {
+	return &keziov1alpha2.PartitionContent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "default",
+		},
+		Spec: keziov1alpha2.PartitionContentSpec{
+			FSType:        "ext4",
+			UsedBytes:     1024,
+			SizeBytes:     2048,
+			LastExtentEnd: 2048,
+			PieceLength:   16384,
+			Source: keziov1alpha2.PartitionContentSource{
+				ImageName:       "image-a",
+				PartitionNumber: 1,
+			},
+		},
+	}
+}
+
 var _ = Describe("PartitionContent Controller", func() {
-	Context("When reconciling a resource", func() {
-		const resourceName = "test-resource"
+	var ctx context.Context
 
-		ctx := context.Background()
+	BeforeEach(func() {
+		ctx = context.Background()
+	})
 
-		typeNamespacedName := types.NamespacedName{
-			Name:      resourceName,
-			Namespace: "default", // TODO(user):Modify as needed
+	newReconciler := func(publish PartitionContentPublishConfig) *PartitionContentReconciler {
+		return &PartitionContentReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Recorder: record.NewFakeRecorder(16),
+			Publish:  publish,
 		}
-		partitioncontent := &keziov1alpha2.PartitionContent{}
+	}
 
-		BeforeEach(func() {
-			By("creating the custom resource for the Kind PartitionContent")
-			err := k8sClient.Get(ctx, typeNamespacedName, partitioncontent)
-			if err != nil && errors.IsNotFound(err) {
-				resource := &keziov1alpha2.PartitionContent{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: "default",
-					},
-					Spec: keziov1alpha2.PartitionContentSpec{
-						FSType:        "ext4",
-						UsedBytes:     1024,
-						SizeBytes:     2048,
-						LastExtentEnd: 2048,
-						PieceLength:   16384,
-						Source: keziov1alpha2.PartitionContentSource{
-							ImageName:       "image-a",
-							PartitionNumber: 1,
-						},
-					},
-				}
-				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+	It("creates an owner-referenced RWX content PVC sized from spec.sizeBytes", func() {
+		hashHex := partitionContentTestHash(1)
+		name := "pc-" + hashHex
+		pc := newTestPartitionContent(name)
+		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, pc) })
+
+		r := newReconciler(PartitionContentPublishConfig{})
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}})
+		Expect(err).NotTo(HaveOccurred())
+
+		hash, err := store.ParseInfoHash(hashHex)
+		Expect(err).NotTo(HaveOccurred())
+
+		var pvc corev1.PersistentVolumeClaim
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: store.PVCName(hash), Namespace: "default"}, &pvc)).To(Succeed())
+
+		Expect(pvc.Spec.AccessModes).To(ConsistOf(corev1.ReadWriteMany))
+		wantSize := partitionContentPVCSize(pc.Spec.SizeBytes)
+		got := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+		Expect(got.Cmp(wantSize)).To(Equal(0))
+
+		Expect(pvc.OwnerReferences).To(HaveLen(1))
+		Expect(pvc.OwnerReferences[0].Name).To(Equal(name))
+		Expect(pvc.OwnerReferences[0].Controller).NotTo(BeNil())
+		Expect(*pvc.OwnerReferences[0].Controller).To(BeTrue())
+	})
+
+	It("holds Pending with a condition and creates no Job when publish config is missing", func() {
+		hashHex := partitionContentTestHash(2)
+		name := "pc-" + hashHex
+		pc := newTestPartitionContent(name)
+		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, pc) })
+
+		r := newReconciler(PartitionContentPublishConfig{})
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}})
+		Expect(err).NotTo(HaveOccurred())
+
+		var got keziov1alpha2.PartitionContent
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &got)).To(Succeed())
+		Expect(got.Status.State).To(Equal(keziov1alpha2.PartitionContentStatePending))
+		cond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.PartitionContentConditionReady)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(cond.Reason).To(Equal("PublishConfigMissing"))
+
+		hash, err := store.ParseInfoHash(hashHex)
+		Expect(err).NotTo(HaveOccurred())
+		var job batchv1.Job
+		err = k8sClient.Get(ctx, types.NamespacedName{Name: publishJobName(hash), Namespace: "default"}, &job)
+		Expect(client.IgnoreNotFound(err)).To(Succeed())
+		Expect(err).To(HaveOccurred(), "no publish job should have been created")
+	})
+
+	It("creates a publish Job shaped correctly once publish config is set, and walks Pending->Publishing->Ready", func() {
+		hashHex := partitionContentTestHash(3)
+		name := "pc-" + hashHex
+		pc := newTestPartitionContent(name)
+		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, pc) })
+
+		publish := PartitionContentPublishConfig{
+			Image:      "example.test/kezio-ingest:test",
+			TrackerURL: "http://tracker.example.test/announce",
+		}
+		r := newReconciler(publish)
+		nn := types.NamespacedName{Name: name, Namespace: "default"}
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		hash, err := store.ParseInfoHash(hashHex)
+		Expect(err).NotTo(HaveOccurred())
+
+		var job batchv1.Job
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: publishJobName(hash), Namespace: "default"}, &job)).To(Succeed())
+		Expect(job.OwnerReferences).To(HaveLen(1))
+		Expect(job.OwnerReferences[0].Name).To(Equal(name))
+
+		container := job.Spec.Template.Spec.Containers[0]
+		Expect(container.Image).To(Equal(publish.Image))
+		var trackerEnv string
+		for _, e := range container.Env {
+			if e.Name == "TRACKER_URL" {
+				trackerEnv = e.Value
 			}
-		})
+		}
+		Expect(trackerEnv).To(Equal(publish.TrackerURL))
+		Expect(container.VolumeMounts).To(HaveLen(1))
+		Expect(container.VolumeMounts[0].MountPath).To(Equal(ingest.ContentMountPath(hash)))
 
-		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &keziov1alpha2.PartitionContent{}
-			err := k8sClient.Get(ctx, typeNamespacedName, resource)
-			Expect(err).NotTo(HaveOccurred())
+		var afterCreate keziov1alpha2.PartitionContent
+		Expect(k8sClient.Get(ctx, nn, &afterCreate)).To(Succeed())
+		Expect(afterCreate.Status.State).To(Equal(keziov1alpha2.PartitionContentStatePublishing))
+		Expect(afterCreate.Status.PVCRef).NotTo(BeNil())
+		Expect(afterCreate.Status.PVCRef.Name).To(Equal(store.PVCName(hash)))
 
-			By("Cleanup the specific resource instance PartitionContent")
-			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
-		})
-		It("should successfully reconcile the resource", func() {
-			By("Reconciling the created resource")
-			controllerReconciler := &PartitionContentReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
+		// A second reconcile with the Job still running must not create a
+		// second Job and must stay Publishing.
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+		var jobs batchv1.JobList
+		Expect(k8sClient.List(ctx, &jobs, client.InNamespace("default"), client.MatchingLabels{partitionContentAppComponentLabel: partitionContentJobComponentValue})).To(Succeed())
+		count := 0
+		for _, j := range jobs.Items {
+			if len(j.OwnerReferences) > 0 && j.OwnerReferences[0].Name == name {
+				count++
 			}
+		}
+		Expect(count).To(Equal(1))
 
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
-		})
+		// The reconciler cannot literally write a .torrent in envtest (no
+		// real Job pod runs); it trusts the Job's own status instead - fake
+		// that here the way a real Job controller would report success.
+		job.Status.Succeeded = 1
+		Expect(k8sClient.Status().Update(ctx, &job)).To(Succeed())
+
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		var ready keziov1alpha2.PartitionContent
+		Expect(k8sClient.Get(ctx, nn, &ready)).To(Succeed())
+		Expect(ready.Status.State).To(Equal(keziov1alpha2.PartitionContentStateReady))
+		Expect(ready.Status.TorrentPath).To(Equal(store.ContentTorrentFileName))
+		readyCond := meta.FindStatusCondition(ready.Status.Conditions, keziov1alpha2.PartitionContentConditionReady)
+		Expect(readyCond).NotTo(BeNil())
+		Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
+
+		// Already-Ready reconcile is a no-op: it must not create a second
+		// publish Job for this content hash.
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.List(ctx, &jobs, client.InNamespace("default"), client.MatchingLabels{partitionContentAppComponentLabel: partitionContentJobComponentValue})).To(Succeed())
+		count = 0
+		for _, j := range jobs.Items {
+			if len(j.OwnerReferences) > 0 && j.OwnerReferences[0].Name == name {
+				count++
+			}
+		}
+		Expect(count).To(Equal(1))
+	})
+
+	It("records Failed with a Ready=False condition on a terminal Job failure", func() {
+		hashHex := partitionContentTestHash(4)
+		name := "pc-" + hashHex
+		pc := newTestPartitionContent(name)
+		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, pc) })
+
+		publish := PartitionContentPublishConfig{
+			Image:      "example.test/kezio-ingest:test",
+			TrackerURL: "http://tracker.example.test/announce",
+		}
+		r := newReconciler(publish)
+		nn := types.NamespacedName{Name: name, Namespace: "default"}
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		hash, err := store.ParseInfoHash(hashHex)
+		Expect(err).NotTo(HaveOccurred())
+		var job batchv1.Job
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: publishJobName(hash), Namespace: "default"}, &job)).To(Succeed())
+		job.Status.Failed = 1
+		Expect(k8sClient.Status().Update(ctx, &job)).To(Succeed())
+
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		var failed keziov1alpha2.PartitionContent
+		Expect(k8sClient.Get(ctx, nn, &failed)).To(Succeed())
+		Expect(failed.Status.State).To(Equal(keziov1alpha2.PartitionContentStateFailed))
+		cond := meta.FindStatusCondition(failed.Status.Conditions, keziov1alpha2.PartitionContentConditionReady)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(cond.Reason).To(Equal("PublishJobFailed"))
 	})
 })
