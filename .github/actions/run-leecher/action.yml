@@ -1,0 +1,185 @@
+name: Leech a PartitionContent and byte-compare it against the fixture
+
+description: >-
+  Exercises the seeder lifecycle end to end against an already-Ready
+  PartitionContent: sets the seed-demand annotation and waits for its
+  seeder Deployment to become Available, runs a leecher Pod (the same
+  kezio-seeder image, default entrypoint - just ezio, gRPC-driven, no
+  register sidecar) that downloads the content over BitTorrent via
+  leechctl (built on the runner, copied in, and driven with kubectl exec
+  entirely inside the pod - localhost gRPC to ezio, a direct pod-IP HTTP
+  fetch of the .torrent from the seeder's torrent-HTTP port, no
+  port-forward needed either way), reconstructs the original partition
+  from the downloaded extent files, and fails unless its sha256 matches
+  the fixture's own. Finally clears the seed-demand annotation.
+
+  Deliberately does not wait out the seeder's grace-period shutdown -
+  that belongs to whichever item asserts it, not this one - so it always
+  returns as soon as the annotation is cleared.
+
+inputs:
+  content-name:
+    description: 'PartitionContent object name ("pc-<info hash>"), e.g. ingest-test-image''s content-ref output.'
+    required: true
+  partition-sha256:
+    description: 'sha256 of the original fixture partition, e.g. ingest-test-image''s partition-sha256 output.'
+    required: true
+  partition-size-bytes:
+    description: 'Size in bytes of the original fixture partition, e.g. ingest-test-image''s partition-size-bytes output.'
+    required: true
+  namespace:
+    description: 'Namespace the PartitionContent and its seeder Deployment live in.'
+    required: false
+    default: "scaffold-system"
+  seeder-image:
+    description: 'Image the leecher Pod runs - must match the cluster''s PARTITIONCONTENT_SEEDER_IMAGE so it is already resolvable locally.'
+    required: false
+    default: "example.com/kezio-seeder:e2e"
+  seeder-wait-timeout-seconds:
+    description: 'How long to wait for the seeder Deployment to become Available.'
+    required: false
+    default: "180"
+  leech-timeout-seconds:
+    description: 'How long leechctl waits for the BitTorrent download itself to finish.'
+    required: false
+    default: "180"
+
+outputs:
+  reconstructed-sha256:
+    description: 'sha256 leechctl computed for the partition it reconstructed from the downloaded extent files.'
+    value: ${{ steps.leech.outputs.reconstructed-sha256 }}
+
+runs:
+  using: composite
+  steps:
+    - name: Build leechctl
+      shell: bash
+      run: go build -o bin/leechctl ./cmd/leechctl
+
+    - name: Seed, leech, byte-compare, then clear seed-demand
+      id: leech
+      shell: bash
+      env:
+        CONTENT_NAME: ${{ inputs.content-name }}
+        PARTITION_SHA256: ${{ inputs.partition-sha256 }}
+        PARTITION_SIZE_BYTES: ${{ inputs.partition-size-bytes }}
+        NAMESPACE: ${{ inputs.namespace }}
+        SEEDER_IMAGE: ${{ inputs.seeder-image }}
+        SEEDER_WAIT_TIMEOUT_SECONDS: ${{ inputs.seeder-wait-timeout-seconds }}
+        LEECH_TIMEOUT_SECONDS: ${{ inputs.leech-timeout-seconds }}
+      run: |
+        set -euo pipefail
+
+        info_hash="${CONTENT_NAME#pc-}"
+        leecher_pod="kezio-e2e-leecher"
+        seeder_deployment="kezio-seeder-${info_hash}"
+        seeder_label_selector="app.kubernetes.io/name=kezio,app.kubernetes.io/component=partition-content-seeder"
+
+        dump_diagnostics() {
+          echo "::group::PartitionContent ${CONTENT_NAME}"
+          kubectl get partitioncontents.kezio.kojuro.date "${CONTENT_NAME}" -n "${NAMESPACE}" -o yaml || true
+          echo "::endgroup::"
+          echo "::group::seeder Deployment ${seeder_deployment}"
+          kubectl get deployment "${seeder_deployment}" -n "${NAMESPACE}" -o yaml || true
+          echo "::endgroup::"
+          echo "::group::seeder pods"
+          kubectl get pods -n "${NAMESPACE}" -l "${seeder_label_selector}" -o wide || true
+          kubectl describe pods -n "${NAMESPACE}" -l "${seeder_label_selector}" || true
+          echo "::endgroup::"
+          echo "::group::seeder pod logs"
+          kubectl logs -n "${NAMESPACE}" -l "${seeder_label_selector}" --all-containers --tail=1000 || true
+          echo "::endgroup::"
+          echo "::group::leecher pod"
+          kubectl get pod "${leecher_pod}" -n "${NAMESPACE}" -o wide || true
+          kubectl describe pod "${leecher_pod}" -n "${NAMESPACE}" || true
+          echo "::endgroup::"
+          echo "::group::leecher pod logs"
+          kubectl logs "${leecher_pod}" -n "${NAMESPACE}" --all-containers --tail=1000 || true
+          echo "::endgroup::"
+          echo "::group::tracker connectivity evidence (opentracker Service/endpoints)"
+          kubectl get service opentracker -n "${NAMESPACE}" -o wide || true
+          kubectl get endpoints opentracker -n "${NAMESPACE}" -o wide || true
+          echo "::endgroup::"
+        }
+        cleanup() {
+          kubectl delete pod "${leecher_pod}" -n "${NAMESPACE}" --ignore-not-found --wait=false || true
+          kubectl annotate partitioncontents.kezio.kojuro.date "${CONTENT_NAME}" -n "${NAMESPACE}" \
+            "kezio.kojuro.date/seed-demand-" --overwrite || true
+        }
+        trap 'dump_diagnostics; cleanup' ERR
+
+        echo "Setting seed-demand on ${CONTENT_NAME}"
+        kubectl annotate partitioncontents.kezio.kojuro.date "${CONTENT_NAME}" -n "${NAMESPACE}" \
+          "kezio.kojuro.date/seed-demand=true" --overwrite
+
+        echo "Waiting for seeder Deployment ${seeder_deployment} to become Available"
+        deadline=$(( $(date +%s) + SEEDER_WAIT_TIMEOUT_SECONDS ))
+        while ! kubectl get deployment "${seeder_deployment}" -n "${NAMESPACE}" >/dev/null 2>&1; do
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::seeder deployment ${seeder_deployment} never appeared" >&2
+            dump_diagnostics
+            exit 1
+          fi
+          sleep 3
+        done
+        kubectl wait --for=condition=Available "deployment/${seeder_deployment}" -n "${NAMESPACE}" \
+          --timeout="${SEEDER_WAIT_TIMEOUT_SECONDS}s"
+
+        seeder_pod="$(kubectl get pods -n "${NAMESPACE}" -l "${seeder_label_selector}" \
+          -o jsonpath='{.items[0].metadata.name}')"
+        seeder_pod_ip="$(kubectl get pod "${seeder_pod}" -n "${NAMESPACE}" -o jsonpath='{.status.podIP}')"
+        echo "seeder pod ${seeder_pod} at ${seeder_pod_ip}"
+
+        echo "Starting the leecher Pod"
+        cat <<EOF | kubectl apply -f -
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: ${leecher_pod}
+          namespace: ${NAMESPACE}
+          labels:
+            app.kubernetes.io/name: kezio-e2e-leecher
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: ezio
+              image: ${SEEDER_IMAGE}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+          volumes:
+            - name: data
+              emptyDir: {}
+        EOF
+        kubectl wait --for=condition=Ready "pod/${leecher_pod}" -n "${NAMESPACE}" --timeout=120s
+
+        kubectl exec "${leecher_pod}" -n "${NAMESPACE}" -- mkdir -p /data/download
+
+        echo "Copying leechctl into the leecher Pod"
+        kubectl exec -i "${leecher_pod}" -n "${NAMESPACE}" -- \
+          sh -c 'cat > /data/leechctl && chmod +x /data/leechctl' <bin/leechctl
+
+        echo "Leeching content ${info_hash} and byte-comparing the reconstructed partition"
+        reconstructed_sha256="$(kubectl exec "${leecher_pod}" -n "${NAMESPACE}" -- /data/leechctl \
+          --ezio-target 127.0.0.1:50051 \
+          --torrent-url "http://${seeder_pod_ip}:8080/torrents/${info_hash}" \
+          --info-hash "${info_hash}" \
+          --save-path /data/download \
+          --out /data/reconstructed.raw \
+          --partition-size-bytes "${PARTITION_SIZE_BYTES}" \
+          --want-sha256 "${PARTITION_SHA256}" \
+          --timeout "${LEECH_TIMEOUT_SECONDS}s")"
+        echo "reconstructed-sha256=${reconstructed_sha256}" >>"${GITHUB_OUTPUT}"
+        echo "leecher reconstructed sha256 ${reconstructed_sha256}, matches fixture partition ${PARTITION_SHA256}"
+
+        cleanup
+        trap - ERR

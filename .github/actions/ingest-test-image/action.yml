@@ -41,6 +41,17 @@ inputs:
     required: false
     default: "300"
 
+outputs:
+  content-ref:
+    description: 'The PartitionContent object name ("pc-<info hash>") ingest publishes the fixture''s one content partition to.'
+    value: ${{ steps.fixture.outputs.content-ref }}
+  partition-sha256:
+    description: 'sha256 of the fixture disk''s raw partition slice, for a downstream byte-compare (e.g. run-leecher) against a BT-reconstructed copy.'
+    value: ${{ steps.fixture.outputs.partition-sha256 }}
+  partition-size-bytes:
+    description: 'Size in bytes of the fixture disk''s one partition.'
+    value: ${{ steps.fixture.outputs.partition-size-bytes }}
+
 runs:
   using: composite
   steps:
@@ -114,6 +125,12 @@ runs:
 
         echo "disk-path=${disk}" >>"${GITHUB_OUTPUT}"
         echo "layout-path=${RUNNER_TEMP}/layout.json" >>"${GITHUB_OUTPUT}"
+
+        # For run-leecher's byte-compare: the exact reference the
+        # leecher's reconstructed-from-BT-extents partition must match.
+        partition_sha256="$(sha256sum "${slice}" | cut -d' ' -f1)"
+        echo "partition-sha256=${partition_sha256}" >>"${GITHUB_OUTPUT}"
+        echo "partition-size-bytes=${size_bytes}" >>"${GITHUB_OUTPUT}"
 
     - name: Upload the fixture and wait for its Image to reach Ready
       shell: bash

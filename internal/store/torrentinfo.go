@@ -246,3 +246,20 @@ func WriteTorrentInfo(w io.Writer, info *TorrentInfo) error {
 func ExtentFileName(offset uint64) string {
 	return fmt.Sprintf("%0*x", hexFieldWidth, offset)
 }
+
+// ParseExtentFileName is the inverse of ExtentFileName: it recovers the
+// partition byte offset an extent file's name encodes. A leecher that
+// only has the downloaded extent files (no torrent.info - that file is
+// never distributed over BitTorrent, see ContentDataDir's doc comment)
+// still needs this to place each extent back at its own offset when
+// reconstructing the original partition.
+func ParseExtentFileName(name string) (uint64, error) {
+	if len(name) != hexFieldWidth {
+		return 0, fmt.Errorf("parse extent file name %q: want %d hex chars, got %d", name, hexFieldWidth, len(name))
+	}
+	offset, err := strconv.ParseUint(name, 16, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse extent file name %q: %w", name, err)
+	}
+	return offset, nil
+}

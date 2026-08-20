@@ -125,6 +125,35 @@ func TestExtentFileName_MatchesOffsetFieldWidth(t *testing.T) {
 	}
 }
 
+func TestParseExtentFileName_RoundTripsWithExtentFileName(t *testing.T) {
+	for _, offset := range []uint64{0, 0x1000, 0xdeadbeef, 1 << 40} {
+		name := ExtentFileName(offset)
+		got, err := ParseExtentFileName(name)
+		if err != nil {
+			t.Fatalf("ParseExtentFileName(%q): %v", name, err)
+		}
+		if got != offset {
+			t.Fatalf("ParseExtentFileName(%q) = %#x, want %#x", name, got, offset)
+		}
+	}
+}
+
+func TestParseExtentFileName_Errors(t *testing.T) {
+	cases := map[string]string{
+		"too short": "1000",
+		"too long":  hexPad("1000") + "0",
+		"not hex":   strings.Repeat("z", 32),
+		"empty":     "",
+	}
+	for name, input := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseExtentFileName(input); err == nil {
+				t.Fatalf("ParseExtentFileName(%q): got nil error, want an error", input)
+			}
+		})
+	}
+}
+
 func TestParseTorrentInfo_Errors(t *testing.T) {
 	cases := map[string]string{
 		"missing block_size": "" +

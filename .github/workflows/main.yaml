@@ -208,8 +208,10 @@ jobs:
   # plain local-path-provisioner alone cannot satisfy) + opentracker + the
   # image-service token Secret + the controller-manager, verified healthy,
   # then a real upload -> ingest -> publish -> Ready walk through kezioctl
-  # (ingest-test-image). run-leecher (a separate item) slots in after that
-  # once it exists.
+  # (ingest-test-image), then run-leecher: seed-demand -> seeder
+  # Deployment Available -> a leecher Pod downloads the content over
+  # BitTorrent and byte-compares it against the fixture -> seed-demand
+  # cleared.
   e2e-image-path:
     name: Image path
     needs: [images]
@@ -249,16 +251,25 @@ jobs:
           name: image-tar-ingest
           path: /tmp/images
 
+      # run-leecher's seeder Deployment (PARTITIONCONTENT_SEEDER_IMAGE
+      # below) runs this - amd64-only, matching the images job's seeder
+      # matrix entry.
+      - name: Download the seeder image tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: image-tar-seeder
+          path: /tmp/images
+
       - name: Install RKE2
         uses: ./.github/actions/install-rke2
         with:
           rke2-version: "v1.36.2+rke2r1"
           enable-multus: "false"
 
-      - name: Import the manager, image-service, and ingest images into RKE2 containerd
+      - name: Import the manager, image-service, ingest, and seeder images into RKE2 containerd
         uses: ./.github/actions/import-image-tarballs
         with:
-          images: manager image-service ingest
+          images: manager image-service ingest seeder
 
       # RKE2 ships no default StorageClass, and every PVC the lane's
       # controllers request (the ingest scratch PVC, a PartitionContent's
@@ -295,6 +306,13 @@ jobs:
       # manager's own qcow2 default (ImageIngestConfig.sourceFormat).
       # PARTITIONCONTENT_TRACKER_URL points at opentracker's Service,
       # deployed below - every published .torrent's announce URL.
+      # PARTITIONCONTENT_SEEDER_IMAGE names the seeder tarball's local-tag
+      # imported above - without it, run-leecher's seed-demand annotation
+      # would only ever produce SeederDegraded=SeederImageMissing.
+      # PARTITIONCONTENT_SEEDER_GRACE_PERIOD is shortened from the 5m
+      # production default so a later lane item asserting the
+      # grace-period shutdown itself does not have to wait 5 real
+      # minutes; run-leecher does not wait it out either way.
       - name: Deploy kezio CRDs and controller-manager
         uses: ./.github/actions/deploy-kezio
         with:
@@ -305,6 +323,8 @@ jobs:
             IMAGE_INGEST_SOURCE_FORMAT=raw
             PARTITIONCONTENT_PUBLISH_IMAGE=example.com/kezio-ingest:e2e
             PARTITIONCONTENT_TRACKER_URL=http://opentracker.scaffold-system.svc.cluster.local:6969/announce
+            PARTITIONCONTENT_SEEDER_IMAGE=example.com/kezio-seeder:e2e
+            PARTITIONCONTENT_SEEDER_GRACE_PERIOD=30s
 
       - name: Deploy opentracker
         uses: ./.github/actions/deploy-opentracker
@@ -335,9 +355,17 @@ jobs:
         uses: ./.github/actions/verify-image-path-prerequisites
 
       - name: Ingest a test image through kezioctl
+        id: ingest
         uses: ./.github/actions/ingest-test-image
         with:
           token: ${{ env.IMAGE_SERVICE_TOKEN }}
+
+      - name: Seed, leech, and byte-compare the ingested content
+        uses: ./.github/actions/run-leecher
+        with:
+          content-name: ${{ steps.ingest.outputs.content-ref }}
+          partition-sha256: ${{ steps.ingest.outputs.partition-sha256 }}
+          partition-size-bytes: ${{ steps.ingest.outputs.partition-size-bytes }}
 
       - name: Collect diagnostics
         if: failure()
