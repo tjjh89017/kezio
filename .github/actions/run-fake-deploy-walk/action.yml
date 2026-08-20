@@ -2,8 +2,8 @@ name: Run a fake-deployer Machine walk
 
 description: >-
   Creates a Machine CR against a deployed kezio manager running the
-  FakeDeployer, with spec.imageRef already set so the reconciler drives it
-  straight through the full state walk (Enrolling -> Inspecting ->
+  FakeDeployer, with spec.dataImages already set so the reconciler drives
+  it straight through the full state walk (Enrolling -> Inspecting ->
   Available -> Provisioning -> Provisioned) without a second patch, then
   asserts the resulting DeployRun reached phase Succeeded with its
   phaseTimings populated. A placeholder BMC credentials Secret is created
@@ -48,10 +48,13 @@ inputs:
     default: "fake-deploy-walk-subnet"
   image-name:
     description: >-
-      spec.imageRef name. Image does not exist as a kind at this stage, so
-      this is never resolved - it exists only to be non-nil: an absent
-      imageRef never triggers provisioning, so this is what provokes the
-      walk from Available into Provisioning and on to Provisioned.
+      spec.dataImages[0].imageRef name. Image does not exist as a kind at
+      this stage, so this is never resolved - it exists only to keep the
+      deploy payload non-empty: an absent imageRef/dataImages never
+      triggers provisioning, so this is what provokes the walk from
+      Available into Provisioning and on to Provisioned. dataImages is
+      used instead of imageRef because imageRef is gated on the named
+      Image being Ready, which the fast lane's Machine never has.
     required: false
     default: "fake-deploy-walk-image"
   timeout:
@@ -101,8 +104,9 @@ runs:
           bootMACAddress: ${BOOT_MAC_ADDRESS}
           subnetRef:
             name: ${SUBNET_NAME}
-          imageRef:
-            name: ${IMAGE_NAME}
+          dataImages:
+            - imageRef:
+                name: ${IMAGE_NAME}
         EOF
 
     - name: Wait for the Machine to reach state Provisioned

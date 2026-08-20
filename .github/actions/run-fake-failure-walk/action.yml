@@ -47,9 +47,12 @@ inputs:
     default: "aa:bb:cc:dd:ee:02"
   retry-image-name:
     description: >-
-      spec.imageRef name for the Scenario A Machine. Image does not exist
-      as a kind at this stage, so this is never resolved - it exists only
-      to be non-nil and provoke the walk into Provisioning.
+      spec.dataImages[0].imageRef name for the Scenario A Machine. Image
+      does not exist as a kind at this stage, so this is never resolved -
+      it exists only to keep the deploy payload non-empty and provoke the
+      walk into Provisioning. dataImages is used instead of imageRef
+      because imageRef is gated on the named Image being Ready, which this
+      Machine never has.
     required: false
     default: "fake-failure-retry-image"
   retry-error-observed-timeout:
@@ -133,8 +136,9 @@ runs:
           bootMACAddress: ${BOOT_MAC_ADDRESS}
           subnetRef:
             name: ${SUBNET_NAME}
-          imageRef:
-            name: ${IMAGE_NAME}
+          dataImages:
+            - imageRef:
+                name: ${IMAGE_NAME}
         EOF
 
     - name: "Scenario A: wait for it to enter Provisioning"
