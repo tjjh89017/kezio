@@ -127,8 +127,12 @@ func Upload(client *http.Client, opts UploadOptions, body io.Reader, size int64)
 		return UploadResponse{}, fmt.Errorf("decode upload response: %w", err)
 	}
 
+	if out.Checksum == "" {
+		return UploadResponse{}, errors.New(
+			"upload integrity check failed: server response carried no checksum; cannot verify upload integrity")
+	}
 	streamedChecksum := "sha256:" + hex.EncodeToString(hasher.Sum(nil))
-	if out.Checksum != "" && streamedChecksum != out.Checksum {
+	if streamedChecksum != out.Checksum {
 		return UploadResponse{}, fmt.Errorf(
 			"upload integrity check failed: streamed content hashed to %s but the server reports %s",
 			streamedChecksum, out.Checksum)

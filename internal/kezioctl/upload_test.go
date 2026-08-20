@@ -147,6 +147,38 @@ func TestUpload_StreamedChecksumMismatchIsRejected(t *testing.T) {
 	}
 }
 
+// Upload must fail closed when a 2xx response carries no checksum: an
+// empty Checksum field is not proof of a verified upload, and treating it
+// as such would silently bypass the integrity check the doc comment
+// promises.
+func TestUpload_EmptyServerChecksumIsRejected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(UploadResponse{
+			Name:      "n",
+			URL:       "kezio-staged://n",
+			SizeBytes: 4,
+			Checksum:  "",
+		})
+	}))
+	defer srv.Close()
+
+	content := []byte("data")
+	_, err := Upload(srv.Client(), UploadOptions{
+		ServerURL: srv.URL,
+		Token:     "tok",
+		Name:      "n",
+	}, bytes.NewReader(content), int64(len(content)))
+	if err == nil {
+		t.Fatal("expected an error when the server response carries no checksum")
+	}
+	if !strings.Contains(err.Error(), "no checksum") {
+		t.Errorf("error = %q, want it to mention the missing server checksum", err.Error())
+	}
+}
+
 func TestUpload_TrimsTrailingSlashFromServerURL(t *testing.T) {
 	srv := newUploadTestServer(t, "tok", nil)
 	defer srv.Close()
