@@ -1,0 +1,26 @@
+# RBAC prerequisite for kezio-bootd (proxyDHCP + TFTP). bootd is not part
+# of the controller-manager process, and its Deployment is not something
+# this kustomization applies: SubnetReconciler creates one bootd
+# Deployment per Subnet, in that Subnet's own namespace
+# (internal/controller/subnet_bootd_deployment.go). What is applied here
+# is the ServiceAccount and ClusterRole every Subnet's bootd
+# ServiceAccount needs:
+#
+#   kustomize build config/bootd | kubectl apply -f -
+#
+# A bootd pod also needs a pod-security.kubernetes.io/enforce=privileged
+# label on its Subnet's namespace and a NetworkAttachmentDefinition
+# there (see networkattachmentdefinition.example.yaml), neither of which
+# this kustomization provisions.
+namespace: scaffold-system
+namePrefix: kezio-
+
+labels:
+  - includeSelectors: true
+    pairs:
+      app.kubernetes.io/part-of: kezio
+
+resources:
+  - rbac.yaml
+  # networkattachmentdefinition.example.yaml is NOT listed here - see
+  # that file's header comment.

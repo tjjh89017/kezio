@@ -287,8 +287,9 @@ func main() {
 		}
 	}
 	if err := (&controller.SubnetReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:          mgr.GetClient(),
+		Scheme:          mgr.GetScheme(),
+		BootdDeployment: bootdDeploymentConfigFromEnv(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Subnet")
 		os.Exit(1)
@@ -401,4 +402,22 @@ func partitionContentSeederConfigFromEnv() controller.PartitionContentSeederConf
 		}
 	}
 	return cfg
+}
+
+// bootdDeploymentConfigFromEnv builds the Subnet reconciler's
+// BootdDeploymentConfig from the environment. Leaving BOOTD_DEPLOYMENT_IMAGE
+// or BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE unset yields a config that is
+// not enabled() (see its doc comment): the reconciler still computes and
+// writes Valid/Ready for every Subnet, but Ready stays False with a
+// reason naming that no image is configured, and no Deployment is
+// created.
+func bootdDeploymentConfigFromEnv() controller.BootdDeploymentConfig {
+	return controller.BootdDeploymentConfig{
+		Image:              os.Getenv("BOOTD_DEPLOYMENT_IMAGE"),
+		BootArtifactsImage: os.Getenv("BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE"),
+		ServiceAccountName: os.Getenv("BOOTD_DEPLOYMENT_SERVICE_ACCOUNT"),
+		AgentUpstreamURL:   os.Getenv("BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL"),
+		BootUpstreamURL:    os.Getenv("BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL"),
+		HTTPBootURL:        os.Getenv("BOOTD_DEPLOYMENT_HTTP_BOOT_URL"),
+	}
 }

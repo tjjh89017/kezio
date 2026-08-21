@@ -1,0 +1,60 @@
+# EXAMPLE / PLACEHOLDER - not applied by this kustomization. Copy this file,
+# strip the ".example" suffix, fill in the site-specific values below, and
+# apply it directly in the Subnet's own namespace under its final name.
+# Point that Subnet's spec.bootdNetworkRef at the name - the controller
+# stamps the k8s.v1.cni.cncf.io/networks annotation on its bootd Deployment
+# for you (bootdPodAnnotations, internal/controller/subnet_bootd_deployment.go),
+# so there is no kustomization.yaml entry to add or annotation to uncomment.
+#
+# Requires the Multus CNI meta-plugin
+# (https://github.com/k8snetworkplumbingwg/multus-cni) and its
+# NetworkAttachmentDefinition CRD already installed cluster-wide.
+#
+# === Why Multus, not hostNetwork ===
+# bootd must see the exact broadcast domain a booting machine's NIC is on
+# and broadcast proxyDHCP replies onto only that segment. hostNetwork
+# would work but ties the pod to one node's NIC and fights over ports
+# 67/69/4011; a Multus secondary interface (net1) gets the same L2
+# visibility without either problem, keeping eth0 free for the
+# Kubernetes API access bootd's MAC allowlist depends on.
+#
+# === Routing ===
+# This attachment needs no routes onto other subnets: proxyDHCP/TFTP
+# traffic here is directly-connected L2 traffic.
+#
+# === IPAM ===
+# bootdServerIP (Subnet spec, stamped as BOOTD_SERVER_IP on the
+# Deployment) requires static ipam that pins that exact address - a
+# dynamic allocator such as whereabouts cannot satisfy this: the
+# controller's CheckBootdAddress raises a Violation on any non-static
+# ipam recognised on this NAD (internal/nadvalidate), and dynamic
+# allocation is a chicken-and-egg with a value that must be known up
+# front regardless.
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: kezio-boot-network
+  namespace: system
+spec:
+  # SITE-SPECIFIC: replace the "macvlan" plugin entry with whatever CNI
+  # plugin this cluster's boot L2 segment uses; it is illustrative only.
+  config: |
+    {
+      "cniVersion": "0.3.1",
+      "name": "kezio-boot-network",
+      "plugins": [
+        {
+          "type": "macvlan",
+          "master": "REPLACE_WITH_BOOT_NETWORK_HOST_INTERFACE",
+          "mode": "bridge",
+          "ipam": {
+            "type": "static",
+            "addresses": [
+              {
+                "address": "REPLACE_WITH_STATIC_CIDR/32"
+              }
+            ]
+          }
+        }
+      ]
+    }

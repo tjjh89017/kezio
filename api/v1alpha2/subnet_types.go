@@ -116,8 +116,12 @@ const (
 	// SubnetConditionReady reflects whether this Subnet's bootd
 	// Deployment has become available.
 	SubnetConditionReady = "Ready"
-	// SubnetConditionValid reports whether the subnet's own schema-level
-	// validation passed.
+	// SubnetConditionValid reports whether this Subnet passed both
+	// schema-level validation (enforced at admission, so always True for
+	// an admitted object) and the SubnetReconciler's own checks against
+	// its referenced NetworkAttachmentDefinitions and DHCP configuration
+	// (internal/nadvalidate, internal/subnetvalidate). False names the
+	// first failing check as Reason.
 	SubnetConditionValid = "Valid"
 )
 
