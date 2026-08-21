@@ -1,0 +1,64 @@
+name: Start continuous VM console capture
+
+description: >-
+  Backgrounds a virtctl console attach loop against a VM from the moment
+  it is Ready, appending everything the guest prints to logfile for the
+  rest of the job - so a later diagnostics dump's brief live attach is no
+  longer the only window onto the guest's boot output, which by then has
+  usually already scrolled past. A VMI recreation (a BMC power cycle, for
+  example) drops the attach; the loop reattaches on its own, with a
+  marker line either side of the gap, so the uploaded log still reads as
+  one continuous history across however many VMI generations the job goes
+  through.
+
+  virtctl console requires a real TTY (it puts the local terminal into
+  raw mode to relay guest input) and errors outright on a plain pipe or
+  file redirect; `script` supplies a fake pty and records everything
+  written to it, byte for byte, without needing a real terminal itself.
+
+  Call once per VM - a multi-VM lane calls this action once per VM, each
+  with its own logfile.
+
+inputs:
+  vm-name:
+    description: Name of the VirtualMachine/VirtualMachineInstance to attach to.
+    required: true
+  namespace:
+    description: Namespace the VM lives in.
+    required: false
+    default: "scaffold-system"
+  logfile:
+    description: >-
+      Path the console output is appended to. Put it under the runner
+      temp directory so a later upload-artifact step picks it up.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Start continuous VM console capture (${{ inputs.vm-name }})
+      shell: bash
+      env:
+        VM_NAME: ${{ inputs.vm-name }}
+        NAMESPACE: ${{ inputs.namespace }}
+        LOGFILE: ${{ inputs.logfile }}
+      run: |
+        set -euo pipefail
+        loop_script="${RUNNER_TEMP}/console-capture-loop-${VM_NAME}.sh"
+        cat >"${loop_script}" <<'CONSOLE_CAPTURE_LOOP'
+        #!/bin/bash
+        set -uo pipefail
+        vm_name="$1"
+        namespace="$2"
+        logfile="$3"
+        while true; do
+        echo "===== console-capture: (re)attaching to ${vm_name} at $(date -Is) =====" >>"${logfile}"
+        script -qec "virtctl console '${vm_name}' -n '${namespace}'" -a "${logfile}"
+        echo "===== console-capture: disconnected from ${vm_name} at $(date -Is); reattaching in 2s (a VMI recreation or a transient drop, not necessarily a failure) =====" >>"${logfile}"
+        sleep 2
+        done
+        CONSOLE_CAPTURE_LOOP
+        chmod +x "${loop_script}"
+        nohup "${loop_script}" "${VM_NAME}" "${NAMESPACE}" "${LOGFILE}" \
+          >"${RUNNER_TEMP}/console-capture-wrapper-${VM_NAME}.log" 2>&1 &
+        disown

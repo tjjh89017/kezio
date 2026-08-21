@@ -1,0 +1,208 @@
+name: Dump E2E diagnostics on failure
+
+description: >-
+  The verbose, failure-only diagnostic dump a KubeVirt/KubeVirtBMC e2e
+  lane runs when any earlier step fails: controller-manager pod logs
+  (including each pod's securityContext, restart count, and
+  previous-attempt crash logs), bootd's Multus attachment and net1
+  rp_filter/link state (read from inside its pod network namespace via
+  crictl+nsenter), a caller-supplied set of extra Deployment/Job logs and
+  arbitrary kezio CRs, the target VM/VMI, the host's FORWARD/mangle
+  iptables rules and bridge offload settings, and KubeVirtBMC's own
+  controller-manager logs, VirtualMachineBMC, and virtbmc pod/Service.
+  Every command runs under `set +e` and best-effort: a resource that
+  never got created (the lane failed before reaching it) must not fail
+  this step.
+
+inputs:
+  namespace:
+    description: Namespace to collect the controller-manager, bootd, and VM/VMI diagnostics from.
+    required: false
+    default: "scaffold-system"
+  target-vm-name:
+    description: Name of the target VirtualMachine/VirtualMachineInstance/VirtualMachineBMC to dump.
+    required: true
+  provisioning-bridge:
+    description: Host Linux bridge to dump FORWARD/mangle iptables rules and offload settings for.
+    required: true
+  bootd-label-selector:
+    description: Label selector for the bootd pod(s) whose Multus attachment and net1 netns state are dumped.
+    required: false
+    default: "app.kubernetes.io/component=bootd"
+  extra-deployment-logs:
+    description: >-
+      Newline-separated Deployment names (e.g. opentracker, existing-dhcp,
+      seeder, image-service) whose combined container logs are dumped, one
+      per line. Blank lines are skipped.
+    required: false
+    default: ""
+  extra-job-label-selectors:
+    description: >-
+      Newline-separated label selectors (e.g. an ingest Job's own label)
+      whose matching pods' combined container logs are dumped, one per
+      line. Blank lines are skipped.
+    required: false
+    default: ""
+  extra-resource-refs:
+    description: >-
+      Newline-separated "kind name" pairs (e.g. "machine my-machine",
+      "image my-image") dumped as YAML - the kezio CRs relevant to this
+      lane. Blank lines are skipped.
+    required: false
+    default: ""
+  kubevirtbmc-namespace:
+    description: Namespace KubeVirtBMC's own controller-manager runs in.
+    required: false
+    default: "kubevirtbmc-system"
+
+runs:
+  using: composite
+  steps:
+    # No `if: failure()` here: a composite action's own steps evaluate
+    # failure() against steps within that same composite, never the
+    # calling job, so a guard here would always skip. The caller gates
+    # this action's `uses:` step with `if: failure()` instead.
+    - name: Dump diagnostics on failure
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        TARGET_VM_NAME: ${{ inputs.target-vm-name }}
+        PROVISIONING_BRIDGE: ${{ inputs.provisioning-bridge }}
+        BOOTD_LABEL_SELECTOR: ${{ inputs.bootd-label-selector }}
+        EXTRA_DEPLOYMENT_LOGS: ${{ inputs.extra-deployment-logs }}
+        EXTRA_JOB_LABEL_SELECTORS: ${{ inputs.extra-job-label-selectors }}
+        EXTRA_RESOURCE_REFS: ${{ inputs.extra-resource-refs }}
+      run: |
+        set +e
+        # Teed into a file too: a later "Upload E2E diagnostics artifacts"
+        # step in the calling workflow picks this up.
+        exec > >(tee "${RUNNER_TEMP}/diagnostics-dump.log") 2>&1
+        echo "===== nodes ====="
+        kubectl get nodes -o wide
+        echo "===== ${NAMESPACE} pods ====="
+        kubectl get pods -n "${NAMESPACE}" -o wide
+        echo "===== controller-manager logs ====="
+        kubectl -n "${NAMESPACE}" logs deployment/kezio-controller-manager --all-containers --tail=1000
+        echo "===== controller-manager fetch-boot-artifacts initContainer logs ====="
+        # kubectl logs --all-containers above does not include
+        # initContainers. `deployment/kezio-controller-manager` (a
+        # workload reference) can resolve to the OLD ReplicaSet's pod
+        # during a rollout, which has no fetch-boot-artifacts container at
+        # all - loop over the actual pods instead, and dump each one's
+        # rendered securityContext too.
+        for p in $(kubectl -n "${NAMESPACE}" get pods -l control-plane=controller-manager -o name); do
+          echo "--- ${p} securityContext ---"
+          kubectl -n "${NAMESPACE}" get "${p}" \
+            -o jsonpath='{.spec.securityContext}{"\n"}{range .spec.initContainers[*]}{.name}{": "}{.securityContext}{"\n"}{end}'
+          echo "--- ${p} restart count ---"
+          kubectl -n "${NAMESPACE}" get "${p}" \
+            -o jsonpath='{range .status.containerStatuses[*]}{.name}{": restartCount="}{.restartCount}{" lastState="}{.lastState}{"\n"}{end}'
+          # --previous first: the current attempt's log starts fresh at
+          # the restart, well after whatever caused a mid-run crash.
+          echo "--- ${p} manager logs (--previous) ---"
+          kubectl -n "${NAMESPACE}" logs "${p}" -c manager --previous --tail=500 || true
+          echo "--- ${p} fetch-boot-artifacts logs (--previous) ---"
+          kubectl -n "${NAMESPACE}" logs "${p}" -c fetch-boot-artifacts --previous --tail=200 || \
+            kubectl -n "${NAMESPACE}" logs "${p}" -c fetch-boot-artifacts --tail=200 || true
+        done
+        echo "===== bootd pods (${BOOTD_LABEL_SELECTOR}) ====="
+        for p in $(kubectl -n "${NAMESPACE}" get pods -l "${BOOTD_LABEL_SELECTOR}" -o name); do
+          echo "--- ${p} securityContext ---"
+          kubectl -n "${NAMESPACE}" get "${p}" \
+            -o jsonpath='{.spec.securityContext}{"\n"}{range .spec.initContainers[*]}{.name}{": "}{.securityContext}{"\n"}{end}'
+          # Multus attachment dumped explicitly: the requested annotation
+          # only proves what was asked for, not what attached, and a CNI
+          # ADD failure leaves bootd running normally on eth0 alone with
+          # every PXE request silently timing out and nothing in its logs.
+          echo "--- ${p} k8s.v1.cni.cncf.io/networks annotation (requested) ---"
+          kubectl -n "${NAMESPACE}" get "${p}" \
+            -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/networks}{"\n"}'
+          echo "--- ${p} k8s.v1.cni.cncf.io/network-status annotation (actual, set by Multus) ---"
+          kubectl -n "${NAMESPACE}" get "${p}" \
+            -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}{"\n"}'
+          # net1 lives only inside this pod's own netns, so rp_filter and
+          # link state must be read from there via nsenter/crictl, not
+          # the host.
+          echo "--- ${p} net1 rp_filter and link state (inside the pod network namespace) ---"
+          pod_name="${p#pod/}"
+          # Without -r, crictl's default endpoint probe finds nothing on an RKE2 node.
+          crictl_endpoint="unix:///run/k3s/containerd/containerd.sock"
+          sandbox_id="$(sudo crictl -r "${crictl_endpoint}" pods --name "${pod_name}" -q | head -1)"
+          if [ -n "${sandbox_id}" ]; then
+            sandbox_pid="$(sudo crictl -r "${crictl_endpoint}" inspectp -o go-template --template '{{.info.pid}}' "${sandbox_id}")"
+            sudo nsenter -t "${sandbox_pid}" -n -- sh -c '
+              for f in all default net1; do
+                echo "net.ipv4.conf.${f}.rp_filter = $(cat /proc/sys/net/ipv4/conf/${f}/rp_filter 2>/dev/null || echo "<no such interface>")"
+              done
+              ip -d link show net1 2>&1
+              ip addr show net1 2>&1
+            ' || true
+          fi
+          echo "--- ${p} restart count ---"
+          kubectl -n "${NAMESPACE}" get "${p}" \
+            -o jsonpath='{range .status.containerStatuses[*]}{.name}{": restartCount="}{.restartCount}{" lastState="}{.lastState}{"\n"}{end}'
+          echo "--- ${p} bootd logs (--previous) ---"
+          kubectl -n "${NAMESPACE}" logs "${p}" -c bootd --previous --tail=500 || true
+          echo "--- ${p} fetch-boot-artifacts logs (--previous) ---"
+          kubectl -n "${NAMESPACE}" logs "${p}" -c fetch-boot-artifacts --previous --tail=200 || \
+            kubectl -n "${NAMESPACE}" logs "${p}" -c fetch-boot-artifacts --tail=200 || true
+        done
+        echo "===== extra Deployment logs ====="
+        while IFS= read -r name; do
+          [ -z "${name}" ] && continue
+          echo "--- deployment/${name} ---"
+          kubectl -n "${NAMESPACE}" logs deployment/"${name}" --all-containers --tail=1000
+        done <<<"${EXTRA_DEPLOYMENT_LOGS}"
+        echo "===== extra Job/on-demand-workload logs ====="
+        while IFS= read -r selector; do
+          [ -z "${selector}" ] && continue
+          echo "--- pods matching ${selector} ---"
+          kubectl -n "${NAMESPACE}" get pods -l "${selector}" -o wide
+          kubectl -n "${NAMESPACE}" logs -l "${selector}" --all-containers --tail=1000
+        done <<<"${EXTRA_JOB_LABEL_SELECTORS}"
+        echo "===== VirtualMachine / VMI ====="
+        kubectl get vm,vmi -n "${NAMESPACE}" -o yaml
+        echo "===== virt-launcher pod describe ====="
+        kubectl describe pod -n "${NAMESPACE}" -l "kubevirt.io/vm=${TARGET_VM_NAME}"
+        echo "===== VM console (last 20s, live attach only - see the uploaded console.log artifact for the full history from VM start) ====="
+        timeout 20 virtctl console "${TARGET_VM_NAME}" -n "${NAMESPACE}" || true
+        echo "===== extra kezio CRs ====="
+        while IFS= read -r ref; do
+          [ -z "${ref}" ] && continue
+          kind="${ref%% *}"
+          name="${ref#* }"
+          echo "--- ${kind} ${name} ---"
+          kubectl get "${kind}" "${name}" -n "${NAMESPACE}" -o yaml
+        done <<<"${EXTRA_RESOURCE_REFS}"
+        echo "===== events ====="
+        kubectl get events -n "${NAMESPACE}" --sort-by=.lastTimestamp
+        echo "===== host FORWARD chain (canal/br_netfilter can silently drop bridged traffic here) ====="
+        sudo iptables -L FORWARD -v --line-numbers || true
+        sysctl net.bridge.bridge-nf-call-iptables || true
+        echo "===== host mangle table CHECKSUM rules (fills UDP checksums the VM's virtio-net offloaded) ====="
+        sudo iptables -t mangle -L POSTROUTING -v --line-numbers || true
+        echo "===== ${PROVISIONING_BRIDGE} offload settings ====="
+        ethtool -k "${PROVISIONING_BRIDGE}" | head || true
+
+    - name: Dump KubeVirtBMC diagnostics on failure
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        TARGET_VM_NAME: ${{ inputs.target-vm-name }}
+        KUBEVIRTBMC_NAMESPACE: ${{ inputs.kubevirtbmc-namespace }}
+      run: |
+        set +e
+        # Teed into a file too, same as "Dump diagnostics on failure" above.
+        exec > >(tee "${RUNNER_TEMP}/diagnostics-kubevirtbmc-dump.log") 2>&1
+        echo "===== ${KUBEVIRTBMC_NAMESPACE} pods ====="
+        kubectl get pods -n "${KUBEVIRTBMC_NAMESPACE}" -o wide
+        echo "===== KubeVirtBMC controller-manager logs ====="
+        kubectl -n "${KUBEVIRTBMC_NAMESPACE}" logs deployment/kubevirtbmc-controller-manager --all-containers --tail=1000
+        echo "===== VirtualMachineBMC ====="
+        kubectl get virtualmachinebmc -n "${NAMESPACE}" -o yaml
+        echo "===== virtbmc pod logs (the per-VM Redfish/IPMI agent) ====="
+        kubectl -n "${NAMESPACE}" logs "${TARGET_VM_NAME}-virtbmc" --all-containers --tail=1000
+        echo "===== virtbmc Service ====="
+        kubectl get svc -n "${NAMESPACE}" -l app=virtbmc -o yaml
+        echo "===== events (${KUBEVIRTBMC_NAMESPACE}) ====="
+        kubectl get events -n "${KUBEVIRTBMC_NAMESPACE}" --sort-by=.lastTimestamp

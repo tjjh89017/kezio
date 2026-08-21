@@ -1,0 +1,135 @@
+name: Create the provisioning NetworkAttachmentDefinitions
+
+description: >-
+  Creates the four Multus NetworkAttachmentDefinitions a BMC e2e lane
+  attaches bootd, the opentracker/ezio-seeder swarm, and the target VM to
+  on the provisioning bridge - see this action's own inline comments for
+  why each NAD's ipam shape differs (static vs. empty ipam). A fifth NAD,
+  belonging to a deploy-existing-dhcp pod, is created separately by that
+  action, travelling with the pod it belongs to instead of living here.
+
+inputs:
+  namespace:
+    description: Namespace the NetworkAttachmentDefinitions are created in - must match the Subnet's own namespace, since bootdNetworkRef/seederNetworkRef resolve unqualified names there.
+    required: false
+    default: "scaffold-system"
+  bridge-name:
+    description: 'Host Linux bridge every NAD attaches to, e.g. "kezio-prov0".'
+    required: true
+  bootd-net1-ip:
+    description: 'Fixed net1 CIDR address for bootd, e.g. "192.0.2.2/24" - matches the Subnet''s bootdServerIP.'
+    required: true
+  tracker-net1-ip:
+    description: 'Fixed net1 CIDR address for the opentracker pod, e.g. "192.0.2.3/24".'
+    required: true
+  seeder-net1-ip:
+    description: 'Fixed net1 CIDR address for the ezio-seeder pod, e.g. "192.0.2.4/24".'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Create the provisioning NetworkAttachmentDefinitions
+      # Four NADs on the SAME bridge, split on purpose:
+      # - kezio-boot-network (static ipam): bootd only, fixed address
+      #   (dnsmasq binds to net1, BOOTD_SERVER_IP advertises it as TFTP
+      #   next-server).
+      # - kezio-tracker-network / kezio-seeder-network (static ipam, one
+      #   NAD per pod since the static plugin hands every attaching pod
+      #   the same address): fixed addresses for opentracker/ezio-seeder,
+      #   matching config/seeder/README.md's data-network convention, so
+      #   the seeder announces its bridge address directly with no NAT.
+      # - kezio-boot-network-vm ("ipam": {}): the target VM's NIC must NOT
+      #   get an IPAM'd network - a KubeVirt bridge-mode interface with
+      #   IPAM makes virt-launcher run its own in-pod DHCP server that
+      #   hands the guest the pod's (static, duplicate-hazard) address,
+      #   hijacking real PXE DHCP (observed: a rogue in-pod server
+      #   answered DISCOVER before bootd and PXE died with PXE-E16).
+      #   Empty ipam lets the guest do real DHCP on the wire instead.
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        PROVISIONING_BRIDGE: ${{ inputs.bridge-name }}
+        BOOTD_NET1_IP: ${{ inputs.bootd-net1-ip }}
+        TRACKER_NET1_IP: ${{ inputs.tracker-net1-ip }}
+        SEEDER_NET1_IP: ${{ inputs.seeder-net1-ip }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: k8s.cni.cncf.io/v1
+        kind: NetworkAttachmentDefinition
+        metadata:
+          name: kezio-boot-network
+          namespace: ${NAMESPACE}
+        spec:
+          config: |
+            {
+              "cniVersion": "0.3.1",
+              "name": "kezio-boot-network",
+              "plugins": [
+                {
+                  "type": "bridge",
+                  "bridge": "${PROVISIONING_BRIDGE}",
+                  "ipam": {
+                    "type": "static",
+                    "addresses": [
+                      {"address": "${BOOTD_NET1_IP}"}
+                    ]
+                  }
+                }
+              ]
+            }
+        EOF
+        # One static address per NAD is correct for this single-Image lane;
+        # a subnet with concurrent Image deploys needs one address per
+        # concurrently active seeder Deployment instead - see
+        # config/seeder/networkattachmentdefinition-whereabouts.example.yaml.
+        for nad_spec in "kezio-tracker-network:${TRACKER_NET1_IP}" "kezio-seeder-network:${SEEDER_NET1_IP}"; do
+          nad_name="${nad_spec%%:*}"
+          nad_addr="${nad_spec#*:}"
+          cat <<EOF | kubectl apply -f -
+        apiVersion: k8s.cni.cncf.io/v1
+        kind: NetworkAttachmentDefinition
+        metadata:
+          name: ${nad_name}
+          namespace: ${NAMESPACE}
+        spec:
+          config: |
+            {
+              "cniVersion": "0.3.1",
+              "name": "${nad_name}",
+              "plugins": [
+                {
+                  "type": "bridge",
+                  "bridge": "${PROVISIONING_BRIDGE}",
+                  "ipam": {
+                    "type": "static",
+                    "addresses": [
+                      {"address": "${nad_addr}"}
+                    ]
+                  }
+                }
+              ]
+            }
+        EOF
+        done
+        cat <<EOF | kubectl apply -f -
+        apiVersion: k8s.cni.cncf.io/v1
+        kind: NetworkAttachmentDefinition
+        metadata:
+          name: kezio-boot-network-vm
+          namespace: ${NAMESPACE}
+        spec:
+          config: |
+            {
+              "cniVersion": "0.3.1",
+              "name": "kezio-boot-network-vm",
+              "plugins": [
+                {
+                  "type": "bridge",
+                  "bridge": "${PROVISIONING_BRIDGE}",
+                  "ipam": {}
+                }
+              ]
+            }
+        EOF

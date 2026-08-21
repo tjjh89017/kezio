@@ -1,0 +1,119 @@
+name: Deploy kezio-bootd's RBAC and wait for a Subnet's bootd Deployment
+
+description: >-
+  Applies config/bootd's RBAC (the bootd ServiceAccount and the
+  ClusterRole/ClusterRoleBinding it binds to) - a cluster-wide
+  prerequisite SubnetReconciler assumes already exists, not something it
+  creates. Then waits for the named Subnet's own bootd Deployment
+  (SubnetReconciler builds one Deployment per Subnet, asynchronously
+  after observing the Subnet) to appear and roll out, and proves both its
+  reverse proxy and its Multus attachment actually came up before
+  returning. Does not create the Subnet (or any Site) itself - that CR
+  creation belongs to whichever step owns the kezio API objects for this
+  lane; this action only waits on the Deployment it produces.
+
+inputs:
+  namespace:
+    description: Namespace config/bootd's RBAC is applied into, and the Subnet's own namespace.
+    required: false
+    default: "scaffold-system"
+  subnet-name:
+    description: 'Name of the Subnet whose bootd Deployment (kezio-bootd-<subnet-name>) this action waits on.'
+    required: true
+  bootd-server-ip:
+    description: 'The Subnet''s spec.bootdServerIP (bare address, no CIDR suffix) - used to reach bootd''s reverse proxy for the readiness check.'
+    required: true
+  timeout:
+    description: Timeout for the bootd Deployment rollout wait.
+    required: false
+    default: "180s"
+
+outputs:
+  pod-name:
+    description: The resolved, non-terminating bootd pod name - already confirmed to carry the kezio-boot-network Multus attachment.
+    value: ${{ steps.resolve-pod.outputs.pod-name }}
+
+runs:
+  using: composite
+  steps:
+    - name: Apply config/bootd's RBAC
+      shell: bash
+      run: |
+        set -euo pipefail
+        kubectl apply -k config/bootd
+
+    - name: Wait for the Subnet's bootd Deployment to roll out
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        SUBNET_NAME: ${{ inputs.subnet-name }}
+        TIMEOUT: ${{ inputs.timeout }}
+      run: |
+        set -euo pipefail
+        deployment_name="kezio-bootd-${SUBNET_NAME}"
+        # SubnetReconciler builds the Deployment asynchronously after
+        # observing the Subnet - it does not exist the instant the Subnet
+        # is applied. `rollout status` on a Deployment that isn't there
+        # yet exits immediately with NotFound instead of waiting, so poll
+        # for its existence first and only then hand off to `rollout
+        # status` for the real readiness wait.
+        deadline=$(( $(date +%s) + 120 ))
+        until kubectl get deployment/"${deployment_name}" -n "${NAMESPACE}" >/dev/null 2>&1; do
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::${deployment_name} Deployment did not appear within 120s - the Subnet controller either hasn't reconciled yet or is withholding the Deployment." >&2
+            kubectl get subnet "${SUBNET_NAME}" -n "${NAMESPACE}" -o yaml || true
+            exit 1
+          fi
+          sleep 5
+        done
+        kubectl rollout status deployment/"${deployment_name}" -n "${NAMESPACE}" --timeout="${TIMEOUT}"
+
+    - name: Confirm bootd's reverse proxy is reachable
+      # Proves bootd's reverse proxy reaches the boot config server, over
+      # the same L2 path the VM will use. Split into a connect step and a
+      # status check instead of a bare `curl -sf`, since `-f` conflates
+      # "no TCP connection to bootd" with "connected fine but upstream
+      # answered >= 400" - the http_code capture below distinguishes them.
+      shell: bash
+      env:
+        BOOTD_SERVER_IP: ${{ inputs.bootd-server-ip }}
+      run: |
+        set -euo pipefail
+        http_code="$(curl -s -o /dev/null -w '%{http_code}' "http://${BOOTD_SERVER_IP}:80/boot/artifacts/manifest.json")" || {
+          echo "::error::could not connect to bootd's reverse proxy at ${BOOTD_SERVER_IP}:80 at all (no TCP connection - a network/routing failure, not an HTTP error from the boot config server)" >&2
+          exit 1
+        }
+        if [ "${http_code}" -lt 200 ] || [ "${http_code}" -ge 400 ]; then
+          echo "::error::bootd's reverse proxy at ${BOOTD_SERVER_IP}:80 is reachable but answered HTTP ${http_code} for /boot/artifacts/manifest.json - the proxy itself is up, the boot config server behind it is not serving the artifact" >&2
+          exit 1
+        fi
+
+    - name: Confirm bootd's Multus attachment actually happened
+      # Fail fast here, not 20 minutes later at a PXE-E18 timeout on the
+      # VM console: confirm the live bootd pod's network-status annotation
+      # (set by Multus after CNI ADD) actually reports the attachment, not
+      # just the deployment template's *request* for it. Exclude
+      # terminating pods: `rollout status` returning does not mean the old
+      # ReplicaSet's pod is gone yet, and it still reports phase=Running,
+      # so a bare .items[0] can race onto it.
+      id: resolve-pod
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        SUBNET_NAME: ${{ inputs.subnet-name }}
+      run: |
+        set -euo pipefail
+        bootd_pod="$(kubectl -n "${NAMESPACE}" get pods \
+          -l "app.kubernetes.io/component=bootd,kezio.kojuro.date/bootd-subnet=${SUBNET_NAME}" -o json \
+          | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)][0].metadata.name')"
+        if [ -z "${bootd_pod}" ] || [ "${bootd_pod}" = "null" ]; then
+          echo "::error::no non-terminating bootd pod found for Subnet ${SUBNET_NAME}" >&2
+          exit 1
+        fi
+        network_status="$(kubectl -n "${NAMESPACE}" get pod "${bootd_pod}" \
+          -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}')"
+        if ! grep -q 'kezio-boot-network' <<<"${network_status}"; then
+          echo "::error::bootd pod ${bootd_pod} has no kezio-boot-network attachment in its network-status; got: ${network_status}" >&2
+          exit 1
+        fi
+        echo "pod-name=${bootd_pod}" >> "$GITHUB_OUTPUT"

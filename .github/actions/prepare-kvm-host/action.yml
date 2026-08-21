@@ -1,0 +1,31 @@
+name: Prepare the KVM host
+
+description: >-
+  Two runner-level fixups a KubeVirt e2e lane needs before any VM starts:
+  fail fast unless /dev/kvm is usable by the job's user, and raise the
+  inotify limits KubeVirt's virt-handler and the cluster's other watchers
+  need on a busy runner.
+
+runs:
+  using: composite
+  steps:
+    - name: Fail fast unless /dev/kvm is usable
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ ! -e /dev/kvm ]; then
+          echo "::error::/dev/kvm does not exist on this runner; KubeVirt VMs need hardware virtualization." >&2
+          exit 1
+        fi
+        sudo usermod -aG kvm "$(whoami)"
+        echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --name-match=kvm
+        ls -l /dev/kvm
+
+    - name: Raise inotify limits
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo sysctl -w fs.inotify.max_user_watches=1048576
+        sudo sysctl -w fs.inotify.max_user_instances=8192
