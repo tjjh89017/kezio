@@ -48,6 +48,67 @@ const FakeFailAnnotation = "kezio.kojuro.date/fake-fail"
 // unconditionally, instead of a bounded number of times.
 const fakeFailForever = "forever"
 
+// FakeDisksAnnotation is a test-only override, read only by FakeDeployer's
+// default (non-Func) Inspect: it never affects a real deployer. The only
+// recognized value is "2", which fabricates two distinct disks
+// (/dev/vda, /dev/vdb - differing serial, WWN, model, and size) instead of
+// the default single /dev/vda, so a test Machine's targetDisk hints have
+// something to disambiguate. A Machine without this annotation, or with
+// any other value, gets the unchanged single-disk inventory production and
+// every other e2e lane rely on.
+const FakeDisksAnnotation = "kezio.kojuro.date/fake-disks"
+
+// fakeSingleDisk is the default synthetic inventory: one plausible but
+// otherwise featureless disk, unchanged since before FakeDisksAnnotation
+// existed.
+var fakeSingleDisk = []keziov1alpha2.MachineHardwareDisk{
+	{
+		DeviceName: "/dev/vda",
+		SizeBytes:  32 << 30, // 32Gi, an arbitrary but plausible fake disk size.
+	},
+}
+
+// fakeTwoDisks is the FakeDisksAnnotation="2" inventory: two disks that
+// differ in every field diskmatch.Match can hint on, so a test can write a
+// hint that matches both (ambiguous), a hint that matches only the second
+// (a unique disambiguating match), or a hint that matches neither (no
+// match). Both share Rotational=false so a "rotational: false" hint alone
+// is deliberately ambiguous between them.
+var fakeTwoDisks = []keziov1alpha2.MachineHardwareDisk{
+	{
+		DeviceName:   "/dev/vda",
+		SizeBytes:    32 << 30, // 32Gi
+		SerialNumber: "fake-disk-0",
+		WWN:          "0x5000000000000000",
+		Model:        "FakeDisk0",
+		Vendor:       "FakeVendor",
+		Rotational:   boolPtr(false),
+	},
+	{
+		DeviceName:   "/dev/vdb",
+		SizeBytes:    64 << 30, // 64Gi, deliberately different from the first disk.
+		SerialNumber: "fake-disk-1",
+		WWN:          "0x5000000000000001",
+		Model:        "FakeDisk1",
+		Vendor:       "FakeVendor",
+		Rotational:   boolPtr(false),
+	},
+}
+
+// boolPtr returns a pointer to v, for MachineHardwareDisk.Rotational
+// literals.
+func boolPtr(v bool) *bool { return &v }
+
+// fakeDisks selects Inspect's synthetic disk inventory for machine:
+// fakeTwoDisks when FakeDisksAnnotation is exactly "2", fakeSingleDisk
+// otherwise (absent, or any other value).
+func fakeDisks(machine *keziov1alpha2.Machine) []keziov1alpha2.MachineHardwareDisk {
+	if machine.Annotations[FakeDisksAnnotation] == "2" {
+		return fakeTwoDisks
+	}
+	return fakeSingleDisk
+}
+
 // fakeFailOverride inspects machine's FakeFailAnnotation for step and, when
 // it applies, returns the scripted Failed Result to use instead of the
 // default behavior. The second return value is false when the annotation is
@@ -118,9 +179,9 @@ type FakeDeployer struct {
 var _ Deployer = (*FakeDeployer)(nil)
 
 // Inspect implements Deployer. The default behavior is deliberately a
-// stub: it fabricates one disk and one NIC rather than reading real
-// hardware, and never resolves machine.spec.subnetRef (Subnet does not
-// exist yet in this stage).
+// stub: it fabricates one disk (two, opt-in via FakeDisksAnnotation) and
+// one NIC rather than reading real hardware, and never resolves
+// machine.spec.subnetRef (Subnet does not exist yet in this stage).
 func (f *FakeDeployer) Inspect(ctx context.Context, machine *keziov1alpha2.Machine, restartOnFailure bool) (Result, error) {
 	if f.InspectFunc != nil {
 		return f.InspectFunc(ctx, machine, restartOnFailure)
@@ -133,12 +194,7 @@ func (f *FakeDeployer) Inspect(ctx context.Context, machine *keziov1alpha2.Machi
 			OwnerReferences: []metav1.OwnerReference{machineOwnerReference(machine)},
 		},
 		Spec: keziov1alpha2.MachineHardwareSpec{
-			Disks: []keziov1alpha2.MachineHardwareDisk{
-				{
-					DeviceName: "/dev/vda",
-					SizeBytes:  32 << 30, // 32Gi, an arbitrary but plausible fake disk size.
-				},
-			},
+			Disks: fakeDisks(machine),
 			Nics: []keziov1alpha2.MachineHardwareNIC{
 				{Name: "eth0", MACAddress: machine.Spec.BootMACAddress},
 			},

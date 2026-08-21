@@ -104,6 +104,91 @@ func TestFakeDeployerInspectWritesSyntheticMachineHardware(t *testing.T) {
 	}
 }
 
+// TestFakeDeployerInspectDefaultsToOneDisk proves a Machine with no
+// FakeDisksAnnotation gets the single-disk inventory every existing lane
+// relies on, unaffected by FakeDisksAnnotation's introduction.
+func TestFakeDeployerInspectDefaultsToOneDisk(t *testing.T) {
+	c := newFakeClient(t)
+	machine := newTestMachine()
+	f := &FakeDeployer{Client: c}
+
+	if _, err := f.Inspect(context.Background(), machine, false); err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+
+	var hw keziov1alpha2.MachineHardware
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "m1"}, &hw); err != nil {
+		t.Fatalf("Get(MachineHardware) error = %v", err)
+	}
+	if len(hw.Spec.Disks) != 1 {
+		t.Fatalf("len(Disks) = %d, want 1", len(hw.Spec.Disks))
+	}
+	if hw.Spec.Disks[0].DeviceName != "/dev/vda" {
+		t.Errorf("Disks[0].DeviceName = %q, want %q", hw.Spec.Disks[0].DeviceName, "/dev/vda")
+	}
+}
+
+// TestFakeDeployerInspectFakeDisksAnnotationFabricatesTwoDistinctDisks
+// proves FakeDisksAnnotation="2" fabricates two disks with stable, distinct
+// serial numbers, WWNs, sizes, and models, so a hint can disambiguate them.
+func TestFakeDeployerInspectFakeDisksAnnotationFabricatesTwoDistinctDisks(t *testing.T) {
+	c := newFakeClient(t)
+	machine := newTestMachine()
+	machine.Annotations = map[string]string{FakeDisksAnnotation: "2"}
+	f := &FakeDeployer{Client: c}
+
+	if _, err := f.Inspect(context.Background(), machine, false); err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+
+	var hw keziov1alpha2.MachineHardware
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "m1"}, &hw); err != nil {
+		t.Fatalf("Get(MachineHardware) error = %v", err)
+	}
+	if len(hw.Spec.Disks) != 2 {
+		t.Fatalf("len(Disks) = %d, want 2", len(hw.Spec.Disks))
+	}
+
+	d0, d1 := hw.Spec.Disks[0], hw.Spec.Disks[1]
+	if d0.DeviceName == d1.DeviceName {
+		t.Errorf("both disks share DeviceName %q, want distinct device names", d0.DeviceName)
+	}
+	if d0.SerialNumber == "" || d1.SerialNumber == "" || d0.SerialNumber == d1.SerialNumber {
+		t.Errorf("SerialNumbers = %q, %q, want distinct non-empty values", d0.SerialNumber, d1.SerialNumber)
+	}
+	if d0.WWN == "" || d1.WWN == "" || d0.WWN == d1.WWN {
+		t.Errorf("WWNs = %q, %q, want distinct non-empty values", d0.WWN, d1.WWN)
+	}
+	if d0.SizeBytes == d1.SizeBytes {
+		t.Errorf("SizeBytes = %d, %d, want distinct sizes", d0.SizeBytes, d1.SizeBytes)
+	}
+	if d0.Model == d1.Model {
+		t.Errorf("Models = %q, %q, want distinct models", d0.Model, d1.Model)
+	}
+}
+
+// TestFakeDeployerInspectFakeDisksAnnotationIgnoresUnrecognizedValue proves
+// any value other than "2" falls back to the default single-disk
+// inventory, instead of silently no-oping into something unexpected.
+func TestFakeDeployerInspectFakeDisksAnnotationIgnoresUnrecognizedValue(t *testing.T) {
+	c := newFakeClient(t)
+	machine := newTestMachine()
+	machine.Annotations = map[string]string{FakeDisksAnnotation: "3"}
+	f := &FakeDeployer{Client: c}
+
+	if _, err := f.Inspect(context.Background(), machine, false); err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+
+	var hw keziov1alpha2.MachineHardware
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "m1"}, &hw); err != nil {
+		t.Fatalf("Get(MachineHardware) error = %v", err)
+	}
+	if len(hw.Spec.Disks) != 1 {
+		t.Fatalf("len(Disks) = %d, want 1 (fallback to default)", len(hw.Spec.Disks))
+	}
+}
+
 func TestFakeDeployerInspectIsIdempotent(t *testing.T) {
 	c := newFakeClient(t)
 	machine := newTestMachine()
