@@ -387,7 +387,7 @@ func (r *SubnetReconciler) runNADChecks(ctx context.Context, subnet *keziov1alph
 	}
 	checks = append(checks, subnetCheck{result: nadvalidate.CheckSeederOverlap(seederConfig, subnet.Spec.BootdServerIP)})
 
-	concurrentImages, err := r.concurrentSeederDeployments(ctx)
+	concurrentImages, err := r.concurrentSeederDeployments(ctx, subnet)
 	if err != nil {
 		return nil, err
 	}
@@ -451,16 +451,18 @@ func indeterminateFromFetchErr(reasonPrefix, what string, err error) nadvalidate
 }
 
 // concurrentSeederDeployments counts the seeder Deployments
-// PartitionContentReconciler builds (partitionContentSeederComponentValue)
-// that currently have an available replica, cluster-wide. It is
-// CheckSeederStaticMultiImage's concurrentImages input: main's seeder
-// Deployments are not yet Subnet/Site-scoped
-// (partitioncontent_seeder_config.go's defaultSeederSite), so there is no
-// per-Subnet count to draw from yet - this is the closest available
-// proxy for "how many things are seeding concurrently right now".
-func (r *SubnetReconciler) concurrentSeederDeployments(ctx context.Context) (int, error) {
+// PartitionContentReconciler placed on subnet's own seeder network
+// (partitionContentSeederSubnetLabel, scoped to subnet's namespace since
+// that label carries a bare Subnet name) that currently have an available
+// replica. It is CheckSeederStaticMultiImage's concurrentImages input:
+// this Subnet's own NAD is what a static multi-image address pool
+// actually constrains, so only seeders sharing it count.
+func (r *SubnetReconciler) concurrentSeederDeployments(ctx context.Context, subnet *keziov1alpha2.Subnet) (int, error) {
 	var deployments appsv1.DeploymentList
-	if err := r.List(ctx, &deployments, client.MatchingLabels{partitionContentAppComponentLabel: partitionContentSeederComponentValue}); err != nil {
+	if err := r.List(ctx, &deployments, client.InNamespace(subnet.Namespace), client.MatchingLabels{
+		partitionContentAppComponentLabel: partitionContentSeederComponentValue,
+		partitionContentSeederSubnetLabel: subnet.Name,
+	}); err != nil {
 		return 0, fmt.Errorf("list seeder deployments: %w", err)
 	}
 	count := 0

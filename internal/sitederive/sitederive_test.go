@@ -211,3 +211,98 @@ func TestResolveSubnetGetTransientErrorPropagates(t *testing.T) {
 		t.Fatalf("Resolution = %+v, want zero value on error", got)
 	}
 }
+
+// A namespace with no Subnet at all - the shape a Subnet-less environment
+// (for example an image-only CI lane) always has - resolves to ok = false
+// with a zero Resolution, not an error.
+func TestResolveNamespaceSeederNoSubnets(t *testing.T) {
+	c := newTestClient(t)
+
+	got, ok, err := ResolveNamespaceSeeder(context.Background(), c, "ns1")
+	if err != nil {
+		t.Fatalf("ResolveNamespaceSeeder returned error: %v", err)
+	}
+	if ok {
+		t.Fatalf("ok = true, want false with no Subnets present")
+	}
+	if got.Identity != "" || got.Subnet != nil {
+		t.Fatalf("Resolution = %+v, want zero value", got)
+	}
+}
+
+// A namespace whose only Subnets carry no SeederNetworkRef is a supported
+// topology (none of them host seeders), not an error.
+func TestResolveNamespaceSeederNoneHostSeeders(t *testing.T) {
+	subnet := newSubnet("ns1", nil)
+	c := newTestClient(t, subnet)
+
+	_, ok, err := ResolveNamespaceSeeder(context.Background(), c, "ns1")
+	if err != nil {
+		t.Fatalf("ResolveNamespaceSeeder returned error: %v", err)
+	}
+	if ok {
+		t.Fatalf("ok = true, want false when no Subnet in the namespace hosts seeders")
+	}
+}
+
+// Exactly one seeder-hosting Subnet in the namespace resolves to it.
+func TestResolveNamespaceSeederSingleMatch(t *testing.T) {
+	seederRef := &keziov1alpha2.NameRef{Name: "seeder-nad"}
+	subnet := newSubnet("ns1", seederRef)
+	c := newTestClient(t, subnet)
+
+	got, ok, err := ResolveNamespaceSeeder(context.Background(), c, "ns1")
+	if err != nil {
+		t.Fatalf("ResolveNamespaceSeeder returned error: %v", err)
+	}
+	if !ok {
+		t.Fatalf("ok = false, want true")
+	}
+	if got.Identity != "ns1/sub1" {
+		t.Errorf("Identity = %q, want %q", got.Identity, "ns1/sub1")
+	}
+	if got.SeederNetworkRef == nil || got.SeederNetworkRef.Name != "seeder-nad" {
+		t.Errorf("SeederNetworkRef = %+v, want name %q", got.SeederNetworkRef, "seeder-nad")
+	}
+}
+
+// Several Subnets in the namespace host seeders: the one with the
+// lexicographically lowest Name wins, deterministically.
+func TestResolveNamespaceSeederPicksLowestNameAmongSeederHostingSubnets(t *testing.T) {
+	seederRef := &keziov1alpha2.NameRef{Name: "seeder-nad"}
+	lowest := newSubnet("ns1", seederRef)
+	lowest.Name = "aaa"
+	highest := newSubnet("ns1", seederRef)
+	highest.Name = "zzz"
+	// A non-seeder-hosting Subnet with an even lower name must not win.
+	noSeeder := newSubnet("ns1", nil)
+	noSeeder.Name = "aaaa0"
+
+	c := newTestClient(t, lowest, highest, noSeeder)
+
+	got, ok, err := ResolveNamespaceSeeder(context.Background(), c, "ns1")
+	if err != nil {
+		t.Fatalf("ResolveNamespaceSeeder returned error: %v", err)
+	}
+	if !ok {
+		t.Fatalf("ok = false, want true")
+	}
+	if got.Subnet.Name != "aaa" {
+		t.Errorf("Subnet.Name = %q, want the lowest-named seeder-hosting Subnet %q", got.Subnet.Name, "aaa")
+	}
+}
+
+// A seeder-hosting Subnet in a different namespace must never be picked.
+func TestResolveNamespaceSeederIgnoresOtherNamespaces(t *testing.T) {
+	seederRef := &keziov1alpha2.NameRef{Name: "seeder-nad"}
+	other := newSubnet("ns2", seederRef)
+	c := newTestClient(t, other)
+
+	_, ok, err := ResolveNamespaceSeeder(context.Background(), c, "ns1")
+	if err != nil {
+		t.Fatalf("ResolveNamespaceSeeder returned error: %v", err)
+	}
+	if ok {
+		t.Fatalf("ok = true, want false: the only seeder-hosting Subnet lives in a different namespace")
+	}
+}

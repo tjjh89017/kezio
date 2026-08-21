@@ -14,10 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package sitederive is the single choke point that resolves a
-// Machine's seeder placement facts by following
-// Machine.spec.subnetRef -> Subnet. All callers must share this
-// resolution rather than recomputing it.
+// Package sitederive is the single choke point that resolves seeder
+// placement facts from a Subnet, either by following
+// Machine.spec.subnetRef -> Subnet (Resolve) or by picking a
+// seeder-hosting Subnet within a namespace (ResolveNamespaceSeeder). All
+// callers must share this resolution rather than recomputing it.
 package sitederive
 
 import (
@@ -99,10 +100,54 @@ func Resolve(ctx context.Context, c client.Client, machine *keziov1alpha2.Machin
 		return Resolution{}, fmt.Errorf("get subnet %s/%s: %w", subnetNS, subnetRef.Name, err)
 	}
 
+	return ResolveSubnet(subnet), nil
+}
+
+// ResolveSubnet derives subnet's own seeder placement facts directly, with
+// no Machine indirection: Resolve calls this once it has followed
+// Machine.spec.subnetRef to fetch subnet, and ResolveNamespaceSeeder calls
+// it once it has picked a Subnet by namespace instead.
+func ResolveSubnet(subnet *keziov1alpha2.Subnet) Resolution {
 	return Resolution{
 		Identity:         Identity(subnet),
 		SeederNetworkRef: subnet.Spec.SeederNetworkRef,
 		NodeSelector:     subnet.Spec.NodeSelector,
 		Subnet:           subnet,
-	}, nil
+	}
+}
+
+// ResolveNamespaceSeeder picks the Subnet in namespace that hosts seeders
+// and resolves its placement facts, for a caller with no Machine to
+// follow (for example a PartitionContent's seeder Deployment, placed once
+// per namespace rather than once per Machine).
+//
+// Selection rule: among the Subnets in namespace whose SeederNetworkRef is
+// set, the one with the lexicographically lowest Name wins - deterministic
+// across reconciles without needing a Site kind to arbitrate between
+// several seeder-hosting Subnets. Zero matching Subnets reports ok = false
+// with a zero Resolution, not an error: an environment with no
+// seeder-hosting Subnet (for example a Subnet-less CI lane) is a
+// supported topology.
+//
+// c is expected to be a cached informer client, as Resolve documents.
+func ResolveNamespaceSeeder(ctx context.Context, c client.Client, namespace string) (Resolution, bool, error) {
+	var subnets keziov1alpha2.SubnetList
+	if err := c.List(ctx, &subnets, client.InNamespace(namespace)); err != nil {
+		return Resolution{}, false, fmt.Errorf("list subnets in namespace %s: %w", namespace, err)
+	}
+
+	var chosen *keziov1alpha2.Subnet
+	for i := range subnets.Items {
+		candidate := &subnets.Items[i]
+		if candidate.Spec.SeederNetworkRef == nil {
+			continue
+		}
+		if chosen == nil || candidate.Name < chosen.Name {
+			chosen = candidate
+		}
+	}
+	if chosen == nil {
+		return Resolution{}, false, nil
+	}
+	return ResolveSubnet(chosen), true, nil
 }

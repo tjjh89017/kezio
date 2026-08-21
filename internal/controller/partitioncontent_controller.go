@@ -85,6 +85,7 @@ type PartitionContentReconciler struct {
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=images,verbs=get;list;watch
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=deployruns,verbs=get;list;watch
+// +kubebuilder:rbac:groups=kezio.kojuro.date,resources=subnets,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -261,6 +262,7 @@ func (r *PartitionContentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&batchv1.Job{}).
 		Owns(&appsv1.Deployment{}).
 		Watches(&keziov1alpha2.Image{}, handler.EnqueueRequestsFromMapFunc(r.mapImageToPartitionContents), builder.WithPredicates(imageDeletionOnly)).
+		Watches(&keziov1alpha2.Subnet{}, handler.EnqueueRequestsFromMapFunc(r.mapSubnetToPartitionContents), builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Named("partitioncontent").
 		Complete(r)
 }

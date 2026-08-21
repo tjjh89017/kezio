@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -34,6 +35,7 @@ import (
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 	"github.com/tjjh89017/kezio/internal/ingest"
 	"github.com/tjjh89017/kezio/internal/seederdeploy"
+	"github.com/tjjh89017/kezio/internal/sitederive"
 	"github.com/tjjh89017/kezio/internal/store"
 )
 
@@ -93,7 +95,11 @@ func (r *PartitionContentReconciler) reconcileSeeder(ctx context.Context, pc *ke
 		if !r.Seeder.ready() {
 			return r.recordSeederConfigMissing(ctx, pc)
 		}
-		if err := r.createSeederDeployment(ctx, pc, hash); err != nil {
+		res, err := r.resolveSeederPlacement(ctx, pc)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.createSeederDeployment(ctx, pc, hash, res); err != nil {
 			return ctrl.Result{}, err
 		}
 		// Freshly created: not Available yet. The Deployment watch
@@ -101,6 +107,14 @@ func (r *PartitionContentReconciler) reconcileSeeder(ctx context.Context, pc *ke
 		return r.recordSeederStatus(ctx, pc, nil, demand)
 
 	case dep != nil && demand:
+		res, err := r.resolveSeederPlacement(ctx, pc)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		dep, err = r.ensureSeederPlacement(ctx, pc, hash, dep, res)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
 		if err := r.cancelSeederShutdown(ctx, dep); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -127,11 +141,12 @@ func (r *PartitionContentReconciler) seederDeploymentFor(ctx context.Context, pc
 	return dep, nil
 }
 
-// createSeederDeployment creates the seeder Deployment for pc/hash.
-// r.Seeder must be ready() - the caller gates on that before calling
-// this, since an unready config means SeederDegraded, not a Deployment.
-func (r *PartitionContentReconciler) createSeederDeployment(ctx context.Context, pc *keziov1alpha2.PartitionContent, hash store.InfoHash) error {
-	dep := r.buildSeederDeployment(pc, hash)
+// createSeederDeployment creates the seeder Deployment for pc/hash,
+// placed per res. r.Seeder must be ready() - the caller gates on that
+// before calling this, since an unready config means SeederDegraded, not
+// a Deployment.
+func (r *PartitionContentReconciler) createSeederDeployment(ctx context.Context, pc *keziov1alpha2.PartitionContent, hash store.InfoHash, res sitederive.Resolution) error {
+	dep := r.buildSeederDeployment(pc, hash, res)
 	if err := controllerutil.SetControllerReference(pc, dep, r.Scheme); err != nil {
 		return fmt.Errorf("partitioncontent %q: setting seeder deployment owner reference: %w", pc.Name, err)
 	}
@@ -149,11 +164,26 @@ func (r *PartitionContentReconciler) createSeederDeployment(ctx context.Context,
 // CONTENT_ROOT (ingest.ContentMountRoot) scans for content
 // subdirectories, and the same mount-path convention the publish Job
 // uses.
-func (r *PartitionContentReconciler) buildSeederDeployment(pc *keziov1alpha2.PartitionContent, hash store.InfoHash) *appsv1.Deployment {
+//
+// res carries the Subnet-derived placement: a zero Resolution (no Subnet
+// resolved) builds a Deployment with no Multus annotation and no
+// nodeSelector, unchanged from before Subnet-aware placement existed -
+// the shape a Subnet-less environment (for example an image-only CI
+// lane) still needs. res.SeederNetworkRef/NodeSelector only ever affect
+// the pod template, never Selector.MatchLabels: the Deployment's own
+// label set carries the extra seeder-subnet label instead, so a Subnet
+// change never collides with the immutable selector.
+func (r *PartitionContentReconciler) buildSeederDeployment(pc *keziov1alpha2.PartitionContent, hash store.InfoHash, res sitederive.Resolution) *appsv1.Deployment {
 	replicas := int32(1)
 	labels := map[string]string{
 		partitionContentAppNameLabel:      partitionContentAppNameValue,
 		partitionContentAppComponentLabel: partitionContentSeederComponentValue,
+	}
+	depLabels := labels
+	if res.SeederNetworkRef != nil {
+		depLabels = make(map[string]string, len(labels)+1)
+		maps.Copy(depLabels, labels)
+		depLabels[partitionContentSeederSubnetLabel] = res.Subnet.Name
 	}
 	trueVal := true
 	falseVal := false
@@ -179,14 +209,15 @@ func (r *PartitionContentReconciler) buildSeederDeployment(pc *keziov1alpha2.Par
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      seederdeploy.Name(hash),
 			Namespace: pc.Namespace,
-			Labels:    labels,
+			Labels:    depLabels,
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: seederPodAnnotations(res)},
 				Spec: corev1.PodSpec{
+					NodeSelector: nodeSelectorOrNil(res.NodeSelector),
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: &trueVal,
 						SeccompProfile: &corev1.SeccompProfile{
