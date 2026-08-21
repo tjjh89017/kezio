@@ -245,6 +245,26 @@ func TestDeployPlanValidate_EmptyTargetDisk(t *testing.T) {
 	}
 }
 
+func TestDeployPlanValidate_DataImagesOnlyNoTargetDiskIsValid(t *testing.T) {
+	p := DeployPlan{
+		SchemaVersion: AgentSchemaVersion,
+		RunName:       "run-1",
+		RunUID:        "uid-1",
+		DataImages: []DeployDataImagePlan{
+			{
+				ImageRef:     keziov1alpha2.NameRef{Name: "data-image"},
+				TargetDisk:   "/dev/sdb",
+				SfdiskScript: `{"partitiontable":{}}`,
+				Slots:        []DeploySlot{{Number: 1, Device: "/dev/sdb1", Mkfs: &DeployMkfs{Filesystem: "ext4"}}},
+			},
+		},
+		AfterDeploy: keziov1alpha2.AfterDeployPowerOff,
+	}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want nil for a dataImages-only plan with no OS image (no targetDisk, no slots)", err)
+	}
+}
+
 func TestDeployPlanValidate_EmptySlots(t *testing.T) {
 	p := validDeployPlan()
 	p.Slots = nil

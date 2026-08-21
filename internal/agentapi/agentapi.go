@@ -293,10 +293,16 @@ func (p DeployPlan) Validate() error {
 	if p.SchemaVersion != AgentSchemaVersion {
 		return fmt.Errorf("schemaVersion %d does not match the agent wire schema version %d", p.SchemaVersion, AgentSchemaVersion)
 	}
+	// TargetDisk/Slots are empty together exactly when the plan deploys no
+	// OS image (a dataImages-only run, see keziov1alpha2.MachineSpec.
+	// ImageRef's doc comment) - that is a legitimate plan, not a
+	// malformed one, so only a plan with one set but not the other, or
+	// with Slots itself malformed, is rejected here.
 	if p.TargetDisk == "" {
-		return fmt.Errorf("targetDisk is empty")
-	}
-	if err := validateSlots(p.Slots); err != nil {
+		if len(p.Slots) != 0 {
+			return fmt.Errorf("slots set with no targetDisk")
+		}
+	} else if err := validateSlots(p.Slots); err != nil {
 		return fmt.Errorf("slots: %w", err)
 	}
 	for i, di := range p.DataImages {

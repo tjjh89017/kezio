@@ -204,11 +204,16 @@ func diskForSelection(disks []keziov1alpha2.MachineHardwareDisk, deviceName stri
 }
 
 // resolveMachineHooks resolves machine's attached hooks: its own
-// postHookRefs when set, or exactly the shipped default hook otherwise
-// (never both - see MachineSpec.PostHookRefs's doc comment). osImage is
-// the resolved OS image, nil for a dataImages-only run: its name and
-// target disk feed the imageName/targetDisk reserved template values,
-// left empty when there is no OS image.
+// postHookRefs when set, or the shipped default hook otherwise, but only
+// when machine deploys an OS image (never both - see
+// MachineSpec.PostHookRefs's doc comment). osImage is the resolved OS
+// image, nil for a dataImages-only run: its name and target disk feed the
+// imageName/targetDisk reserved template values, left empty when there is
+// no OS image. A dataImages-only run with no postHookRefs resolves no
+// hooks at all: per deployer.Deployer.Provision's contract it completes
+// at its after-deploy power state with no OS to boot, so the shipped
+// default hook's boot-entry builtins (mkswap, efibootmgr) would have no
+// OS ESP to act on.
 func (b *Builder) resolveMachineHooks(ctx context.Context, machine *keziov1alpha2.Machine, osImage *resolvedImage) ([]agentapi.ResolvedHook, error) {
 	shared, err := mergeParams(imageParamsOf(osImage), machine.Spec.Params)
 	if err != nil {
@@ -229,6 +234,9 @@ func (b *Builder) resolveMachineHooks(ctx context.Context, machine *keziov1alpha
 	defaults := deriveBuiltinDefaults(osImage)
 
 	if len(machine.Spec.PostHookRefs) == 0 {
+		if osImage == nil {
+			return nil, nil
+		}
 		defaultRef := keziov1alpha2.NameRef{Name: posthookdefaults.DefaultFinalizeHookName}
 		return b.resolveHooks(ctx, b.ManagerNamespace, []keziov1alpha2.NameRef{defaultRef}, shared, defaults)
 	}

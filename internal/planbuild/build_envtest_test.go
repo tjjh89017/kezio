@@ -123,6 +123,75 @@ func TestBuilder_Build_Envtest(t *testing.T) {
 	t.Run("a builtin needing the ESP fails with a validation error when the image has none", func(t *testing.T) {
 		testBuiltinMissingESPIsValidationError(t, fx)
 	})
+	t.Run("a dataImages-only machine with no postHookRefs attaches no hooks", func(t *testing.T) {
+		testDataImagesOnlyNoDefaultHook(t, fx)
+	})
+	t.Run("a dataImages-only machine with an explicit efibootmgr hook fails with a validation error", func(t *testing.T) {
+		testDataImagesOnlyExplicitEfibootmgrIsValidationError(t, fx)
+	})
+}
+
+// testDataImagesOnlyNoDefaultHook covers the fast-lane regression: a
+// Machine deploying only DataImages (no OS image) must not have the
+// shipped default finalize hook substituted in - there is no OS ESP for
+// its efibootmgr step to resolve against, and per
+// deployer.Deployer.Provision's contract the run simply completes at its
+// after-deploy power state with no boot entry to set.
+func testDataImagesOnlyNoDefaultHook(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	mgrNS := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+	fx.mustCreatePostHook(mgrNS, posthookdefaults.DefaultFinalizeHookName, posthookdefaults.Spec())
+	image := fx.mustCreateImage(ns, blankDataLayout())
+
+	b := &Builder{Client: fx.client, ManagerNamespace: mgrNS}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec: keziov1alpha2.MachineSpec{
+			DataImages: []keziov1alpha2.MachineDataImage{{ImageRef: keziov1alpha2.NameRef{Name: image.Name}}},
+		},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	plan, _, err := b.Build(context.Background(), machine, run)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(plan.Hooks) != 0 {
+		t.Fatalf("plan.Hooks = %+v, want none (the default finalize hook must not attach with no OS image)", plan.Hooks)
+	}
+}
+
+// testDataImagesOnlyExplicitEfibootmgrIsValidationError covers the flip
+// side: an explicit postHookRefs entry is still honored verbatim even on
+// a dataImages-only Machine, so a user-attached efibootmgr step with no
+// OS ESP to resolve against is still a genuine configuration error.
+func testDataImagesOnlyExplicitEfibootmgrIsValidationError(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+	fx.mustCreatePostHook(ns, "hook", keziov1alpha2.PostHookSpec{
+		Steps: []keziov1alpha2.PostHookStep{{
+			OSFamily: keziov1alpha2.OSFamilyLinux,
+			Builtin:  &keziov1alpha2.PostHookBuiltinStep{Name: keziov1alpha2.BuiltinStepEfibootmgr},
+		}},
+	})
+	image := fx.mustCreateImage(ns, blankDataLayout())
+
+	b := &Builder{Client: fx.client}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec: keziov1alpha2.MachineSpec{
+			DataImages:   []keziov1alpha2.MachineDataImage{{ImageRef: keziov1alpha2.NameRef{Name: image.Name}}},
+			PostHookRefs: []keziov1alpha2.NameRef{{Name: "hook"}},
+		},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	_, _, err := b.Build(context.Background(), machine, run)
+	var valErr *ValidationError
+	if !errors.As(err, &valErr) {
+		t.Fatalf("Build err = %v, want a *ValidationError", err)
+	}
 }
 
 func testDefaultHookDerivesBuiltinParams(t *testing.T, fx *fixtures) {
