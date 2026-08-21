@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,7 +57,19 @@ type Server struct {
 	// Now returns the current time; overridden in tests. Nil means
 	// time.Now.
 	Now func() time.Time
+	// Abort decides whether a running DeployRun should abort, given the
+	// progress report the agent just sent. Nil means POST /agent/progress
+	// always answers ActionContinue.
+	Abort AbortDecider
 }
+
+// AbortDecider decides whether the DeployRun a ProgressRequest reports
+// against should abort. machineName, runName, and runUID come from the
+// authenticated session and the request body respectively; a decider
+// wired to watch DeployRun deletion is expected to compare runUID
+// against the DeployRun it still knows about, so a report from a
+// already-superseded run cannot suppress an abort meant for it.
+type AbortDecider func(ctx context.Context, machineName, runName, runUID string) bool
 
 var (
 	_ manager.Runnable               = (*Server)(nil)
@@ -119,7 +132,25 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST "+agentapi.RegisterPath, s.handleRegister)
 	mux.HandleFunc("GET "+agentapi.NextPath, s.handleNext)
 	mux.HandleFunc("POST "+agentapi.NextPath, s.handleNext)
-	return mux
+	mux.HandleFunc("POST "+agentapi.ProgressPath, s.handleProgress)
+	return requireAgentSchemaVersion(mux)
+}
+
+// requireAgentSchemaVersion wraps next so every route it serves rejects a
+// request whose AgentSchemaVersionHeader is missing or does not equal
+// agentapi.AgentSchemaVersion, before the request ever reaches a route
+// handler - an agent build speaking an incompatible wire shape must never
+// get far enough to have its body decoded as this build understands it.
+func requireAgentSchemaVersion(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header := r.Header.Get(agentapi.AgentSchemaVersionHeader)
+		version, err := strconv.Atoi(header)
+		if header == "" || err != nil || version != agentapi.AgentSchemaVersion {
+			writeJSON(w, http.StatusBadRequest, agentapi.ErrorResponse{Error: "missing or unsupported " + agentapi.AgentSchemaVersionHeader})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // bearerToken extracts the token from an "Authorization: Bearer <token>"
@@ -371,6 +402,51 @@ func (s *Server) lookupMachineBySession(ctx context.Context, token string) (*kez
 		return nil, nil
 	}
 	return machine, nil
+}
+
+// maxProgressBodyBytes bounds the progress request body: a single step
+// report is a handful of short fields, so this is a generous ceiling
+// against a misbehaving or hostile agent sending an unbounded body.
+const maxProgressBodyBytes = 64 << 10 // 64 KiB
+
+// handleProgress implements POST /agent/progress: the agent's periodic
+// step report while a DeployPlan runs. It requires the same session
+// credential as GET/POST /agent/next. The response is ActionContinue
+// unless s.Abort is set and returns true for this report - the decision
+// is stubbed out behind that field so a later change can wire "DeployRun
+// deleting means abort" without touching this transport.
+func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	log := logf.FromContext(ctx).WithName("agentserver")
+
+	token, ok := bearerToken(r)
+	if !ok {
+		writeUnauthorized(w)
+		return
+	}
+
+	machine, err := s.lookupMachineBySession(ctx, token)
+	if err != nil {
+		log.Error(err, "looking up machine by session token failed")
+		writeUnauthorized(w)
+		return
+	}
+	if machine == nil {
+		writeUnauthorized(w)
+		return
+	}
+
+	var req agentapi.ProgressRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxProgressBodyBytes)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, agentapi.ErrorResponse{Error: "malformed request body"})
+		return
+	}
+
+	action := agentapi.ProgressActionContinue
+	if s.Abort != nil && s.Abort(ctx, machine.Name, req.RunName, req.RunUID) {
+		action = agentapi.ProgressActionAbort
+	}
+	writeJSON(w, http.StatusOK, agentapi.ProgressResponse{Action: action})
 }
 
 // writeUnauthorized writes the fixed 401 response every rejection path

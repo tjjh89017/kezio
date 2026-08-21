@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -95,6 +96,7 @@ func doRegister(t *testing.T, handler http.Handler, token string, body agentapi.
 		t.Fatalf("marshal request: %v", err)
 	}
 	req := httptest.NewRequest(http.MethodPost, agentapi.RegisterPath, bytes.NewReader(b))
+	req.Header.Set(agentapi.AgentSchemaVersionHeader, strconv.Itoa(agentapi.AgentSchemaVersion))
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -105,6 +107,7 @@ func doRegister(t *testing.T, handler http.Handler, token string, body agentapi.
 
 func doNext(handler http.Handler, token string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, agentapi.NextPath, nil)
+	req.Header.Set(agentapi.AgentSchemaVersionHeader, strconv.Itoa(agentapi.AgentSchemaVersion))
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -325,6 +328,7 @@ func TestHandleRegister_MalformedBodyIsBadRequest(t *testing.T) {
 	s, _ := newTestServer(t, now, machine)
 
 	req := httptest.NewRequest(http.MethodPost, agentapi.RegisterPath, bytes.NewReader([]byte("not json")))
+	req.Header.Set(agentapi.AgentSchemaVersionHeader, strconv.Itoa(agentapi.AgentSchemaVersion))
 	req.Header.Set("Authorization", "Bearer "+testToken)
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, req)
@@ -388,6 +392,7 @@ func TestHandleNext_POSTAlsoAnswers(t *testing.T) {
 	s, _ := newTestServer(t, now, machine)
 
 	req := httptest.NewRequest(http.MethodPost, agentapi.NextPath, nil)
+	req.Header.Set(agentapi.AgentSchemaVersionHeader, strconv.Itoa(agentapi.AgentSchemaVersion))
 	req.Header.Set("Authorization", "Bearer "+testSessionToken)
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, req)
@@ -443,5 +448,185 @@ func TestHandleNext_RejectionsAreConstantShape(t *testing.T) {
 				t.Fatalf("response for %q differs from the reference 401 response (code=%d body=%q)", tc.name, rec.Code, rec.Body.String())
 			}
 		})
+	}
+}
+
+// TestSchemaVersionGuard_EveryRoute exercises requireAgentSchemaVersion
+// against every route this server exposes: a missing, lower, or higher
+// AgentSchemaVersionHeader is rejected with a 4xx and an ErrorResponse
+// before the route handler ever runs.
+func TestSchemaVersionGuard_EveryRoute(t *testing.T) {
+	now := time.Now()
+
+	newRequest := func(route, method, header string) *http.Request {
+		req := httptest.NewRequest(method, route, bytes.NewReader([]byte("{}")))
+		if header != "" {
+			req.Header.Set(agentapi.AgentSchemaVersionHeader, header)
+		}
+		req.Header.Set("Authorization", "Bearer "+testSessionToken)
+		return req
+	}
+
+	routes := []struct {
+		name   string
+		route  string
+		method string
+	}{
+		{name: "register", route: agentapi.RegisterPath, method: http.MethodPost},
+		{name: "next", route: agentapi.NextPath, method: http.MethodGet},
+		{name: "progress", route: agentapi.ProgressPath, method: http.MethodPost},
+	}
+
+	headerCases := []struct {
+		name    string
+		header  string
+		wantErr bool
+	}{
+		{name: "matching", header: strconv.Itoa(agentapi.AgentSchemaVersion), wantErr: false},
+		{name: "missing", header: "", wantErr: true},
+		{name: "lower", header: strconv.Itoa(agentapi.AgentSchemaVersion - 1), wantErr: true},
+		{name: "higher", header: strconv.Itoa(agentapi.AgentSchemaVersion + 1), wantErr: true},
+		{name: "non-numeric", header: "bogus", wantErr: true},
+	}
+
+	for _, route := range routes {
+		for _, hc := range headerCases {
+			t.Run(route.name+"/"+hc.name, func(t *testing.T) {
+				machine := newTestMachineWithSession(now)
+				s, _ := newTestServer(t, now, machine)
+
+				rec := httptest.NewRecorder()
+				s.Handler().ServeHTTP(rec, newRequest(route.route, route.method, hc.header))
+
+				if hc.wantErr {
+					if rec.Code < 400 || rec.Code >= 500 {
+						t.Fatalf("status = %d, want a 4xx for header %q", rec.Code, hc.header)
+					}
+					var resp agentapi.ErrorResponse
+					if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || resp.Error == "" {
+						t.Fatalf("body = %s, want a decodable ErrorResponse with a non-empty Error", rec.Body.String())
+					}
+					return
+				}
+				// A matching header must pass the guard: register's
+				// route-specific auth still needs the register token, not
+				// the session token this helper sends, so a 401 here is
+				// still "the guard let it through", not a repeat of the
+				// missing-header 400 shape.
+				if route.name == "register" && rec.Code != http.StatusUnauthorized {
+					t.Fatalf("register status = %d, want 401 (wrong-kind token, but past the schema guard)", rec.Code)
+				}
+				if route.name != "register" && rec.Code == http.StatusBadRequest {
+					t.Fatalf("%s status = %d, want the schema guard to pass for a matching header", route.name, rec.Code)
+				}
+			})
+		}
+	}
+}
+
+func doProgress(handler http.Handler, token string, body agentapi.ProgressRequest) *httptest.ResponseRecorder {
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, agentapi.ProgressPath, bytes.NewReader(b))
+	req.Header.Set(agentapi.AgentSchemaVersionHeader, strconv.Itoa(agentapi.AgentSchemaVersion))
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestHandleProgress_MissingOrUnknownTokenIsUnauthorized(t *testing.T) {
+	now := time.Now()
+	machine := newTestMachineWithSession(now)
+	s, _ := newTestServer(t, now, machine)
+
+	req := agentapi.ProgressRequest{RunName: "run-1", RunUID: "uid-1", Step: "WritingContent", State: agentapi.ProgressStateRunning}
+
+	rec := doProgress(s.Handler(), "", req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("missing token: status = %d, want 401", rec.Code)
+	}
+
+	rec = doProgress(s.Handler(), "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unknown token: status = %d, want 401", rec.Code)
+	}
+}
+
+func TestHandleProgress_MalformedBodyIsBadRequest(t *testing.T) {
+	now := time.Now()
+	machine := newTestMachineWithSession(now)
+	s, _ := newTestServer(t, now, machine)
+
+	req := httptest.NewRequest(http.MethodPost, agentapi.ProgressPath, bytes.NewReader([]byte("not json")))
+	req.Header.Set(agentapi.AgentSchemaVersionHeader, strconv.Itoa(agentapi.AgentSchemaVersion))
+	req.Header.Set("Authorization", "Bearer "+testSessionToken)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestHandleProgress_DefaultsToContinue(t *testing.T) {
+	now := time.Now()
+	machine := newTestMachineWithSession(now)
+	s, _ := newTestServer(t, now, machine)
+	// s.Abort is left nil.
+
+	rec := doProgress(s.Handler(), testSessionToken, agentapi.ProgressRequest{
+		RunName: "run-1", RunUID: "uid-1", Step: "WritingContent", State: agentapi.ProgressStateRunning,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", rec.Code, rec.Body.String())
+	}
+	var resp agentapi.ProgressResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if resp.Action != agentapi.ProgressActionContinue {
+		t.Fatalf("Action = %q, want %q", resp.Action, agentapi.ProgressActionContinue)
+	}
+}
+
+func TestHandleProgress_InjectedDeciderCanAbort(t *testing.T) {
+	now := time.Now()
+	machine := newTestMachineWithSession(now)
+	s, _ := newTestServer(t, now, machine)
+
+	var gotMachine, gotRunName, gotRunUID string
+	s.Abort = func(_ context.Context, machineName, runName, runUID string) bool {
+		gotMachine, gotRunName, gotRunUID = machineName, runName, runUID
+		return runUID == "abort-me"
+	}
+
+	rec := doProgress(s.Handler(), testSessionToken, agentapi.ProgressRequest{
+		RunName: "run-1", RunUID: "abort-me", Step: "WritingContent", State: agentapi.ProgressStateRunning,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", rec.Code, rec.Body.String())
+	}
+	var resp agentapi.ProgressResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if resp.Action != agentapi.ProgressActionAbort {
+		t.Fatalf("Action = %q, want %q", resp.Action, agentapi.ProgressActionAbort)
+	}
+	if gotMachine != testMachineName || gotRunName != "run-1" || gotRunUID != "abort-me" {
+		t.Fatalf("decider saw (%q, %q, %q), want (%q, %q, %q)", gotMachine, gotRunName, gotRunUID, testMachineName, "run-1", "abort-me")
+	}
+
+	// A run the decider does not flag still continues.
+	rec = doProgress(s.Handler(), testSessionToken, agentapi.ProgressRequest{
+		RunName: "run-1", RunUID: "keep-going", Step: "WritingContent", State: agentapi.ProgressStateRunning,
+	})
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if resp.Action != agentapi.ProgressActionContinue {
+		t.Fatalf("Action = %q, want %q", resp.Action, agentapi.ProgressActionContinue)
 	}
 }

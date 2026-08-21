@@ -45,6 +45,9 @@ func init() {
 	if !strings.HasPrefix(agentapi.NextPath, agentRoutePrefix) {
 		panic(fmt.Sprintf("bootd: agentRoutePrefix %q does not cover agentapi.NextPath %q", agentRoutePrefix, agentapi.NextPath))
 	}
+	if !strings.HasPrefix(agentapi.ProgressPath, agentRoutePrefix) {
+		panic(fmt.Sprintf("bootd: agentRoutePrefix %q does not cover agentapi.ProgressPath %q", agentRoutePrefix, agentapi.ProgressPath))
+	}
 }
 
 // DefaultProxyAddr is ProxyServer.Addr's default: DefaultProxyPort

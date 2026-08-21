@@ -19,6 +19,7 @@ package agentapi
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 )
@@ -30,14 +31,20 @@ func TestRouteAndHeaderConstants(t *testing.T) {
 	if NextPath != "/agent/next" {
 		t.Fatalf("NextPath = %q, want /agent/next", NextPath)
 	}
+	if ProgressPath != "/agent/progress" {
+		t.Fatalf("ProgressPath = %q, want /agent/progress", ProgressPath)
+	}
 	if AgentSchemaVersionHeader != "X-Kezio-Agent-Schema-Version" {
 		t.Fatalf("AgentSchemaVersionHeader = %q, want X-Kezio-Agent-Schema-Version", AgentSchemaVersionHeader)
 	}
-	if AgentSchemaVersion <= 0 {
-		t.Fatalf("AgentSchemaVersion = %d, want a positive version", AgentSchemaVersion)
+	if AgentSchemaVersion != 3 {
+		t.Fatalf("AgentSchemaVersion = %d, want 3 (strictly greater than every schema version an earlier agent build ever sent)", AgentSchemaVersion)
 	}
 	if ActionWait != "wait" {
 		t.Fatalf("ActionWait = %q, want wait", ActionWait)
+	}
+	if ActionDeploy != "deploy" {
+		t.Fatalf("ActionDeploy = %q, want deploy", ActionDeploy)
 	}
 }
 
@@ -110,6 +117,26 @@ func TestNextResponseRoundTrip(t *testing.T) {
 	}
 }
 
+func TestNextResponseWithPlanRoundTrip(t *testing.T) {
+	want := NextResponse{
+		Action:              ActionDeploy,
+		PollIntervalSeconds: 15,
+		Plan:                &DeployPlan{SchemaVersion: AgentSchemaVersion, RunName: "run-1", TargetDisk: "/dev/nvme0n1"},
+	}
+
+	raw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var got NextResponse
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got.Action != want.Action || got.Plan == nil || got.Plan.RunName != want.Plan.RunName {
+		t.Fatalf("round trip = %+v, want %+v", got, want)
+	}
+}
+
 func TestErrorResponseRoundTrip(t *testing.T) {
 	want := ErrorResponse{Error: "unauthorized"}
 
@@ -123,5 +150,224 @@ func TestErrorResponseRoundTrip(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("round trip = %+v, want %+v", got, want)
+	}
+}
+
+func validDeployPlan() DeployPlan {
+	return DeployPlan{
+		SchemaVersion: AgentSchemaVersion,
+		RunName:       "run-1",
+		RunUID:        "uid-1",
+		TargetDisk:    "/dev/nvme0n1",
+		SfdiskScript:  `{"partitiontable":{}}`,
+		Slots: []DeploySlot{
+			{Number: 1, Device: "/dev/nvme0n1p1", Mkfs: &DeployMkfs{Filesystem: "vfat"}},
+			{Number: 2, Device: "/dev/nvme0n1p2", Torrent: &DeployTorrent{URL: "http://seeder/1.torrent", InfoHash: "abc123"}},
+			{Number: 3, Device: "/dev/nvme0n1p3", Swap: &DeploySwap{UUID: "swap-uuid"}},
+		},
+		DataImages: []DeployDataImagePlan{
+			{
+				ImageRef:     keziov1alpha2.NameRef{Name: "data-image"},
+				TargetDisk:   "/dev/sdb",
+				SfdiskScript: `{"partitiontable":{}}`,
+				Slots:        []DeploySlot{{Number: 1, Device: "/dev/sdb1", Mkfs: &DeployMkfs{Filesystem: "ext4"}}},
+			},
+		},
+		Hooks: []ResolvedHook{
+			{
+				Name: "default",
+				Steps: []ResolvedHookStep{
+					{Type: HookStepTypeBuiltin, Builtin: "efibootmgr", TimeoutSeconds: 30},
+					{Type: HookStepTypeScript, Content: "echo hi", TimeoutSeconds: 30},
+					{Type: HookStepTypeChrootScript, Content: "echo chroot", OSFamily: keziov1alpha2.OSFamilyLinux, TimeoutSeconds: 30},
+				},
+			},
+		},
+		AfterDeploy: keziov1alpha2.AfterDeployReboot,
+	}
+}
+
+func TestDeployPlanRoundTripPreservesFieldNames(t *testing.T) {
+	want := validDeployPlan()
+
+	raw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("Unmarshal into map: %v", err)
+	}
+	for _, key := range []string{"schemaVersion", "runName", "runUID", "targetDisk", "sfdiskScript", "slots", "dataImages", "hooks", "afterDeploy"} {
+		if _, ok := m[key]; !ok {
+			t.Fatalf("marshaled DeployPlan is missing key %q: %s", key, raw)
+		}
+	}
+
+	var got DeployPlan
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got.RunName != want.RunName || got.TargetDisk != want.TargetDisk || len(got.Slots) != len(want.Slots) {
+		t.Fatalf("round trip = %+v, want %+v", got, want)
+	}
+	if got.Slots[1].Torrent == nil || got.Slots[1].Torrent.InfoHash != "abc123" {
+		t.Fatalf("Slots[1].Torrent = %+v, want the round-tripped torrent", got.Slots[1].Torrent)
+	}
+	if len(got.DataImages) != 1 || got.DataImages[0].ImageRef.Name != "data-image" {
+		t.Fatalf("DataImages = %+v, want the round-tripped data image plan", got.DataImages)
+	}
+	if len(got.Hooks) != 1 || len(got.Hooks[0].Steps) != 3 {
+		t.Fatalf("Hooks = %+v, want the round-tripped hook", got.Hooks)
+	}
+}
+
+func TestDeployPlanValidate_Valid(t *testing.T) {
+	if err := validDeployPlan().Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want nil for a well-formed plan", err)
+	}
+}
+
+func TestDeployPlanValidate_SchemaVersionMismatch(t *testing.T) {
+	p := validDeployPlan()
+	p.SchemaVersion = AgentSchemaVersion - 1
+	if err := p.Validate(); err == nil {
+		t.Fatal("Validate() = nil, want an error for a mismatched schema version")
+	}
+}
+
+func TestDeployPlanValidate_EmptyTargetDisk(t *testing.T) {
+	p := validDeployPlan()
+	p.TargetDisk = ""
+	if err := p.Validate(); err == nil {
+		t.Fatal("Validate() = nil, want an error for an empty targetDisk")
+	}
+}
+
+func TestDeployPlanValidate_EmptySlots(t *testing.T) {
+	p := validDeployPlan()
+	p.Slots = nil
+	if err := p.Validate(); err == nil {
+		t.Fatal("Validate() = nil, want an error for no slots")
+	}
+}
+
+func TestDeployPlanValidate_DuplicatePartitionNumber(t *testing.T) {
+	p := validDeployPlan()
+	p.Slots[1].Number = p.Slots[0].Number
+	if err := p.Validate(); err == nil {
+		t.Fatal("Validate() = nil, want an error for a duplicate partition number")
+	}
+}
+
+func TestDeployPlanValidate_SlotContentKindInvariant(t *testing.T) {
+	cases := []struct {
+		name string
+		slot DeploySlot
+	}{
+		{name: "no content kind set", slot: DeploySlot{Number: 1, Device: "/dev/x1"}},
+		{
+			name: "two content kinds set",
+			slot: DeploySlot{
+				Number: 1, Device: "/dev/x1",
+				Mkfs:    &DeployMkfs{Filesystem: "ext4"},
+				Torrent: &DeployTorrent{URL: "http://seeder/1.torrent", InfoHash: "abc"},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := validDeployPlan()
+			p.Slots = []DeploySlot{tc.slot}
+			if err := p.Validate(); err == nil {
+				t.Fatalf("Validate() = nil for %s, want an error", tc.name)
+			}
+		})
+	}
+}
+
+func TestDeployPlanValidate_DataImageInvariants(t *testing.T) {
+	p := validDeployPlan()
+	p.DataImages[0].TargetDisk = ""
+	if err := p.Validate(); err == nil {
+		t.Fatal("Validate() = nil, want an error for a dataImages entry with no targetDisk")
+	}
+
+	p = validDeployPlan()
+	p.DataImages[0].Slots = nil
+	if err := p.Validate(); err == nil {
+		t.Fatal("Validate() = nil, want an error for a dataImages entry with no slots")
+	}
+}
+
+func TestDeployPlanValidate_HookStepInvariants(t *testing.T) {
+	cases := []struct {
+		name string
+		step ResolvedHookStep
+	}{
+		{name: "builtin with no name", step: ResolvedHookStep{Type: HookStepTypeBuiltin, TimeoutSeconds: 30}},
+		{name: "script with no content", step: ResolvedHookStep{Type: HookStepTypeScript, TimeoutSeconds: 30}},
+		{name: "chrootScript with no content", step: ResolvedHookStep{Type: HookStepTypeChrootScript, TimeoutSeconds: 30}},
+		{name: "unknown type", step: ResolvedHookStep{Type: "bogus", TimeoutSeconds: 30}},
+		{name: "non-positive timeout", step: ResolvedHookStep{Type: HookStepTypeBuiltin, Builtin: "mkswap", TimeoutSeconds: 0}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := validDeployPlan()
+			p.Hooks = []ResolvedHook{{Name: "h", Steps: []ResolvedHookStep{tc.step}}}
+			if err := p.Validate(); err == nil {
+				t.Fatalf("Validate() = nil for %s, want an error", tc.name)
+			}
+		})
+	}
+}
+
+func TestProgressRequestRoundTrip(t *testing.T) {
+	percent := int32(42)
+	bytesDone := int64(1024)
+	want := ProgressRequest{
+		RunName:     "run-1",
+		RunUID:      "uid-1",
+		Step:        "WritingContent",
+		State:       ProgressStateRunning,
+		Message:     "seeding",
+		PercentDone: &percent,
+		BytesDone:   &bytesDone,
+		Timestamp:   time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC),
+	}
+
+	raw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var got ProgressRequest
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got.RunName != want.RunName || got.State != want.State || *got.PercentDone != *want.PercentDone || *got.BytesDone != *want.BytesDone {
+		t.Fatalf("round trip = %+v, want %+v", got, want)
+	}
+	if !got.Timestamp.Equal(want.Timestamp) {
+		t.Fatalf("Timestamp = %v, want %v", got.Timestamp, want.Timestamp)
+	}
+}
+
+func TestProgressResponseRoundTrip(t *testing.T) {
+	want := ProgressResponse{Action: ProgressActionAbort}
+
+	raw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var got ProgressResponse
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got != want {
+		t.Fatalf("round trip = %+v, want %+v", got, want)
+	}
+	if ProgressActionContinue != "continue" {
+		t.Fatalf("ProgressActionContinue = %q, want continue", ProgressActionContinue)
 	}
 }
