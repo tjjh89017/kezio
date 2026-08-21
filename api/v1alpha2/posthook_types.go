@@ -51,14 +51,22 @@ type PostHookParam struct {
 const (
 	// BuiltinStepMkswap runs mkswap with the source partition's saved UUID.
 	BuiltinStepMkswap = "mkswap"
-	// BuiltinStepEfibootmgr creates a UEFI boot entry pointing at the ESP.
+	// BuiltinStepEfibootmgr creates a UEFI NVRAM boot entry pointing only
+	// at the removable-fallback loader path on the target's ESP
+	// (\EFI\BOOT\BOOTX64.EFI on x86_64, \EFI\BOOT\BOOTAA64.EFI on
+	// aarch64, selected by the deploying machine's architecture). kezio
+	// never inspects or branches on a distro's own loader path; providing
+	// the fallback file there is the image's responsibility (see
+	// docs/physical-lab-deployment.md's boot-entry contract section).
 	BuiltinStepEfibootmgr = "efibootmgr"
 	// BuiltinStepGrowLastPartition grows the last partition and its file
 	// system when the target disk is larger than the source.
 	BuiltinStepGrowLastPartition = "growLastPartition"
 	// BuiltinStepInstallRemovableFallback copies a shim/grub bootloader
 	// onto the ESP's UEFI removable-media fallback path for an image that
-	// does not already carry one there.
+	// does not already carry one there. Opt-in only: a PostHook must name
+	// it explicitly, and it is not part of the shipped default hook (see
+	// internal/posthookdefaults).
 	BuiltinStepInstallRemovableFallback = "install-removable-fallback"
 )
 

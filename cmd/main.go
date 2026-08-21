@@ -49,6 +49,7 @@ import (
 	"github.com/tjjh89017/kezio/internal/bootserver"
 	"github.com/tjjh89017/kezio/internal/controller"
 	"github.com/tjjh89017/kezio/internal/deployer"
+	"github.com/tjjh89017/kezio/internal/posthookdefaults"
 	webhookv1alpha2 "github.com/tjjh89017/kezio/internal/webhook/v1alpha2"
 
 	// Blank-imported so their init() registers "redfish"/"ipmi" (and
@@ -354,6 +355,11 @@ func main() {
 		}
 	}
 	// +kubebuilder:scaffold:builder
+
+	if err := mgr.Add(&posthookdefaults.Ensurer{Client: mgr.GetClient()}); err != nil {
+		setupLog.Error(err, "unable to add default PostHook ensurer")
+		os.Exit(1)
+	}
 
 	if metricsCertWatcher != nil {
 		setupLog.Info("Adding metrics certificate watcher to manager")
