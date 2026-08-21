@@ -1,0 +1,21 @@
+apiVersion: kezio.kojuro.date/v1alpha2
+kind: PostHook
+metadata:
+  labels:
+    app.kubernetes.io/name: scaffold
+    app.kubernetes.io/managed-by: kustomize
+  name: posthook-sample
+spec:
+  params:
+    - name: hostname
+  steps:
+    - osFamily: Linux
+      builtin:
+        name: mkswap
+    - osFamily: Linux
+      builtin:
+        name: efibootmgr
+    - script:
+        script: |
+          #!/bin/sh
+          hostnamectl set-hostname {{ .hostname }}

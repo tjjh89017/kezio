@@ -38,3 +38,21 @@ type NameRef struct {
 type SecretReference struct {
 	Name string `json:"name"`
 }
+
+// ConfigMapKeyRef references a specific key in a ConfigMap, in the same
+// namespace as the referencing resource.
+type ConfigMapKeyRef struct {
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+	// +kubebuilder:validation:MinLength=1
+	Key string `json:"key"`
+}
+
+// SecretKeyRef references a specific key in a Secret, in the same
+// namespace as the referencing resource.
+type SecretKeyRef struct {
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+	// +kubebuilder:validation:MinLength=1
+	Key string `json:"key"`
+}

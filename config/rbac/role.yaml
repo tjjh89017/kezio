@@ -83,6 +83,7 @@ rules:
   - machinehardwares
   - machines
   - partitioncontents
+  - posthooks
   - subnets
   verbs:
   - create
@@ -99,6 +100,7 @@ rules:
   - images/finalizers
   - machines/finalizers
   - partitioncontents/finalizers
+  - posthooks/finalizers
   - subnets/finalizers
   verbs:
   - update
@@ -109,6 +111,7 @@ rules:
   - images/status
   - machines/status
   - partitioncontents/status
+  - posthooks/status
   - subnets/status
   verbs:
   - get

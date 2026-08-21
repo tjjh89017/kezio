@@ -110,6 +110,26 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
+      path: /validate-kezio-kojuro-date-v1alpha2-posthook
+  failurePolicy: Fail
+  name: vposthook-v1alpha2.kb.io
+  rules:
+  - apiGroups:
+    - kezio.kojuro.date
+    apiVersions:
+    - v1alpha2
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - posthooks
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
       path: /validate-kezio-kojuro-date-v1alpha2-subnet
   failurePolicy: Fail
   name: vsubnet-v1alpha2.kb.io
