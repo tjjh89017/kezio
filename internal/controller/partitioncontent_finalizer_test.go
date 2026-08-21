@@ -56,31 +56,54 @@ func newTestImage(name, contentName string) *keziov1alpha2.Image {
 	}
 }
 
+// newTestMachine builds an (uncreated) Machine whose spec.imageRef names
+// imageName, in the "default" namespace - a minimal seed-demand source
+// for resolveSeedDemand. The BMC address, credentials Secret, and Subnet
+// it names are all placeholders: nothing in this suite runs
+// MachineReconciler or the Machine webhook, so none of them need to
+// actually exist or resolve.
+func newTestMachine(name, imageName string) *keziov1alpha2.Machine {
+	return &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Spec: keziov1alpha2.MachineSpec{
+			BMC: keziov1alpha2.MachineBMC{
+				Address:              "redfish://198.51.100.10/redfish/v1/Systems/1",
+				CredentialsSecretRef: keziov1alpha2.SecretReference{Name: name + "-bmc-creds"},
+			},
+			ImageRef:  &keziov1alpha2.NameRef{Name: imageName},
+			SubnetRef: keziov1alpha2.NameRef{Name: name + "-subnet"},
+		},
+	}
+}
+
 // newTestDeployRun builds an (uncreated) DeployRun whose resolved snapshot
 // names imageName, in the "default" namespace. Status.Phase is left empty
-// - an active phase (see isDeployRunActive).
-func newTestDeployRun(name, machineName, imageName string) *keziov1alpha2.DeployRun {
+// - an active phase (see isDeployRunActive). spec.machineRef is required
+// by the schema but not meaningful to any caller, so it is a fixed
+// placeholder rather than a parameter.
+func newTestDeployRun(name, imageName string) *keziov1alpha2.DeployRun {
 	return &keziov1alpha2.DeployRun{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec: keziov1alpha2.DeployRunSpec{
-			MachineRef: keziov1alpha2.NameRef{Name: machineName},
+			MachineRef: keziov1alpha2.NameRef{Name: "machine-a"},
 			ImageRef:   &keziov1alpha2.NameRef{Name: imageName},
 		},
 	}
 }
 
 // newIndexedReconciler returns a PartitionContentReconciler whose Client
-// resolves Image reads (Get and List) through a real, index-backed cache
-// - the same mechanism SetupWithManager wires in production - so
-// imagesReferencing exercises the actual field-selector List rather than
-// a full scan. Every other type is read directly (client.CacheOptions.
-// DisableFor): those stay on the plain envtest client so a status write
-// this test just made is visible on the very next Get, with no cache-sync
-// lag to race against.
+// resolves Image and Machine reads (Get and List) through a real,
+// index-backed cache - the same mechanism SetupWithManager wires in
+// production - so imagesReferencing and resolveSeedDemand exercise the
+// actual field-selector List rather than a full scan. Every other type is
+// read directly (client.CacheOptions.DisableFor): those stay on the plain
+// envtest client so a status write this test just made is visible on the
+// very next Get, with no cache-sync lag to race against.
 func newIndexedReconciler(ctx context.Context, publish PartitionContentPublishConfig, seeder PartitionContentSeederConfig) (*PartitionContentReconciler, func()) {
 	c, err := cache.New(cfg, cache.Options{Scheme: k8sClient.Scheme()})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(c.IndexField(ctx, &keziov1alpha2.Image{}, imageContentRefIndex, indexImageContentRefs)).To(Succeed())
+	Expect(c.IndexField(ctx, &keziov1alpha2.Machine{}, machineImageRefIndex, indexMachineImageRefs)).To(Succeed())
 
 	cacheCtx, cancel := context.WithCancel(ctx)
 	go func() { _ = c.Start(cacheCtx) }()
@@ -166,7 +189,7 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
-		run := newTestDeployRun("run-blocking-1", "machine-a", img.Name)
+		run := newTestDeployRun("run-blocking-1", img.Name)
 		Expect(k8sClient.Create(ctx, run)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, run) })
 
@@ -196,7 +219,7 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 
 		// run.spec.imageRef names an Image that is never created: the
 		// deleted-Image edge case documented on activeDeployRunsReferencing.
-		run := newTestDeployRun("run-orphaned-1", "machine-a", "image-does-not-exist")
+		run := newTestDeployRun("run-orphaned-1", "image-does-not-exist")
 		Expect(k8sClient.Create(ctx, run)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, run) })
 
@@ -224,7 +247,7 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
-		run := newTestDeployRun("run-terminal-1", "machine-a", img.Name)
+		run := newTestDeployRun("run-terminal-1", img.Name)
 		Expect(k8sClient.Create(ctx, run)).To(Succeed())
 		run.Status.Phase = keziov1alpha2.DeployRunPhaseSucceeded
 		Expect(k8sClient.Status().Update(ctx, run)).To(Succeed())
@@ -289,7 +312,6 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 		name := "pc-" + hashHex
 		nn := types.NamespacedName{Name: name, Namespace: "default"}
 		pc := newTestPartitionContent(name)
-		pc.Annotations = map[string]string{keziov1alpha2.PartitionContentAnnotationSeedDemand: ""}
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
 
 		publish := PartitionContentPublishConfig{
@@ -300,6 +322,17 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 		r, cancel := newIndexedReconciler(ctx, publish, seeder)
 		DeferCleanup(cancel)
 		reconcileAddsFinalizer(ctx, r, nn)
+
+		// image-blocks-seeded-content both blocks pc's deletion below and,
+		// through the Machine created next, is the seed-demand source that
+		// must outlive that block.
+		img := newTestImage("image-blocks-seeded-content", name)
+		Expect(k8sClient.Create(ctx, img)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
+
+		machine := newTestMachine("machine-demands-"+hashHex, img.Name)
+		Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, machine) })
 
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
@@ -317,10 +350,6 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 		depKey := types.NamespacedName{Name: seederdeploy.Name(hash), Namespace: "default"}
 		var dep appsv1.Deployment
 		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
-
-		img := newTestImage("image-blocks-seeded-content", name)
-		Expect(k8sClient.Create(ctx, img)).To(Succeed())
-		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
 		Expect(k8sClient.Delete(ctx, pc)).To(Succeed())
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})

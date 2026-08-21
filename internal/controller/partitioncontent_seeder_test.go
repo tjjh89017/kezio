@@ -30,7 +30,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
@@ -53,19 +52,6 @@ var _ = Describe("PartitionContent Controller seeder lifecycle", func() {
 	BeforeEach(func() {
 		ctx = context.Background()
 	})
-
-	newSeederReconciler := func(seeder PartitionContentSeederConfig) *PartitionContentReconciler {
-		return &PartitionContentReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Recorder: record.NewFakeRecorder(16),
-			Publish: PartitionContentPublishConfig{
-				Image:      "example.test/kezio-ingest:test",
-				TrackerURL: "http://tracker.example.test/announce",
-			},
-			Seeder: seeder,
-		}
-	}
 
 	// advancePartitionContentToReady drives an already-created
 	// PartitionContent through Pending -> Publishing -> Ready, faking the
@@ -95,18 +81,34 @@ var _ = Describe("PartitionContent Controller seeder lifecycle", func() {
 		Expect(ready.Status.State).To(Equal(keziov1alpha2.PartitionContentStateReady))
 	}
 
-	setSeedDemand := func(nn types.NamespacedName, demand bool) {
-		var pc keziov1alpha2.PartitionContent
-		Expect(k8sClient.Get(ctx, nn, &pc)).To(Succeed())
-		if demand {
-			if pc.Annotations == nil {
-				pc.Annotations = map[string]string{}
-			}
-			pc.Annotations[keziov1alpha2.PartitionContentAnnotationSeedDemand] = ""
-		} else {
-			delete(pc.Annotations, keziov1alpha2.PartitionContentAnnotationSeedDemand)
-		}
-		Expect(k8sClient.Update(ctx, &pc)).To(Succeed())
+	// addSeedDemand creates an Image (in "default") referencing
+	// contentName and a Machine naming that Image as its spec.imageRef -
+	// the minimal referencing pair resolveSeedDemand looks for. The
+	// caller names both so a test that toggles demand mid-run can delete
+	// and recreate the Machine (dropSeedDemand/restoreSeedDemand) without
+	// colliding with another test's objects.
+	addSeedDemand := func(imageName, machineName, contentName string) {
+		img := newTestImage(imageName, contentName)
+		Expect(k8sClient.Create(ctx, img)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
+
+		machine := newTestMachine(machineName, imageName)
+		Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+	}
+
+	// dropSeedDemand deletes machineName's Machine, the seed-demand source
+	// addSeedDemand created - no finalizer holds it in this suite (nothing
+	// runs MachineReconciler here), so the delete is immediate.
+	dropSeedDemand := func(machineName string) {
+		machine := &keziov1alpha2.Machine{ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"}}
+		Expect(k8sClient.Delete(ctx, machine)).To(Succeed())
+	}
+
+	// restoreSeedDemand recreates machineName's Machine after
+	// dropSeedDemand removed it.
+	restoreSeedDemand := func(imageName, machineName string) {
+		machine := newTestMachine(machineName, imageName)
+		Expect(k8sClient.Create(ctx, machine)).To(Succeed())
 	}
 
 	It("creates an owner-referenced seeder Deployment with the configured image and a read-only content mount once seed-demand is set on Ready content", func() {
@@ -114,12 +116,17 @@ var _ = Describe("PartitionContent Controller seeder lifecycle", func() {
 		name := "pc-" + hashHex
 		nn := types.NamespacedName{Name: name, Namespace: "default"}
 		pc := newTestPartitionContent(name)
-		pc.Annotations = map[string]string{keziov1alpha2.PartitionContentAnnotationSeedDemand: ""}
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
 		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
 
+		addSeedDemand("image-demand-100", "machine-demand-100", name)
+
 		seederImage := "example.test/kezio-seeder:test"
-		r := newSeederReconciler(PartitionContentSeederConfig{Image: seederImage})
+		r, cancel := newIndexedReconciler(ctx, PartitionContentPublishConfig{
+			Image:      "example.test/kezio-ingest:test",
+			TrackerURL: "http://tracker.example.test/announce",
+		}, PartitionContentSeederConfig{Image: seederImage})
+		DeferCleanup(cancel)
 		advancePartitionContentToReady(r, nn, hashHex)
 
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
@@ -167,7 +174,11 @@ var _ = Describe("PartitionContent Controller seeder lifecycle", func() {
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
 		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
 
-		r := newSeederReconciler(PartitionContentSeederConfig{Image: "example.test/kezio-seeder:test"})
+		r, cancel := newIndexedReconciler(ctx, PartitionContentPublishConfig{
+			Image:      "example.test/kezio-ingest:test",
+			TrackerURL: "http://tracker.example.test/announce",
+		}, PartitionContentSeederConfig{Image: "example.test/kezio-seeder:test"})
+		DeferCleanup(cancel)
 		advancePartitionContentToReady(r, nn, hashHex)
 
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
@@ -185,17 +196,15 @@ var _ = Describe("PartitionContent Controller seeder lifecycle", func() {
 		name := "pc-" + hashHex
 		nn := types.NamespacedName{Name: name, Namespace: "default"}
 		pc := newTestPartitionContent(name)
-		pc.Annotations = map[string]string{keziov1alpha2.PartitionContentAnnotationSeedDemand: ""}
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
 		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
 
-		r := &PartitionContentReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Recorder: record.NewFakeRecorder(16),
-			Publish:  PartitionContentPublishConfig{}, // not ready() -> stays Pending
-			Seeder:   PartitionContentSeederConfig{Image: "example.test/kezio-seeder:test"},
-		}
+		addSeedDemand("image-demand-102", "machine-demand-102", name)
+
+		r, cancel := newIndexedReconciler(ctx,
+			PartitionContentPublishConfig{}, // not ready() -> stays Pending
+			PartitionContentSeederConfig{Image: "example.test/kezio-seeder:test"})
+		DeferCleanup(cancel)
 		reconcileAddsFinalizer(ctx, r, nn)
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
@@ -216,11 +225,16 @@ var _ = Describe("PartitionContent Controller seeder lifecycle", func() {
 		name := "pc-" + hashHex
 		nn := types.NamespacedName{Name: name, Namespace: "default"}
 		pc := newTestPartitionContent(name)
-		pc.Annotations = map[string]string{keziov1alpha2.PartitionContentAnnotationSeedDemand: ""}
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
 		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
 
-		r := newSeederReconciler(PartitionContentSeederConfig{}) // no image
+		addSeedDemand("image-demand-103", "machine-demand-103", name)
+
+		r, cancel := newIndexedReconciler(ctx, PartitionContentPublishConfig{
+			Image:      "example.test/kezio-ingest:test",
+			TrackerURL: "http://tracker.example.test/announce",
+		}, PartitionContentSeederConfig{}) // no image
+		DeferCleanup(cancel)
 		advancePartitionContentToReady(r, nn, hashHex)
 
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
@@ -250,11 +264,16 @@ var _ = Describe("PartitionContent Controller seeder lifecycle", func() {
 		name := "pc-" + hashHex
 		nn := types.NamespacedName{Name: name, Namespace: "default"}
 		pc := newTestPartitionContent(name)
-		pc.Annotations = map[string]string{keziov1alpha2.PartitionContentAnnotationSeedDemand: ""}
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
 		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
 
-		r := newSeederReconciler(PartitionContentSeederConfig{Image: "example.test/kezio-seeder:test"})
+		addSeedDemand("image-demand-104", "machine-demand-104", name)
+
+		r, cancel := newIndexedReconciler(ctx, PartitionContentPublishConfig{
+			Image:      "example.test/kezio-ingest:test",
+			TrackerURL: "http://tracker.example.test/announce",
+		}, PartitionContentSeederConfig{Image: "example.test/kezio-seeder:test"})
+		DeferCleanup(cancel)
 		advancePartitionContentToReady(r, nn, hashHex)
 
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
@@ -293,17 +312,23 @@ var _ = Describe("PartitionContent Controller seeder lifecycle", func() {
 		name := "pc-" + hashHex
 		nn := types.NamespacedName{Name: name, Namespace: "default"}
 		pc := newTestPartitionContent(name)
-		pc.Annotations = map[string]string{keziov1alpha2.PartitionContentAnnotationSeedDemand: ""}
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
 		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
 
+		imageName, machineName := "image-demand-105", "machine-demand-105"
+		addSeedDemand(imageName, machineName, name)
+
 		clock := &testClock{t: time.Now()}
 		grace := 10 * time.Minute
-		r := newSeederReconciler(PartitionContentSeederConfig{
+		r, cancel := newIndexedReconciler(ctx, PartitionContentPublishConfig{
+			Image:      "example.test/kezio-ingest:test",
+			TrackerURL: "http://tracker.example.test/announce",
+		}, PartitionContentSeederConfig{
 			Image:       "example.test/kezio-seeder:test",
 			GracePeriod: grace,
 			Now:         clock.now,
 		})
+		DeferCleanup(cancel)
 		advancePartitionContentToReady(r, nn, hashHex)
 
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
@@ -316,26 +341,37 @@ var _ = Describe("PartitionContent Controller seeder lifecycle", func() {
 		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
 
 		// Demand drops: the Deployment must survive, with a grace-period
-		// countdown started on it.
-		setSeedDemand(nn, false)
-		result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(result.RequeueAfter).To(Equal(grace))
-		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
-		Expect(dep.Annotations).To(HaveKey(partitionContentSeederEmptySinceAnnotation))
+		// countdown started on it. Reconcile is retried (not just the
+		// Get/assert) because the Machine's removal reaches
+		// resolveSeedDemand through the index-backed cache, which can lag
+		// the delete this test just issued by a beat.
+		dropSeedDemand(machineName)
+		Eventually(func(g Gomega) {
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(result.RequeueAfter).To(Equal(grace))
+			g.Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
+			g.Expect(dep.Annotations).To(HaveKey(partitionContentSeederEmptySinceAnnotation))
+		}).Should(Succeed())
 
 		// Demand reappears mid-grace: the countdown must be cancelled.
-		setSeedDemand(nn, true)
-		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
-		Expect(dep.Annotations).NotTo(HaveKey(partitionContentSeederEmptySinceAnnotation))
+		restoreSeedDemand(imageName, machineName)
+		Eventually(func(g Gomega) {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
+			g.Expect(dep.Annotations).NotTo(HaveKey(partitionContentSeederEmptySinceAnnotation))
+		}).Should(Succeed())
 
 		// Demand drops again and the clock runs past the grace period: the
 		// Deployment must actually be deleted.
-		setSeedDemand(nn, false)
-		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
-		Expect(err).NotTo(HaveOccurred())
+		dropSeedDemand(machineName)
+		Eventually(func(g Gomega) {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
+			g.Expect(dep.Annotations).To(HaveKey(partitionContentSeederEmptySinceAnnotation))
+		}).Should(Succeed())
 		clock.advance(grace + time.Second)
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
@@ -349,11 +385,17 @@ var _ = Describe("PartitionContent Controller seeder lifecycle", func() {
 		name := "pc-" + hashHex
 		nn := types.NamespacedName{Name: name, Namespace: "default"}
 		pc := newTestPartitionContent(name)
-		pc.Annotations = map[string]string{keziov1alpha2.PartitionContentAnnotationSeedDemand: ""}
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
 		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
 
-		r := newSeederReconciler(PartitionContentSeederConfig{Image: "example.test/kezio-seeder:test"})
+		machineName := "machine-demand-106"
+		addSeedDemand("image-demand-106", machineName, name)
+
+		r, cancel := newIndexedReconciler(ctx, PartitionContentPublishConfig{
+			Image:      "example.test/kezio-ingest:test",
+			TrackerURL: "http://tracker.example.test/announce",
+		}, PartitionContentSeederConfig{Image: "example.test/kezio-seeder:test"})
+		DeferCleanup(cancel)
 		advancePartitionContentToReady(r, nn, hashHex)
 
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
@@ -388,12 +430,14 @@ var _ = Describe("PartitionContent Controller seeder lifecycle", func() {
 
 		// Demand removed: must not attempt to force-delete or re-delete an
 		// already-terminating Deployment.
-		setSeedDemand(nn, false)
-		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
-		Expect(dep.UID).To(Equal(terminatingUID))
-		Expect(dep.DeletionTimestamp.IsZero()).To(BeFalse())
+		dropSeedDemand(machineName)
+		Eventually(func(g Gomega) {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
+			g.Expect(dep.UID).To(Equal(terminatingUID))
+			g.Expect(dep.DeletionTimestamp.IsZero()).To(BeFalse())
+		}).Should(Succeed())
 
 		// Let it go.
 		dep.Finalizers = nil
@@ -408,17 +452,23 @@ var _ = Describe("PartitionContent Controller seeder lifecycle", func() {
 		name := "pc-" + hashHex
 		nn := types.NamespacedName{Name: name, Namespace: "default"}
 		pc := newTestPartitionContent(name)
-		pc.Annotations = map[string]string{keziov1alpha2.PartitionContentAnnotationSeedDemand: ""}
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
 		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
 
+		machineName := "machine-demand-107"
+		addSeedDemand("image-demand-107", machineName, name)
+
 		clock := &testClock{t: time.Now()}
 		grace := 10 * time.Minute
-		r := newSeederReconciler(PartitionContentSeederConfig{
+		r, cancel := newIndexedReconciler(ctx, PartitionContentPublishConfig{
+			Image:      "example.test/kezio-ingest:test",
+			TrackerURL: "http://tracker.example.test/announce",
+		}, PartitionContentSeederConfig{
 			Image:       "example.test/kezio-seeder:test",
 			GracePeriod: grace,
 			Now:         clock.now,
 		})
+		DeferCleanup(cancel)
 		advancePartitionContentToReady(r, nn, hashHex)
 
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
@@ -437,14 +487,15 @@ var _ = Describe("PartitionContent Controller seeder lifecycle", func() {
 		// Demand drops while the Deployment is already reporting an
 		// available replica: the grace-period countdown starts, but the
 		// Deployment itself is untouched, so Seeders must still reflect it.
-		setSeedDemand(nn, false)
-		result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(result.RequeueAfter).To(Equal(grace))
-
+		dropSeedDemand(machineName)
 		var got keziov1alpha2.PartitionContent
-		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
-		Expect(got.Status.Seeders).To(ConsistOf(keziov1alpha2.PartitionContentSeederSite{Site: defaultSeederSite, MachineCount: 0}))
+		Eventually(func(g Gomega) {
+			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(result.RequeueAfter).To(Equal(grace))
+			g.Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
+			g.Expect(got.Status.Seeders).To(ConsistOf(keziov1alpha2.PartitionContentSeederSite{Site: defaultSeederSite, MachineCount: 0}))
+		}).Should(Succeed())
 		// No demand means SeederDegraded does not apply - see
 		// recordSeederStatus's doc comment - so it must be absent, not
 		// False.

@@ -59,13 +59,6 @@ const defaultSeederSite = "default"
 // (internal/controller/seeder_deployment.go on the legacy branch).
 const partitionContentSeederEmptySinceAnnotation = "kezio.kojuro.date/seeder-empty-since"
 
-// hasSeedDemand reports whether pc carries the seed-demand marker - see
-// PartitionContentAnnotationSeedDemand's doc comment.
-func hasSeedDemand(pc *keziov1alpha2.PartitionContent) bool {
-	_, ok := pc.Annotations[keziov1alpha2.PartitionContentAnnotationSeedDemand]
-	return ok
-}
-
 // reconcileSeeder drives the seeder Deployment lifecycle for an
 // already-Ready content: create-on-demand, grace-period shutdown on
 // demand loss, and the seeders[]/SeederDegraded status reflection. It
@@ -74,7 +67,10 @@ func hasSeedDemand(pc *keziov1alpha2.PartitionContent) bool {
 // never regresses out of Ready once reached (PartitionContentSpec is
 // immutable), so no earlier state can have left a Deployment behind.
 func (r *PartitionContentReconciler) reconcileSeeder(ctx context.Context, pc *keziov1alpha2.PartitionContent, hash store.InfoHash) (ctrl.Result, error) {
-	demand := hasSeedDemand(pc)
+	demand, err := r.resolveSeedDemand(ctx, pc)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 
 	dep, err := r.seederDeploymentFor(ctx, pc, hash)
 	if err != nil {

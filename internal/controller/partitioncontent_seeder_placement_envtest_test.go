@@ -86,11 +86,25 @@ var _ = Describe("PartitionContent Controller seeder Subnet placement", func() {
 		nn := types.NamespacedName{Name: name, Namespace: ns}
 		pc := newTestPartitionContent(name)
 		pc.Namespace = ns
-		pc.Annotations = map[string]string{keziov1alpha2.PartitionContentAnnotationSeedDemand: ""}
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
 		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
 
-		r := newPlacementReconciler()
+		r, cancel := newIndexedReconciler(ctx, PartitionContentPublishConfig{
+			Image:      "example.test/kezio-ingest:test",
+			TrackerURL: "http://tracker.example.test/announce",
+		}, PartitionContentSeederConfig{Image: "example.test/kezio-seeder:test"})
+		DeferCleanup(cancel)
+
+		img := newTestImage("image-"+hashHex, name)
+		img.Namespace = ns
+		Expect(k8sClient.Create(ctx, img)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
+
+		machine := newTestMachine("machine-"+hashHex, img.Name)
+		machine.Namespace = ns
+		Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, machine) })
+
 		advanceToReadyWithSeederDeployment(r, nn, hashHex)
 
 		hash, err := store.ParseInfoHash(hashHex)

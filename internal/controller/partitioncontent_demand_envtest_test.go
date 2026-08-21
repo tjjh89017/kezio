@@ -1,0 +1,189 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	"github.com/tjjh89017/kezio/internal/seederdeploy"
+	"github.com/tjjh89017/kezio/internal/store"
+)
+
+var _ = Describe("PartitionContent Controller seed demand from Machines and DeployRuns", func() {
+	var ctx context.Context
+
+	BeforeEach(func() {
+		ctx = context.Background()
+	})
+
+	newDemandReconciler := func() (*PartitionContentReconciler, func()) {
+		return newIndexedReconciler(ctx, PartitionContentPublishConfig{
+			Image:      "example.test/kezio-ingest:test",
+			TrackerURL: "http://tracker.example.test/announce",
+		}, PartitionContentSeederConfig{Image: "example.test/kezio-seeder:test"})
+	}
+
+	advanceToReady := func(r *PartitionContentReconciler, nn types.NamespacedName, hashHex string) {
+		reconcileAddsFinalizer(ctx, r, nn)
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		hash, err := store.ParseInfoHash(hashHex)
+		Expect(err).NotTo(HaveOccurred())
+
+		var job batchv1.Job
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: publishJobName(hash), Namespace: nn.Namespace}, &job)).To(Succeed())
+		job.Status.Succeeded = 1
+		Expect(k8sClient.Status().Update(ctx, &job)).To(Succeed())
+
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+	}
+
+	It("creates a seeder Deployment for a Machine's referenced Image and removes it once the Machine is deleted", func() {
+		hashHex := partitionContentTestHash(500)
+		name := "pc-" + hashHex
+		nn := types.NamespacedName{Name: name, Namespace: "default"}
+		pc := newTestPartitionContent(name)
+		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
+		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
+
+		img := newTestImage("image-demand-500", name)
+		Expect(k8sClient.Create(ctx, img)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
+
+		machine := newTestMachine("machine-demand-500", img.Name)
+		Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+
+		r, cancel := newDemandReconciler()
+		DeferCleanup(cancel)
+		advanceToReady(r, nn, hashHex)
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		hash, err := store.ParseInfoHash(hashHex)
+		Expect(err).NotTo(HaveOccurred())
+		depKey := types.NamespacedName{Name: seederdeploy.Name(hash), Namespace: "default"}
+
+		var dep appsv1.Deployment
+		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
+		Expect(dep.Spec.Replicas).NotTo(BeNil())
+		Expect(*dep.Spec.Replicas).To(Equal(int32(1)))
+
+		Expect(k8sClient.Delete(ctx, machine)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			g.Expect(err).NotTo(HaveOccurred())
+			var got keziov1alpha2.PartitionContent
+			g.Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
+			degraded := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.PartitionContentConditionSeederDegraded)
+			g.Expect(degraded).To(BeNil(), "no demand must clear SeederDegraded rather than leave it True")
+		}).Should(Succeed())
+	})
+
+	It("creates a seeder Deployment for a non-terminal DeployRun's resolved Image and stops demanding once the run reaches a terminal phase", func() {
+		hashHex := partitionContentTestHash(501)
+		name := "pc-" + hashHex
+		nn := types.NamespacedName{Name: name, Namespace: "default"}
+		pc := newTestPartitionContent(name)
+		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
+		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
+
+		img := newTestImage("image-demand-501", name)
+		Expect(k8sClient.Create(ctx, img)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
+
+		run := newTestDeployRun("run-demand-501", img.Name)
+		Expect(k8sClient.Create(ctx, run)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, run) })
+
+		r, cancel := newDemandReconciler()
+		DeferCleanup(cancel)
+		advanceToReady(r, nn, hashHex)
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		hash, err := store.ParseInfoHash(hashHex)
+		Expect(err).NotTo(HaveOccurred())
+		depKey := types.NamespacedName{Name: seederdeploy.Name(hash), Namespace: "default"}
+
+		var dep appsv1.Deployment
+		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
+		Expect(dep.Spec.Replicas).NotTo(BeNil())
+		Expect(*dep.Spec.Replicas).To(Equal(int32(1)))
+
+		run.Status.Phase = keziov1alpha2.DeployRunPhaseSucceeded
+		Expect(k8sClient.Status().Update(ctx, run)).To(Succeed())
+
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		var got keziov1alpha2.PartitionContent
+		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
+		degraded := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.PartitionContentConditionSeederDegraded)
+		Expect(degraded).To(BeNil(), "no demand must clear SeederDegraded rather than leave it True")
+		// The Deployment itself survives the (zero-length here)
+		// grace-period countdown - see partitioncontent_seeder_test.go's
+		// own grace-period coverage for that lifecycle.
+		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
+	})
+
+	It("maps a Machine event to every PartitionContent its referenced Image's slots name", func() {
+		img := newTestImage("image-demand-map", "pc-"+partitionContentTestHash(502))
+		Expect(k8sClient.Create(ctx, img)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
+
+		machine := newTestMachine("machine-demand-map", img.Name)
+
+		r, cancel := newDemandReconciler()
+		DeferCleanup(cancel)
+
+		requests := r.mapMachineToPartitionContents(ctx, machine)
+		Expect(requests).To(ContainElement(reconcile.Request{
+			NamespacedName: types.NamespacedName{Namespace: "default", Name: "pc-" + partitionContentTestHash(502)},
+		}))
+	})
+
+	It("maps a DeployRun event to every PartitionContent its resolved Image's slots name", func() {
+		img := newTestImage("image-demand-map-2", "pc-"+partitionContentTestHash(503))
+		Expect(k8sClient.Create(ctx, img)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
+
+		run := newTestDeployRun("run-demand-map", img.Name)
+
+		r, cancel := newDemandReconciler()
+		DeferCleanup(cancel)
+
+		requests := r.mapDeployRunToPartitionContents(ctx, run)
+		Expect(requests).To(ContainElement(reconcile.Request{
+			NamespacedName: types.NamespacedName{Namespace: "default", Name: "pc-" + partitionContentTestHash(503)},
+		}))
+	})
+})

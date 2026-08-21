@@ -123,20 +123,6 @@ const (
 // the PartitionContentReconciler's onDelete.
 const PartitionContentFinalizer = "kezio.kojuro.date/partitioncontent"
 
-// PartitionContent operational annotations, read directly off
-// ObjectMeta.Annotations - no defaulting or schema covers them.
-const (
-	// PartitionContentAnnotationSeedDemand, present with any value, asks
-	// the controller to run a seeder Deployment for this content (once
-	// Ready) on the default, site-unaware network - see
-	// PartitionContentSeederSite's Site doc comment for the "default"
-	// sentinel this stage reports. The e2e lane sets and clears it
-	// directly around a leecher run; a later item derives demand from
-	// Machine/DeployRun state instead, at which point this annotation
-	// becomes one input among several rather than the only one.
-	PartitionContentAnnotationSeedDemand = "kezio.kojuro.date/seed-demand"
-)
-
 // PartitionContentSeederSite counts seeders for this content at one site.
 type PartitionContentSeederSite struct {
 	// Site identifies the seeding site, for example a rack or DC name.
@@ -150,10 +136,7 @@ type PartitionContentSeederSite struct {
 	// MachineCount is the number of deploying machines seeding this
 	// content at this site via their agents - the controller's own
 	// seeder Deployment is infrastructure, not a counted machine. It
-	// stays 0 until per-machine demand tracking exists (a later item
-	// derives demand, and this count, from Machine/DeployRun state
-	// instead of the manual seed-demand annotation - see
-	// PartitionContentAnnotationSeedDemand).
+	// stays 0 until per-machine demand tracking exists.
 	// +kubebuilder:validation:Minimum=0
 	MachineCount int32 `json:"machineCount"`
 }
