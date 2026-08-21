@@ -266,6 +266,25 @@ docker-build-image-service: ## Build docker image for image-service.
 docker-push-image-service: ## Push docker image for image-service.
 	$(CONTAINER_TOOL) push ${IMAGE_SERVICE_IMG}
 
+# BOOT_ARTIFACTS_IMG is the image tag for kezio-boot-artifacts. Unlike
+# every other docker-build-* target above, its build context must
+# already hold dist/live/ (hack/live-image/build.sh's output: vmlinuz,
+# initrd.img, filesystem.squashfs, shimx64.efi, grubx64.efi,
+# kernel.config, manifest.json, sha256sums) - there is no Go binary here
+# to compile, only those files to package; see
+# docker/boot-artifacts/Dockerfile and internal/controller's
+# buildBootdDeployment, the consumer this image feeds.
+BOOT_ARTIFACTS_IMG ?= $(IMAGE_TAG_BASE)-boot-artifacts:latest
+
+.PHONY: docker-build-boot-artifacts
+docker-build-boot-artifacts: ## Build docker image for kezio-boot-artifacts (dist/live/ must already exist - run hack/live-image/build.sh first).
+	@[ -d dist/live ] || { echo "dist/live is missing; run hack/live-image/build.sh first."; exit 1; }
+	$(CONTAINER_TOOL) build -t ${BOOT_ARTIFACTS_IMG} -f docker/boot-artifacts/Dockerfile .
+
+.PHONY: docker-push-boot-artifacts
+docker-push-boot-artifacts: ## Push docker image for kezio-boot-artifacts.
+	$(CONTAINER_TOOL) push ${BOOT_ARTIFACTS_IMG}
+
 .PHONY: build-installer
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
 	mkdir -p dist

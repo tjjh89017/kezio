@@ -124,6 +124,38 @@ jobs:
           cache-scope: ${{ matrix.name }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+  boot-artifacts:
+    name: Boot artifacts
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    # `lb build` compiles ezio from source and assembles a full Debian sid
+    # chroot into a squashfs - budget generously.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the live boot image
+        uses: ./.github/actions/build-live-image
+
+      - name: Fail fast if the built boot artifacts are empty
+        uses: ./.github/actions/assert-boot-artifacts-present
+
+      - name: Upload the live image artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kezio-live-image
+          retention-days: 1
+          path: |
+            dist/live/vmlinuz
+            dist/live/initrd.img
+            dist/live/filesystem.squashfs
+            dist/live/shimx64.efi
+            dist/live/grubx64.efi
+            dist/live/kernel.config
+            dist/live/manifest.json
+            dist/live/sha256sums
+          if-no-files-found: error
+
   # Fast e2e lane: single-node RKE2, built entirely from composite
   # actions - install CRDs, deploy the manager, walk a Machine through
   # the fake deployer to Provisioned, assert its DeployRun, exercise
@@ -408,10 +440,15 @@ jobs:
     name: Build
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    if: always()
     needs:
       - images
+      - boot-artifacts
     steps:
-      - run: "true"
+      - name: All build outputs passed
+        run: |
+          [ "${{ needs.images.result }}" = "success" ] && \
+            [ "${{ needs.boot-artifacts.result }}" = "success" ]
 
   e2e-required:
     name: E2E
