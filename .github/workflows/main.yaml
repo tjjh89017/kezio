@@ -74,6 +74,11 @@ jobs:
             dockerfile: docker/image-service/Dockerfile
             platforms: linux/amd64,linux/arm64
             local-tag: example.com/kezio-image-service:e2e
+          - name: bootd
+            image: kezio-bootd
+            dockerfile: docker/bootd/Dockerfile
+            platforms: linux/amd64,linux/arm64
+            local-tag: example.com/kezio-bootd:e2e
     steps:
       - uses: actions/checkout@v4
 

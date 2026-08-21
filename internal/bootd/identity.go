@@ -14,12 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package bootd holds identity constants that internal/controller's bootd
-// Deployment builder and the bootd daemon itself must agree on. It carries
-// no daemon logic yet - only the shapes a later port of bootd (the
-// proxyDHCP/TFTP process the Deployment runs) must keep matching:
-// filenames the TFTP server serves, the capabilities its dnsmasq child
-// needs, and the ports it listens on.
 package bootd
 
 // ShimFilename and GrubFilename are the on-disk names the bootd

@@ -16,27 +16,19 @@ limitations under the License.
 
 package bootserver
 
-import (
-	"regexp"
-	"strings"
-)
+import "github.com/tjjh89017/kezio/internal/bootd"
 
-// macPattern matches a colon-separated MAC address, case-insensitively.
-// It intentionally mirrors keziov1alpha2's MAC pattern rather than
-// importing it: the two must accept the same strings, but this package
-// only ever needs the pattern to normalize an incoming path segment, not
-// the CRD validation marker that string is also used as.
-var macPattern = regexp.MustCompile(`^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$`)
-
-// NormalizeMAC validates mac as a colon-separated MAC address and returns
-// it lower-cased, so it compares equal to the index key IndexMachineBootMAC
-// derives from Machine.spec.bootMACAddress regardless of how either side
-// capitalized its hex digits. ok is false when mac does not match the
-// expected shape at all; the caller should treat that the same as an
-// unknown machine, not as a server error.
+// NormalizeMAC validates mac as a colon-separated MAC address and
+// returns it lower-cased, so it compares equal to the index key
+// IndexMachineBootMAC derives from Machine.spec.bootMACAddress
+// regardless of how either side capitalized its hex digits. ok is false
+// when mac does not match the expected shape at all; the caller should
+// treat that the same as an unknown machine, not as a server error.
+//
+// Forwards to internal/bootd.NormalizeMAC, the single source of truth -
+// this package already imports internal/bootd for its shared
+// ShimFilename/GrubFilename constants (see efi.go), and bootd cannot
+// import back without a cycle, so the definition lives there.
 func NormalizeMAC(mac string) (normalized string, ok bool) {
-	if !macPattern.MatchString(mac) {
-		return "", false
-	}
-	return strings.ToLower(mac), true
+	return bootd.NormalizeMAC(mac)
 }

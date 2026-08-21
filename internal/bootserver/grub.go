@@ -18,8 +18,9 @@ package bootserver
 
 import (
 	"fmt"
-	"net/url"
 	"strings"
+
+	"github.com/tjjh89017/kezio/internal/bootd"
 )
 
 // grubContentType is the Content-Type every grub.cfg response is served
@@ -65,21 +66,13 @@ configfile ${prefix}/grub.cfg-01-${net_default_mac}
 // and failing; "(<protocol>,<server[:port]>)/<path>" is the form GRUB's
 // network stack actually resolves. Only http is accepted: GRUB's netboot
 // images carry an http module but no TLS stack.
+//
+// Forwards to internal/bootd.GrubNetPath, the single source of truth -
+// this package already imports internal/bootd for its shared
+// ShimFilename/GrubFilename constants (see efi.go), and bootd cannot
+// import back without a cycle, so the definition lives there.
 func GrubNetPath(serverURL, filePath string) (string, error) {
-	u, err := url.Parse(serverURL)
-	if err != nil {
-		return "", fmt.Errorf("parsing server URL %q: %w", serverURL, err)
-	}
-	if u.Scheme != "http" {
-		return "", fmt.Errorf("server URL %q: GRUB's network stack supports only http, not %q", serverURL, u.Scheme)
-	}
-	if u.Host == "" {
-		return "", fmt.Errorf("server URL %q carries no host", serverURL)
-	}
-	if !strings.HasPrefix(filePath, "/") {
-		filePath = "/" + filePath
-	}
-	return fmt.Sprintf("(%s,%s)%s%s", u.Scheme, u.Host, strings.TrimRight(u.Path, "/"), filePath), nil
+	return bootd.GrubNetPath(serverURL, filePath)
 }
 
 // renderNetBootConfig builds the GRUB config for a machine that needs the

@@ -174,6 +174,10 @@ build-kezioctl: fmt vet ## Build the kezioctl CLI binary.
 build-ingest: fmt vet ## Build the kezio-ingest binary (runs inside the Image/PartitionContent controllers' Jobs).
 	go build -o bin/kezio-ingest ./cmd/ingest
 
+.PHONY: build-bootd
+build-bootd: fmt vet ## Build the kezio-bootd binary (the per-Subnet proxyDHCP/TFTP daemon).
+	go build -o bin/kezio-bootd ./cmd/bootd
+
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go
@@ -233,6 +237,20 @@ docker-build-seeder: ## Build docker image for the ezio seeder.
 .PHONY: docker-push-seeder
 docker-push-seeder: ## Push docker image for the ezio seeder.
 	$(CONTAINER_TOOL) push ${SEEDER_IMG}
+
+# BOOTD_IMG is the image tag for kezio-bootd. It is a separate image from
+# IMG (the controller manager) because it runs as its own Deployment (one
+# per Subnet) and needs raw-socket capabilities and a dnsmasq binary the
+# manager image does not carry; see docker/bootd/Dockerfile.
+BOOTD_IMG ?= $(IMAGE_TAG_BASE)-bootd:latest
+
+.PHONY: docker-build-bootd
+docker-build-bootd: ## Build docker image for kezio-bootd.
+	$(CONTAINER_TOOL) build -t ${BOOTD_IMG} -f docker/bootd/Dockerfile .
+
+.PHONY: docker-push-bootd
+docker-push-bootd: ## Push docker image for kezio-bootd.
+	$(CONTAINER_TOOL) push ${BOOTD_IMG}
 
 # IMAGE_SERVICE_IMG is the image tag for image-service. It is a separate
 # image from IMG (the controller manager) because it mounts a different
