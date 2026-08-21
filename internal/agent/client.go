@@ -132,6 +132,38 @@ func (c *Client) Next(ctx context.Context, sessionToken string) (agentapi.NextRe
 	return out, nil
 }
 
+// Progress posts one deploy-step report to the controller, authenticating
+// with the session token Register returned.
+func (c *Client) Progress(ctx context.Context, sessionToken string, req agentapi.ProgressRequest) (agentapi.ProgressResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return agentapi.ProgressResponse{}, fmt.Errorf("encoding progress request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url(agentapi.ProgressPath), bytes.NewReader(body))
+	if err != nil {
+		return agentapi.ProgressResponse{}, fmt.Errorf("building progress request: %w", err)
+	}
+	c.setCommonHeaders(httpReq)
+	httpReq.Header.Set("Authorization", "Bearer "+sessionToken)
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return agentapi.ProgressResponse{}, fmt.Errorf("progress request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return agentapi.ProgressResponse{}, fmt.Errorf("progress report rejected: %s", statusSummary(resp))
+	}
+
+	var out agentapi.ProgressResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return agentapi.ProgressResponse{}, fmt.Errorf("decoding progress response: %w", err)
+	}
+	return out, nil
+}
+
 // setCommonHeaders sets the headers every request this client sends
 // carries, regardless of endpoint: AgentSchemaVersionHeader, so the
 // controller can tell which wire schema this agent build speaks, and

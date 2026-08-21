@@ -61,6 +61,11 @@ type Config struct {
 	// other behavior leave it nil so a stray ActionDeploy can never
 	// invoke a real Executor against the test machine.
 	Deploy func(ctx context.Context, plan *agentapi.DeployPlan) error
+	// OnRegistered, when set, is called once registration succeeds and
+	// before polling starts: a production build (cmd/agent) uses it to
+	// hand the session token to its HTTPReporter, which is constructed
+	// before Run knows that token.
+	OnRegistered func(RegisterResult)
 }
 
 func (c Config) log(format string, args ...any) {
@@ -94,6 +99,9 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 	cfg.log("registered as machine %q", result.MachineName)
+	if cfg.OnRegistered != nil {
+		cfg.OnRegistered(result)
+	}
 
 	return pollLoop(ctx, client, cfg, result)
 }

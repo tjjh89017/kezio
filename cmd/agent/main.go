@@ -55,11 +55,12 @@ func main() {
 	}
 	log.Printf("kezio-agent: booted; kezio.server=%s kezio.token=%s", cmdline.Server, redactToken(cmdline.Token))
 
+	reporter := &agent.HTTPReporter{Client: agent.NewClient(cmdline.Server), Logf: log.Printf}
 	executor := &deploy.Executor{
 		Runner:   agent.ExecRunner{},
 		Ezio:     agent.ExecEzioLauncher{},
 		Fetcher:  agent.HTTPTorrentFetcher{},
-		Progress: agent.LogReporter{Logf: log.Printf},
+		Progress: reporter,
 		Logf:     log.Printf,
 	}
 
@@ -67,8 +68,17 @@ func main() {
 		Cmdline:       cmdline,
 		InventoryRoot: *inventoryRoot,
 		Logf:          log.Printf,
+		OnRegistered: func(result agent.RegisterResult) {
+			reporter.SessionToken = result.SessionToken
+		},
 		Deploy: func(ctx context.Context, plan *agentapi.DeployPlan) error {
-			return executor.Execute(ctx, plan)
+			// A fresh, cancellable context per deploy: reporter.Cancel
+			// stops this specific Execute call on a controller-requested
+			// abort without also tearing down the agent's own poll loop.
+			deployCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			reporter.Cancel = cancel
+			return executor.Execute(deployCtx, plan)
 		},
 	})
 	if err != nil && ctx.Err() == nil {
