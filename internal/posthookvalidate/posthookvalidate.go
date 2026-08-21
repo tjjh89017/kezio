@@ -180,6 +180,26 @@ func validateScriptSource(path string, src keziov1alpha2.PostHookScriptSource, d
 	return validatePlaceholders(path+".script", src.Script, declared)
 }
 
+// CheckOSFamilyCompatible rejects a step whose explicit osFamily does not
+// match imageOSFamily: a step's own OSFamily doc comment says an absent
+// value applies regardless, so such a step always passes here too,
+// including a chrootScript step - the chroot it mounts is always this
+// image's deployed root, so an unset osFamily never conflicts with it.
+// Only an explicit mismatch is rejected, on any step kind: an attached
+// step whose declared osFamily can never match the image it is checked
+// against would simply never run once resolved, which is virtually always
+// a configuration mistake worth catching at admission/resolve time rather
+// than a hook intentionally covering several OS families in one object.
+func CheckOSFamilyCompatible(hook *keziov1alpha2.PostHook, imageOSFamily string) error {
+	for i, step := range hook.Spec.Steps {
+		if step.OSFamily == "" || step.OSFamily == imageOSFamily {
+			continue
+		}
+		return fmt.Errorf("spec.steps[%d]: osFamily %q is incompatible with the image's osFamily %q", i, step.OSFamily, imageOSFamily)
+	}
+	return nil
+}
+
 // placeholderPattern matches the flat "{{ .name }}" template placeholder
 // form the deploy plan builder resolves a PostHook step's content with
 // (see internal/agentserver's template rendering): a single field lookup

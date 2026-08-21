@@ -239,6 +239,82 @@ func TestDeclaredPlaceholderNames(t *testing.T) {
 	}
 }
 
+func TestCheckOSFamilyCompatible(t *testing.T) {
+	tests := []struct {
+		name    string
+		steps   []keziov1alpha2.PostHookStep
+		image   string
+		wantErr string
+	}{
+		{
+			name:  "no steps",
+			steps: nil,
+			image: keziov1alpha2.OSFamilyLinux,
+		},
+		{
+			name: "step with no osFamily applies regardless",
+			steps: []keziov1alpha2.PostHookStep{
+				{Script: &keziov1alpha2.PostHookScriptSource{Script: "echo hi"}},
+			},
+			image: keziov1alpha2.OSFamilyWindows,
+		},
+		{
+			name: "matching explicit osFamily",
+			steps: []keziov1alpha2.PostHookStep{
+				{OSFamily: keziov1alpha2.OSFamilyLinux, Script: &keziov1alpha2.PostHookScriptSource{Script: "echo hi"}},
+			},
+			image: keziov1alpha2.OSFamilyLinux,
+		},
+		{
+			name: "mismatched explicit osFamily on a script step",
+			steps: []keziov1alpha2.PostHookStep{
+				{OSFamily: keziov1alpha2.OSFamilyWindows, Script: &keziov1alpha2.PostHookScriptSource{Script: "echo hi"}},
+			},
+			image:   keziov1alpha2.OSFamilyLinux,
+			wantErr: `spec.steps[0]: osFamily "Windows" is incompatible with the image's osFamily "Linux"`,
+		},
+		{
+			name: "mismatched explicit osFamily on a chrootScript step",
+			steps: []keziov1alpha2.PostHookStep{
+				{OSFamily: keziov1alpha2.OSFamilyWindows, ChrootScript: &keziov1alpha2.PostHookScriptSource{Script: "echo hi"}},
+			},
+			image:   keziov1alpha2.OSFamilyLinux,
+			wantErr: `spec.steps[0]: osFamily "Windows" is incompatible with the image's osFamily "Linux"`,
+		},
+		{
+			name: "chrootScript step with no osFamily applies regardless, no error",
+			steps: []keziov1alpha2.PostHookStep{
+				{ChrootScript: &keziov1alpha2.PostHookScriptSource{Script: "echo hi"}},
+			},
+			image: keziov1alpha2.OSFamilyWindows,
+		},
+		{
+			name: "the offending step is named when it is not the first one",
+			steps: []keziov1alpha2.PostHookStep{
+				{OSFamily: keziov1alpha2.OSFamilyLinux, Script: &keziov1alpha2.PostHookScriptSource{Script: "echo hi"}},
+				{OSFamily: keziov1alpha2.OSFamilyWindows, Script: &keziov1alpha2.PostHookScriptSource{Script: "echo bye"}},
+			},
+			image:   keziov1alpha2.OSFamilyLinux,
+			wantErr: `spec.steps[1]: osFamily "Windows" is incompatible with the image's osFamily "Linux"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hook := &keziov1alpha2.PostHook{Spec: keziov1alpha2.PostHookSpec{Steps: tt.steps}}
+			err := CheckOSFamilyCompatible(hook, tt.image)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tt.wantErr {
+				t.Fatalf("error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidate(t *testing.T) {
 	valid := &keziov1alpha2.PostHook{
 		Spec: keziov1alpha2.PostHookSpec{
@@ -256,5 +332,22 @@ func TestValidate(t *testing.T) {
 	}
 	if err := Validate(invalid); err == nil {
 		t.Fatal("expected an error for a step with no kind set")
+	}
+}
+
+// TestValidateAcceptsUnreferencedParam pins the unreferenced-param policy
+// PostHookParam's doc comment states: a declared param no step's content
+// references is accepted, not rejected - it may back a builtin step's
+// Params value, or simply document an input a future step or attaching
+// resource can rely on.
+func TestValidateAcceptsUnreferencedParam(t *testing.T) {
+	ph := &keziov1alpha2.PostHook{
+		Spec: keziov1alpha2.PostHookSpec{
+			Params: []keziov1alpha2.PostHookParam{{Name: "unused"}},
+			Steps:  []keziov1alpha2.PostHookStep{validBuiltinStep()},
+		},
+	}
+	if err := Validate(ph); err != nil {
+		t.Fatalf("unexpected error for a declared param no step references: %v", err)
 	}
 }
