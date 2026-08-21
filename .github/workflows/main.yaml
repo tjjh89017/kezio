@@ -573,6 +573,15 @@ jobs:
           tracker-net1-ip: ${{ env.TRACKER_NET1_IP }}
           seeder-net1-ip: ${{ env.SEEDER_NET1_IP }}
 
+      # SubnetReconciler's Valid condition checks the kezio-bootd
+      # ServiceAccount already exists (its bootd Deployment stamps
+      # serviceAccountName: kezio-bootd unconditionally) - apply
+      # config/bootd's RBAC before the Subnet, not only through
+      # deploy-bootd below, which cannot run until the Subnet's own
+      # bootd Deployment exists.
+      - name: Apply kezio-bootd's RBAC ahead of the Subnet
+        run: kubectl apply -k config/bootd
+
       - name: Deploy the existing-dhcp pod on the provisioning bridge
         if: matrix.dhcp-scenario == 'no-relay'
         uses: ./.github/actions/deploy-existing-dhcp
