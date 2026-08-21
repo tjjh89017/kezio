@@ -27,8 +27,8 @@ import (
 
 // Subnet's validator is a deliberate no-op (see subnet_webhook.go), so this
 // suite only proves the webhook is registered and serves admission
-// requests; CRD schema/CEL rules belong in internal/controller's envtest
-// suite instead.
+// requests; CRD schema/CEL rules are covered in subnet_schema_test.go
+// instead.
 var _ = Describe("Subnet Webhook", func() {
 	Context("admission round-trip through the webhook server", func() {
 		It("admits a valid Subnet", func() {

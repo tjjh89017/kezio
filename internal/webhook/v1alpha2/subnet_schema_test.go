@@ -1,0 +1,151 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package v1alpha2
+
+import (
+	"fmt"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+)
+
+// These specs exercise the CRD schema (kubebuilder markers and CEL rules)
+// through the real envtest apiserver, not the Go type definitions: OpenAPI
+// and CEL validation only run there.
+const (
+	subnetSchemaTestNotAnIP    = "not-an-ip"
+	subnetSchemaTestLeaseStart = "192.0.2.50"
+	subnetSchemaTestLeaseEnd   = "192.0.2.100"
+)
+
+var _ = Describe("Subnet CRD schema", func() {
+	var subnetCount int
+
+	newSubnet := func() *keziov1alpha2.Subnet {
+		subnetCount++
+		return &keziov1alpha2.Subnet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("schema-test-subnet-%d", subnetCount),
+				Namespace: "default",
+			},
+			Spec: keziov1alpha2.SubnetSpec{
+				SiteRef:         keziov1alpha2.NameRef{Name: "site-a"},
+				CIDR:            "192.0.2.0/24",
+				BootdServerIP:   "192.0.2.2",
+				BootdNetworkRef: keziov1alpha2.NameRef{Name: "bootd-net"},
+				DHCP: keziov1alpha2.SubnetDHCP{
+					Mode: keziov1alpha2.SubnetDHCPModeProxy,
+				},
+			},
+		}
+	}
+
+	It("admits a minimal valid Subnet", func() {
+		s := newSubnet()
+		Expect(k8sClient.Create(ctx, s)).To(Succeed())
+	})
+
+	It("rejects a cidr that is not a CIDR", func() {
+		s := newSubnet()
+		s.Spec.CIDR = "not-a-cidr"
+		Expect(k8sClient.Create(ctx, s)).To(HaveOccurred())
+	})
+
+	It("rejects a bootdServerIP that is not an IPv4 address", func() {
+		s := newSubnet()
+		s.Spec.BootdServerIP = subnetSchemaTestNotAnIP
+		Expect(k8sClient.Create(ctx, s)).To(HaveOccurred())
+	})
+
+	It("rejects a dhcp.mode value outside the enum", func() {
+		s := newSubnet()
+		s.Spec.DHCP.Mode = "static"
+		Expect(k8sClient.Create(ctx, s)).To(HaveOccurred())
+	})
+
+	It("rejects a leaseRangeStart that is not an IPv4 address", func() {
+		s := newSubnet()
+		s.Spec.DHCP.Mode = keziov1alpha2.SubnetDHCPModeLease
+		s.Spec.DHCP.LeaseRangeStart = subnetSchemaTestNotAnIP
+		s.Spec.DHCP.LeaseRangeEnd = subnetSchemaTestLeaseEnd
+		Expect(k8sClient.Create(ctx, s)).To(HaveOccurred())
+	})
+
+	It("rejects a leaseRangeEnd that is not an IPv4 address", func() {
+		s := newSubnet()
+		s.Spec.DHCP.Mode = keziov1alpha2.SubnetDHCPModeLease
+		s.Spec.DHCP.LeaseRangeStart = subnetSchemaTestLeaseStart
+		s.Spec.DHCP.LeaseRangeEnd = subnetSchemaTestNotAnIP
+		Expect(k8sClient.Create(ctx, s)).To(HaveOccurred())
+	})
+
+	It("rejects a missing siteRef", func() {
+		s := newSubnet()
+		s.Spec.SiteRef = keziov1alpha2.NameRef{}
+		Expect(k8sClient.Create(ctx, s)).To(HaveOccurred())
+	})
+
+	It("rejects a missing cidr", func() {
+		s := newSubnet()
+		s.Spec.CIDR = ""
+		Expect(k8sClient.Create(ctx, s)).To(HaveOccurred())
+	})
+
+	It("rejects a missing bootdServerIP", func() {
+		s := newSubnet()
+		s.Spec.BootdServerIP = ""
+		Expect(k8sClient.Create(ctx, s)).To(HaveOccurred())
+	})
+
+	It("rejects a missing bootdNetworkRef", func() {
+		s := newSubnet()
+		s.Spec.BootdNetworkRef = keziov1alpha2.NameRef{}
+		Expect(k8sClient.Create(ctx, s)).To(HaveOccurred())
+	})
+
+	It("rejects a missing dhcp block", func() {
+		s := newSubnet()
+		s.Spec.DHCP = keziov1alpha2.SubnetDHCP{}
+		Expect(k8sClient.Create(ctx, s)).To(HaveOccurred())
+	})
+
+	It("rejects a leaseRangeStart set with no leaseRangeEnd", func() {
+		s := newSubnet()
+		s.Spec.DHCP.Mode = keziov1alpha2.SubnetDHCPModeLease
+		s.Spec.DHCP.LeaseRangeStart = subnetSchemaTestLeaseStart
+		Expect(k8sClient.Create(ctx, s)).To(HaveOccurred())
+	})
+
+	It("rejects a leaseRangeEnd set with no leaseRangeStart", func() {
+		s := newSubnet()
+		s.Spec.DHCP.Mode = keziov1alpha2.SubnetDHCPModeLease
+		s.Spec.DHCP.LeaseRangeEnd = subnetSchemaTestLeaseEnd
+		Expect(k8sClient.Create(ctx, s)).To(HaveOccurred())
+	})
+
+	It("admits both leaseRangeStart and leaseRangeEnd set together", func() {
+		s := newSubnet()
+		s.Spec.DHCP.Mode = keziov1alpha2.SubnetDHCPModeLease
+		s.Spec.DHCP.LeaseRangeStart = subnetSchemaTestLeaseStart
+		s.Spec.DHCP.LeaseRangeEnd = subnetSchemaTestLeaseEnd
+		Expect(k8sClient.Create(ctx, s)).To(Succeed())
+	})
+})
