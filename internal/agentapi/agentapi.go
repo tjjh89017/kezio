@@ -254,6 +254,14 @@ type DeployPlan struct {
 	// different run, and RunUID is what lets a stale progress report be
 	// told apart from a current one.
 	RunUID string `json:"runUID"`
+	// MachineName is the Machine this plan deploys to. The agent's
+	// finalize step (internal/agent/deploy) uses it to build a stable
+	// UEFI boot entry label, so a later redeploy to the same machine can
+	// find and replace its own prior entry instead of accumulating
+	// duplicates. Empty on a plan built before this field existed - the
+	// agent falls back to RunName in that case, at the cost of that
+	// dedup property.
+	MachineName string `json:"machineName,omitempty"`
 	// TargetDisk is the OS image's resolved target device path, for
 	// example "/dev/nvme0n1".
 	TargetDisk string `json:"targetDisk"`
