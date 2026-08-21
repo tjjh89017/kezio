@@ -31,6 +31,7 @@ import (
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 	"github.com/tjjh89017/kezio/internal/agentapi"
+	"github.com/tjjh89017/kezio/internal/posthookvalidate"
 )
 
 // resolveHooks builds the ordered agentapi.ResolvedHook list for refs, in
@@ -42,10 +43,14 @@ import (
 // A PostHook that does not exist or is not Valid is reported as
 // NotReadyError, not a hard failure: it may simply not have caught up
 // with the PostHookReconciler yet.
-func (b *Builder) resolveHooks(ctx context.Context, defaultNS string, refs []keziov1alpha2.NameRef, shared map[string]any, defaults builtinDefaults) ([]agentapi.ResolvedHook, error) {
+//
+// imageOSFamily is the resolved OS image's effective OSFamily, empty for a
+// dataImages-only run (no OS image to check compatibility against) -
+// resolveHook skips the compatibility check in that case.
+func (b *Builder) resolveHooks(ctx context.Context, defaultNS string, refs []keziov1alpha2.NameRef, shared map[string]any, defaults builtinDefaults, imageOSFamily string) ([]agentapi.ResolvedHook, error) {
 	hooks := make([]agentapi.ResolvedHook, 0, len(refs))
 	for _, ref := range refs {
-		hook, err := b.resolveHook(ctx, defaultNS, ref, shared, defaults)
+		hook, err := b.resolveHook(ctx, defaultNS, ref, shared, defaults, imageOSFamily)
 		if err != nil {
 			return nil, fmt.Errorf("posthook %q: %w", ref.Name, err)
 		}
@@ -54,11 +59,15 @@ func (b *Builder) resolveHooks(ctx context.Context, defaultNS string, refs []kez
 	return hooks, nil
 }
 
-// resolveHook fetches ref's PostHook and resolves every one of its steps
-// against shared (the deploy's merged params plus reserved values),
-// filling in each declared param's own default for any name shared does
-// not already carry.
-func (b *Builder) resolveHook(ctx context.Context, defaultNS string, ref keziov1alpha2.NameRef, shared map[string]any, defaults builtinDefaults) (agentapi.ResolvedHook, error) {
+// resolveHook fetches ref's PostHook, checks it against imageOSFamily
+// (posthookvalidate.CheckOSFamilyCompatible, skipped when imageOSFamily is
+// empty), and resolves every one of its steps against shared (the deploy's
+// merged params plus reserved values), filling in each declared param's
+// own default for any name shared does not already carry. Checking
+// compatibility here - the single place both an Image's own postHookRefs
+// and a Machine's postHookRefs resolve through - is what makes the rule
+// hold regardless of which side referenced the hook.
+func (b *Builder) resolveHook(ctx context.Context, defaultNS string, ref keziov1alpha2.NameRef, shared map[string]any, defaults builtinDefaults, imageOSFamily string) (agentapi.ResolvedHook, error) {
 	ns := resolveNamespace(ref, defaultNS)
 
 	hook := &keziov1alpha2.PostHook{}
@@ -70,6 +79,11 @@ func (b *Builder) resolveHook(ctx context.Context, defaultNS string, ref keziov1
 	}
 	if !meta.IsStatusConditionTrue(hook.Status.Conditions, keziov1alpha2.PostHookConditionValid) {
 		return agentapi.ResolvedHook{}, &NotReadyError{Reason: fmt.Sprintf("posthook %s/%s is not Valid yet", ns, ref.Name)}
+	}
+	if imageOSFamily != "" {
+		if err := posthookvalidate.CheckOSFamilyCompatible(hook, imageOSFamily); err != nil {
+			return agentapi.ResolvedHook{}, &ValidationError{Reason: fmt.Sprintf("posthook %s/%s: %v", ns, ref.Name, err)}
+		}
 	}
 
 	data := hookTemplateData(shared, hook)

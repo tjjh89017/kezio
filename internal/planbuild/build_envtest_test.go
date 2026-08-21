@@ -129,6 +129,136 @@ func TestBuilder_Build_Envtest(t *testing.T) {
 	t.Run("a dataImages-only machine with an explicit efibootmgr hook fails with a validation error", func(t *testing.T) {
 		testDataImagesOnlyExplicitEfibootmgrIsValidationError(t, fx)
 	})
+	t.Run("image hooks resolve before machine hooks", func(t *testing.T) {
+		testImageHooksResolveBeforeMachineHooks(t, fx)
+	})
+	t.Run("the default hook is not attached when the image already carries its own hooks", func(t *testing.T) {
+		testDefaultHookNotAttachedWhenImageHasHooks(t, fx)
+	})
+	t.Run("a machine-referenced hook incompatible with the resolved OS image's osFamily is a validation error", func(t *testing.T) {
+		testMachineHookIncompatibleOSFamilyIsValidationError(t, fx)
+	})
+	t.Run("HooksHash changes when the image's own hooks change", func(t *testing.T) {
+		testHooksHashChangesWithImageHooks(t, fx)
+	})
+}
+
+func testImageHooksResolveBeforeMachineHooks(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+	fx.mustCreatePostHook(ns, "image-hook", scriptHookSpec("from-image"))
+	fx.mustCreatePostHook(ns, "machine-hook", scriptHookSpec("from-machine"))
+	image := fx.mustCreateImageWithHooks(ns, blankDataLayout(), []keziov1alpha2.NameRef{{Name: "image-hook"}})
+
+	b := &Builder{Client: fx.client}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec: keziov1alpha2.MachineSpec{
+			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha2.NameRef{{Name: "machine-hook"}},
+		},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	plan, _, err := b.Build(context.Background(), machine, run)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(plan.Hooks) != 2 || plan.Hooks[0].Name != "image-hook" || plan.Hooks[1].Name != "machine-hook" {
+		t.Fatalf("plan.Hooks = %+v, want [image-hook machine-hook] in that order", plan.Hooks)
+	}
+}
+
+// testDefaultHookNotAttachedWhenImageHasHooks covers the "substitutes only
+// when BOTH lists are empty" rule's other half: the image's own postHookRefs
+// being non-empty is enough on its own to suppress the shipped default,
+// even though the machine's own postHookRefs stays empty.
+func testDefaultHookNotAttachedWhenImageHasHooks(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	mgrNS := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+	fx.mustCreatePostHook(mgrNS, posthookdefaults.DefaultFinalizeHookName, posthookdefaults.Spec())
+	fx.mustCreatePostHook(ns, "image-hook", scriptHookSpec("from-image"))
+	image := fx.mustCreateImageWithHooks(ns, blankDataLayout(), []keziov1alpha2.NameRef{{Name: "image-hook"}})
+
+	b := &Builder{Client: fx.client, ManagerNamespace: mgrNS}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: image.Name}},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	plan, _, err := b.Build(context.Background(), machine, run)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(plan.Hooks) != 1 || plan.Hooks[0].Name != "image-hook" {
+		t.Fatalf("plan.Hooks = %+v, want exactly [image-hook], default must not attach", plan.Hooks)
+	}
+}
+
+func testMachineHookIncompatibleOSFamilyIsValidationError(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+	fx.mustCreatePostHook(ns, "windows-hook", keziov1alpha2.PostHookSpec{
+		Steps: []keziov1alpha2.PostHookStep{{
+			OSFamily:     keziov1alpha2.OSFamilyWindows,
+			ChrootScript: &keziov1alpha2.PostHookScriptSource{Script: "echo hi"},
+		}},
+	})
+	image := fx.mustCreateImage(ns, blankDataLayout()) // OSFamily defaults to Linux
+
+	b := &Builder{Client: fx.client}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec: keziov1alpha2.MachineSpec{
+			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha2.NameRef{{Name: "windows-hook"}},
+		},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	_, _, err := b.Build(context.Background(), machine, run)
+	var valErr *ValidationError
+	if !errors.As(err, &valErr) {
+		t.Fatalf("Build err = %v, want a *ValidationError", err)
+	}
+}
+
+// testHooksHashChangesWithImageHooks pins Snapshot.HooksHash's coverage of
+// image-attached hooks: two otherwise-identical Machines deploying images
+// that differ only in their own postHookRefs must resolve to different
+// hashes, since the resolved hooks driving a deploy actually differ.
+func testHooksHashChangesWithImageHooks(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	fx.mustCreatePostHook(ns, "image-hook", scriptHookSpec("from-image"))
+	fx.mustCreatePostHook(ns, posthookdefaults.DefaultFinalizeHookName, posthookdefaults.Spec())
+	withHooks := fx.mustCreateImageWithHooks(ns, blankDataLayout(), []keziov1alpha2.NameRef{{Name: "image-hook"}})
+	withoutHooks := fx.mustCreateImageWithHooksNamed(ns, "img2", blankDataLayout(), nil)
+
+	// withoutHooks has no postHookRefs of its own, so Build substitutes the
+	// shipped default hook (from the manager namespace) for it - the very
+	// difference this test exercises against withHooks' explicit hook.
+	b := &Builder{Client: fx.client, ManagerNamespace: ns}
+	buildFor := func(image *keziov1alpha2.Image, machineName string) string {
+		machine := &keziov1alpha2.Machine{
+			ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: ns},
+			Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: image.Name}},
+		}
+		fx.mustCreateMachineHardwareNamed(ns, machineName, oneDisk("/dev/vda"))
+		run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run-" + machineName, UID: types.UID("uid-" + machineName)}}
+		_, snap, err := b.Build(context.Background(), machine, run)
+		if err != nil {
+			t.Fatalf("Build(%s): %v", machineName, err)
+		}
+		return snap.HooksHash
+	}
+
+	hashWith := buildFor(withHooks, "m-with-hooks")
+	hashWithout := buildFor(withoutHooks, "m-without-hooks")
+	if hashWith == hashWithout {
+		t.Fatalf("HooksHash = %q for both, want different hashes since one machine's image attaches a hook the other's does not", hashWith)
+	}
 }
 
 // testDataImagesOnlyNoDefaultHook covers the fast-lane regression: a
@@ -596,13 +726,17 @@ func (fx *fixtures) mustCreateNamespace() string {
 const testMachineName = "m1"
 
 func (fx *fixtures) mustCreateMachineHardware(ns string, disks []keziov1alpha2.MachineHardwareDisk) {
+	fx.mustCreateMachineHardwareNamed(ns, testMachineName, disks)
+}
+
+func (fx *fixtures) mustCreateMachineHardwareNamed(ns, name string, disks []keziov1alpha2.MachineHardwareDisk) {
 	fx.t.Helper()
 	hw := &keziov1alpha2.MachineHardware{
-		ObjectMeta: metav1.ObjectMeta{Name: testMachineName, Namespace: ns},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec:       keziov1alpha2.MachineHardwareSpec{Disks: disks},
 	}
 	if err := fx.client.Create(context.Background(), hw); err != nil {
-		fx.t.Fatalf("create machinehardware %s/%s: %v", ns, testMachineName, err)
+		fx.t.Fatalf("create machinehardware %s/%s: %v", ns, name, err)
 	}
 }
 
@@ -615,16 +749,31 @@ func (fx *fixtures) mustCreateImage(ns string, layout keziov1alpha2.ImageDiskLay
 
 func (fx *fixtures) mustCreateImageWithParams(ns string, layout keziov1alpha2.ImageDiskLayout, params *apiextensionsv1.JSON) *keziov1alpha2.Image {
 	fx.t.Helper()
+	return fx.mustCreateImageFull(ns, testImageName, layout, params, nil)
+}
+
+func (fx *fixtures) mustCreateImageWithHooks(ns string, layout keziov1alpha2.ImageDiskLayout, hookRefs []keziov1alpha2.NameRef) *keziov1alpha2.Image {
+	fx.t.Helper()
+	return fx.mustCreateImageFull(ns, testImageName, layout, nil, hookRefs)
+}
+
+func (fx *fixtures) mustCreateImageWithHooksNamed(ns, name string, layout keziov1alpha2.ImageDiskLayout, hookRefs []keziov1alpha2.NameRef) *keziov1alpha2.Image {
+	fx.t.Helper()
+	return fx.mustCreateImageFull(ns, name, layout, nil, hookRefs)
+}
+
+func (fx *fixtures) mustCreateImageFull(ns, name string, layout keziov1alpha2.ImageDiskLayout, params *apiextensionsv1.JSON, hookRefs []keziov1alpha2.NameRef) *keziov1alpha2.Image {
+	fx.t.Helper()
 	img := &keziov1alpha2.Image{
-		ObjectMeta: metav1.ObjectMeta{Name: testImageName, Namespace: ns},
-		Spec:       keziov1alpha2.ImageSpec{Layout: layout, Params: params},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec:       keziov1alpha2.ImageSpec{Layout: layout, Params: params, PostHookRefs: hookRefs},
 	}
 	if err := fx.client.Create(context.Background(), img); err != nil {
-		fx.t.Fatalf("create image %s/%s: %v", ns, testImageName, err)
+		fx.t.Fatalf("create image %s/%s: %v", ns, name, err)
 	}
 	img.Status.State = keziov1alpha2.ImageStateReady
 	if err := fx.client.Status().Update(context.Background(), img); err != nil {
-		fx.t.Fatalf("update image %s/%s status: %v", ns, testImageName, err)
+		fx.t.Fatalf("update image %s/%s status: %v", ns, name, err)
 	}
 	return img
 }
