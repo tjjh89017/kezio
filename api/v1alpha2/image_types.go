@@ -189,6 +189,15 @@ type ImageSpec struct {
 	// +kubebuilder:validation:Schemaless
 	// +optional
 	Params *apiextensionsv1.JSON `json:"params,omitempty"`
+	// PostHookRefs is an ordered list of PostHook resources this image's
+	// own content needs. Namespace, if set, must equal this Image's own
+	// namespace - the webhook denies any other value, the same rule
+	// ImageSlot.ContentRef's own namespace restriction gives. Execution
+	// order: these run first, ahead of the deploying Machine's own
+	// postHookRefs (see MachineSpec.PostHookRefs's doc comment).
+	// +kubebuilder:validation:MaxItems=64
+	// +optional
+	PostHookRefs []NameRef `json:"postHookRefs,omitempty"`
 }
 
 // EffectiveBootable returns whether the image is bootable, treating a nil

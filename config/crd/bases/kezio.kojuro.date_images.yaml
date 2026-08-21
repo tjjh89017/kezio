@@ -218,6 +218,38 @@ spec:
                   this field, then the deploying Machine's own spec.params; later
                   entries override earlier ones.
                 x-kubernetes-preserve-unknown-fields: true
+              postHookRefs:
+                description: |-
+                  PostHookRefs is an ordered list of PostHook resources this image's
+                  own content needs. Namespace, if set, must equal this Image's own
+                  namespace - the webhook denies any other value, the same rule
+                  ImageSlot.ContentRef's own namespace restriction gives. Execution
+                  order: these run first, ahead of the deploying Machine's own
+                  postHookRefs (see MachineSpec.PostHookRefs's doc comment).
+                items:
+                  description: |-
+                    NameRef is a reference to a resource by name, optionally in another
+                    namespace. When Namespace is empty, the namespace of the referencing
+                    resource is used. Field names that hold a NameRef end in "Ref"; ordered
+                    lists of NameRef end in "Refs".
+                  properties:
+                    name:
+                      description: |-
+                        Post-mutation admission always re-serialises this struct, so a
+                        zero-value Name would otherwise satisfy "required"; MinLength closes
+                        that gap. MaxLength mirrors the Kubernetes object name limit and
+                        bounds the CEL cost of any pattern-matching XValidation rule a
+                        field of this type carries (see ImageSlot.ContentRef).
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    namespace:
+                      type: string
+                  required:
+                  - name
+                  type: object
+                maxItems: 64
+                type: array
               source:
                 description: |-
                   Source describes where to fetch and verify a source disk image to

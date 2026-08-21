@@ -186,8 +186,10 @@ type MachineSpec struct {
 	SubnetRef NameRef `json:"subnetRef"`
 	// PostHookRefs is an ordered list of PostHook resources attached to
 	// this machine. Execution order: the attached Image's own
-	// postHookRefs run first, then this list; within this list, the
-	// given order holds.
+	// postHookRefs (ImageSpec.PostHookRefs) run first, then this list;
+	// within this list, the given order holds. The shipped default hook
+	// (kezio-default-finalize) is substituted only when both lists are
+	// empty and this machine deploys an OS image.
 	// +kubebuilder:validation:MaxItems=64
 	// +optional
 	PostHookRefs []NameRef `json:"postHookRefs,omitempty"`

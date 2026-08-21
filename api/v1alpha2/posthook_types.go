@@ -37,7 +37,10 @@ const (
 // PostHookParam declares one input a PostHook's steps may reference through
 // templating. Default supplies the value used when the attaching resource's
 // merged params do not set it; a nil Default means the param has no
-// fallback and an attaching resource must supply it.
+// fallback and an attaching resource must supply it. A declared param that
+// no step's content currently references is accepted, not rejected: it may
+// back a builtin step's Params value, or simply document an input a future
+// step or attaching resource can rely on.
 type PostHookParam struct {
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
