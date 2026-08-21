@@ -2,14 +2,16 @@ name: Create the target VM's KubeVirtBMC Redfish endpoint
 
 description: >-
   The BMC-side half of BMC-driven provisioning: creates KubeVirtBMC's
-  VirtualMachineBMC for an already-existing, powered-off target VM
-  (create-target-vm) and waits for both the VirtualMachineBMC and its
-  virtbmc pod to become Ready; then verifies the Redfish endpoint
-  answers and reports the VM off. Does not create the VM, its PVC, a
-  Machine CR, or the BMC credentials Secret - the VM belongs to
-  create-target-vm and the Machine/Secret belong to create-bmc-machine;
-  this action only expects both to already exist. bmc-creds-secret-name
-  is the same Secret both VirtualMachineBMC.spec.authSecretRef and
+  VirtualMachineBMC for an already-existing target VM (create-target-vm)
+  and waits for both the VirtualMachineBMC and its virtbmc pod to become
+  Ready; then verifies the Redfish endpoint answers at all (PowerState is
+  logged, not asserted - a caller that already created the Machine CR
+  may have started a legitimate power-on by the time this runs). Does
+  not create the VM, its PVC, a Machine CR, or the BMC credentials
+  Secret - the VM belongs to create-target-vm and the Machine/Secret
+  belong to create-bmc-machine; this action only expects both to
+  already exist. bmc-creds-secret-name is the same Secret both
+  VirtualMachineBMC.spec.authSecretRef and
   Machine.spec.bmc.credentialsSecretRef read, so it is created once,
   ahead of both.
 
@@ -94,12 +96,21 @@ runs:
         kubectl -n "${NAMESPACE}" wait --for=condition=Ready pod \
           -l "kubevirt.io/virtualmachinebmc-name=${VM_NAME}" --timeout=180s
 
-    - name: "Verify the Redfish endpoint is reachable and reports the VM off"
+    - name: "Verify the Redfish endpoint is reachable"
       # Exercised from inside the cluster with a throwaway Pod (Service is
       # ClusterIP-only) - the same call a Register step against this
       # endpoint would make, done here first so a broken endpoint fails
       # with a clear diagnostic. Retried a few times to absorb a
       # first-connection blip on an endpoint that only just turned ready.
+      #
+      # PowerState is logged, not asserted: a caller that has already
+      # created the Machine CR before this step (its BMC address only
+      # resolves once this action's VirtualMachineBMC/Service exist)
+      # races the Machine controller's own first power-on against this
+      # check, and "On" at this point is that legitimate deploy walk, not
+      # a broken endpoint - the same real value this check exists for
+      # (proving the endpoint answers at all) holds regardless of which
+      # PowerState it reports.
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
@@ -190,7 +201,4 @@ runs:
         echo "Redfish ComputerSystem response: ${redfish_body}"
 
         power_state="$(jq -r '.PowerState' <<<"${redfish_body}")"
-        if [ "${power_state}" != "Off" ]; then
-          echo "::error::Redfish reports PowerState=${power_state}, want Off." >&2
-          exit 1
-        fi
+        echo "Redfish reports PowerState=${power_state}."
