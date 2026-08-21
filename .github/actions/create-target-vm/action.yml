@@ -1,0 +1,207 @@
+name: Create the target VM
+
+description: >-
+  The VM-creation half of BMC-driven provisioning: creates the target
+  VM's power-cycle-surviving data disk PVC and the VirtualMachine itself
+  powered off (`running: false`), then asserts it stays off. Does not
+  create the VirtualMachineBMC or touch Redfish - that belongs to
+  provision-target-vm-via-bmc, which expects this action's VM to already
+  exist and be off. Does not create a Machine CR or the BMC credentials
+  Secret either - both belong to create-bmc-machine.
+
+inputs:
+  namespace:
+    description: Namespace the VM and its data PVC are created in.
+    required: false
+    default: "scaffold-system"
+  vm-name:
+    description: Name shared by the VirtualMachine and its data PVC (<vm-name>-data).
+    required: true
+  vm-mac:
+    description: MAC address stamped on the VM's provisioning interface - must match the Machine CR's bootMACAddress create-bmc-machine creates later.
+    required: true
+  disk-serial:
+    description: Serial number stamped on the VM's data disk - must match the Machine CR's targetDisk.serialNumber, when one is set.
+    required: true
+  boot-network-name:
+    description: Name of the empty-ipam Multus NetworkAttachmentDefinition the VM's provisioning interface attaches to (see create-provisioning-nads).
+    required: false
+    default: "kezio-boot-network-vm"
+  storage-class:
+    description: StorageClass for the VM's data disk PVC.
+    required: false
+    default: "local-path"
+  disk-size:
+    description: Size of the VM's data disk PVC.
+    required: false
+    default: "4Gi"
+  memory:
+    description: Memory request/limit for the VM's domain.
+    required: false
+    default: "3Gi"
+  cpus:
+    description: CPU core count for the VM's domain.
+    required: false
+    default: "2"
+
+runs:
+  using: composite
+  steps:
+    - name: Create the target VM's data disk PVC
+      # A power cycle recreates the VMI to consume KubeVirtBMC's one-shot
+      # PXE override (the BMC lane's stand-in for a power-button press).
+      # An emptyDisk volume does not survive that - KubeVirt recreates it
+      # blank on every VMI - which would wipe the deployed disk before the
+      # reboot. A PVC survives VMI recreation like a real bare-metal disk
+      # would. volumeMode Filesystem, not Block: local-path has no raw
+      # block device to hand out, and KubeVirt presents a Filesystem-mode
+      # PVC to the guest as the same virtio block device emptyDisk did.
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        VM_NAME: ${{ inputs.vm-name }}
+        STORAGE_CLASS: ${{ inputs.storage-class }}
+        DISK_SIZE: ${{ inputs.disk-size }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: ${VM_NAME}-data
+          namespace: ${NAMESPACE}
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          volumeMode: Filesystem
+          storageClassName: ${STORAGE_CLASS}
+          resources:
+            requests:
+              storage: ${DISK_SIZE}
+        EOF
+
+    - name: Create the target KubeVirt VirtualMachine, powered off
+      # `running: false`: this VM is never started here. The network
+      # interface carries bootOrder 1 and the disk bootOrder 2 - OVMF
+      # tries PXE first on every boot, falling back to disk only once
+      # kezio-agent's efibootmgr entry exists and PXE itself declines (no
+      # boot files served, or bootd's boot config server answers "boot
+      # local"). secureBoot is off: OVMF's secure-boot variable store
+      # needs a vendor-signed shim/grub chain CI's built artifacts don't
+      # carry.
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        VM_NAME: ${{ inputs.vm-name }}
+        VM_MAC: ${{ inputs.vm-mac }}
+        DISK_SERIAL: ${{ inputs.disk-serial }}
+        BOOT_NETWORK_NAME: ${{ inputs.boot-network-name }}
+        VM_MEMORY: ${{ inputs.memory }}
+        VM_CPUS: ${{ inputs.cpus }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kubevirt.io/v1
+        kind: VirtualMachine
+        metadata:
+          name: ${VM_NAME}
+          namespace: ${NAMESPACE}
+        spec:
+          running: false
+          template:
+            metadata:
+              labels:
+                kubevirt.io/vm: ${VM_NAME}
+            spec:
+              domain:
+                cpu:
+                  cores: ${VM_CPUS}
+                resources:
+                  requests:
+                    memory: ${VM_MEMORY}
+                firmware:
+                  bootloader:
+                    efi:
+                      secureBoot: false
+                      # Persist the EFI variable store: real bare-metal
+                      # NVRAM survives power cycles, so the efibootmgr
+                      # boot entry kezio-agent writes at finalize must
+                      # survive the reboot into disk.
+                      persistent: true
+                devices:
+                  interfaces:
+                    - name: provisioning
+                      macAddress: "${VM_MAC}"
+                      bootOrder: 1
+                      bridge: {}
+                  disks:
+                    - name: data
+                      serial: "${DISK_SERIAL}"
+                      bootOrder: 2
+                      disk:
+                        bus: virtio
+                    - name: cloudinitdisk
+                      disk:
+                        bus: virtio
+              networks:
+                - name: provisioning
+                  multus:
+                    networkName: ${BOOT_NETWORK_NAME}
+              volumes:
+                - name: data
+                  persistentVolumeClaim:
+                    claimName: ${VM_NAME}-data
+                - name: cloudinitdisk
+                  cloudInitNoCloud:
+                    # Without this override, qemu-guest-agent.service
+                    # crash-loops in the guest and permanently fails
+                    # (systemd StartLimitBurst exhausted) before it can
+                    # connect. This VM persists across the BMC
+                    # power-cycle's VMI recreation, so the seed stays
+                    # attached and applies on every boot, including after
+                    # PowerOn.
+                    userData: |
+                      #cloud-config
+                      write_files:
+                        - path: /etc/systemd/system/qemu-guest-agent.service.d/override.conf
+                          content: |
+                            [Unit]
+                            StartLimitIntervalSec=0
+                            [Service]
+                            Restart=always
+                            RestartSec=1
+                      runcmd:
+                        - systemctl daemon-reload
+                        - systemctl enable --now qemu-guest-agent.service
+        EOF
+
+    - name: "Assert the VM is off (nothing has started it yet)"
+      # Bounded wait, not a one-shot check: right after `kubectl apply`,
+      # status.printableStatus may not be populated yet (a lag, not a real
+      # problem). A Running status is never lag, though, and must fail
+      # immediately.
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        VM_NAME: ${{ inputs.vm-name }}
+      run: |
+        set -euo pipefail
+        deadline=$(( $(date +%s) + 120 ))
+        while true; do
+          status="$(kubectl get vm "${VM_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.printableStatus}' || true)"
+          echo "$(date -Is) VM printableStatus: ${status:-<none>}"
+          [ "${status}" = "Stopped" ] && break
+          if [ "${status}" = "Running" ]; then
+            echo "::error::VM ${VM_NAME} printableStatus = Running, want Stopped - it must be off until a BMC caller powers it on." >&2
+            exit 1
+          fi
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::VM ${VM_NAME} printableStatus = ${status:-<none>}, want Stopped - it must be off until a BMC caller powers it on." >&2
+            exit 1
+          fi
+          sleep 5
+        done
+        if kubectl get vmi "${VM_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1; then
+          echo "::error::A VirtualMachineInstance already exists for ${VM_NAME}; the VM must not be running yet." >&2
+          exit 1
+        fi

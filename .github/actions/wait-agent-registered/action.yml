@@ -1,0 +1,94 @@
+name: Wait for a Machine's agent to register
+
+description: >-
+  Polls a Machine through the tail of the enrollment walk: condition
+  AgentRegistered=True (kezio-agent posted its hardware inventory from
+  the live boot environment), then its MachineHardware (same name as
+  the Machine) exists with at least one nic and one disk, then
+  status.state reaches "Available". Prints the inventory summary and
+  the Machine's conditions on success. On timeout, dumps the Machine
+  and MachineHardware YAML and fails.
+
+inputs:
+  machine-name:
+    description: Name of the Machine to poll; also the name of its MachineHardware.
+    required: true
+  namespace:
+    description: Namespace the Machine and MachineHardware live in.
+    required: false
+    default: "scaffold-system"
+  timeout:
+    description: Total timeout for the whole walk (AgentRegistered, then inventory, then Available).
+    required: false
+    default: "900"
+
+runs:
+  using: composite
+  steps:
+    - name: Wait for AgentRegistered, inventory, and Available
+      shell: bash
+      env:
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        NAMESPACE: ${{ inputs.namespace }}
+        TIMEOUT: ${{ inputs.timeout }}
+      run: |
+        set -euo pipefail
+        deadline=$(( $(date +%s) + TIMEOUT ))
+
+        dump_and_fail() {
+          echo "::error::$1" >&2
+          echo "===== Machine ${MACHINE_NAME} ====="
+          kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o yaml || true
+          echo "===== MachineHardware ${MACHINE_NAME} ====="
+          kubectl get machinehardware "${MACHINE_NAME}" -n "${NAMESPACE}" -o yaml || true
+          exit 1
+        }
+
+        echo "--- waiting for condition AgentRegistered=True ---"
+        while true; do
+          registered="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" \
+            -o jsonpath='{.status.conditions[?(@.type=="AgentRegistered")].status}' || true)"
+          echo "$(date -Is) Machine AgentRegistered=${registered:-<none>}"
+          [ "${registered}" = "True" ] && break
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            dump_and_fail "Machine ${MACHINE_NAME} did not reach AgentRegistered=True within ${TIMEOUT}s"
+          fi
+          sleep 10
+        done
+
+        echo "--- waiting for MachineHardware with at least one nic and one disk ---"
+        while true; do
+          hw_json="$(kubectl get machinehardware "${MACHINE_NAME}" -n "${NAMESPACE}" -o json 2>/dev/null || true)"
+          if [ -n "${hw_json}" ]; then
+            nic_count="$(jq '.spec.nics // [] | length' <<<"${hw_json}")"
+            disk_count="$(jq '.spec.disks // [] | length' <<<"${hw_json}")"
+            echo "$(date -Is) MachineHardware nics=${nic_count} disks=${disk_count}"
+            if [ "${nic_count}" -ge 1 ] && [ "${disk_count}" -ge 1 ]; then
+              break
+            fi
+          else
+            echo "$(date -Is) MachineHardware ${MACHINE_NAME} not found yet"
+          fi
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            dump_and_fail "MachineHardware ${MACHINE_NAME} did not report at least one nic and one disk within ${TIMEOUT}s"
+          fi
+          sleep 10
+        done
+
+        echo "--- waiting for status.state == Available ---"
+        while true; do
+          state="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.state}' || true)"
+          echo "$(date -Is) Machine status.state=${state:-<empty>}"
+          [ "${state}" = "Available" ] && break
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            dump_and_fail "Machine ${MACHINE_NAME} did not reach state Available within ${TIMEOUT}s"
+          fi
+          sleep 10
+        done
+
+        echo "===== inventory summary ====="
+        kubectl get machinehardware "${MACHINE_NAME}" -n "${NAMESPACE}" -o json \
+          | jq '{cpuCount: .spec.cpuCount, memoryBytes: .spec.memoryBytes, nics: (.spec.nics // []), disks: (.spec.disks // [])}'
+        echo "===== Machine conditions ====="
+        kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" \
+          -o jsonpath='{range .status.conditions[*]}{.type}{"="}{.status}{" ("}{.reason}{"): "}{.message}{"\n"}{end}'

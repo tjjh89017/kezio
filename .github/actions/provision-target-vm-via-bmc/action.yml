@@ -1,207 +1,33 @@
-name: Create the target VM and its KubeVirtBMC Redfish endpoint
+name: Create the target VM's KubeVirtBMC Redfish endpoint
 
 description: >-
-  The VM-side half of BMC-driven provisioning: creates the target VM's
-  power-cycle-surviving data disk PVC and the VirtualMachine itself
-  powered off (`running: false`); asserts the VM stays off; creates
-  KubeVirtBMC's VirtualMachineBMC for it and waits for both the
-  VirtualMachineBMC and its virtbmc pod to become Ready; then verifies
-  the Redfish endpoint answers and reports the VM off. Does not create a
-  Machine CR or the BMC credentials Secret - both belong to whichever
-  step owns the kezio API objects for this lane; this action only expects
-  bmc-creds-secret-name to already exist (VirtualMachineBMC.spec.authSecretRef
-  and Machine.spec.bmc.credentialsSecretRef read the same Secret, so it
-  is created once, ahead of both).
+  The BMC-side half of BMC-driven provisioning: creates KubeVirtBMC's
+  VirtualMachineBMC for an already-existing, powered-off target VM
+  (create-target-vm) and waits for both the VirtualMachineBMC and its
+  virtbmc pod to become Ready; then verifies the Redfish endpoint
+  answers and reports the VM off. Does not create the VM, its PVC, a
+  Machine CR, or the BMC credentials Secret - the VM belongs to
+  create-target-vm and the Machine/Secret belong to create-bmc-machine;
+  this action only expects both to already exist. bmc-creds-secret-name
+  is the same Secret both VirtualMachineBMC.spec.authSecretRef and
+  Machine.spec.bmc.credentialsSecretRef read, so it is created once,
+  ahead of both.
 
 inputs:
   namespace:
-    description: Namespace the VM, its PVC, and its VirtualMachineBMC are created in.
+    description: Namespace the target VM and its VirtualMachineBMC live in.
     required: false
     default: "scaffold-system"
   vm-name:
-    description: Name shared by the VirtualMachine, its data PVC (<vm-name>-data), and its VirtualMachineBMC.
-    required: true
-  vm-mac:
-    description: MAC address stamped on the VM's provisioning interface - must match the Machine CR's bootMACAddress the API half creates later.
-    required: true
-  disk-serial:
-    description: Serial number stamped on the VM's data disk - must match the Machine CR's targetDisk.serialNumber the API half creates later.
+    description: Name of the already-existing target VirtualMachine; also used as the VirtualMachineBMC's own name.
     required: true
   bmc-creds-secret-name:
-    description: Name of the pre-existing basic-auth Secret (username/password keys) both VirtualMachineBMC and the later Machine CR authenticate through.
+    description: Name of the pre-existing basic-auth Secret (username/password keys) both VirtualMachineBMC and the Machine CR authenticate through.
     required: true
-  boot-network-name:
-    description: Name of the empty-ipam Multus NetworkAttachmentDefinition the VM's provisioning interface attaches to (see create-provisioning-nads).
-    required: false
-    default: "kezio-boot-network-vm"
-  storage-class:
-    description: StorageClass for the VM's data disk PVC.
-    required: false
-    default: "local-path"
-  disk-size:
-    description: Size of the VM's data disk PVC.
-    required: false
-    default: "4Gi"
 
 runs:
   using: composite
   steps:
-    - name: Create the target VM's data disk PVC
-      # A power cycle recreates the VMI to consume KubeVirtBMC's one-shot
-      # PXE override (the BMC lane's stand-in for a power-button press).
-      # An emptyDisk volume does not survive that - KubeVirt recreates it
-      # blank on every VMI - which would wipe the deployed disk before the
-      # reboot. A PVC survives VMI recreation like a real bare-metal disk
-      # would. volumeMode Filesystem, not Block: local-path has no raw
-      # block device to hand out, and KubeVirt presents a Filesystem-mode
-      # PVC to the guest as the same virtio block device emptyDisk did.
-      shell: bash
-      env:
-        NAMESPACE: ${{ inputs.namespace }}
-        VM_NAME: ${{ inputs.vm-name }}
-        STORAGE_CLASS: ${{ inputs.storage-class }}
-        DISK_SIZE: ${{ inputs.disk-size }}
-      run: |
-        set -euo pipefail
-        cat <<EOF | kubectl apply -f -
-        apiVersion: v1
-        kind: PersistentVolumeClaim
-        metadata:
-          name: ${VM_NAME}-data
-          namespace: ${NAMESPACE}
-        spec:
-          accessModes:
-            - ReadWriteOnce
-          volumeMode: Filesystem
-          storageClassName: ${STORAGE_CLASS}
-          resources:
-            requests:
-              storage: ${DISK_SIZE}
-        EOF
-
-    - name: Create the target KubeVirt VirtualMachine, powered off
-      # `running: false`: this VM is never started here. Neither device
-      # carries a permanent bootOrder: a static bootOrder would keep
-      # QEMU's "bootorder" fw_cfg file non-empty on every boot, and OVMF's
-      # QemuBootOrderLib rewrites NVRAM BootOrder from that file whenever
-      # it is present - discarding the persistent efibootmgr entry
-      # kezio-agent writes at finalize and falling back to PXE. With no
-      # static bootOrder, fw_cfg goes back to empty once KubeVirtBMC's
-      # one-shot PXE override (SetOneTimePXEBoot) is consumed and
-      # restored, so OVMF leaves NVRAM BootOrder untouched on the reboot
-      # into disk - matching real firmware with no BMC override in effect.
-      shell: bash
-      env:
-        NAMESPACE: ${{ inputs.namespace }}
-        VM_NAME: ${{ inputs.vm-name }}
-        VM_MAC: ${{ inputs.vm-mac }}
-        DISK_SERIAL: ${{ inputs.disk-serial }}
-        BOOT_NETWORK_NAME: ${{ inputs.boot-network-name }}
-      run: |
-        set -euo pipefail
-        cat <<EOF | kubectl apply -f -
-        apiVersion: kubevirt.io/v1
-        kind: VirtualMachine
-        metadata:
-          name: ${VM_NAME}
-          namespace: ${NAMESPACE}
-        spec:
-          running: false
-          template:
-            metadata:
-              labels:
-                kubevirt.io/vm: ${VM_NAME}
-            spec:
-              domain:
-                cpu:
-                  cores: 2
-                resources:
-                  requests:
-                    memory: 3Gi
-                firmware:
-                  bootloader:
-                    efi:
-                      secureBoot: false
-                      # Persist the EFI variable store: real bare-metal
-                      # NVRAM survives power cycles, so the efibootmgr
-                      # boot entry kezio-agent writes at finalize must
-                      # survive the reboot into disk.
-                      persistent: true
-                devices:
-                  interfaces:
-                    - name: provisioning
-                      macAddress: "${VM_MAC}"
-                      bridge: {}
-                  disks:
-                    - name: data
-                      serial: "${DISK_SERIAL}"
-                      disk:
-                        bus: virtio
-                    - name: cloudinitdisk
-                      disk:
-                        bus: virtio
-              networks:
-                - name: provisioning
-                  multus:
-                    networkName: ${BOOT_NETWORK_NAME}
-              volumes:
-                - name: data
-                  persistentVolumeClaim:
-                    claimName: ${VM_NAME}-data
-                - name: cloudinitdisk
-                  cloudInitNoCloud:
-                    # Without this override, qemu-guest-agent.service
-                    # crash-loops in the guest and permanently fails
-                    # (systemd StartLimitBurst exhausted) before it can
-                    # connect. This VM persists across the BMC
-                    # power-cycle's VMI recreation, so the seed stays
-                    # attached and applies on every boot, including after
-                    # PowerOn.
-                    userData: |
-                      #cloud-config
-                      write_files:
-                        - path: /etc/systemd/system/qemu-guest-agent.service.d/override.conf
-                          content: |
-                            [Unit]
-                            StartLimitIntervalSec=0
-                            [Service]
-                            Restart=always
-                            RestartSec=1
-                      runcmd:
-                        - systemctl daemon-reload
-                        - systemctl enable --now qemu-guest-agent.service
-        EOF
-
-    - name: "Assert the VM is off (nothing has started it yet)"
-      # Bounded wait, not a one-shot check: right after `kubectl apply`,
-      # status.printableStatus may not be populated yet (a lag, not a real
-      # problem). A Running status is never lag, though, and must fail immediately.
-      shell: bash
-      env:
-        NAMESPACE: ${{ inputs.namespace }}
-        VM_NAME: ${{ inputs.vm-name }}
-      run: |
-        set -euo pipefail
-        deadline=$(( $(date +%s) + 120 ))
-        while true; do
-          status="$(kubectl get vm "${VM_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.printableStatus}' || true)"
-          echo "$(date -Is) VM printableStatus: ${status:-<none>}"
-          [ "${status}" = "Stopped" ] && break
-          if [ "${status}" = "Running" ]; then
-            echo "::error::VM ${VM_NAME} printableStatus = Running, want Stopped - it must be off until a BMC caller powers it on." >&2
-            exit 1
-          fi
-          if [ "$(date +%s)" -ge "${deadline}" ]; then
-            echo "::error::VM ${VM_NAME} printableStatus = ${status:-<none>}, want Stopped - it must be off until a BMC caller powers it on." >&2
-            exit 1
-          fi
-          sleep 5
-        done
-        if kubectl get vmi "${VM_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1; then
-          echo "::error::A VirtualMachineInstance already exists for ${VM_NAME}; the VM must not be running yet." >&2
-          exit 1
-        fi
-
     - name: Create the KubeVirtBMC VirtualMachineBMC for the target VM
       # Gives the VM a Redfish endpoint: KubeVirtBMC's controller creates a
       # "virtbmc" agent Pod (translating Redfish calls into VirtualMachine

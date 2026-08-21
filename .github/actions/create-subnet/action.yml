@@ -1,0 +1,147 @@
+name: Create a Subnet
+
+description: >-
+  The API half of a Subnet-backed bootd deployment: creates the Subnet
+  CR that SubnetReconciler watches to build a bootd Deployment
+  (kezio-bootd-<name>). Waits for status condition Valid=True (schema
+  validation plus internal/nadvalidate and internal/subnetvalidate's own
+  checks against the referenced NetworkAttachmentDefinitions and DHCP
+  config) and reports the Ready condition without failing the action on
+  it - Ready reflects the bootd Deployment's own rollout, which is
+  deploy-bootd's job to wait on, not this action's.
+
+inputs:
+  name:
+    description: Name of the Subnet CR; also the suffix of the bootd Deployment it produces (kezio-bootd-<name>).
+    required: true
+  namespace:
+    description: Namespace the Subnet is created in.
+    required: false
+    default: "scaffold-system"
+  cidr:
+    description: 'Subnet.spec.cidr, e.g. "192.0.2.0/24".'
+    required: true
+  bootd-server-ip:
+    description: 'Subnet.spec.bootdServerIP (bare address, no CIDR suffix), e.g. "192.0.2.2".'
+    required: true
+  bootd-network-name:
+    description: Name of the NetworkAttachmentDefinition the bootd Deployment attaches through - must live in the same namespace.
+    required: true
+  seeder-network-name:
+    description: Name of the NetworkAttachmentDefinition seeder pods attach through, when this Subnet hosts seeders. Empty leaves it unset.
+    required: false
+    default: ""
+  site-ref:
+    description: Subnet.spec.siteRef.name. The Site kind does not exist yet, so this value is free-form and unvalidated.
+    required: false
+    default: "default"
+  dhcp-scenario:
+    description: 'DHCP scenario, mapped onto Subnet.spec.dhcp.mode: "no-relay" -> proxy (an existing DHCP server stays lease authority), "lease" -> lease (bootd''s own dnsmasq becomes lease authority).'
+    required: false
+    default: "no-relay"
+  lease-range-start:
+    description: Subnet.spec.dhcp.leaseRangeStart. Required when dhcp-scenario is "lease".
+    required: false
+    default: ""
+  lease-range-end:
+    description: Subnet.spec.dhcp.leaseRangeEnd. Required when dhcp-scenario is "lease".
+    required: false
+    default: ""
+  timeout:
+    description: Timeout to wait for the Valid condition to become True.
+    required: false
+    default: "120s"
+
+runs:
+  using: composite
+  steps:
+    - name: Create the Subnet
+      shell: bash
+      env:
+        NAME: ${{ inputs.name }}
+        NAMESPACE: ${{ inputs.namespace }}
+        CIDR: ${{ inputs.cidr }}
+        BOOTD_SERVER_IP: ${{ inputs.bootd-server-ip }}
+        BOOTD_NETWORK_NAME: ${{ inputs.bootd-network-name }}
+        SEEDER_NETWORK_NAME: ${{ inputs.seeder-network-name }}
+        SITE_REF: ${{ inputs.site-ref }}
+        DHCP_SCENARIO: ${{ inputs.dhcp-scenario }}
+        LEASE_RANGE_START: ${{ inputs.lease-range-start }}
+        LEASE_RANGE_END: ${{ inputs.lease-range-end }}
+      run: |
+        set -euo pipefail
+        case "${DHCP_SCENARIO}" in
+          no-relay) dhcp_mode=proxy ;;
+          lease) dhcp_mode=lease ;;
+          *)
+            echo "::error::unknown dhcp-scenario '${DHCP_SCENARIO}' (expected no-relay or lease)" >&2
+            exit 1
+            ;;
+        esac
+        if [ "${dhcp_mode}" = lease ] && { [ -z "${LEASE_RANGE_START}" ] || [ -z "${LEASE_RANGE_END}" ]; }; then
+          echo "::error::dhcp-scenario 'lease' requires both lease-range-start and lease-range-end" >&2
+          exit 1
+        fi
+
+        subnet_yaml="$(cat <<EOF
+        apiVersion: kezio.kojuro.date/v1alpha2
+        kind: Subnet
+        metadata:
+          name: ${NAME}
+          namespace: ${NAMESPACE}
+        spec:
+          siteRef:
+            name: ${SITE_REF}
+          cidr: "${CIDR}"
+          bootdServerIP: "${BOOTD_SERVER_IP}"
+          bootdNetworkRef:
+            name: ${BOOTD_NETWORK_NAME}
+        EOF
+        )"
+        if [ -n "${SEEDER_NETWORK_NAME}" ]; then
+          subnet_yaml+=$'\n  seederNetworkRef:\n    name: '"${SEEDER_NETWORK_NAME}"
+        fi
+        subnet_yaml+=$'\n  dhcp:\n    mode: '"${dhcp_mode}"
+        if [ "${dhcp_mode}" = lease ]; then
+          subnet_yaml+=$'\n    leaseRangeStart: '"${LEASE_RANGE_START}"
+          subnet_yaml+=$'\n    leaseRangeEnd: '"${LEASE_RANGE_END}"
+        fi
+        echo "${subnet_yaml}" | kubectl apply -f -
+
+    - name: Wait for the Subnet to become Valid
+      shell: bash
+      env:
+        NAME: ${{ inputs.name }}
+        NAMESPACE: ${{ inputs.namespace }}
+        TIMEOUT: ${{ inputs.timeout }}
+      run: |
+        set -euo pipefail
+        deadline_seconds="${TIMEOUT%s}"
+        deadline=$(( $(date +%s) + deadline_seconds ))
+        while true; do
+          valid="$(kubectl get subnet "${NAME}" -n "${NAMESPACE}" \
+            -o jsonpath='{.status.conditions[?(@.type=="Valid")].status}' || true)"
+          echo "$(date -Is) Subnet Valid=${valid:-<none>}"
+          [ "${valid}" = "True" ] && break
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::Subnet ${NAME} did not become Valid within ${TIMEOUT}." >&2
+            kubectl get subnet "${NAME}" -n "${NAMESPACE}" -o yaml
+            exit 1
+          fi
+          sleep 5
+        done
+
+    - name: Report the Subnet's Ready condition
+      # Informational only: Ready tracks the bootd Deployment's own
+      # rollout, which asynchronously follows this Subnet becoming
+      # Valid. deploy-bootd is what actually waits on it - this step
+      # never fails the action.
+      shell: bash
+      env:
+        NAME: ${{ inputs.name }}
+        NAMESPACE: ${{ inputs.namespace }}
+      run: |
+        set +e
+        ready="$(kubectl get subnet "${NAME}" -n "${NAMESPACE}" \
+          -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')"
+        echo "Subnet ${NAME} Ready=${ready:-<none>} (not gated on by this action)"

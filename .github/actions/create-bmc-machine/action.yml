@@ -1,0 +1,127 @@
+name: Create a Machine and its BMC credentials Secret
+
+description: >-
+  The API half of BMC-driven provisioning: creates the basic-auth BMC
+  credentials Secret (kubernetes.io/basic-auth, "username"/"password"
+  keys - internal/bmc/credentials.go's SecretKeyUsername/SecretKeyPassword)
+  and the Machine CR pointing spec.bmc at a Redfish endpoint through it.
+  No spec.imageRef: this action only enrolls the machine, it does not
+  request a deployment. Asserts the Machine is admitted (the v1alpha2
+  Machine validating webhook accepts spec.bmc/spec.subnetRef) and its
+  status.state leaves "" within a short timeout - proof the controller
+  observed it and entered the Enrolling walk. Does not wait for
+  AgentRegistered or Available - that belongs to wait-agent-registered.
+
+inputs:
+  namespace:
+    description: Namespace the Secret and Machine are created in.
+    required: false
+    default: "scaffold-system"
+  secret-name:
+    description: Name of the basic-auth Secret created for the BMC credentials.
+    required: true
+  username:
+    description: BMC username stored in the Secret.
+    required: false
+    default: "kezio-e2e"
+  password:
+    description: BMC password stored in the Secret. Left empty, a random 32-hex-character password is generated.
+    required: false
+    default: ""
+  machine-name:
+    description: Name of the Machine CR.
+    required: true
+  bmc-address:
+    description: 'Machine.spec.bmc.address, e.g. "redfish+http://<vm>-virtbmc.<ns>.svc.cluster.local/redfish/v1/Systems/1".'
+    required: true
+  boot-mac:
+    description: Machine.spec.bootMACAddress - must match the target VM's provisioning interface MAC.
+    required: true
+  subnet-name:
+    description: Machine.spec.subnetRef.name - the Subnet whose bootd instance answers this machine's PXE boot.
+    required: true
+  timeout:
+    description: Timeout to wait for status.state to leave "" after creation.
+    required: false
+    default: "120s"
+
+runs:
+  using: composite
+  steps:
+    - name: Create the BMC credentials Secret
+      # Shared by both sides of the BMC relationship: KubeVirtBMC's
+      # VirtualMachineBMC.spec.authSecretRef and kezio's
+      # Machine.spec.bmc.credentialsSecretRef both read the same
+      # "username"/"password" keys, so one Secret authenticates both
+      # sides.
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        SECRET_NAME: ${{ inputs.secret-name }}
+        BMC_USERNAME: ${{ inputs.username }}
+        BMC_PASSWORD_INPUT: ${{ inputs.password }}
+      run: |
+        set -euo pipefail
+        BMC_PASSWORD="${BMC_PASSWORD_INPUT}"
+        if [ -z "${BMC_PASSWORD}" ]; then
+          BMC_PASSWORD="$(openssl rand -hex 16)"
+        fi
+        echo "::add-mask::${BMC_PASSWORD}"
+        kubectl -n "${NAMESPACE}" create secret generic "${SECRET_NAME}" \
+          --type=kubernetes.io/basic-auth \
+          --from-literal=username="${BMC_USERNAME}" \
+          --from-literal=password="${BMC_PASSWORD}" \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: Create the Machine
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        SECRET_NAME: ${{ inputs.secret-name }}
+        BMC_ADDRESS: ${{ inputs.bmc-address }}
+        BOOT_MAC: ${{ inputs.boot-mac }}
+        SUBNET_NAME: ${{ inputs.subnet-name }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha2
+        kind: Machine
+        metadata:
+          name: ${MACHINE_NAME}
+          namespace: ${NAMESPACE}
+        spec:
+          bmc:
+            address: ${BMC_ADDRESS}
+            credentialsSecretRef:
+              name: ${SECRET_NAME}
+          bootMACAddress: "${BOOT_MAC}"
+          subnetRef:
+            name: ${SUBNET_NAME}
+        EOF
+
+    - name: Assert the Machine left its zero-value state
+      # `kubectl apply` above already proved admission (the validating
+      # webhook rejects a malformed spec.bmc/spec.subnetRef at that call);
+      # this step proves the controller went on to observe the object,
+      # not just that the API server accepted it.
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        TIMEOUT: ${{ inputs.timeout }}
+      run: |
+        set -euo pipefail
+        deadline_seconds="${TIMEOUT%s}"
+        deadline=$(( $(date +%s) + deadline_seconds ))
+        while true; do
+          state="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.state}' || true)"
+          echo "$(date -Is) Machine status.state: ${state:-<empty>}"
+          [ -n "${state}" ] && break
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::Machine ${MACHINE_NAME} status.state is still empty after ${TIMEOUT} - the controller has not observed it." >&2
+            kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o yaml
+            exit 1
+          fi
+          sleep 5
+        done

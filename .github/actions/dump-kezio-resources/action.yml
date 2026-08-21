@@ -1,0 +1,30 @@
+name: Dump all kezio v1alpha2 resources in a namespace
+
+description: >-
+  Best-effort YAML dump of every kezio.kojuro.date/v1alpha2 kind
+  (machines, machinehardwares, subnets, deployruns, images,
+  partitioncontents) in one namespace. A companion to
+  dump-e2e-diagnostics for the API half of the netboot lane: pass this
+  action's `namespace` instead of building an extra-resource-refs list
+  by hand when the caller wants every kezio CR in the namespace, not a
+  hand-picked subset. Runs under `set +e`: a kind with zero objects, or
+  not yet created, must not fail this step.
+
+inputs:
+  namespace:
+    description: Namespace to dump kezio resources from.
+    required: false
+    default: "scaffold-system"
+
+runs:
+  using: composite
+  steps:
+    - name: Dump kezio v1alpha2 resources
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+      run: |
+        set +e
+        echo "===== kezio v1alpha2 resources in ${NAMESPACE} ====="
+        kubectl get machines,machinehardwares,subnets,deployruns,images,partitioncontents \
+          -n "${NAMESPACE}" -o yaml
