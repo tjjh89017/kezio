@@ -139,6 +139,65 @@ func TestValidateStep(t *testing.T) {
 			wantErr: `spec.steps[0].chrootScript.script: placeholder "bogus" does not reference a declared param or a reserved name (machineName, imageName, targetDisk)`,
 		},
 		{
+			name: "builtin with allowed param",
+			step: keziov1alpha2.PostHookStep{
+				Builtin: &keziov1alpha2.PostHookBuiltinStep{
+					Name:   keziov1alpha2.BuiltinStepInstallRemovableFallback,
+					Params: map[string]string{"disk": "/dev/sda", "part": "1"},
+				},
+			},
+		},
+		{
+			name: "builtin with unknown param key",
+			step: keziov1alpha2.PostHookStep{
+				Builtin: &keziov1alpha2.PostHookBuiltinStep{
+					Name:   keziov1alpha2.BuiltinStepInstallRemovableFallback,
+					Params: map[string]string{"bogus": "x"},
+				},
+			},
+			wantErr: `spec.steps[0].builtin.params: "bogus" is not a valid parameter for builtin "install-removable-fallback"`,
+		},
+		{
+			name: "mkswap rejects any param",
+			step: keziov1alpha2.PostHookStep{
+				OSFamily: keziov1alpha2.OSFamilyLinux,
+				Builtin: &keziov1alpha2.PostHookBuiltinStep{
+					Name:   keziov1alpha2.BuiltinStepMkswap,
+					Params: map[string]string{"disk": "/dev/sda"},
+				},
+			},
+			wantErr: `spec.steps[0].builtin.params: "disk" is not a valid parameter for builtin "mkswap"`,
+		},
+		{
+			name: "builtin param with declared placeholder",
+			step: keziov1alpha2.PostHookStep{
+				Builtin: &keziov1alpha2.PostHookBuiltinStep{
+					Name:   keziov1alpha2.BuiltinStepInstallRemovableFallback,
+					Params: map[string]string{"disk": "{{ .foo }}"},
+				},
+			},
+		},
+		{
+			name: "builtin param with undeclared placeholder",
+			step: keziov1alpha2.PostHookStep{
+				Builtin: &keziov1alpha2.PostHookBuiltinStep{
+					Name:   keziov1alpha2.BuiltinStepInstallRemovableFallback,
+					Params: map[string]string{"disk": "{{ .bogus }}"},
+				},
+			},
+			wantErr: `spec.steps[0].builtin.params[disk]: placeholder "bogus" does not reference a declared param or a reserved name (machineName, imageName, targetDisk)`,
+		},
+		{
+			name: "growLastPartition allows disk, partition, fsType",
+			step: keziov1alpha2.PostHookStep{
+				OSFamily: keziov1alpha2.OSFamilyLinux,
+				Builtin: &keziov1alpha2.PostHookBuiltinStep{
+					Name:   keziov1alpha2.BuiltinStepGrowLastPartition,
+					Params: map[string]string{"disk": "/dev/sda", "partition": "3", "fsType": "ext4"},
+				},
+			},
+		},
+		{
 			name: "script sourced from configMapRef skips placeholder checks",
 			step: keziov1alpha2.PostHookStep{
 				Script: &keziov1alpha2.PostHookScriptSource{ConfigMapRef: &keziov1alpha2.ConfigMapKeyRef{Name: "cm", Key: "run.sh"}},

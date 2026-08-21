@@ -105,6 +105,41 @@ var _ = Describe("PostHook Webhook", func() {
 			Expect(validator.ValidateCreate(ctx, obj)).Error().NotTo(HaveOccurred())
 		})
 
+		It("denies a builtin param key outside its allow-list", func() {
+			obj.Spec.Steps = []keziov1alpha2.PostHookStep{
+				{Builtin: &keziov1alpha2.PostHookBuiltinStep{
+					Name:   keziov1alpha2.BuiltinStepInstallRemovableFallback,
+					Params: map[string]string{"bogus": "x"},
+				}},
+			}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring(`"bogus" is not a valid parameter`))
+		})
+
+		It("denies a builtin param placeholder that references an undeclared param", func() {
+			obj.Spec.Steps = []keziov1alpha2.PostHookStep{
+				{Builtin: &keziov1alpha2.PostHookBuiltinStep{
+					Name:   keziov1alpha2.BuiltinStepInstallRemovableFallback,
+					Params: map[string]string{"disk": "{{ .bogus }}"},
+				}},
+			}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("bogus"))
+		})
+
+		It("admits an allowed builtin param with a declared placeholder", func() {
+			obj.Spec.Params = []keziov1alpha2.PostHookParam{{Name: "diskName"}}
+			obj.Spec.Steps = []keziov1alpha2.PostHookStep{
+				{Builtin: &keziov1alpha2.PostHookBuiltinStep{
+					Name:   keziov1alpha2.BuiltinStepInstallRemovableFallback,
+					Params: map[string]string{"disk": "{{ .diskName }}"},
+				}},
+			}
+			Expect(validator.ValidateCreate(ctx, obj)).Error().NotTo(HaveOccurred())
+		})
+
 		It("denies a duplicate param name", func() {
 			obj.Spec.Params = []keziov1alpha2.PostHookParam{{Name: "a"}, {Name: "a"}}
 			_, err := validator.ValidateCreate(ctx, obj)

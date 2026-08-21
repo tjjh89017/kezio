@@ -93,6 +93,20 @@ spec:
                           - growLastPartition
                           - install-removable-fallback
                           type: string
+                        params:
+                          additionalProperties:
+                            type: string
+                          description: |-
+                            Params carries this builtin's own parameters, keyed by the name each
+                            builtin accepts (see posthookvalidate's per-builtin allow-list: for
+                            example efibootmgr/install-removable-fallback take "disk"/"part",
+                            growLastPartition takes "disk"/"partition"/"fsType", mkswap takes
+                            none). A value may be a literal or a "{{ .name }}" placeholder,
+                            resolved the same way a script step's content is. The deploy plan
+                            builder merges these over its own derived defaults (the OS image's
+                            target disk and ESP/last-slot partition numbers), an explicit entry
+                            here always winning.
+                          type: object
                         timeoutSeconds:
                           description: |-
                             TimeoutSeconds bounds how long the builtin may run before the agent

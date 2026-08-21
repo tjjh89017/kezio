@@ -104,7 +104,10 @@ func ValidateStep(i int, step keziov1alpha2.PostHookStep, declared map[string]bo
 	case keziov1alpha2.PostHookStepTypeUnknown:
 		return fmt.Errorf("%s: exactly one of builtin, script, or chrootScript must be set", path)
 	case keziov1alpha2.PostHookStepTypeBuiltin:
-		return validateOSFamilyGating(path, step)
+		if err := validateOSFamilyGating(path, step); err != nil {
+			return err
+		}
+		return validateBuiltinParams(path, *step.Builtin, declared)
 	case keziov1alpha2.PostHookStepTypeScript:
 		return validateScriptSource(path+".script", *step.Script, declared)
 	case keziov1alpha2.PostHookStepTypeChrootScript:
@@ -124,6 +127,39 @@ func validateOSFamilyGating(path string, step keziov1alpha2.PostHookStep) error 
 			"%s.builtin: %q requires osFamily to be set to %q, got %q",
 			path, step.Builtin.Name, keziov1alpha2.OSFamilyLinux, step.OSFamily,
 		)
+	}
+	return nil
+}
+
+// builtinAllowedParams names, per builtin, the params.* keys that builtin
+// accepts (see internal/agent/deploy's finalize.go, which reads exactly
+// these keys off ResolvedHookStep.Params): efibootmgr and
+// install-removable-fallback both target one ESP partition ("disk",
+// "part"); growLastPartition targets one partition to grow ("disk",
+// "partition", "fsType"); mkswap takes none, since it always acts on
+// every swap slot across the whole plan.
+var builtinAllowedParams = map[string]map[string]bool{
+	keziov1alpha2.BuiltinStepEfibootmgr:               {"disk": true, "part": true},
+	keziov1alpha2.BuiltinStepInstallRemovableFallback: {"disk": true, "part": true},
+	keziov1alpha2.BuiltinStepGrowLastPartition:        {"disk": true, "partition": true, "fsType": true},
+	keziov1alpha2.BuiltinStepMkswap:                   {},
+}
+
+// validateBuiltinParams rejects a builtin step's params key not in
+// builtinAllowedParams[step.Name], and checks every value's template
+// placeholders the same way an inline script's content is checked
+// (validatePlaceholders). step.Name not appearing in builtinAllowedParams
+// at all is not reported here - the CRD schema's own Enum on
+// PostHookBuiltinStep.Name already rejects any other value.
+func validateBuiltinParams(path string, step keziov1alpha2.PostHookBuiltinStep, declared map[string]bool) error {
+	allowed := builtinAllowedParams[step.Name]
+	for key, value := range step.Params {
+		if !allowed[key] {
+			return fmt.Errorf("%s.builtin.params: %q is not a valid parameter for builtin %q", path, key, step.Name)
+		}
+		if err := validatePlaceholders(fmt.Sprintf("%s.builtin.params[%s]", path, key), value, declared); err != nil {
+			return err
+		}
 	}
 	return nil
 }

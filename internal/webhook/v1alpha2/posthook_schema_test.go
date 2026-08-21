@@ -23,6 +23,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 )
@@ -140,5 +141,23 @@ var _ = Describe("PostHook CRD schema", func() {
 			{Name: "hostname"},
 		}
 		Expect(k8sClient.Create(ctx, ph)).To(Succeed())
+	})
+
+	It("round-trips a builtin step's params through the schema (not pruned as an unknown field)", func() {
+		ph := newPostHook()
+		ph.Spec.Steps = []keziov1alpha2.PostHookStep{
+			{
+				OSFamily: keziov1alpha2.OSFamilyLinux,
+				Builtin: &keziov1alpha2.PostHookBuiltinStep{
+					Name:   keziov1alpha2.BuiltinStepEfibootmgr,
+					Params: map[string]string{"disk": "/dev/sda", "part": "1"},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ph)).To(Succeed())
+
+		var stored keziov1alpha2.PostHook
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(ph), &stored)).To(Succeed())
+		Expect(stored.Spec.Steps[0].Builtin.Params).To(Equal(map[string]string{"disk": "/dev/sda", "part": "1"}))
 	})
 })

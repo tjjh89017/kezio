@@ -80,6 +80,17 @@ type PostHookBuiltinStep struct {
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
+	// Params carries this builtin's own parameters, keyed by the name each
+	// builtin accepts (see posthookvalidate's per-builtin allow-list: for
+	// example efibootmgr/install-removable-fallback take "disk"/"part",
+	// growLastPartition takes "disk"/"partition"/"fsType", mkswap takes
+	// none). A value may be a literal or a "{{ .name }}" placeholder,
+	// resolved the same way a script step's content is. The deploy plan
+	// builder merges these over its own derived defaults (the OS image's
+	// target disk and ESP/last-slot partition numbers), an explicit entry
+	// here always winning.
+	// +optional
+	Params map[string]string `json:"params,omitempty"`
 }
 
 // EffectiveTimeoutSeconds returns the builtin step's timeout, treating a
