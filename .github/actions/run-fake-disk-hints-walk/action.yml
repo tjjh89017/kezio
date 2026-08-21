@@ -172,6 +172,21 @@ runs:
 
         echo "machine/${MACHINE_NAME} correctly stayed Available/error with no DeployRun created, errorMessage=\"${error_message}\""
 
+    - name: "Machine A: clean it up"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.ambiguous-machine-name }}
+      run: |
+        set -euo pipefail
+        # Machine A settles in operationalStatus=error, which keeps
+        # requeuing on the failed-reconcile backoff timer - leaving it
+        # around would move controller_runtime_reconcile_total during a
+        # later churn-flatness assertion against a different Machine.
+        kubectl delete "machine/${MACHINE_NAME}" -n "${NAMESPACE}" --wait=false --ignore-not-found
+        kubectl wait "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
+          --for=delete --timeout=60s
+
     - name: "Machine B: create a Machine whose targetDisk hint uniquely selects the second fabricated disk"
       shell: bash
       env:
@@ -231,6 +246,17 @@ runs:
         fi
 
         echo "machine/${MACHINE_NAME} resolved its unique serialNumber hint to ${resolved_disk}"
+
+    - name: "Machine B: clean it up"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.unique-machine-name }}
+      run: |
+        set -euo pipefail
+        kubectl delete "machine/${MACHINE_NAME}" -n "${NAMESPACE}" --wait=false --ignore-not-found
+        kubectl wait "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
+          --for=delete --timeout=60s
 
     - name: "Machine C: create a Machine whose targetDisk hint matches neither fabricated disk"
       shell: bash
@@ -300,3 +326,30 @@ runs:
         fi
 
         echo "machine/${MACHINE_NAME} correctly stayed Available/error with no DeployRun created, errorMessage=\"${error_message}\""
+
+    - name: "Machine C: clean it up"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.no-match-machine-name }}
+      run: |
+        set -euo pipefail
+        # Same error-backoff requeue concern as Machine A.
+        kubectl delete "machine/${MACHINE_NAME}" -n "${NAMESPACE}" --wait=false --ignore-not-found
+        kubectl wait "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
+          --for=delete --timeout=60s
+
+    - name: Clean up the shared BMC credentials Secret and Image fixture
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        SECRET_NAME: ${{ inputs.credentials-secret-name }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+      run: |
+        set -euo pipefail
+        # Each Machine's own BMC credentials Secret ref has no owner
+        # reference back to the Secret, so it outlives the Machines above
+        # and needs an explicit delete; --ignore-not-found also covers any
+        # cascade from a Machine that did claim it.
+        kubectl delete "secret/${SECRET_NAME}" -n "${NAMESPACE}" --ignore-not-found
+        kubectl delete "image/${IMAGE_NAME}" -n "${NAMESPACE}" --ignore-not-found
