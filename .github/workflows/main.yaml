@@ -616,12 +616,9 @@ jobs:
           vm-mac: ${{ env.TARGET_VM_MAC }}
           disk-serial: "KEZIONETBOOTDISK01"
 
-      - name: Provision the target VM through a real KubeVirtBMC/Redfish endpoint
-        uses: ./.github/actions/provision-target-vm-via-bmc
-        with:
-          vm-name: ${{ env.TARGET_VM_NAME }}
-          bmc-creds-secret-name: "${{ env.TARGET_VM_NAME }}-bmc-creds"
-
+      # Must precede provisioning through the BMC: it creates the
+      # basic-auth Secret VirtualMachineBMC.spec.authSecretRef reads,
+      # which create-bmc-machine also points Machine.spec.bmc at.
       - name: Create the Machine
         uses: ./.github/actions/create-bmc-machine
         with:
@@ -630,6 +627,12 @@ jobs:
           bmc-address: "redfish+http://${{ env.TARGET_VM_NAME }}-virtbmc.scaffold-system.svc.cluster.local/redfish/v1/Systems/1"
           boot-mac: ${{ env.TARGET_VM_MAC }}
           subnet-name: ${{ env.SUBNET_NAME }}
+
+      - name: Provision the target VM through a real KubeVirtBMC/Redfish endpoint
+        uses: ./.github/actions/provision-target-vm-via-bmc
+        with:
+          vm-name: ${{ env.TARGET_VM_NAME }}
+          bmc-creds-secret-name: "${{ env.TARGET_VM_NAME }}-bmc-creds"
 
       - name: Start continuous VM console capture
         uses: ./.github/actions/capture-vm-console

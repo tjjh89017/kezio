@@ -58,7 +58,26 @@ runs:
         echo "bootd-baseline-lines=${bootd_baseline_lines}" >> "$GITHUB_OUTPUT"
         echo "manager-baseline-lines=${manager_baseline_lines}" >> "$GITHUB_OUTPUT"
 
-    - name: Create the unenrolled VM's BMC credentials Secret and VirtualMachineBMC
+    - name: Create the unenrolled VM's BMC credentials Secret
+      # provision-target-vm-via-bmc expects this Secret to already exist
+      # (VirtualMachineBMC.spec.authSecretRef) - unlike the enrolled
+      # target VM, there is no create-bmc-machine call here to create it,
+      # since this VM is deliberately never enrolled as a Machine.
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        SECRET_NAME: ${{ inputs.bmc-creds-secret-name }}
+      run: |
+        set -euo pipefail
+        password="$(openssl rand -hex 16)"
+        echo "::add-mask::${password}"
+        kubectl -n "${NAMESPACE}" create secret generic "${SECRET_NAME}" \
+          --type=kubernetes.io/basic-auth \
+          --from-literal=username="kezio-e2e" \
+          --from-literal=password="${password}" \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: Create the unenrolled VM's VirtualMachineBMC
       uses: ./.github/actions/provision-target-vm-via-bmc
       with:
         namespace: ${{ inputs.namespace }}
