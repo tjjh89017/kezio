@@ -123,6 +123,9 @@ var _ = BeforeSuite(func() {
 	err = SetupPartitionContentWebhookWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
+	err = SetupDeployRunWebhookWithManager(mgr)
+	Expect(err).NotTo(HaveOccurred())
+
 	// +kubebuilder:scaffold:webhook
 
 	go func() {
