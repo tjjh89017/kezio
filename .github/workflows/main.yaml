@@ -531,9 +531,6 @@ jobs:
         with:
           images: manager bootd boot-artifacts
 
-      - name: Install cert-manager
-        uses: ./.github/actions/install-cert-manager
-
       - name: Install cert-manager, KubeVirt, virtctl, and CDI
         uses: ./.github/actions/install-cluster-addons
         with:

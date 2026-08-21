@@ -82,14 +82,16 @@ runs:
         echo "===== ${NAMESPACE} pods ====="
         kubectl get pods -n "${NAMESPACE}" -o wide
         echo "===== controller-manager logs ====="
-        kubectl -n "${NAMESPACE}" logs deployment/kezio-controller-manager --all-containers --tail=1000
+        # Resolved by label, not a fixed name: kustomize's namePrefix
+        # (see deploy-kezio) can change the Deployment name.
+        controller_manager_deployment="$(kubectl -n "${NAMESPACE}" get deployment -l control-plane=controller-manager -o name | head -1)"
+        kubectl -n "${NAMESPACE}" logs "${controller_manager_deployment}" --all-containers --tail=1000
         echo "===== controller-manager fetch-boot-artifacts initContainer logs ====="
         # kubectl logs --all-containers above does not include
-        # initContainers. `deployment/kezio-controller-manager` (a
-        # workload reference) can resolve to the OLD ReplicaSet's pod
-        # during a rollout, which has no fetch-boot-artifacts container at
-        # all - loop over the actual pods instead, and dump each one's
-        # rendered securityContext too.
+        # initContainers. A Deployment workload reference can resolve to
+        # the OLD ReplicaSet's pod during a rollout, which has no
+        # fetch-boot-artifacts container at all - loop over the actual
+        # pods instead, and dump each one's rendered securityContext too.
         for p in $(kubectl -n "${NAMESPACE}" get pods -l control-plane=controller-manager -o name); do
           echo "--- ${p} securityContext ---"
           kubectl -n "${NAMESPACE}" get "${p}" \
