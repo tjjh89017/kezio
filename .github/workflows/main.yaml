@@ -159,9 +159,11 @@ jobs:
   # Fast e2e lane: single-node RKE2, built entirely from composite
   # actions - install CRDs, deploy the manager, walk a Machine through
   # the fake deployer to Provisioned, assert its DeployRun, exercise
-  # the failure paths (retry-to-success, dead-BMC delete give-up), then
-  # assert the Machine reconcile count stays flat under progress-only
-  # DeployRun status updates.
+  # the failure paths (retry-to-success, dead-BMC delete give-up), walk
+  # the deploy plan builder against a real mkfs-only Image/PostHook pair
+  # (default hook, a custom hook, and an unresolvable one), then assert
+  # the Machine reconcile count stays flat under progress-only DeployRun
+  # status updates.
   e2e-fast-lane:
     name: Fast lane
     needs: [images]
@@ -217,6 +219,12 @@ jobs:
         uses: ./.github/actions/run-fake-failure-walk
         with:
           namespace: "default"
+
+      - name: Run a fake-deployer plan-builder walk
+        uses: ./.github/actions/run-fake-plan-walk
+        with:
+          namespace: "default"
+          manager-namespace: "scaffold-system"
 
       - name: Run the watch-churn check
         uses: ./.github/actions/run-watch-churn-check

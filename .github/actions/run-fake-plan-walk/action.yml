@@ -1,0 +1,371 @@
+name: Run a fake-deployer plan-builder walk
+
+description: >-
+  Exercises internal/planbuild.Builder end to end against real objects,
+  distinct from run-fake-deploy-walk's dataImages-naming-nothing fixture:
+  a mkfs-only Image (an ESP slot, a swap slot, a data slot - no
+  PartitionContent, so it needs no seeder and reaches Ready purely
+  through the Image reconciler's own aggregation) plus a Machine whose
+  spec.imageRef names it. FakeDeployer.Provision still just walks
+  DeployRun phases without reading the resolved plan, so every assertion
+  here is against DeployRunSpec, the snapshot MachineReconciler.
+  createDeployRun writes before FakeDeployer ever runs. Three walks in
+  turn: a default-postHookRefs Machine (proves the shipped
+  kezio-default-finalize PostHook resolves), a custom-postHookRefs
+  Machine (proves a different attached PostHook set produces a different
+  hooksHash), and a Machine naming a PostHook that does not exist (proves
+  the unresolvable-hook case delays instead of provisioning).
+
+inputs:
+  namespace:
+    description: 'Namespace the Image, Machines, PostHook, and Secret are created in.'
+    required: false
+    default: "default"
+  manager-namespace:
+    description: >-
+      Namespace the controller-manager runs in - where
+      posthookdefaults.Ensurer server-side-applies the shipped
+      kezio-default-finalize PostHook (deploy-kezio's own "namespace"
+      input, config/default's namespace).
+    required: false
+    default: "scaffold-system"
+  image-name:
+    description: 'Name of the mkfs-only Image fixture.'
+    required: false
+    default: "fake-plan-walk-image"
+  credentials-secret-name:
+    description: 'Name of the placeholder BMC credentials Secret shared by every Machine this action creates.'
+    required: false
+    default: "fake-plan-walk-bmc-creds"
+  default-hook-machine-name:
+    description: 'Name of the Machine created with no postHookRefs (resolves the default PostHook).'
+    required: false
+    default: "fake-plan-walk-default-hook"
+  custom-hook-name:
+    description: 'Name of the custom PostHook this action creates.'
+    required: false
+    default: "fake-plan-walk-custom-hook"
+  custom-hook-machine-name:
+    description: 'Name of the Machine created with postHookRefs naming the custom PostHook.'
+    required: false
+    default: "fake-plan-walk-custom-hook-machine"
+  missing-hook-machine-name:
+    description: 'Name of the Machine created with postHookRefs naming a PostHook that does not exist.'
+    required: false
+    default: "fake-plan-walk-missing-hook-machine"
+  timeout:
+    description: 'Timeout for a Machine to reach status.state=Provisioned, e.g. "120s".'
+    required: false
+    default: "120s"
+
+runs:
+  using: composite
+  steps:
+    - name: Create the mkfs-only Image fixture (no PartitionContent, so it needs no seeder)
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha2
+        kind: Image
+        metadata:
+          name: ${IMAGE_NAME}
+          namespace: ${NAMESPACE}
+        spec:
+          osFamily: Linux
+          bootable: true
+          layout:
+            partitionTable: gpt
+            sfdiskJSON: |
+              {"partitiontable":{"label":"gpt","id":"00000000-0000-0000-0000-000000000000","device":"/dev/vda","unit":"sectors","firstlba":34,"lastlba":67108062,"partitions":[{"node":"/dev/vda1","start":2048,"size":1048576,"type":"C12A7328-F81F-11D2-BA4B-00A0C93EC93B","uuid":"00000000-0000-0000-0000-000000000001","name":"esp"},{"node":"/dev/vda2","start":1050624,"size":4194304,"type":"0657FD6D-A4AB-43C4-84E5-0933C84B4F4F","uuid":"00000000-0000-0000-0000-000000000002","name":"swap"},{"node":"/dev/vda3","start":5244928,"size":61863099,"type":"0FC63DAF-8483-4772-8E79-3D69D8477DE4","uuid":"00000000-0000-0000-0000-000000000003","name":"root"}]}}
+            slots:
+              - number: 1
+                role: esp
+                fsType: vfat
+              - number: 2
+                role: swap
+              - number: 3
+                role: data
+                fsType: ext4
+        EOF
+
+    - name: Wait for the Image to reach state Ready
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+      run: |
+        set -euo pipefail
+        kubectl wait "image/${IMAGE_NAME}" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.state}'=Ready --timeout=60s
+        kubectl get "image/${IMAGE_NAME}" -n "${NAMESPACE}" -o yaml
+
+    - name: Create the placeholder BMC credentials Secret shared by every Machine below
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        SECRET_NAME: ${{ inputs.credentials-secret-name }}
+      run: |
+        set -euo pipefail
+        kubectl create secret generic "${SECRET_NAME}" \
+          --namespace "${NAMESPACE}" \
+          --from-literal=username=fake \
+          --from-literal=password=fake \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: Create the default-postHookRefs Machine
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.default-hook-machine-name }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+        SECRET_NAME: ${{ inputs.credentials-secret-name }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha2
+        kind: Machine
+        metadata:
+          name: ${MACHINE_NAME}
+          namespace: ${NAMESPACE}
+        spec:
+          bmc:
+            address: redfish://198.51.100.21/redfish/v1/Systems/1
+            credentialsSecretRef:
+              name: ${SECRET_NAME}
+          bootMACAddress: "aa:bb:cc:dd:ee:21"
+          subnetRef:
+            name: fake-plan-walk-subnet
+          imageRef:
+            name: ${IMAGE_NAME}
+        EOF
+
+    - name: Wait for the default-postHookRefs Machine to reach state Provisioned
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.default-hook-machine-name }}
+        TIMEOUT: ${{ inputs.timeout }}
+      run: |
+        set -euo pipefail
+        kubectl wait "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.state}'=Provisioned --timeout="${TIMEOUT}"
+
+    - name: Assert the default-postHookRefs DeployRun's snapshot and the shipped default PostHook
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MANAGER_NAMESPACE: ${{ inputs.manager-namespace }}
+        MACHINE_NAME: ${{ inputs.default-hook-machine-name }}
+      run: |
+        set -euo pipefail
+
+        run_name="$(kubectl get "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
+          -o jsonpath='{.status.lastSuccessfulRunRef.name}')"
+        if [ -z "${run_name}" ]; then
+          echo "machine/${MACHINE_NAME} reached Provisioned but status.lastSuccessfulRunRef is unset" >&2
+          exit 1
+        fi
+        run_json="$(kubectl get "deployrun/${run_name}" -n "${NAMESPACE}" -o json)"
+        echo "${run_json}" | jq .
+
+        hooks_hash="$(echo "${run_json}" | jq -r '.spec.hooksHash')"
+        if [ -z "${hooks_hash}" ] || [ "${hooks_hash}" = "null" ]; then
+          echo "deployrun/${run_name} spec.hooksHash is empty - the plan builder did not resolve the default PostHook" >&2
+          exit 1
+        fi
+        echo "FIRST_HOOKS_HASH=${hooks_hash}" >> "${GITHUB_ENV}"
+
+        resolved_disk="$(echo "${run_json}" | jq -r '.spec.resolvedDisks[0].targetDisk // empty')"
+        if [ "${resolved_disk}" != "/dev/vda" ]; then
+          echo "deployrun/${run_name} spec.resolvedDisks[0].targetDisk is \"${resolved_disk}\", expected \"/dev/vda\" (FakeDeployer.Inspect's fabricated disk)" >&2
+          exit 1
+        fi
+
+        default_hook_valid="$(kubectl get posthook kezio-default-finalize -n "${MANAGER_NAMESPACE}" \
+          -o jsonpath='{.status.conditions[?(@.type=="Valid")].status}')"
+        if [ "${default_hook_valid}" != "True" ]; then
+          echo "posthook/kezio-default-finalize in namespace ${MANAGER_NAMESPACE} has Valid=\"${default_hook_valid}\", expected \"True\"" >&2
+          kubectl get posthook kezio-default-finalize -n "${MANAGER_NAMESPACE}" -o yaml
+          exit 1
+        fi
+
+        echo "deployrun/${run_name} carries a non-empty hooksHash and resolvedDisks, and the default PostHook is Valid"
+
+    - name: Create a custom PostHook with a templated script step
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        HOOK_NAME: ${{ inputs.custom-hook-name }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha2
+        kind: PostHook
+        metadata:
+          name: ${HOOK_NAME}
+          namespace: ${NAMESPACE}
+        spec:
+          params:
+            - name: name
+              default: "kezio-e2e"
+          steps:
+            - script:
+                script: |
+                  echo "hello {{ .name }}"
+        EOF
+        kubectl wait "posthook/${HOOK_NAME}" -n "${NAMESPACE}" --for=condition=Valid --timeout=60s
+
+    - name: Create the custom-postHookRefs Machine
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.custom-hook-machine-name }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+        SECRET_NAME: ${{ inputs.credentials-secret-name }}
+        HOOK_NAME: ${{ inputs.custom-hook-name }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha2
+        kind: Machine
+        metadata:
+          name: ${MACHINE_NAME}
+          namespace: ${NAMESPACE}
+        spec:
+          bmc:
+            address: redfish://198.51.100.22/redfish/v1/Systems/1
+            credentialsSecretRef:
+              name: ${SECRET_NAME}
+          bootMACAddress: "aa:bb:cc:dd:ee:22"
+          subnetRef:
+            name: fake-plan-walk-subnet
+          imageRef:
+            name: ${IMAGE_NAME}
+          postHookRefs:
+            - name: ${HOOK_NAME}
+        EOF
+
+    - name: Wait for the custom-postHookRefs Machine to reach state Provisioned
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.custom-hook-machine-name }}
+        TIMEOUT: ${{ inputs.timeout }}
+      run: |
+        set -euo pipefail
+        kubectl wait "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.state}'=Provisioned --timeout="${TIMEOUT}"
+
+    - name: Assert the custom-postHookRefs run resolved a different hooksHash than the default one
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.custom-hook-machine-name }}
+      run: |
+        set -euo pipefail
+
+        run_name="$(kubectl get "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
+          -o jsonpath='{.status.lastSuccessfulRunRef.name}')"
+        if [ -z "${run_name}" ]; then
+          echo "machine/${MACHINE_NAME} reached Provisioned but status.lastSuccessfulRunRef is unset" >&2
+          exit 1
+        fi
+
+        run_json="$(kubectl get "deployrun/${run_name}" -n "${NAMESPACE}" -o json)"
+        echo "${run_json}" | jq .
+
+        hooks_hash="$(echo "${run_json}" | jq -r '.spec.hooksHash')"
+        if [ -z "${hooks_hash}" ] || [ "${hooks_hash}" = "null" ]; then
+          echo "deployrun/${run_name} spec.hooksHash is empty - the plan builder did not resolve the custom PostHook" >&2
+          exit 1
+        fi
+        if [ "${hooks_hash}" = "${FIRST_HOOKS_HASH}" ]; then
+          echo "deployrun/${run_name} spec.hooksHash (${hooks_hash}) matches the default-postHookRefs run's (${FIRST_HOOKS_HASH})," \
+            "expected a different attached PostHook to resolve a different hash" >&2
+          exit 1
+        fi
+
+        echo "deployrun/${run_name} resolved a distinct hooksHash (${hooks_hash}) from the default-postHookRefs run (${FIRST_HOOKS_HASH})"
+
+    - name: Create a Machine naming a PostHook that does not exist
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.missing-hook-machine-name }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+        SECRET_NAME: ${{ inputs.credentials-secret-name }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha2
+        kind: Machine
+        metadata:
+          name: ${MACHINE_NAME}
+          namespace: ${NAMESPACE}
+        spec:
+          bmc:
+            address: redfish://198.51.100.23/redfish/v1/Systems/1
+            credentialsSecretRef:
+              name: ${SECRET_NAME}
+          bootMACAddress: "aa:bb:cc:dd:ee:23"
+          subnetRef:
+            name: fake-plan-walk-subnet
+          imageRef:
+            name: ${IMAGE_NAME}
+          postHookRefs:
+            - name: fake-plan-walk-posthook-does-not-exist
+        EOF
+
+    - name: Wait for it to reach state Available, then assert it never starts provisioning
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.missing-hook-machine-name }}
+      run: |
+        set -euo pipefail
+        kubectl wait "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.state}'=Available --timeout=60s
+
+        # A NotReadyError from resolving the missing PostHook (see
+        # planbuild.Builder.resolveHook) makes the Machine reconciler's
+        # provisioning trigger delay rather than create a DeployRun (see
+        # MachineReconciler.currentHooksHash) - give it a few reconciles'
+        # worth of time to (wrongly) start one before asserting it never
+        # does.
+        sleep 30
+
+        machine_json="$(kubectl get "machine/${MACHINE_NAME}" -n "${NAMESPACE}" -o json)"
+        echo "${machine_json}" | jq .
+
+        state="$(echo "${machine_json}" | jq -r '.status.state')"
+        if [ "${state}" != "Available" ]; then
+          echo "machine/${MACHINE_NAME} left state Available (now \"${state}\") despite referencing a nonexistent PostHook" >&2
+          exit 1
+        fi
+
+        operational_status="$(echo "${machine_json}" | jq -r '.status.operationalStatus')"
+        if [ "${operational_status}" != "delayed" ]; then
+          echo "machine/${MACHINE_NAME} status.operationalStatus is \"${operational_status}\", expected \"delayed\"" >&2
+          exit 1
+        fi
+
+        current_run="$(echo "${machine_json}" | jq -r '.status.currentRunRef // empty')"
+        if [ -n "${current_run}" ]; then
+          echo "machine/${MACHINE_NAME} status.currentRunRef is set (${current_run}) despite referencing a nonexistent PostHook" >&2
+          exit 1
+        fi
+
+        echo "machine/${MACHINE_NAME} correctly stayed Available/delayed with no DeployRun created"
+
+    - name: Clean up the missing-PostHook Machine
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.missing-hook-machine-name }}
+      run: |
+        set -euo pipefail
+        kubectl delete "machine/${MACHINE_NAME}" -n "${NAMESPACE}" --wait=false --ignore-not-found

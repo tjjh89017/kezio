@@ -55,6 +55,13 @@ runs:
         echo "===== MachineHardware CRs ====="
         kubectl get machinehardwares.kezio.kojuro.date -n "${WORKLOAD_NAMESPACE}" -o yaml \
           >"${OUTPUT_PATH}/machinehardwares.yaml" 2>&1
+        echo "===== Image CRs ====="
+        kubectl get images.kezio.kojuro.date -n "${WORKLOAD_NAMESPACE}" -o yaml >"${OUTPUT_PATH}/images.yaml" 2>&1
+        echo "===== PostHook CRs (workload namespace and manager namespace) ====="
+        kubectl get posthooks.kezio.kojuro.date -n "${WORKLOAD_NAMESPACE}" -o yaml \
+          >"${OUTPUT_PATH}/posthooks.yaml" 2>&1
+        kubectl get posthooks.kezio.kojuro.date -n "${NAMESPACE}" -o yaml \
+          >>"${OUTPUT_PATH}/posthooks.yaml" 2>&1
 
         echo "===== pods ====="
         kubectl get pods -n "${NAMESPACE}" -o wide >"${OUTPUT_PATH}/pods.txt" 2>&1
