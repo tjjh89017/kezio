@@ -433,6 +433,269 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  # Netboot lane: a KubeVirt VM PXE-boots through a per-Subnet bootd pod
+  # into the live image, kezio-agent registers with a single-use token,
+  # MachineHardware holds the inventory, and the Machine reaches
+  # Available - no disk write. The matrix exercises both of Subnet's DHCP
+  # modes: no-relay (an existing DHCP server stays lease authority,
+  # bootd answers proxyDHCP only) and lease (bootd's own dnsmasq issues
+  # leases). Each leg also proves the MAC gate stays fail-secure against
+  # an unenrolled MAC.
+  e2e-netboot:
+    name: Netboot lane
+    needs: [build-required, e2e-fast-lane]
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    strategy:
+      fail-fast: false
+      matrix:
+        dhcp-scenario: [no-relay, lease]
+    env:
+      PROVISIONING_BRIDGE: kezio-prov0
+      PROVISIONING_HOST_IP: 192.0.2.1/24
+      PROVISIONING_CIDR: 192.0.2.0/24
+      BOOTD_SERVER_IP: 192.0.2.2
+      EXISTING_DHCP_NET1_IP: 192.0.2.3/24
+      TRACKER_NET1_IP: 192.0.2.4/24
+      SEEDER_NET1_IP: 192.0.2.5/24
+      LEASE_RANGE_START: 192.0.2.10
+      LEASE_RANGE_END: 192.0.2.100
+      SUBNET_NAME: netboot-${{ matrix.dhcp-scenario }}
+      TARGET_VM_NAME: netboot-vm
+      TARGET_VM_MAC: "52:54:00:be:ef:03"
+      UNKNOWN_VM_NAME: netboot-vm-unknown
+      UNKNOWN_VM_MAC: "52:54:00:be:ef:99"
+      BOOT_ARTIFACTS_IMG: "example.com/kezio-boot-artifacts:e2e"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the live boot image artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: kezio-live-image
+          path: dist/live
+
+      - name: Fail fast if the downloaded boot artifacts are empty
+        uses: ./.github/actions/assert-boot-artifacts-present
+
+      - name: Prepare the KVM host
+        uses: ./.github/actions/prepare-kvm-host
+
+      - name: Resource check (fail fast if the runner is under-resourced)
+        uses: ./.github/actions/check-runner-resources
+        with:
+          min-cpus: "4"
+          min-mem-mb: "14000"
+          min-disk-gb: "25"
+          context-label: "the netboot e2e lane"
+
+      - name: Create the provisioning bridge
+        uses: ./.github/actions/create-provisioning-bridge
+        with:
+          bridge-name: ${{ env.PROVISIONING_BRIDGE }}
+          host-ip: ${{ env.PROVISIONING_HOST_IP }}
+
+      - name: Download the manager and bootd image tarballs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "image-tar-@(manager|bootd)"
+          path: /tmp/images
+          merge-multiple: true
+
+      - name: Install RKE2 with Multus enabled
+        uses: ./.github/actions/install-rke2
+        with:
+          rke2-version: "v1.36.2+rke2r1"
+          enable-multus: "true"
+
+      - name: Harden the provisioning bridge for real PXE/DHCP traffic
+        uses: ./.github/actions/harden-provisioning-bridge
+        with:
+          bridge-name: ${{ env.PROVISIONING_BRIDGE }}
+
+      - name: Install local-path-provisioner and mark it the default StorageClass
+        uses: ./.github/actions/install-local-path-provisioner
+        with:
+          version: "v0.0.37"
+
+      # Packages the downloaded dist/live/ artifacts into an OCI image -
+      # cheap local repackaging, not a from-source live-image rebuild.
+      - name: Build the boot-artifacts image
+        run: make docker-build-boot-artifacts BOOT_ARTIFACTS_IMG="${{ env.BOOT_ARTIFACTS_IMG }}"
+
+      - name: Save the boot-artifacts image to a tarball
+        run: docker save "${{ env.BOOT_ARTIFACTS_IMG }}" -o /tmp/images/boot-artifacts.tar
+
+      - name: Import the manager, bootd, and boot-artifacts images into RKE2 containerd
+        uses: ./.github/actions/import-image-tarballs
+        with:
+          images: manager bootd boot-artifacts
+
+      - name: Install cert-manager
+        uses: ./.github/actions/install-cert-manager
+
+      - name: Install cert-manager, KubeVirt, virtctl, and CDI
+        uses: ./.github/actions/install-cluster-addons
+        with:
+          kubevirt-version: "v1.9.0"
+          cdi-version: "v1.65.0"
+
+      - name: Install KubeVirtBMC
+        uses: ./.github/actions/install-kubevirtbmc
+        with:
+          version: "v0.9.0"
+
+      # BOOT_SERVER_URL/BOOT_AGENT_SERVER_URL point at bootd's own
+      # provisioning-network address: bootd's reverse proxy is what a
+      # net-booting machine can actually reach, not the ClusterIP
+      # Services BOOTD_DEPLOYMENT_*_UPSTREAM_URL name.
+      - name: Deploy kezio CRDs and controller-manager
+        uses: ./.github/actions/deploy-kezio
+        with:
+          manager-image: example.com/kezio:e2e
+          kustomize-dir: config/netboot-e2e
+          extra-env: |
+            DEPLOYER=agent
+            BOOT_SERVER_ADDR=:8090
+            BOOT_SERVER_URL=http://${{ env.BOOTD_SERVER_IP }}
+            BOOT_AGENT_SERVER_URL=http://${{ env.BOOTD_SERVER_IP }}
+            AGENT_SERVER_ADDR=:8091
+            BOOTD_DEPLOYMENT_IMAGE=example.com/kezio-bootd:e2e
+            BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE=${{ env.BOOT_ARTIFACTS_IMG }}
+            BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL=http://boot-server.scaffold-system.svc.cluster.local:8090
+            BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL=http://agent-server.scaffold-system.svc.cluster.local:8091
+
+      - name: Create the provisioning NetworkAttachmentDefinitions
+        uses: ./.github/actions/create-provisioning-nads
+        with:
+          bridge-name: ${{ env.PROVISIONING_BRIDGE }}
+          bootd-net1-ip: "${{ env.BOOTD_SERVER_IP }}/24"
+          tracker-net1-ip: ${{ env.TRACKER_NET1_IP }}
+          seeder-net1-ip: ${{ env.SEEDER_NET1_IP }}
+
+      - name: Deploy the existing-dhcp pod on the provisioning bridge
+        if: matrix.dhcp-scenario == 'no-relay'
+        uses: ./.github/actions/deploy-existing-dhcp
+        with:
+          name: kezio-existing-dhcp
+          image: "jpillora/dnsmasq:1.1@sha256:78a9c6711031a557d9c6a79a0b6e060c4ac09de3a8755c78d690acb55b4ccd15"
+          bridge: ${{ env.PROVISIONING_BRIDGE }}
+          static-cidr: ${{ env.EXISTING_DHCP_NET1_IP }}
+          dhcp-range: "192.0.2.10,192.0.2.100,255.255.255.0,12h"
+
+      - name: Create the Subnet
+        uses: ./.github/actions/create-subnet
+        with:
+          name: ${{ env.SUBNET_NAME }}
+          cidr: ${{ env.PROVISIONING_CIDR }}
+          bootd-server-ip: ${{ env.BOOTD_SERVER_IP }}
+          bootd-network-name: kezio-boot-network
+          dhcp-scenario: ${{ matrix.dhcp-scenario }}
+          lease-range-start: ${{ env.LEASE_RANGE_START }}
+          lease-range-end: ${{ env.LEASE_RANGE_END }}
+
+      - name: Deploy kezio-bootd on the provisioning bridge
+        uses: ./.github/actions/deploy-bootd
+        with:
+          subnet-name: ${{ env.SUBNET_NAME }}
+          bootd-server-ip: ${{ env.BOOTD_SERVER_IP }}
+
+      - name: Create the target VM
+        uses: ./.github/actions/create-target-vm
+        with:
+          vm-name: ${{ env.TARGET_VM_NAME }}
+          vm-mac: ${{ env.TARGET_VM_MAC }}
+          disk-serial: "KEZIONETBOOTDISK01"
+
+      - name: Provision the target VM through a real KubeVirtBMC/Redfish endpoint
+        uses: ./.github/actions/provision-target-vm-via-bmc
+        with:
+          vm-name: ${{ env.TARGET_VM_NAME }}
+          bmc-creds-secret-name: "${{ env.TARGET_VM_NAME }}-bmc-creds"
+
+      - name: Create the Machine
+        uses: ./.github/actions/create-bmc-machine
+        with:
+          secret-name: "${{ env.TARGET_VM_NAME }}-bmc-creds"
+          machine-name: ${{ env.TARGET_VM_NAME }}
+          bmc-address: "redfish+http://${{ env.TARGET_VM_NAME }}-virtbmc.scaffold-system.svc.cluster.local/redfish/v1/Systems/1"
+          boot-mac: ${{ env.TARGET_VM_MAC }}
+          subnet-name: ${{ env.SUBNET_NAME }}
+
+      - name: Start continuous VM console capture
+        uses: ./.github/actions/capture-vm-console
+        with:
+          vm-name: ${{ env.TARGET_VM_NAME }}
+          logfile: ${{ runner.temp }}/console-${{ matrix.dhcp-scenario }}.log
+
+      - name: Wait for the agent to register and the Machine to become Available
+        uses: ./.github/actions/wait-agent-registered
+        with:
+          machine-name: ${{ env.TARGET_VM_NAME }}
+
+      - name: Verify the DHCP scenario behaved as configured
+        uses: ./.github/actions/verify-dhcp-scenario
+        with:
+          scenario: ${{ matrix.dhcp-scenario }}
+          bootd-deployment-name: "kezio-bootd-${{ env.SUBNET_NAME }}"
+
+      - name: Create the unenrolled-MAC VM
+        uses: ./.github/actions/create-target-vm
+        with:
+          vm-name: ${{ env.UNKNOWN_VM_NAME }}
+          vm-mac: ${{ env.UNKNOWN_VM_MAC }}
+          disk-serial: "KEZIONETBOOTDISK02"
+
+      - name: Assert the unenrolled MAC is never answered
+        uses: ./.github/actions/assert-mac-not-allowlisted
+        with:
+          vm-name: ${{ env.UNKNOWN_VM_NAME }}
+          mac: ${{ env.UNKNOWN_VM_MAC }}
+          bmc-creds-secret-name: "${{ env.UNKNOWN_VM_NAME }}-bmc-creds"
+          bootd-deployment-name: "kezio-bootd-${{ env.SUBNET_NAME }}"
+          wait-seconds: "90"
+
+      - name: Dump all kezio v1alpha2 resources
+        if: always()
+        uses: ./.github/actions/dump-kezio-resources
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        uses: ./.github/actions/dump-e2e-diagnostics
+        with:
+          target-vm-name: ${{ env.TARGET_VM_NAME }}
+          provisioning-bridge: ${{ env.PROVISIONING_BRIDGE }}
+          bootd-label-selector: "app.kubernetes.io/component=bootd,kezio.kojuro.date/bootd-subnet=${{ env.SUBNET_NAME }}"
+          extra-resource-refs: |
+            machine ${{ env.TARGET_VM_NAME }}
+            subnet ${{ env.SUBNET_NAME }}
+
+      - name: Collect always-on diagnostics bundle
+        if: always()
+        uses: ./.github/actions/collect-e2e-diagnostics-bundle
+        with:
+          output-dir: e2e-bundle
+          deployments: |
+            kezio-bootd-${{ env.SUBNET_NAME }}:bootd.log
+            scaffold-controller-manager:controller-manager.log
+          resources: |
+            machine/${{ env.TARGET_VM_NAME }}:machine.yaml
+            subnet/${{ env.SUBNET_NAME }}:subnet.yaml
+            machinehardware/${{ env.TARGET_VM_NAME }}:machinehardware.yaml
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: netboot-${{ matrix.dhcp-scenario }}-diagnostics
+          path: |
+            e2e-bundle
+            ${{ runner.temp }}/console-${{ matrix.dhcp-scenario }}.log
+            ${{ runner.temp }}/diagnostics-dump.log
+            ${{ runner.temp }}/diagnostics-kubevirtbmc-dump.log
+          retention-days: 7
+          if-no-files-found: ignore
+
   # Stable required-check names for the branch ruleset. The real jobs
   # hang off these through `needs`; the ruleset references "Build" and
   # "E2E" so the graph can grow without ruleset edits.
@@ -454,8 +717,14 @@ jobs:
     name: E2E
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    if: always()
     needs:
       - e2e-fast-lane
       - e2e-image-path
+      - e2e-netboot
     steps:
-      - run: "true"
+      - name: All e2e lanes passed
+        run: |
+          [ "${{ needs.e2e-fast-lane.result }}" = "success" ] && \
+            [ "${{ needs.e2e-image-path.result }}" = "success" ] && \
+            [ "${{ needs.e2e-netboot.result }}" = "success" ]

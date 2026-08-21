@@ -1,0 +1,23 @@
+# Exposes the agent registration server's port. As with the boot config
+# server, there is no separate Deployment: it runs embedded in
+# controller-manager (internal/agentserver, cmd/main.go's
+# AGENT_SERVER_ADDR gate).
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-server
+  namespace: scaffold-system
+  labels:
+    app.kubernetes.io/name: kezio
+    app.kubernetes.io/component: agent-server
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  type: ClusterIP
+  selector:
+    control-plane: controller-manager
+    app.kubernetes.io/name: scaffold
+  ports:
+    - name: agent-http
+      port: 8091
+      targetPort: agent-http
+      protocol: TCP

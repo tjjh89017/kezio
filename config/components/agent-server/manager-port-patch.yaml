@@ -1,0 +1,9 @@
+# Declares the agent registration server's containerPort so service.yaml's
+# targetPort: agent-http resolves. The manager only listens on it once
+# AGENT_SERVER_ADDR is set.
+- op: add
+  path: /spec/template/spec/containers/0/ports/-
+  value:
+    containerPort: 8091
+    name: agent-http
+    protocol: TCP

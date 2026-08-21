@@ -1,0 +1,26 @@
+# Exposes the boot config server's port. There is no separate Deployment:
+# it runs embedded in controller-manager (internal/bootserver,
+# cmd/main.go's BOOT_SERVER_ADDR gate), so this Service selects
+# controller-manager's own pods.
+apiVersion: v1
+kind: Service
+metadata:
+  name: boot-server
+  namespace: scaffold-system
+  labels:
+    app.kubernetes.io/name: kezio
+    app.kubernetes.io/component: boot-server
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # A netboot lane fronts this with kezio-bootd's reverse proxy, which
+  # reaches it as a ClusterIP - GRUB and firmware never talk to this
+  # Service directly.
+  type: ClusterIP
+  selector:
+    control-plane: controller-manager
+    app.kubernetes.io/name: scaffold
+  ports:
+    - name: boot-http
+      port: 8090
+      targetPort: boot-http
+      protocol: TCP

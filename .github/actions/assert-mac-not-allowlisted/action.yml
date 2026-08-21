@@ -1,0 +1,107 @@
+name: Assert an unenrolled MAC is never answered
+
+description: >-
+  Negative probe for bootd's fail-secure MAC gate: powers on a VM whose
+  MAC was never enrolled in any Machine, waits wait-seconds, then asserts
+  bootd's own dnsmasq log never offered it a lease (no DHCPOFFER/DHCPACK
+  line naming the MAC, even though its DHCPDISCOVER reaches bootd) and the
+  boot config server's log never saw a grub.cfg fetch for it. Both must
+  hold - a MAC that slips past dnsmasq's dhcp-ignore but is still refused
+  by the boot config server is not the fail-secure behavior this lane
+  exists to catch, and neither is the reverse.
+
+inputs:
+  namespace:
+    description: Namespace the VM and bootd Deployment live in.
+    required: false
+    default: "scaffold-system"
+  vm-name:
+    description: Name of the already-created, powered-off VirtualMachine to power on (see create-target-vm) - its VirtualMachineBMC is created here.
+    required: true
+  mac:
+    description: The VM's provisioning MAC address - must NOT match any Machine's spec.bootMACAddress.
+    required: true
+  bmc-creds-secret-name:
+    description: Name of the basic-auth Secret this action creates for the VM's own VirtualMachineBMC.
+    required: true
+  bootd-deployment-name:
+    description: 'Name of the Subnet''s bootd Deployment, e.g. "kezio-bootd-<subnet-name>".'
+    required: true
+  wait-seconds:
+    description: How long to let the VM attempt PXE before checking the logs.
+    required: false
+    default: "90"
+
+runs:
+  using: composite
+  steps:
+    - name: Record the bootd and boot-server log baselines
+      # Both logs are asserted against ONLY the lines appended after this
+      # baseline - a prior Machine's real boot in the same job would
+      # otherwise pollute the check with unrelated DHCPOFFER/grub.cfg
+      # lines that happen to share log timestamps. The controller-manager
+      # Deployment is resolved by its control-plane label, not a fixed
+      # name, since kustomize's namePrefix can change it (see
+      # ./.github/actions/deploy-kezio).
+      id: baseline
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        BOOTD_DEPLOYMENT_NAME: ${{ inputs.bootd-deployment-name }}
+      run: |
+        set -euo pipefail
+        manager_deployment="$(kubectl get deployment -n "${NAMESPACE}" -l control-plane=controller-manager \
+          -o jsonpath='{.items[0].metadata.name}')"
+        bootd_baseline_lines="$(kubectl -n "${NAMESPACE}" logs deployment/"${BOOTD_DEPLOYMENT_NAME}" -c bootd --tail=-1 | wc -l)"
+        manager_baseline_lines="$(kubectl -n "${NAMESPACE}" logs deployment/"${manager_deployment}" -c manager --tail=-1 | wc -l)"
+        echo "manager-deployment=${manager_deployment}" >> "$GITHUB_OUTPUT"
+        echo "bootd-baseline-lines=${bootd_baseline_lines}" >> "$GITHUB_OUTPUT"
+        echo "manager-baseline-lines=${manager_baseline_lines}" >> "$GITHUB_OUTPUT"
+
+    - name: Create the unenrolled VM's BMC credentials Secret and VirtualMachineBMC
+      uses: ./.github/actions/provision-target-vm-via-bmc
+      with:
+        namespace: ${{ inputs.namespace }}
+        vm-name: ${{ inputs.vm-name }}
+        bmc-creds-secret-name: ${{ inputs.bmc-creds-secret-name }}
+
+    - name: Power on the unenrolled VM
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        VM_NAME: ${{ inputs.vm-name }}
+      run: |
+        set -euo pipefail
+        virtctl start "${VM_NAME}" -n "${NAMESPACE}"
+
+    - name: Wait, then assert bootd and the boot config server never answered this MAC
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MAC: ${{ inputs.mac }}
+        BOOTD_DEPLOYMENT_NAME: ${{ inputs.bootd-deployment-name }}
+        WAIT_SECONDS: ${{ inputs.wait-seconds }}
+        MANAGER_DEPLOYMENT: ${{ steps.baseline.outputs.manager-deployment }}
+        BOOTD_BASELINE_LINES: ${{ steps.baseline.outputs.bootd-baseline-lines }}
+        MANAGER_BASELINE_LINES: ${{ steps.baseline.outputs.manager-baseline-lines }}
+      run: |
+        set -euo pipefail
+        sleep "${WAIT_SECONDS}"
+
+        mac_lower="$(echo "${MAC}" | tr '[:upper:]' '[:lower:]')"
+
+        bootd_log_tail="$(kubectl -n "${NAMESPACE}" logs deployment/"${BOOTD_DEPLOYMENT_NAME}" -c bootd --tail=-1 | tail -n "+$((BOOTD_BASELINE_LINES + 1))")"
+        if echo "${bootd_log_tail}" | tr '[:upper:]' '[:lower:]' | grep -E "dhcp(offer|ack)" | grep -qF "${mac_lower}"; then
+          echo "::error::bootd offered or acked a lease to unenrolled MAC ${MAC} - the MAC gate did not hold" >&2
+          echo "${bootd_log_tail}"
+          exit 1
+        fi
+
+        manager_log_tail="$(kubectl -n "${NAMESPACE}" logs deployment/"${MANAGER_DEPLOYMENT}" -c manager --tail=-1 | tail -n "+$((MANAGER_BASELINE_LINES + 1))")"
+        if echo "${manager_log_tail}" | tr '[:upper:]' '[:lower:]' | grep -qF "grub.cfg-${mac_lower}"; then
+          echo "::error::the boot config server served grub.cfg to unenrolled MAC ${MAC}" >&2
+          echo "${manager_log_tail}"
+          exit 1
+        fi
+
+        echo "Confirmed: unenrolled MAC ${MAC} received no DHCPOFFER/DHCPACK from bootd and no grub.cfg from the boot config server."

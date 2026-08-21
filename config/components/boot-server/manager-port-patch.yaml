@@ -1,0 +1,10 @@
+# Declares the boot config server's containerPort so service.yaml's
+# targetPort: boot-http resolves to something. The manager only listens on
+# it once BOOT_SERVER_ADDR and the other BOOT_* vars (cmd/main.go's
+# bootServerConfigFromEnv) are set.
+- op: add
+  path: /spec/template/spec/containers/0/ports/-
+  value:
+    containerPort: 8090
+    name: boot-http
+    protocol: TCP

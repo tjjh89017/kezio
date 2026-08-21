@@ -1,0 +1,32 @@
+# Netboot e2e lane overlay: composes ../default with the boot config
+# server, the agent registration server, and the boot-artifacts
+# initContainer that feeds the boot config server's BOOT_ARTIFACTS_DIR.
+# Both servers or neither: a machine that net boots but cannot register
+# stays in Inspecting forever, so this overlay always includes both
+# components together, never one alone.
+#
+# The netboot e2e lane's own BOOT_*/AGENT_*/DEPLOYER/BOOTD_DEPLOYMENT_*
+# env vars are not set here - deploy-kezio's extra-env input sets them on
+# the live Deployment after this overlay rolls out, the same way every
+# other e2e lane wires its own controller-manager env.
+resources:
+  - ../default
+
+components:
+  - ../components/boot-server
+  - ../components/agent-server
+  - ../components/boot-artifacts
+
+# The netboot lane always builds and imports its own boot-artifacts image
+# under this fixed local tag - see .github/workflows/main.yaml's Netboot
+# lane job.
+images:
+  - name: ghcr.io/tjjh89017/kezio-boot-artifacts
+    newName: example.com/kezio-boot-artifacts
+    newTag: e2e
+
+patches:
+  - path: namespace-privileged-patch.yaml
+    target:
+      kind: Namespace
+      name: scaffold-system

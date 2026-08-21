@@ -1,0 +1,16 @@
+# The agent registration server's Service and its containerPort on the
+# controller-manager Deployment. See config/components/boot-server for why
+# these pieces are components rather than overlays.
+#
+# Included by config/netboot-e2e.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - service.yaml
+
+patches:
+  - path: manager-port-patch.yaml
+    target:
+      kind: Deployment
+      name: controller-manager

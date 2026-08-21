@@ -1,0 +1,8 @@
+# A bootd pod needs pod-security.kubernetes.io/enforce=privileged on its
+# own namespace (dnsmasq's NET_ADMIN/NET_RAW/NET_BIND_SERVICE capabilities
+# are outside restricted/baseline - see config/bootd/kustomization.yaml).
+# The netboot lane's Subnet lives in this same namespace, so the label
+# goes on it directly rather than through a separate namespace.
+- op: add
+  path: /metadata/labels/pod-security.kubernetes.io~1enforce
+  value: privileged
