@@ -1,0 +1,574 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package planbuild
+
+import (
+	"context"
+	"crypto/sha1" //nolint:gosec // building a fixture info hash, not a security use
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"testing"
+
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/client-go/kubernetes/scheme"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/envtest"
+
+	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	"github.com/tjjh89017/kezio/internal/posthookdefaults"
+	"github.com/tjjh89017/kezio/internal/seederdeploy"
+	"github.com/tjjh89017/kezio/internal/store"
+)
+
+// fixtures shares one envtest client across every subtest below, each of
+// which works in its own namespace.
+type fixtures struct {
+	t      *testing.T
+	client ctrlclient.Client
+}
+
+// TestBuilder_Build_Envtest exercises Builder.Build against a real API
+// server, covering every resolution path Build combines: hook attachment
+// (default vs explicit), params merge order, disk hint resolution, slot
+// classification, and the not-ready/validation error shapes.
+func TestBuilder_Build_Envtest(t *testing.T) {
+	if os.Getenv("KUBEBUILDER_ASSETS") == "" && firstEnvtestBinaryDir() == "" {
+		t.Skip("no envtest binaries available (run `make setup-envtest`, or set KUBEBUILDER_ASSETS)")
+	}
+
+	testScheme := scheme.Scheme
+	if err := keziov1alpha2.AddToScheme(testScheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+
+	testEnv := &envtest.Environment{
+		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
+		ErrorIfCRDPathMissing: true,
+	}
+	if dir := firstEnvtestBinaryDir(); dir != "" {
+		testEnv.BinaryAssetsDirectory = dir
+	}
+
+	cfg, err := testEnv.Start()
+	if err != nil {
+		t.Fatalf("starting envtest: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := testEnv.Stop(); err != nil {
+			t.Errorf("stopping envtest: %v", err)
+		}
+	})
+
+	c, err := ctrlclient.New(cfg, ctrlclient.Options{Scheme: testScheme})
+	if err != nil {
+		t.Fatalf("client.New: %v", err)
+	}
+	fx := &fixtures{t: t, client: c}
+
+	t.Run("no postHookRefs attaches the default hook from the manager namespace", func(t *testing.T) {
+		testDefaultHookAttached(t, fx)
+	})
+	t.Run("explicit postHookRefs are honored in order, default not attached", func(t *testing.T) {
+		testExplicitHookRefsHonored(t, fx)
+	})
+	t.Run("params merge order is posthook default, then image, then machine", func(t *testing.T) {
+		testParamsMergeOrder(t, fx)
+	})
+	t.Run("ambiguous disk hints fail with a disk-selection error", func(t *testing.T) {
+		testAmbiguousDiskHints(t, fx)
+	})
+	t.Run("unambiguous disk hints select the matching device", func(t *testing.T) {
+		testUnambiguousDiskHints(t, fx)
+	})
+	t.Run("slots classify as mkfs, swap, and torrent", func(t *testing.T) {
+		testSlotClassification(t, fx)
+	})
+	t.Run("a not-Ready partitioncontent is a not-ready error", func(t *testing.T) {
+		testPartitionContentNotReady(t, fx)
+	})
+	t.Run("an unresolved placeholder is a validation error", func(t *testing.T) {
+		testUnresolvedPlaceholder(t, fx)
+	})
+}
+
+func testDefaultHookAttached(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	mgrNS := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+	fx.mustCreatePostHook(mgrNS, posthookdefaults.DefaultFinalizeHookName, posthookdefaults.Spec())
+	image := fx.mustCreateImage(ns, blankDataLayout())
+
+	b := &Builder{Client: fx.client, ManagerNamespace: mgrNS}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec: keziov1alpha2.MachineSpec{
+			ImageRef: &keziov1alpha2.NameRef{Name: image.Name},
+		},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	plan, _, err := b.Build(context.Background(), machine, run)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(plan.Hooks) != 1 || plan.Hooks[0].Name != posthookdefaults.DefaultFinalizeHookName {
+		t.Fatalf("plan.Hooks = %+v, want exactly the default hook", plan.Hooks)
+	}
+}
+
+func testExplicitHookRefsHonored(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	mgrNS := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+	// The default hook exists in the manager namespace too, so a failure
+	// to honor explicit refs would silently still pass by falling back to
+	// it.
+	fx.mustCreatePostHook(mgrNS, posthookdefaults.DefaultFinalizeHookName, posthookdefaults.Spec())
+	fx.mustCreatePostHook(ns, "hook-a", scriptHookSpec("a"))
+	fx.mustCreatePostHook(ns, "hook-b", scriptHookSpec("b"))
+	image := fx.mustCreateImage(ns, blankDataLayout())
+
+	b := &Builder{Client: fx.client, ManagerNamespace: mgrNS}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec: keziov1alpha2.MachineSpec{
+			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha2.NameRef{{Name: "hook-a"}, {Name: "hook-b"}},
+		},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	plan, _, err := b.Build(context.Background(), machine, run)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(plan.Hooks) != 2 || plan.Hooks[0].Name != "hook-a" || plan.Hooks[1].Name != "hook-b" {
+		t.Fatalf("plan.Hooks = %+v, want [hook-a hook-b] in order, default not attached", plan.Hooks)
+	}
+}
+
+func testParamsMergeOrder(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	spec := keziov1alpha2.PostHookSpec{
+		Params: []keziov1alpha2.PostHookParam{{Name: "greeting", Default: strPtr("from-posthook")}},
+		Steps: []keziov1alpha2.PostHookStep{{
+			OSFamily: keziov1alpha2.OSFamilyLinux,
+			Script:   &keziov1alpha2.PostHookScriptSource{Script: "echo {{ .greeting }}"},
+		}},
+	}
+	fx.mustCreatePostHook(ns, "hook", spec)
+	image := fx.mustCreateImageWithParams(ns, blankDataLayout(), rawJSON(t, map[string]string{"greeting": "from-image"}))
+
+	b := &Builder{Client: fx.client}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec: keziov1alpha2.MachineSpec{
+			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha2.NameRef{{Name: "hook"}},
+			Params:       rawJSON(t, map[string]string{"greeting": "from-machine"}),
+		},
+	}
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	plan, _, err := b.Build(context.Background(), machine, run)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	want := "echo from-machine"
+	if len(plan.Hooks) != 1 || len(plan.Hooks[0].Steps) != 1 || plan.Hooks[0].Steps[0].Content != want {
+		t.Fatalf("rendered content = %+v, want %q (machine overrides image overrides posthook default)", plan.Hooks, want)
+	}
+}
+
+func testAmbiguousDiskHints(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, []keziov1alpha2.MachineHardwareDisk{
+		{DeviceName: "/dev/vda", SizeBytes: 10 << 30},
+		{DeviceName: "/dev/vdb", SizeBytes: 10 << 30},
+	})
+	image := fx.mustCreateImage(ns, blankDataLayout())
+
+	b := &Builder{Client: fx.client}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec: keziov1alpha2.MachineSpec{
+			ImageRef: &keziov1alpha2.NameRef{Name: image.Name},
+			// No hints: two disks are present, so "the only disk" fallback
+			// is ambiguous.
+		},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	_, _, err := b.Build(context.Background(), machine, run)
+	var diskErr *DiskSelectionError
+	if !errors.As(err, &diskErr) {
+		t.Fatalf("Build err = %v, want a *DiskSelectionError", err)
+	}
+}
+
+func testUnambiguousDiskHints(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, []keziov1alpha2.MachineHardwareDisk{
+		{DeviceName: "/dev/vda", SizeBytes: 10 << 30},
+		{DeviceName: "/dev/vdb", SizeBytes: 20 << 30, SerialNumber: "SN-B"},
+	})
+	image := fx.mustCreateImage(ns, blankDataLayout())
+	fx.mustCreatePostHook(ns, posthookdefaults.DefaultFinalizeHookName, posthookdefaults.Spec())
+
+	b := &Builder{Client: fx.client, ManagerNamespace: ns}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec: keziov1alpha2.MachineSpec{
+			ImageRef:   &keziov1alpha2.NameRef{Name: image.Name},
+			TargetDisk: &keziov1alpha2.TargetDiskHints{SerialNumber: "SN-B"},
+		},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	plan, snap, err := b.Build(context.Background(), machine, run)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if plan.TargetDisk != "/dev/vdb" {
+		t.Fatalf("plan.TargetDisk = %q, want /dev/vdb", plan.TargetDisk)
+	}
+	if len(snap.ResolvedDisks) != 1 || snap.ResolvedDisks[0].TargetDisk != "/dev/vdb" {
+		t.Fatalf("snapshot.ResolvedDisks = %+v, want [{%s /dev/vdb}]", snap.ResolvedDisks, image.Name)
+	}
+}
+
+func testSlotClassification(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/nvme0n1"))
+
+	hash := fixtureInfoHash("slot-classification")
+	fx.mustCreatePartitionContentReady(ns, hash)
+	fx.mustCreateSeederPod(ns, hash, "10.0.0.5")
+
+	layout := keziov1alpha2.ImageDiskLayout{
+		PartitionTable: keziov1alpha2.PartitionTableGPT,
+		SfdiskJSON:     `{"partitiontable":{}}`,
+		Slots: []keziov1alpha2.ImageSlot{
+			{Number: 1, Role: keziov1alpha2.PartitionRoleESP, ContentRef: &keziov1alpha2.NameRef{Name: store.ObjectName(hash)}},
+			{Number: 2, Role: keziov1alpha2.PartitionRoleData, FSType: "ext4"},
+			{Number: 3, Role: keziov1alpha2.PartitionRoleSwap, UUID: "swap-uuid"},
+		},
+	}
+	image := fx.mustCreateImage(ns, layout)
+	fx.mustCreatePostHook(ns, posthookdefaults.DefaultFinalizeHookName, posthookdefaults.Spec())
+
+	b := &Builder{Client: fx.client, ManagerNamespace: ns}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: image.Name}},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	plan, _, err := b.Build(context.Background(), machine, run)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(plan.Slots) != 3 {
+		t.Fatalf("len(plan.Slots) = %d, want 3", len(plan.Slots))
+	}
+	torrent, mkfs, swap := plan.Slots[0], plan.Slots[1], plan.Slots[2]
+	if torrent.Torrent == nil || torrent.Torrent.InfoHash != hash.String() || torrent.Torrent.URL != fmt.Sprintf("http://10.0.0.5:%d/torrents/%s", seederdeploy.TorrentHTTPPort, hash.String()) {
+		t.Fatalf("slot 1 = %+v, want a torrent slot serving %s from 10.0.0.5", torrent, hash.String())
+	}
+	if mkfs.Mkfs == nil || mkfs.Mkfs.Filesystem != "ext4" {
+		t.Fatalf("slot 2 = %+v, want mkfs ext4", mkfs)
+	}
+	if swap.Swap == nil || swap.Swap.UUID != "swap-uuid" {
+		t.Fatalf("slot 3 = %+v, want swap with UUID swap-uuid", swap)
+	}
+	if torrent.Device != "/dev/nvme0n1p1" || mkfs.Device != "/dev/nvme0n1p2" || swap.Device != "/dev/nvme0n1p3" {
+		t.Fatalf("devices = %q/%q/%q, want nvme0n1p1/p2/p3", torrent.Device, mkfs.Device, swap.Device)
+	}
+}
+
+func testPartitionContentNotReady(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+
+	hash := fixtureInfoHash("not-ready")
+	fx.mustCreatePartitionContentPending(ns, hash)
+
+	layout := keziov1alpha2.ImageDiskLayout{
+		PartitionTable: keziov1alpha2.PartitionTableGPT,
+		SfdiskJSON:     `{"partitiontable":{}}`,
+		Slots: []keziov1alpha2.ImageSlot{
+			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: store.ObjectName(hash)}},
+		},
+	}
+	image := fx.mustCreateImage(ns, layout)
+
+	b := &Builder{Client: fx.client}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: image.Name}},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	_, _, err := b.Build(context.Background(), machine, run)
+	var notReady *NotReadyError
+	if !errors.As(err, &notReady) {
+		t.Fatalf("Build err = %v, want a *NotReadyError", err)
+	}
+}
+
+func testUnresolvedPlaceholder(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+	fx.mustCreatePostHook(ns, "hook", keziov1alpha2.PostHookSpec{
+		Steps: []keziov1alpha2.PostHookStep{{
+			OSFamily: keziov1alpha2.OSFamilyLinux,
+			Script:   &keziov1alpha2.PostHookScriptSource{Script: "echo {{ .neverDeclared }}"},
+		}},
+	})
+	image := fx.mustCreateImage(ns, blankDataLayout())
+
+	b := &Builder{Client: fx.client}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec: keziov1alpha2.MachineSpec{
+			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha2.NameRef{{Name: "hook"}},
+		},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	_, _, err := b.Build(context.Background(), machine, run)
+	var valErr *ValidationError
+	if !errors.As(err, &valErr) {
+		t.Fatalf("Build err = %v, want a *ValidationError", err)
+	}
+}
+
+// --- fixtures ---
+
+func (fx *fixtures) mustCreateNamespace() string {
+	fx.t.Helper()
+	name := "pb-" + rand.String(8)
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	if err := fx.client.Create(context.Background(), ns); err != nil {
+		fx.t.Fatalf("create namespace %s: %v", name, err)
+	}
+	return name
+}
+
+// testMachineName is the Machine name every subtest's fixtures use: it
+// must match the machine.Name each test builds, since MachineHardware is
+// looked up name-aligned with its Machine.
+const testMachineName = "m1"
+
+func (fx *fixtures) mustCreateMachineHardware(ns string, disks []keziov1alpha2.MachineHardwareDisk) {
+	fx.t.Helper()
+	hw := &keziov1alpha2.MachineHardware{
+		ObjectMeta: metav1.ObjectMeta{Name: testMachineName, Namespace: ns},
+		Spec:       keziov1alpha2.MachineHardwareSpec{Disks: disks},
+	}
+	if err := fx.client.Create(context.Background(), hw); err != nil {
+		fx.t.Fatalf("create machinehardware %s/%s: %v", ns, testMachineName, err)
+	}
+}
+
+// testImageName is the Image name every subtest's fixtures use.
+const testImageName = "img1"
+
+func (fx *fixtures) mustCreateImage(ns string, layout keziov1alpha2.ImageDiskLayout) *keziov1alpha2.Image {
+	return fx.mustCreateImageWithParams(ns, layout, nil)
+}
+
+func (fx *fixtures) mustCreateImageWithParams(ns string, layout keziov1alpha2.ImageDiskLayout, params *apiextensionsv1.JSON) *keziov1alpha2.Image {
+	fx.t.Helper()
+	img := &keziov1alpha2.Image{
+		ObjectMeta: metav1.ObjectMeta{Name: testImageName, Namespace: ns},
+		Spec:       keziov1alpha2.ImageSpec{Layout: layout, Params: params},
+	}
+	if err := fx.client.Create(context.Background(), img); err != nil {
+		fx.t.Fatalf("create image %s/%s: %v", ns, testImageName, err)
+	}
+	img.Status.State = keziov1alpha2.ImageStateReady
+	if err := fx.client.Status().Update(context.Background(), img); err != nil {
+		fx.t.Fatalf("update image %s/%s status: %v", ns, testImageName, err)
+	}
+	return img
+}
+
+func (fx *fixtures) mustCreatePostHook(ns, name string, spec keziov1alpha2.PostHookSpec) {
+	fx.t.Helper()
+	ph := &keziov1alpha2.PostHook{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec:       spec,
+	}
+	if err := fx.client.Create(context.Background(), ph); err != nil {
+		fx.t.Fatalf("create posthook %s/%s: %v", ns, name, err)
+	}
+	meta.SetStatusCondition(&ph.Status.Conditions, metav1.Condition{
+		Type: keziov1alpha2.PostHookConditionValid, Status: metav1.ConditionTrue, Reason: "TestFixture", Message: "fixture",
+	})
+	if err := fx.client.Status().Update(context.Background(), ph); err != nil {
+		fx.t.Fatalf("update posthook %s/%s status: %v", ns, name, err)
+	}
+}
+
+func (fx *fixtures) mustCreatePartitionContentReady(ns string, hash store.InfoHash) {
+	fx.mustCreatePartitionContent(ns, hash, true)
+}
+
+func (fx *fixtures) mustCreatePartitionContentPending(ns string, hash store.InfoHash) {
+	fx.mustCreatePartitionContent(ns, hash, false)
+}
+
+func (fx *fixtures) mustCreatePartitionContent(ns string, hash store.InfoHash, ready bool) {
+	fx.t.Helper()
+	pc := &keziov1alpha2.PartitionContent{
+		ObjectMeta: metav1.ObjectMeta{Name: store.ObjectName(hash), Namespace: ns},
+		Spec: keziov1alpha2.PartitionContentSpec{
+			FSType: "ext4", UsedBytes: 1, SizeBytes: 1, LastExtentEnd: 1, PieceLength: store.PieceSize,
+			Source: keziov1alpha2.PartitionContentSource{ImageName: "src", PartitionNumber: 1},
+		},
+	}
+	if err := fx.client.Create(context.Background(), pc); err != nil {
+		fx.t.Fatalf("create partitioncontent %s/%s: %v", ns, pc.Name, err)
+	}
+	if ready {
+		pc.Status.State = keziov1alpha2.PartitionContentStateReady
+		meta.SetStatusCondition(&pc.Status.Conditions, metav1.Condition{
+			Type: keziov1alpha2.PartitionContentConditionReady, Status: metav1.ConditionTrue, Reason: "TestFixture", Message: "fixture",
+		})
+		if err := fx.client.Status().Update(context.Background(), pc); err != nil {
+			fx.t.Fatalf("update partitioncontent %s/%s status: %v", ns, pc.Name, err)
+		}
+	}
+}
+
+// mustCreateSeederPod creates the per-content seeder Deployment (matching
+// seederdeploy.Name's naming, the identity Builder.resolveTorrentURL
+// looks up by) plus one matching Pod already carrying podIP, standing in
+// for a scheduled, running seeder pod - envtest runs no kubelet to ever
+// assign one itself.
+func (fx *fixtures) mustCreateSeederPod(ns string, hash store.InfoHash, podIP string) {
+	fx.t.Helper()
+	labels := map[string]string{"app": "kezio-seeder", "content": hash.String()}
+	replicas := int32(1)
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: seederdeploy.Name(hash), Namespace: ns},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{MatchLabels: labels},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "ezio", Image: "example/ezio:test"}},
+				},
+			},
+		},
+	}
+	if err := fx.client.Create(context.Background(), dep); err != nil {
+		fx.t.Fatalf("create seeder deployment %s/%s: %v", ns, dep.Name, err)
+	}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: seederdeploy.Name(hash) + "-pod", Namespace: ns, Labels: labels},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "ezio", Image: "example/ezio:test"}},
+		},
+	}
+	if err := fx.client.Create(context.Background(), pod); err != nil {
+		fx.t.Fatalf("create seeder pod %s/%s: %v", ns, pod.Name, err)
+	}
+	pod.Status.PodIP = podIP
+	if err := fx.client.Status().Update(context.Background(), pod); err != nil {
+		fx.t.Fatalf("update seeder pod %s/%s status: %v", ns, pod.Name, err)
+	}
+}
+
+func oneDisk(deviceName string) []keziov1alpha2.MachineHardwareDisk {
+	return []keziov1alpha2.MachineHardwareDisk{{DeviceName: deviceName, SizeBytes: 32 << 30}}
+}
+
+func blankDataLayout() keziov1alpha2.ImageDiskLayout {
+	return keziov1alpha2.ImageDiskLayout{
+		PartitionTable: keziov1alpha2.PartitionTableGPT,
+		SfdiskJSON:     `{"partitiontable":{}}`,
+		Slots: []keziov1alpha2.ImageSlot{
+			{Number: 1, Role: keziov1alpha2.PartitionRoleData, FSType: "ext4"},
+		},
+	}
+}
+
+func scriptHookSpec(tag string) keziov1alpha2.PostHookSpec {
+	return keziov1alpha2.PostHookSpec{
+		Steps: []keziov1alpha2.PostHookStep{{
+			OSFamily: keziov1alpha2.OSFamilyLinux,
+			Script:   &keziov1alpha2.PostHookScriptSource{Script: "echo " + tag},
+		}},
+	}
+}
+
+func rawJSON(t *testing.T, v map[string]string) *apiextensionsv1.JSON {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal params: %v", err)
+	}
+	return &apiextensionsv1.JSON{Raw: raw}
+}
+
+func strPtr(s string) *string { return &s }
+
+// fixtureInfoHash derives a deterministic, valid-looking InfoHash for
+// seed's own bytes, so each subtest gets its own PartitionContent name
+// without needing a real captured partition.
+func fixtureInfoHash(seed string) store.InfoHash {
+	sum := sha1.Sum([]byte(seed)) //nolint:gosec // fixture identity only
+	hash, err := store.ParseInfoHash(hex.EncodeToString(sum[:]))
+	if err != nil {
+		panic(err)
+	}
+	return hash
+}
+
+// firstEnvtestBinaryDir mirrors internal/posthookdefaults's copy of the
+// same helper: it locates the envtest binaries `make setup-envtest`
+// downloads, for runs (for example from an IDE) that do not go through
+// the Makefile's KUBEBUILDER_ASSETS export.
+func firstEnvtestBinaryDir() string {
+	basePath := filepath.Join("..", "..", "bin", "k8s")
+	entries, err := os.ReadDir(basePath)
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			return filepath.Join(basePath, entry.Name())
+		}
+	}
+	return ""
+}
