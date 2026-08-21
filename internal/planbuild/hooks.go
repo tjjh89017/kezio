@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"strconv"
 	"text/template"
 
 	corev1 "k8s.io/api/core/v1"
@@ -41,10 +42,10 @@ import (
 // A PostHook that does not exist or is not Valid is reported as
 // NotReadyError, not a hard failure: it may simply not have caught up
 // with the PostHookReconciler yet.
-func (b *Builder) resolveHooks(ctx context.Context, defaultNS string, refs []keziov1alpha2.NameRef, shared map[string]any) ([]agentapi.ResolvedHook, error) {
+func (b *Builder) resolveHooks(ctx context.Context, defaultNS string, refs []keziov1alpha2.NameRef, shared map[string]any, defaults builtinDefaults) ([]agentapi.ResolvedHook, error) {
 	hooks := make([]agentapi.ResolvedHook, 0, len(refs))
 	for _, ref := range refs {
-		hook, err := b.resolveHook(ctx, defaultNS, ref, shared)
+		hook, err := b.resolveHook(ctx, defaultNS, ref, shared, defaults)
 		if err != nil {
 			return nil, fmt.Errorf("posthook %q: %w", ref.Name, err)
 		}
@@ -57,7 +58,7 @@ func (b *Builder) resolveHooks(ctx context.Context, defaultNS string, refs []kez
 // against shared (the deploy's merged params plus reserved values),
 // filling in each declared param's own default for any name shared does
 // not already carry.
-func (b *Builder) resolveHook(ctx context.Context, defaultNS string, ref keziov1alpha2.NameRef, shared map[string]any) (agentapi.ResolvedHook, error) {
+func (b *Builder) resolveHook(ctx context.Context, defaultNS string, ref keziov1alpha2.NameRef, shared map[string]any, defaults builtinDefaults) (agentapi.ResolvedHook, error) {
 	ns := resolveNamespace(ref, defaultNS)
 
 	hook := &keziov1alpha2.PostHook{}
@@ -75,7 +76,7 @@ func (b *Builder) resolveHook(ctx context.Context, defaultNS string, ref keziov1
 
 	steps := make([]agentapi.ResolvedHookStep, 0, len(hook.Spec.Steps))
 	for i, step := range hook.Spec.Steps {
-		resolved, err := b.resolveStep(ctx, ns, step, data)
+		resolved, err := b.resolveStep(ctx, ns, step, data, defaults)
 		if err != nil {
 			return agentapi.ResolvedHook{}, fmt.Errorf("step %d: %w", i, err)
 		}
@@ -107,12 +108,17 @@ func hookTemplateData(shared map[string]any, hook *keziov1alpha2.PostHook) map[s
 // builtin step carries its name through verbatim; a script or
 // chrootScript step has its content fetched (fetchScriptSource) and
 // templated (renderTemplate) against data.
-func (b *Builder) resolveStep(ctx context.Context, ns string, step keziov1alpha2.PostHookStep, data map[string]any) (agentapi.ResolvedHookStep, error) {
+func (b *Builder) resolveStep(ctx context.Context, ns string, step keziov1alpha2.PostHookStep, data map[string]any, defaults builtinDefaults) (agentapi.ResolvedHookStep, error) {
 	switch step.Type() {
 	case keziov1alpha2.PostHookStepTypeBuiltin:
+		params, err := resolveBuiltinParams(step.Builtin.Name, step.Builtin.Params, defaults, data)
+		if err != nil {
+			return agentapi.ResolvedHookStep{}, err
+		}
 		return agentapi.ResolvedHookStep{
 			Type:           agentapi.HookStepTypeBuiltin,
 			Builtin:        step.Builtin.Name,
+			Params:         params,
 			OSFamily:       step.OSFamily,
 			TimeoutSeconds: step.Builtin.EffectiveTimeoutSeconds(),
 		}, nil
@@ -205,6 +211,60 @@ func renderTemplate(raw string, data map[string]any) (string, error) {
 		return "", fmt.Errorf("executing template: %w", err)
 	}
 	return buf.String(), nil
+}
+
+// espDependentBuiltins names the builtins that require an ESP partition
+// number ("part") and have no runtime fallback for it: unlike "disk" (a
+// dataImages-only deploy simply has no OS disk to default against) or
+// growLastPartition's "partition" (the agent itself already falls back to
+// the plan's last slot when none is given), there is no way to guess
+// "which partition is the ESP" without either an esp-role slot on the OS
+// image or an explicit user override.
+var espDependentBuiltins = map[string]bool{
+	keziov1alpha2.BuiltinStepEfibootmgr:               true,
+	keziov1alpha2.BuiltinStepInstallRemovableFallback: true,
+}
+
+// resolveBuiltinParams computes one builtin step's ResolvedHookStep.Params:
+// name's own derived defaults (deriveBuiltinDefaults), then userParams -
+// each value templated against data - overriding on key collision. Returns
+// a ValidationError when name needs an ESP partition number
+// (espDependentBuiltins) and none is available after the merge.
+func resolveBuiltinParams(name string, userParams map[string]string, defaults builtinDefaults, data map[string]any) (map[string]string, error) {
+	merged := map[string]string{}
+	switch name {
+	case keziov1alpha2.BuiltinStepEfibootmgr, keziov1alpha2.BuiltinStepInstallRemovableFallback:
+		if defaults.disk != "" {
+			merged["disk"] = defaults.disk
+		}
+		if defaults.espPartition > 0 {
+			merged["part"] = strconv.Itoa(int(defaults.espPartition))
+		}
+	case keziov1alpha2.BuiltinStepGrowLastPartition:
+		if defaults.disk != "" {
+			merged["disk"] = defaults.disk
+		}
+		if defaults.lastPartition > 0 {
+			merged["partition"] = strconv.Itoa(int(defaults.lastPartition))
+		}
+	}
+
+	for k, v := range userParams {
+		rendered, err := renderTemplate(v, data)
+		if err != nil {
+			return nil, &ValidationError{Reason: fmt.Sprintf("builtin %q param %q: %v", name, k, err)}
+		}
+		merged[k] = rendered
+	}
+
+	if espDependentBuiltins[name] && merged["part"] == "" {
+		return nil, &ValidationError{Reason: fmt.Sprintf("builtin %q needs the OS image's ESP partition number but none could be identified: no slot has role %q, and params.part was not set explicitly", name, keziov1alpha2.PartitionRoleESP)}
+	}
+
+	if len(merged) == 0 {
+		return nil, nil
+	}
+	return merged, nil
 }
 
 // resolveNamespace returns ref's namespace when set, defaultNS otherwise -

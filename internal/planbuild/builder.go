@@ -117,6 +117,7 @@ func (b *Builder) Build(ctx context.Context, machine *keziov1alpha2.Machine, run
 		SchemaVersion: agentapi.AgentSchemaVersion,
 		RunName:       run.Name,
 		RunUID:        string(run.UID),
+		MachineName:   machine.Name,
 		Hooks:         hooks,
 		AfterDeploy:   effectiveAfterDeploy(machine),
 	}
@@ -225,11 +226,45 @@ func (b *Builder) resolveMachineHooks(ctx context.Context, machine *keziov1alpha
 	shared[keziov1alpha2.PostHookReservedParamImageName] = imageName
 	shared[keziov1alpha2.PostHookReservedParamTargetDisk] = targetDisk
 
+	defaults := deriveBuiltinDefaults(osImage)
+
 	if len(machine.Spec.PostHookRefs) == 0 {
 		defaultRef := keziov1alpha2.NameRef{Name: posthookdefaults.DefaultFinalizeHookName}
-		return b.resolveHooks(ctx, b.ManagerNamespace, []keziov1alpha2.NameRef{defaultRef}, shared)
+		return b.resolveHooks(ctx, b.ManagerNamespace, []keziov1alpha2.NameRef{defaultRef}, shared, defaults)
 	}
-	return b.resolveHooks(ctx, machine.Namespace, machine.Spec.PostHookRefs, shared)
+	return b.resolveHooks(ctx, machine.Namespace, machine.Spec.PostHookRefs, shared, defaults)
+}
+
+// builtinDefaults carries the values a finalize-shaped builtin
+// (efibootmgr, install-removable-fallback, growLastPartition) falls back
+// to when a PostHook step's own params does not override them: only the
+// OS image (never a dataImages entry) carries the ESP and boot partitions
+// these builtins act on, so a dataImages-only deploy derives nothing
+// (zero value).
+type builtinDefaults struct {
+	disk          string
+	espPartition  int32
+	lastPartition int32
+}
+
+// deriveBuiltinDefaults computes builtinDefaults from osImage's own
+// target disk and layout, zero-valued when osImage is nil.
+func deriveBuiltinDefaults(osImage *resolvedImage) builtinDefaults {
+	if osImage == nil {
+		return builtinDefaults{}
+	}
+	d := builtinDefaults{disk: osImage.targetDisk}
+	slots := osImage.image.Spec.Layout.Slots
+	for _, s := range slots {
+		if s.Role == keziov1alpha2.PartitionRoleESP {
+			d.espPartition = s.Number
+			break
+		}
+	}
+	if n := len(slots); n > 0 {
+		d.lastPartition = slots[n-1].Number
+	}
+	return d
 }
 
 // imageParamsOf returns osImage's own Params, or nil (treated as "no

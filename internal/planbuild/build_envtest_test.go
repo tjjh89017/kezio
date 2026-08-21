@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	"github.com/tjjh89017/kezio/internal/agentapi"
 	"github.com/tjjh89017/kezio/internal/posthookdefaults"
 	"github.com/tjjh89017/kezio/internal/seederdeploy"
 	"github.com/tjjh89017/kezio/internal/store"
@@ -113,6 +114,145 @@ func TestBuilder_Build_Envtest(t *testing.T) {
 	t.Run("an unresolved placeholder is a validation error", func(t *testing.T) {
 		testUnresolvedPlaceholder(t, fx)
 	})
+	t.Run("the default hook's efibootmgr step resolves disk/part from the image's ESP slot", func(t *testing.T) {
+		testDefaultHookDerivesBuiltinParams(t, fx)
+	})
+	t.Run("an explicit builtin param overrides the derived default", func(t *testing.T) {
+		testBuiltinParamOverride(t, fx)
+	})
+	t.Run("a builtin needing the ESP fails with a validation error when the image has none", func(t *testing.T) {
+		testBuiltinMissingESPIsValidationError(t, fx)
+	})
+}
+
+func testDefaultHookDerivesBuiltinParams(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	mgrNS := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+	fx.mustCreatePostHook(mgrNS, posthookdefaults.DefaultFinalizeHookName, posthookdefaults.Spec())
+	layout := keziov1alpha2.ImageDiskLayout{
+		PartitionTable: keziov1alpha2.PartitionTableGPT,
+		SfdiskJSON:     `{"partitiontable":{}}`,
+		Slots: []keziov1alpha2.ImageSlot{
+			{Number: 1, Role: keziov1alpha2.PartitionRoleESP, FSType: "vfat"},
+			{Number: 2, Role: keziov1alpha2.PartitionRoleData, FSType: "ext4"},
+		},
+	}
+	image := fx.mustCreateImage(ns, layout)
+
+	b := &Builder{Client: fx.client, ManagerNamespace: mgrNS}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: image.Name}},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	plan, _, err := b.Build(context.Background(), machine, run)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if plan.MachineName != "m1" {
+		t.Fatalf("plan.MachineName = %q, want m1", plan.MachineName)
+	}
+	var efibootmgr *agentapi.ResolvedHookStep
+	for _, hook := range plan.Hooks {
+		for i, step := range hook.Steps {
+			if step.Builtin == keziov1alpha2.BuiltinStepEfibootmgr {
+				efibootmgr = &hook.Steps[i]
+			}
+		}
+	}
+	if efibootmgr == nil {
+		t.Fatalf("plan.Hooks = %+v, want an efibootmgr step", plan.Hooks)
+	}
+	if efibootmgr.Params["disk"] != "/dev/vda" || efibootmgr.Params["part"] != "1" {
+		t.Fatalf("efibootmgr.Params = %+v, want disk=/dev/vda part=1", efibootmgr.Params)
+	}
+}
+
+func testBuiltinParamOverride(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	layout := keziov1alpha2.ImageDiskLayout{
+		PartitionTable: keziov1alpha2.PartitionTableGPT,
+		SfdiskJSON:     `{"partitiontable":{}}`,
+		Slots: []keziov1alpha2.ImageSlot{
+			{Number: 1, Role: keziov1alpha2.PartitionRoleESP, FSType: "vfat"},
+			{Number: 2, Role: keziov1alpha2.PartitionRoleData, FSType: "ext4"},
+		},
+	}
+	image := fx.mustCreateImage(ns, layout)
+	fx.mustCreatePostHook(ns, "hook", keziov1alpha2.PostHookSpec{
+		Steps: []keziov1alpha2.PostHookStep{{
+			OSFamily: keziov1alpha2.OSFamilyLinux,
+			Builtin: &keziov1alpha2.PostHookBuiltinStep{
+				Name:   keziov1alpha2.BuiltinStepEfibootmgr,
+				Params: map[string]string{"part": "9"},
+			},
+		}},
+	})
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+
+	b := &Builder{Client: fx.client}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec: keziov1alpha2.MachineSpec{
+			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha2.NameRef{{Name: "hook"}},
+		},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	plan, _, err := b.Build(context.Background(), machine, run)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(plan.Hooks) != 1 || len(plan.Hooks[0].Steps) != 1 {
+		t.Fatalf("plan.Hooks = %+v, want exactly one hook with one step", plan.Hooks)
+	}
+	step := plan.Hooks[0].Steps[0]
+	if step.Params["part"] != "9" {
+		t.Fatalf("step.Params[part] = %q, want the explicit override 9 (not the derived ESP number 1)", step.Params["part"])
+	}
+	if step.Params["disk"] != "/dev/vda" {
+		t.Fatalf("step.Params[disk] = %q, want the derived default /dev/vda", step.Params["disk"])
+	}
+}
+
+func testBuiltinMissingESPIsValidationError(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+	// blankDataLayout no longer works here for demonstrating the missing-ESP
+	// case (it now carries an ESP slot); this layout carries none.
+	layout := keziov1alpha2.ImageDiskLayout{
+		PartitionTable: keziov1alpha2.PartitionTableGPT,
+		SfdiskJSON:     `{"partitiontable":{}}`,
+		Slots: []keziov1alpha2.ImageSlot{
+			{Number: 1, Role: keziov1alpha2.PartitionRoleData, FSType: "ext4"},
+		},
+	}
+	image := fx.mustCreateImage(ns, layout)
+	fx.mustCreatePostHook(ns, "hook", keziov1alpha2.PostHookSpec{
+		Steps: []keziov1alpha2.PostHookStep{{
+			OSFamily: keziov1alpha2.OSFamilyLinux,
+			Builtin:  &keziov1alpha2.PostHookBuiltinStep{Name: keziov1alpha2.BuiltinStepEfibootmgr},
+		}},
+	})
+
+	b := &Builder{Client: fx.client}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec: keziov1alpha2.MachineSpec{
+			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha2.NameRef{{Name: "hook"}},
+		},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	_, _, err := b.Build(context.Background(), machine, run)
+	var valErr *ValidationError
+	if !errors.As(err, &valErr) {
+		t.Fatalf("Build err = %v, want a *ValidationError", err)
+	}
 }
 
 func testDefaultHookAttached(t *testing.T, fx *fixtures) {
@@ -513,12 +653,17 @@ func oneDisk(deviceName string) []keziov1alpha2.MachineHardwareDisk {
 	return []keziov1alpha2.MachineHardwareDisk{{DeviceName: deviceName, SizeBytes: 32 << 30}}
 }
 
+// blankDataLayout carries an ESP slot (number 1) ahead of its blank data
+// slot (number 2) so a subtest attaching the shipped default PostHook
+// (mkswap, efibootmgr) has an ESP for efibootmgr's derived "part" default
+// to resolve against.
 func blankDataLayout() keziov1alpha2.ImageDiskLayout {
 	return keziov1alpha2.ImageDiskLayout{
 		PartitionTable: keziov1alpha2.PartitionTableGPT,
 		SfdiskJSON:     `{"partitiontable":{}}`,
 		Slots: []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, FSType: "ext4"},
+			{Number: 1, Role: keziov1alpha2.PartitionRoleESP, FSType: "vfat"},
+			{Number: 2, Role: keziov1alpha2.PartitionRoleData, FSType: "ext4"},
 		},
 	}
 }

@@ -34,8 +34,10 @@ import (
 
 const nextPlanTestManagerNamespace = "kezio-system"
 
-// blankDataImage builds a Ready Image with a single mkfs data slot, cheap
-// to resolve: no PartitionContent or seeder Deployment/Pod lookup.
+// blankDataImage builds a Ready Image with an ESP slot and a mkfs data
+// slot, cheap to resolve: no PartitionContent or seeder Deployment/Pod
+// lookup. The ESP slot is required for mustCreateDefaultPostHook's
+// default hook (efibootmgr) to resolve its derived "part" parameter.
 func blankDataImage(name, ns string) *keziov1alpha2.Image {
 	img := &keziov1alpha2.Image{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
@@ -43,7 +45,10 @@ func blankDataImage(name, ns string) *keziov1alpha2.Image {
 			Layout: keziov1alpha2.ImageDiskLayout{
 				PartitionTable: keziov1alpha2.PartitionTableGPT,
 				SfdiskJSON:     `{"partitiontable":{}}`,
-				Slots:          []keziov1alpha2.ImageSlot{{Number: 1, Role: keziov1alpha2.PartitionRoleData, FSType: "ext4"}},
+				Slots: []keziov1alpha2.ImageSlot{
+					{Number: 1, Role: keziov1alpha2.PartitionRoleESP, FSType: "vfat"},
+					{Number: 2, Role: keziov1alpha2.PartitionRoleData, FSType: "ext4"},
+				},
 			},
 		},
 	}
