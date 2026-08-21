@@ -17,8 +17,6 @@ limitations under the License.
 package v1alpha2
 
 import (
-	"testing"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -27,161 +25,14 @@ import (
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 )
 
+// validBuiltinStep builds a step using an OS-family-unrestricted builtin,
+// so tests can populate a PostHook with a trivially valid step. The
+// per-check unit tests for builtin/script/param validation itself live in
+// internal/posthookvalidate; this file only exercises the webhook's own
+// admission behavior (which delegates to that package).
 func validBuiltinStep() keziov1alpha2.PostHookStep {
 	return keziov1alpha2.PostHookStep{
 		Builtin: &keziov1alpha2.PostHookBuiltinStep{Name: keziov1alpha2.BuiltinStepInstallRemovableFallback},
-	}
-}
-
-func TestValidatePostHookParams(t *testing.T) {
-	tests := []struct {
-		name    string
-		params  []keziov1alpha2.PostHookParam
-		wantErr string
-	}{
-		{
-			name:   "no params",
-			params: nil,
-		},
-		{
-			name: "unique names",
-			params: []keziov1alpha2.PostHookParam{
-				{Name: "a"}, {Name: "b"},
-			},
-		},
-		{
-			name: "duplicate name",
-			params: []keziov1alpha2.PostHookParam{
-				{Name: "a"}, {Name: "a"},
-			},
-			wantErr: `spec.params[1]: duplicate param name "a"`,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := validatePostHookParams(tt.params)
-			if tt.wantErr == "" {
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				return
-			}
-			if err == nil || err.Error() != tt.wantErr {
-				t.Fatalf("error = %v, want %q", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func TestValidatePostHookStep(t *testing.T) {
-	declared := map[string]bool{
-		"foo":         true,
-		"machineName": true,
-		"imageName":   true,
-		"targetDisk":  true,
-	}
-
-	tests := []struct {
-		name    string
-		step    keziov1alpha2.PostHookStep
-		wantErr string
-	}{
-		{
-			name:    "no kind set",
-			step:    keziov1alpha2.PostHookStep{},
-			wantErr: "spec.steps[0]: exactly one of builtin, script, or chrootScript must be set",
-		},
-		{
-			name: "builtin only, unrestricted",
-			step: validBuiltinStep(),
-		},
-		{
-			name: "restricted builtin without osFamily",
-			step: keziov1alpha2.PostHookStep{
-				Builtin: &keziov1alpha2.PostHookBuiltinStep{Name: keziov1alpha2.BuiltinStepMkswap},
-			},
-			wantErr: `spec.steps[0].builtin: "mkswap" requires osFamily to be set to "Linux", got ""`,
-		},
-		{
-			name: "restricted builtin with wrong osFamily",
-			step: keziov1alpha2.PostHookStep{
-				OSFamily: keziov1alpha2.OSFamilyWindows,
-				Builtin:  &keziov1alpha2.PostHookBuiltinStep{Name: keziov1alpha2.BuiltinStepEfibootmgr},
-			},
-			wantErr: `spec.steps[0].builtin: "efibootmgr" requires osFamily to be set to "Linux", got "Windows"`,
-		},
-		{
-			name: "restricted builtin with osFamily linux",
-			step: keziov1alpha2.PostHookStep{
-				OSFamily: keziov1alpha2.OSFamilyLinux,
-				Builtin:  &keziov1alpha2.PostHookBuiltinStep{Name: keziov1alpha2.BuiltinStepGrowLastPartition},
-			},
-		},
-		{
-			name: "script with declared placeholder",
-			step: keziov1alpha2.PostHookStep{
-				Script: &keziov1alpha2.PostHookScriptSource{Script: "echo {{ .foo }}"},
-			},
-		},
-		{
-			name: "script with reserved placeholder",
-			step: keziov1alpha2.PostHookStep{
-				Script: &keziov1alpha2.PostHookScriptSource{Script: "echo {{ .machineName }}"},
-			},
-		},
-		{
-			name: "script with undeclared placeholder",
-			step: keziov1alpha2.PostHookStep{
-				Script: &keziov1alpha2.PostHookScriptSource{Script: "echo {{ .bogus }}"},
-			},
-			wantErr: `spec.steps[0].script.script: placeholder "bogus" does not reference a declared param or a reserved name (machineName, imageName, targetDisk)`,
-		},
-		{
-			name: "chrootScript with undeclared placeholder",
-			step: keziov1alpha2.PostHookStep{
-				ChrootScript: &keziov1alpha2.PostHookScriptSource{Script: "echo {{ .bogus }}"},
-			},
-			wantErr: `spec.steps[0].chrootScript.script: placeholder "bogus" does not reference a declared param or a reserved name (machineName, imageName, targetDisk)`,
-		},
-		{
-			name: "script sourced from configMapRef skips placeholder checks",
-			step: keziov1alpha2.PostHookStep{
-				Script: &keziov1alpha2.PostHookScriptSource{ConfigMapRef: &keziov1alpha2.ConfigMapKeyRef{Name: "cm", Key: "run.sh"}},
-			},
-		},
-		{
-			name: "script with no source set",
-			step: keziov1alpha2.PostHookStep{
-				Script: &keziov1alpha2.PostHookScriptSource{},
-			},
-			wantErr: "spec.steps[0].script: exactly one of script, configMapRef, or secretRef must be set",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := validatePostHookStep(0, tt.step, declared)
-			if tt.wantErr == "" {
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				return
-			}
-			if err == nil || err.Error() != tt.wantErr {
-				t.Fatalf("error = %v, want %q", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func TestDeclaredPlaceholderNames(t *testing.T) {
-	names := declaredPlaceholderNames([]keziov1alpha2.PostHookParam{{Name: "foo"}})
-	for _, want := range []string{"foo", "machineName", "imageName", "targetDisk"} {
-		if !names[want] {
-			t.Errorf("expected %q to be a declared placeholder name", want)
-		}
-	}
-	if names["bogus"] {
-		t.Error("expected bogus to not be declared")
 	}
 }
 
