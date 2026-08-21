@@ -18,9 +18,11 @@ inputs:
     required: false
     default: "scaffold-system"
   timeout:
-    description: Total timeout for the whole walk (AgentRegistered, then inventory, then Available).
+    description: >-
+      Total timeout for the whole walk (AgentRegistered, then inventory,
+      then Available), in seconds as an integer, optionally suffixed with s.
     required: false
-    default: "900"
+    default: "900s"
 
 runs:
   using: composite
@@ -33,7 +35,12 @@ runs:
         TIMEOUT: ${{ inputs.timeout }}
       run: |
         set -euo pipefail
-        deadline=$(( $(date +%s) + TIMEOUT ))
+        if [[ ! "${TIMEOUT}" =~ ^[0-9]+s?$ ]]; then
+          echo "::error::invalid timeout '${TIMEOUT}': want seconds like 900 or 900s" >&2
+          exit 1
+        fi
+        TIMEOUT_SECONDS="${TIMEOUT%s}"
+        deadline=$(( $(date +%s) + TIMEOUT_SECONDS ))
 
         dump_and_fail() {
           echo "::error::$1" >&2
@@ -51,7 +58,7 @@ runs:
           echo "$(date -Is) Machine AgentRegistered=${registered:-<none>}"
           [ "${registered}" = "True" ] && break
           if [ "$(date +%s)" -ge "${deadline}" ]; then
-            dump_and_fail "Machine ${MACHINE_NAME} did not reach AgentRegistered=True within ${TIMEOUT}s"
+            dump_and_fail "Machine ${MACHINE_NAME} did not reach AgentRegistered=True within ${TIMEOUT}"
           fi
           sleep 10
         done
@@ -70,7 +77,7 @@ runs:
             echo "$(date -Is) MachineHardware ${MACHINE_NAME} not found yet"
           fi
           if [ "$(date +%s)" -ge "${deadline}" ]; then
-            dump_and_fail "MachineHardware ${MACHINE_NAME} did not report at least one nic and one disk within ${TIMEOUT}s"
+            dump_and_fail "MachineHardware ${MACHINE_NAME} did not report at least one nic and one disk within ${TIMEOUT}"
           fi
           sleep 10
         done
@@ -81,7 +88,7 @@ runs:
           echo "$(date -Is) Machine status.state=${state:-<empty>}"
           [ "${state}" = "Available" ] && break
           if [ "$(date +%s)" -ge "${deadline}" ]; then
-            dump_and_fail "Machine ${MACHINE_NAME} did not reach state Available within ${TIMEOUT}s"
+            dump_and_fail "Machine ${MACHINE_NAME} did not reach state Available within ${TIMEOUT}"
           fi
           sleep 10
         done

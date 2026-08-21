@@ -48,7 +48,9 @@ inputs:
     required: false
     default: ""
   timeout:
-    description: Timeout to wait for the Valid condition to become True.
+    description: >-
+      Timeout to wait for the Valid condition to become True, in seconds
+      as an integer, optionally suffixed with s.
     required: false
     default: "120s"
 
@@ -116,6 +118,10 @@ runs:
         TIMEOUT: ${{ inputs.timeout }}
       run: |
         set -euo pipefail
+        if [[ ! "${TIMEOUT}" =~ ^[0-9]+s?$ ]]; then
+          echo "::error::invalid timeout '${TIMEOUT}': want seconds like 900 or 900s" >&2
+          exit 1
+        fi
         deadline_seconds="${TIMEOUT%s}"
         deadline=$(( $(date +%s) + deadline_seconds ))
         while true; do

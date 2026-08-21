@@ -41,7 +41,9 @@ inputs:
     description: Machine.spec.subnetRef.name - the Subnet whose bootd instance answers this machine's PXE boot.
     required: true
   timeout:
-    description: Timeout to wait for status.state to leave "" after creation.
+    description: >-
+      Timeout to wait for status.state to leave "" after creation, in
+      seconds as an integer, optionally suffixed with s.
     required: false
     default: "120s"
 
@@ -112,6 +114,10 @@ runs:
         TIMEOUT: ${{ inputs.timeout }}
       run: |
         set -euo pipefail
+        if [[ ! "${TIMEOUT}" =~ ^[0-9]+s?$ ]]; then
+          echo "::error::invalid timeout '${TIMEOUT}': want seconds like 900 or 900s" >&2
+          exit 1
+        fi
         deadline_seconds="${TIMEOUT%s}"
         deadline=$(( $(date +%s) + deadline_seconds ))
         while true; do
