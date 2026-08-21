@@ -223,8 +223,13 @@ runs:
           --timeout="${SEEDER_WAIT_TIMEOUT_SECONDS}s"
 
         echo "Deleting the demand Machine ${demand_machine}"
-        kubectl delete machine "${demand_machine}" -n "${NAMESPACE}"
-        kubectl delete secret "${demand_bmc_creds_secret}" -n "${NAMESPACE}"
+        # --ignore-not-found on the secret: the Machine's own delete walk
+        # releases its finalizer and clears the Machine, letting the
+        # credentials Secret's owner reference cascade-delete it (see
+        # claimCredentialsSecret/releaseCredentialsSecretFinalizer) - this
+        # explicit delete can race that cascade and find it already gone.
+        kubectl delete machine "${demand_machine}" -n "${NAMESPACE}" --wait=false
+        kubectl delete secret "${demand_bmc_creds_secret}" -n "${NAMESPACE}" --ignore-not-found
 
         early_check_delay=5
         if [ "${early_check_delay}" -ge "${GRACE_PERIOD_SECONDS}" ]; then

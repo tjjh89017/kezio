@@ -47,12 +47,14 @@ inputs:
     default: "aa:bb:cc:dd:ee:02"
   retry-image-name:
     description: >-
-      spec.dataImages[0].imageRef name for the Scenario A Machine. Image
-      does not exist as a kind at this stage, so this is never resolved -
-      it exists only to keep the deploy payload non-empty and provoke the
-      walk into Provisioning. dataImages is used instead of imageRef
-      because imageRef is gated on the named Image being Ready, which this
-      Machine never has.
+      spec.dataImages[0].imageRef name for the Scenario A Machine.
+      dataImages is used instead of imageRef because imageRef is gated on
+      the named Image being Ready, which this Machine never checks - it
+      exists only to keep the deploy payload non-empty and provoke the
+      walk into Provisioning. The Image still has to exist and reach
+      Ready: MachineReconciler.Builder (wired unconditionally in
+      production) resolves every dataImages entry before provisioning, so
+      this action creates a minimal mkfs-only Image under this name below.
     required: false
     default: "fake-failure-retry-image"
   retry-error-observed-timeout:
@@ -107,6 +109,39 @@ runs:
           --from-literal=username=fake \
           --from-literal=password=fake \
           --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: "Scenario A: create the data Image fixture (mkfs-only, no PartitionContent, so it needs no seeder)"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        IMAGE_NAME: ${{ inputs.retry-image-name }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha2
+        kind: Image
+        metadata:
+          name: ${IMAGE_NAME}
+          namespace: ${NAMESPACE}
+        spec:
+          osFamily: Linux
+          bootable: true
+          layout:
+            partitionTable: gpt
+            sfdiskJSON: |
+              {"partitiontable":{"label":"gpt","id":"00000000-0000-0000-0000-000000000000","device":"/dev/vda","unit":"sectors","firstlba":34,"lastlba":67108062,"partitions":[{"node":"/dev/vda1","start":2048,"size":1048576,"type":"C12A7328-F81F-11D2-BA4B-00A0C93EC93B","uuid":"00000000-0000-0000-0000-000000000001","name":"esp"},{"node":"/dev/vda2","start":1050624,"size":4194304,"type":"0657FD6D-A4AB-43C4-84E5-0933C84B4F4F","uuid":"00000000-0000-0000-0000-000000000002","name":"swap"},{"node":"/dev/vda3","start":5244928,"size":61863099,"type":"0FC63DAF-8483-4772-8E79-3D69D8477DE4","uuid":"00000000-0000-0000-0000-000000000003","name":"root"}]}}
+            slots:
+              - number: 1
+                role: esp
+                fsType: vfat
+              - number: 2
+                role: swap
+              - number: 3
+                role: data
+                fsType: ext4
+        EOF
+        kubectl wait "image/${IMAGE_NAME}" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.state}'=Ready --timeout=60s
 
     - name: "Scenario A: create a Machine that fails Provision twice"
       shell: bash
