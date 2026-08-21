@@ -22,6 +22,9 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the scaffold itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
+- subnet_admin_role.yaml
+- subnet_editor_role.yaml
+- subnet_viewer_role.yaml
 - partitioncontent_admin_role.yaml
 - partitioncontent_editor_role.yaml
 - partitioncontent_viewer_role.yaml

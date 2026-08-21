@@ -73,6 +73,7 @@ rules:
   - machinehardwares
   - machines
   - partitioncontents
+  - subnets
   verbs:
   - create
   - delete
@@ -88,6 +89,7 @@ rules:
   - images/finalizers
   - machines/finalizers
   - partitioncontents/finalizers
+  - subnets/finalizers
   verbs:
   - update
 - apiGroups:
@@ -97,6 +99,7 @@ rules:
   - images/status
   - machines/status
   - partitioncontents/status
+  - subnets/status
   verbs:
   - get
   - patch
