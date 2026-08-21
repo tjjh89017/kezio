@@ -245,10 +245,10 @@ jobs:
   # plain local-path-provisioner alone cannot satisfy) + opentracker + the
   # image-service token Secret + the controller-manager, verified healthy,
   # then a real upload -> ingest -> publish -> Ready walk through kezioctl
-  # (ingest-test-image), then run-leecher: seed-demand -> seeder
-  # Deployment Available -> a leecher Pod downloads the content over
-  # BitTorrent and byte-compares it against the fixture -> seed-demand
-  # cleared.
+  # (ingest-test-image), then run-leecher: a demand Machine naming the
+  # ingested Image -> seeder Deployment Available -> a leecher Pod
+  # downloads the content over BitTorrent and byte-compares it against
+  # the fixture -> the demand Machine deleted.
   e2e-image-path:
     name: Image path
     needs: [images]
@@ -344,8 +344,8 @@ jobs:
       # PARTITIONCONTENT_TRACKER_URL points at opentracker's Service,
       # deployed below - every published .torrent's announce URL.
       # PARTITIONCONTENT_SEEDER_IMAGE names the seeder tarball's local-tag
-      # imported above - without it, run-leecher's seed-demand annotation
-      # would only ever produce SeederDegraded=SeederImageMissing.
+      # imported above - without it, run-leecher's demand Machine would
+      # only ever produce SeederDegraded=SeederImageMissing.
       # PARTITIONCONTENT_SEEDER_GRACE_PERIOD is shortened from the 5m
       # production default so a later lane item asserting the
       # grace-period shutdown itself does not have to wait 5 real
@@ -401,6 +401,7 @@ jobs:
         uses: ./.github/actions/run-leecher
         with:
           content-name: ${{ steps.ingest.outputs.content-ref }}
+          image-name: ${{ steps.ingest.outputs.image-name }}
           partition-sha256: ${{ steps.ingest.outputs.partition-sha256 }}
           partition-size-bytes: ${{ steps.ingest.outputs.partition-size-bytes }}
 

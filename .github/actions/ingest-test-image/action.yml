@@ -42,6 +42,9 @@ inputs:
     default: "300"
 
 outputs:
+  image-name:
+    description: 'Name of the Image object created (this action''s own image-name input, echoed back for a downstream step that only has this action''s outputs to work from).'
+    value: ${{ inputs.image-name }}
   content-ref:
     description: 'The PartitionContent object name ("pc-<info hash>") ingest publishes the fixture''s one content partition to.'
     value: ${{ steps.fixture.outputs.content-ref }}

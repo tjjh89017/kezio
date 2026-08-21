@@ -172,15 +172,17 @@ runs:
     # - nothing would be left to observe a grace shutdown on afterward. It
     # also does not reuse run-leecher's own demand cycle: the dedupe/composed
     # steps above run an unbounded amount of wall-clock time after
-    # run-leecher cleared its marker, which could already exceed
+    # run-leecher deleted its demand Machine, which could already exceed
     # grace-period-seconds by the time this step runs. Driving a fresh
-    # demand-on/demand-off cycle here removes that race instead of racing it.
+    # demand Machine create/delete cycle here removes that race instead of
+    # racing it.
     - name: "Seeder: grace-period shutdown neither fires early nor hangs"
       id: grace
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
         CONTENT_NAME: ${{ inputs.content-name }}
+        FIRST_IMAGE_NAME: ${{ inputs.first-image-name }}
         SEEDER_WAIT_TIMEOUT_SECONDS: ${{ inputs.seeder-wait-timeout-seconds }}
         GRACE_PERIOD_SECONDS: ${{ inputs.grace-period-seconds }}
         TEARDOWN_WAIT_TIMEOUT_SECONDS: ${{ inputs.teardown-wait-timeout-seconds }}
@@ -190,18 +192,39 @@ runs:
 
         info_hash="${CONTENT_NAME#pc-}"
         seeder_deployment="kezio-seeder-${info_hash}"
+        demand_machine="kezio-e2e-grace-demand"
+        demand_bmc_creds_secret="kezio-e2e-grace-demand-bmc-creds"
 
         trap 'dump_seeder_diagnostics "${NAMESPACE}" "${seeder_deployment}"' ERR
 
-        echo "Setting seed-demand on ${CONTENT_NAME} for a fresh demand cycle"
-        kubectl annotate partitioncontents.kezio.kojuro.date "${CONTENT_NAME}" -n "${NAMESPACE}" \
-          "kezio.kojuro.date/seed-demand=true" --overwrite
+        echo "Creating a Machine naming ${FIRST_IMAGE_NAME} as its OS image, for a fresh demand cycle"
+        kubectl create secret generic "${demand_bmc_creds_secret}" \
+          --namespace "${NAMESPACE}" \
+          --from-literal=username=fake \
+          --from-literal=password=fake \
+          --dry-run=client -o yaml | kubectl apply -f -
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha2
+        kind: Machine
+        metadata:
+          name: ${demand_machine}
+          namespace: ${NAMESPACE}
+        spec:
+          bmc:
+            address: redfish://198.51.100.12/redfish/v1/Systems/1
+            credentialsSecretRef:
+              name: ${demand_bmc_creds_secret}
+          subnetRef:
+            name: kezio-e2e-grace-demand-subnet
+          imageRef:
+            name: ${FIRST_IMAGE_NAME}
+        EOF
         kubectl wait --for=condition=Available "deployment/${seeder_deployment}" -n "${NAMESPACE}" \
           --timeout="${SEEDER_WAIT_TIMEOUT_SECONDS}s"
 
-        echo "Clearing seed-demand on ${CONTENT_NAME}"
-        kubectl annotate partitioncontents.kezio.kojuro.date "${CONTENT_NAME}" -n "${NAMESPACE}" \
-          "kezio.kojuro.date/seed-demand-" --overwrite
+        echo "Deleting the demand Machine ${demand_machine}"
+        kubectl delete machine "${demand_machine}" -n "${NAMESPACE}"
+        kubectl delete secret "${demand_bmc_creds_secret}" -n "${NAMESPACE}"
 
         early_check_delay=5
         if [ "${early_check_delay}" -ge "${GRACE_PERIOD_SECONDS}" ]; then

@@ -2,24 +2,28 @@ name: Leech a PartitionContent and byte-compare it against the fixture
 
 description: >-
   Exercises the seeder lifecycle end to end against an already-Ready
-  PartitionContent: sets the seed-demand annotation and waits for its
-  seeder Deployment to become Available, runs a leecher Pod (the same
-  kezio-seeder image, default entrypoint - just ezio, gRPC-driven, no
-  register sidecar) that downloads the content over BitTorrent via
-  leechctl (built on the runner, copied in, and driven with kubectl exec
-  entirely inside the pod - localhost gRPC to ezio, a direct pod-IP HTTP
-  fetch of the .torrent from the seeder's torrent-HTTP port, no
-  port-forward needed either way), reconstructs the original partition
+  PartitionContent: creates a Machine naming the content's Image as its OS
+  image (the seed-demand source the controller derives seeding from) and
+  waits for the content's seeder Deployment to become Available, runs a
+  leecher Pod (the same kezio-seeder image, default entrypoint - just
+  ezio, gRPC-driven, no register sidecar) that downloads the content over
+  BitTorrent via leechctl (built on the runner, copied in, and driven with
+  kubectl exec entirely inside the pod - localhost gRPC to ezio, a direct
+  pod-IP HTTP fetch of the .torrent from the seeder's torrent-HTTP port,
+  no port-forward needed either way), reconstructs the original partition
   from the downloaded extent files, and fails unless its sha256 matches
-  the fixture's own. Finally clears the seed-demand annotation.
+  the fixture's own. Finally deletes the Machine.
 
   Deliberately does not wait out the seeder's grace-period shutdown -
   that belongs to whichever item asserts it, not this one - so it always
-  returns as soon as the annotation is cleared.
+  returns as soon as the Machine is deleted.
 
 inputs:
   content-name:
     description: 'PartitionContent object name ("pc-<info hash>"), e.g. ingest-test-image''s content-ref output.'
+    required: true
+  image-name:
+    description: 'Name of the Image whose slots reference content-name, e.g. ingest-test-image''s image-name output - named by the Machine created here as its seed-demand source.'
     required: true
   partition-sha256:
     description: 'sha256 of the original fixture partition, e.g. ingest-test-image''s partition-sha256 output.'
@@ -28,7 +32,7 @@ inputs:
     description: 'Size in bytes of the original fixture partition, e.g. ingest-test-image''s partition-size-bytes output.'
     required: true
   namespace:
-    description: 'Namespace the PartitionContent and its seeder Deployment live in.'
+    description: 'Namespace the PartitionContent, its Image, its seeder Deployment, and the demand Machine created here all live in.'
     required: false
     default: "scaffold-system"
   seeder-image:
@@ -56,11 +60,12 @@ runs:
       shell: bash
       run: go build -o bin/leechctl ./cmd/leechctl
 
-    - name: Seed, leech, byte-compare, then clear seed-demand
+    - name: Seed, leech, byte-compare, then delete the demand Machine
       id: leech
       shell: bash
       env:
         CONTENT_NAME: ${{ inputs.content-name }}
+        IMAGE_NAME: ${{ inputs.image-name }}
         PARTITION_SHA256: ${{ inputs.partition-sha256 }}
         PARTITION_SIZE_BYTES: ${{ inputs.partition-size-bytes }}
         NAMESPACE: ${{ inputs.namespace }}
@@ -74,10 +79,15 @@ runs:
         leecher_pod="kezio-e2e-leecher"
         seeder_deployment="kezio-seeder-${info_hash}"
         seeder_label_selector="app.kubernetes.io/name=kezio,app.kubernetes.io/component=partition-content-seeder"
+        demand_machine="kezio-e2e-leecher-demand"
+        demand_bmc_creds_secret="kezio-e2e-leecher-demand-bmc-creds"
 
         dump_diagnostics() {
           echo "::group::PartitionContent ${CONTENT_NAME}"
           kubectl get partitioncontents.kezio.kojuro.date "${CONTENT_NAME}" -n "${NAMESPACE}" -o yaml || true
+          echo "::endgroup::"
+          echo "::group::demand Machine ${demand_machine}"
+          kubectl get machine "${demand_machine}" -n "${NAMESPACE}" -o yaml || true
           echo "::endgroup::"
           echo "::group::seeder Deployment ${seeder_deployment}"
           kubectl get deployment "${seeder_deployment}" -n "${NAMESPACE}" -o yaml || true
@@ -103,14 +113,33 @@ runs:
         }
         cleanup() {
           kubectl delete pod "${leecher_pod}" -n "${NAMESPACE}" --ignore-not-found --wait=false || true
-          kubectl annotate partitioncontents.kezio.kojuro.date "${CONTENT_NAME}" -n "${NAMESPACE}" \
-            "kezio.kojuro.date/seed-demand-" --overwrite || true
+          kubectl delete machine "${demand_machine}" -n "${NAMESPACE}" --ignore-not-found --wait=false || true
+          kubectl delete secret "${demand_bmc_creds_secret}" -n "${NAMESPACE}" --ignore-not-found || true
         }
         trap 'dump_diagnostics; cleanup' ERR
 
-        echo "Setting seed-demand on ${CONTENT_NAME}"
-        kubectl annotate partitioncontents.kezio.kojuro.date "${CONTENT_NAME}" -n "${NAMESPACE}" \
-          "kezio.kojuro.date/seed-demand=true" --overwrite
+        echo "Creating a Machine naming ${IMAGE_NAME} as its OS image, to demand seeding for ${CONTENT_NAME}"
+        kubectl create secret generic "${demand_bmc_creds_secret}" \
+          --namespace "${NAMESPACE}" \
+          --from-literal=username=fake \
+          --from-literal=password=fake \
+          --dry-run=client -o yaml | kubectl apply -f -
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha2
+        kind: Machine
+        metadata:
+          name: ${demand_machine}
+          namespace: ${NAMESPACE}
+        spec:
+          bmc:
+            address: redfish://198.51.100.11/redfish/v1/Systems/1
+            credentialsSecretRef:
+              name: ${demand_bmc_creds_secret}
+          subnetRef:
+            name: kezio-e2e-leecher-demand-subnet
+          imageRef:
+            name: ${IMAGE_NAME}
+        EOF
 
         echo "Waiting for seeder Deployment ${seeder_deployment} to become Available"
         deadline=$(( $(date +%s) + SEEDER_WAIT_TIMEOUT_SECONDS ))
