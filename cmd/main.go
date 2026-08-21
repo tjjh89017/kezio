@@ -37,6 +37,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -219,13 +220,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	machineDeployer, err := deployerFromEnv(mgr.GetClient())
+	if err != nil {
+		setupLog.Error(err, "invalid DEPLOYER configuration")
+		os.Exit(1)
+	}
 	if err := (&controller.MachineReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		Recorder: mgr.GetEventRecorderFor("machine-controller"),
-		// FakeDeployer until a hardware-backed Deployer exists: it never
-		// dials a real BMC or agent.
-		Deployer: &deployer.FakeDeployer{Client: mgr.GetClient()},
+		Deployer: machineDeployer,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Machine")
 		os.Exit(1)
@@ -366,6 +370,23 @@ func main() {
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
+	}
+}
+
+// deployerFromEnv selects the Machine reconciler's Deployer implementation.
+// DEPLOYER unset or "fake" keeps deployer.FakeDeployer, which never dials
+// real hardware and backs envtest and the fast e2e lane - kezio's default.
+// DEPLOYER=agent builds deployer.AgentDeployer, which drives real BMCs and
+// waits for kezio-agent registration. Any other value fails startup rather
+// than silently falling back to the fake.
+func deployerFromEnv(c client.Client) (deployer.Deployer, error) {
+	switch v := os.Getenv("DEPLOYER"); v {
+	case "", "fake":
+		return &deployer.FakeDeployer{Client: c}, nil
+	case "agent":
+		return &deployer.AgentDeployer{Client: c}, nil
+	default:
+		return nil, fmt.Errorf("unknown DEPLOYER %q (want \"fake\" or \"agent\")", v)
 	}
 }
 
