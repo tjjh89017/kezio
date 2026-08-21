@@ -6,7 +6,9 @@ description: >-
   internal/deployer.FakeDisksAnnotation), proving an ambiguous targetDisk
   hint stops the walk before any write and a disambiguating hint resolves
   to the right disk. Three Machines, each with its own imageRef onto the
-  same mkfs-only Image fixture: Machine A's hint (rotational: false)
+  same mkfs-only Image fixture and its own BMC credentials Secret (so
+  deleting one Machine between assertions never cascades onto another's
+  Secret): Machine A's hint (rotational: false)
   matches both fabricated disks and must fail with an ambiguous-match
   error, never entering Provisioning or creating a DeployRun. Machine B's
   hint (serialNumber of the second disk) uniquely resolves it, and reaches
@@ -16,17 +18,13 @@ description: >-
 
 inputs:
   namespace:
-    description: 'Namespace the Image, Machines, and Secret are created in.'
+    description: 'Namespace the Image, Machines, and Secrets are created in.'
     required: false
     default: "default"
   image-name:
     description: 'Name of the mkfs-only Image fixture.'
     required: false
     default: "fake-disk-hints-walk-image"
-  credentials-secret-name:
-    description: 'Name of the placeholder BMC credentials Secret shared by every Machine this action creates.'
-    required: false
-    default: "fake-disk-hints-walk-bmc-creds"
   ambiguous-machine-name:
     description: 'Name of Machine A: a hint matching both fabricated disks.'
     required: false
@@ -84,11 +82,11 @@ runs:
         kubectl wait "image/${IMAGE_NAME}" -n "${NAMESPACE}" \
           --for=jsonpath='{.status.state}'=Ready --timeout=60s
 
-    - name: Create the placeholder BMC credentials Secret shared by every Machine below
+    - name: "Machine A: create its own placeholder BMC credentials Secret"
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
-        SECRET_NAME: ${{ inputs.credentials-secret-name }}
+        SECRET_NAME: ${{ inputs.ambiguous-machine-name }}-bmc-creds
       run: |
         set -euo pipefail
         kubectl create secret generic "${SECRET_NAME}" \
@@ -103,7 +101,7 @@ runs:
         NAMESPACE: ${{ inputs.namespace }}
         MACHINE_NAME: ${{ inputs.ambiguous-machine-name }}
         IMAGE_NAME: ${{ inputs.image-name }}
-        SECRET_NAME: ${{ inputs.credentials-secret-name }}
+        SECRET_NAME: ${{ inputs.ambiguous-machine-name }}-bmc-creds
       run: |
         set -euo pipefail
         cat <<EOF | kubectl apply -f -
@@ -177,6 +175,7 @@ runs:
       env:
         NAMESPACE: ${{ inputs.namespace }}
         MACHINE_NAME: ${{ inputs.ambiguous-machine-name }}
+        SECRET_NAME: ${{ inputs.ambiguous-machine-name }}-bmc-creds
       run: |
         set -euo pipefail
         # Machine A settles in operationalStatus=error, which keeps
@@ -186,6 +185,22 @@ runs:
         kubectl delete "machine/${MACHINE_NAME}" -n "${NAMESPACE}" --wait=false --ignore-not-found
         kubectl wait "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
           --for=delete --timeout=60s
+        # Machine A owns this Secret alone, so GC already cascaded it;
+        # --ignore-not-found covers that and any claim that never happened.
+        kubectl delete "secret/${SECRET_NAME}" -n "${NAMESPACE}" --ignore-not-found
+
+    - name: "Machine B: create its own placeholder BMC credentials Secret"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        SECRET_NAME: ${{ inputs.unique-machine-name }}-bmc-creds
+      run: |
+        set -euo pipefail
+        kubectl create secret generic "${SECRET_NAME}" \
+          --namespace "${NAMESPACE}" \
+          --from-literal=username=fake \
+          --from-literal=password=fake \
+          --dry-run=client -o yaml | kubectl apply -f -
 
     - name: "Machine B: create a Machine whose targetDisk hint uniquely selects the second fabricated disk"
       shell: bash
@@ -193,7 +208,7 @@ runs:
         NAMESPACE: ${{ inputs.namespace }}
         MACHINE_NAME: ${{ inputs.unique-machine-name }}
         IMAGE_NAME: ${{ inputs.image-name }}
-        SECRET_NAME: ${{ inputs.credentials-secret-name }}
+        SECRET_NAME: ${{ inputs.unique-machine-name }}-bmc-creds
       run: |
         set -euo pipefail
         cat <<EOF | kubectl apply -f -
@@ -252,11 +267,26 @@ runs:
       env:
         NAMESPACE: ${{ inputs.namespace }}
         MACHINE_NAME: ${{ inputs.unique-machine-name }}
+        SECRET_NAME: ${{ inputs.unique-machine-name }}-bmc-creds
       run: |
         set -euo pipefail
         kubectl delete "machine/${MACHINE_NAME}" -n "${NAMESPACE}" --wait=false --ignore-not-found
         kubectl wait "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
           --for=delete --timeout=60s
+        kubectl delete "secret/${SECRET_NAME}" -n "${NAMESPACE}" --ignore-not-found
+
+    - name: "Machine C: create its own placeholder BMC credentials Secret"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        SECRET_NAME: ${{ inputs.no-match-machine-name }}-bmc-creds
+      run: |
+        set -euo pipefail
+        kubectl create secret generic "${SECRET_NAME}" \
+          --namespace "${NAMESPACE}" \
+          --from-literal=username=fake \
+          --from-literal=password=fake \
+          --dry-run=client -o yaml | kubectl apply -f -
 
     - name: "Machine C: create a Machine whose targetDisk hint matches neither fabricated disk"
       shell: bash
@@ -264,7 +294,7 @@ runs:
         NAMESPACE: ${{ inputs.namespace }}
         MACHINE_NAME: ${{ inputs.no-match-machine-name }}
         IMAGE_NAME: ${{ inputs.image-name }}
-        SECRET_NAME: ${{ inputs.credentials-secret-name }}
+        SECRET_NAME: ${{ inputs.no-match-machine-name }}-bmc-creds
       run: |
         set -euo pipefail
         cat <<EOF | kubectl apply -f -
@@ -332,24 +362,20 @@ runs:
       env:
         NAMESPACE: ${{ inputs.namespace }}
         MACHINE_NAME: ${{ inputs.no-match-machine-name }}
+        SECRET_NAME: ${{ inputs.no-match-machine-name }}-bmc-creds
       run: |
         set -euo pipefail
         # Same error-backoff requeue concern as Machine A.
         kubectl delete "machine/${MACHINE_NAME}" -n "${NAMESPACE}" --wait=false --ignore-not-found
         kubectl wait "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
           --for=delete --timeout=60s
+        kubectl delete "secret/${SECRET_NAME}" -n "${NAMESPACE}" --ignore-not-found
 
-    - name: Clean up the shared BMC credentials Secret and Image fixture
+    - name: Clean up the Image fixture
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
-        SECRET_NAME: ${{ inputs.credentials-secret-name }}
         IMAGE_NAME: ${{ inputs.image-name }}
       run: |
         set -euo pipefail
-        # Each Machine's own BMC credentials Secret ref has no owner
-        # reference back to the Secret, so it outlives the Machines above
-        # and needs an explicit delete; --ignore-not-found also covers any
-        # cascade from a Machine that did claim it.
-        kubectl delete "secret/${SECRET_NAME}" -n "${NAMESPACE}" --ignore-not-found
         kubectl delete "image/${IMAGE_NAME}" -n "${NAMESPACE}" --ignore-not-found
