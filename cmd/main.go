@@ -466,8 +466,9 @@ func partitionContentSeederConfigFromEnv() controller.PartitionContentSeederConf
 // also be set. BOOT_AGENT_SERVER_URL is ordinarily a different address
 // from BOOT_SERVER_URL (a different Service/port fronting the same Pod);
 // left unset it falls back to BOOT_SERVER_URL, correct only when both
-// servers truly share one address. BOOT_EFI_DIR defaults to
-// BOOT_ARTIFACTS_DIR.
+// servers truly share one address. BOOT_KERNEL_PATH, BOOT_INITRD_PATH,
+// and BOOT_SQUASHFS_PATH each default to their bootserver.Default* name.
+// BOOT_EFI_DIR defaults to BOOT_ARTIFACTS_DIR.
 func bootServerConfigFromEnv() (*bootserver.Config, error) {
 	addr := os.Getenv("BOOT_SERVER_ADDR")
 	if addr == "" {
@@ -490,6 +491,7 @@ func bootServerConfigFromEnv() (*bootserver.Config, error) {
 		AgentServerURL: os.Getenv("BOOT_AGENT_SERVER_URL"),
 		KernelPath:     os.Getenv("BOOT_KERNEL_PATH"),
 		InitrdPath:     os.Getenv("BOOT_INITRD_PATH"),
+		SquashfsPath:   os.Getenv("BOOT_SQUASHFS_PATH"),
 		EFIDir:         os.Getenv("BOOT_EFI_DIR"),
 	}
 	if ttl := os.Getenv("BOOT_TOKEN_TTL"); ttl != "" {
