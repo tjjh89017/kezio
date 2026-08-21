@@ -44,6 +44,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	"github.com/tjjh89017/kezio/internal/agentserver"
 	"github.com/tjjh89017/kezio/internal/bootserver"
 	"github.com/tjjh89017/kezio/internal/controller"
 	"github.com/tjjh89017/kezio/internal/deployer"
@@ -319,6 +320,21 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	agentConfig, err := agentServerConfigFromEnv()
+	if err != nil {
+		setupLog.Error(err, "invalid agent server configuration")
+		os.Exit(1)
+	}
+	if agentConfig != nil {
+		if err := agentserver.SetupFieldIndexer(context.Background(), mgr); err != nil {
+			setupLog.Error(err, "unable to set up agent token field indexers")
+			os.Exit(1)
+		}
+		if err := mgr.Add(agentserver.New(mgr.GetClient(), *agentConfig)); err != nil {
+			setupLog.Error(err, "unable to add agent registration server")
+			os.Exit(1)
+		}
+	}
 	// +kubebuilder:scaffold:builder
 
 	if metricsCertWatcher != nil {
@@ -461,6 +477,37 @@ func bootServerConfigFromEnv() (*bootserver.Config, error) {
 			return nil, fmt.Errorf("invalid BOOT_TOKEN_TTL: %w", err)
 		}
 		cfg.TokenTTL = d
+	}
+	return cfg, nil
+}
+
+// agentServerConfigFromEnv builds the agent registration server's
+// agentserver.Config from the environment, mirroring
+// bootServerConfigFromEnv's inert-by-default shape: leaving
+// AGENT_SERVER_ADDR unset returns a nil Config, and main does not add
+// the server to the manager. AGENT_SESSION_TTL and AGENT_POLL_INTERVAL
+// are both optional; left unset the server falls back to
+// agentserver.DefaultSessionTTL and agentserver.DefaultPollInterval.
+func agentServerConfigFromEnv() (*agentserver.Config, error) {
+	addr := os.Getenv("AGENT_SERVER_ADDR")
+	if addr == "" {
+		return nil, nil
+	}
+
+	cfg := &agentserver.Config{Addr: addr}
+	if ttl := os.Getenv("AGENT_SESSION_TTL"); ttl != "" {
+		d, err := time.ParseDuration(ttl)
+		if err != nil {
+			return nil, fmt.Errorf("invalid AGENT_SESSION_TTL: %w", err)
+		}
+		cfg.SessionTTL = d
+	}
+	if interval := os.Getenv("AGENT_POLL_INTERVAL"); interval != "" {
+		d, err := time.ParseDuration(interval)
+		if err != nil {
+			return nil, fmt.Errorf("invalid AGENT_POLL_INTERVAL: %w", err)
+		}
+		cfg.PollInterval = d
 	}
 	return cfg, nil
 }

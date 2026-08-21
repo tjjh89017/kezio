@@ -385,6 +385,12 @@ const (
 	// currently polling for a deploy plan advertises a schema version the
 	// server accepts.
 	MachineConditionAgentCompatible = "AgentCompatible"
+	// MachineConditionAgentRegistered reports whether kezio-agent has
+	// registered from the live boot environment and reported its
+	// hardware inventory (internal/agentserver's POST /agent/register).
+	// True is the signal the deployer polls for before it acts on this
+	// machine's status.hardware.
+	MachineConditionAgentRegistered = "AgentRegistered"
 	// MachineConditionStatusLossHold is True while the controller refuses
 	// to provision a Machine it found with status never written
 	// (status.lastUpdated absent) but spec.imageRef/dataImages already set

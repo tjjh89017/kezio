@@ -24,12 +24,28 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+
+	"github.com/tjjh89017/kezio/internal/agentapi"
 )
+
+// init verifies agentRoutePrefix actually covers every route
+// internal/agentapi defines, so the two can never silently drift apart -
+// a new agentapi route added outside "/agent/" would otherwise proxy as
+// a plain 404 with nothing to explain why.
+func init() {
+	if !strings.HasPrefix(agentapi.RegisterPath, agentRoutePrefix) {
+		panic(fmt.Sprintf("bootd: agentRoutePrefix %q does not cover agentapi.RegisterPath %q", agentRoutePrefix, agentapi.RegisterPath))
+	}
+	if !strings.HasPrefix(agentapi.NextPath, agentRoutePrefix) {
+		panic(fmt.Sprintf("bootd: agentRoutePrefix %q does not cover agentapi.NextPath %q", agentRoutePrefix, agentapi.NextPath))
+	}
+}
 
 // DefaultProxyAddr is ProxyServer.Addr's default: DefaultProxyPort
 // (identity.go) on whatever address the caller binds it to. Firmware and
