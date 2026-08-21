@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	"github.com/tjjh89017/kezio/internal/posthookvalidate"
 )
 
 // nolint:unused
@@ -79,7 +80,7 @@ func (v *ImageCustomValidator) ValidateCreate(ctx context.Context, obj runtime.O
 	}
 	imagelog.Info("Validation for Image upon creation", "name", image.GetName())
 
-	return v.validateSlotContentSizes(ctx, image)
+	return v.validateImage(ctx, image)
 }
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type Image.
@@ -92,8 +93,20 @@ func (v *ImageCustomValidator) ValidateUpdate(ctx context.Context, oldObj, newOb
 
 	// ImageSpec carries its own "spec is immutable" XValidation rule, so
 	// this branch only runs in practice for a dry-run client or if that
-	// rule is ever relaxed; the slot/content rule must hold either way.
-	return v.validateSlotContentSizes(ctx, image)
+	// rule is ever relaxed; the slot/content and postHookRefs rules must
+	// hold either way.
+	return v.validateImage(ctx, image)
+}
+
+// validateImage runs every cross-object Image check: the slot/content size
+// rule, then the postHookRefs rule, merging both calls' warnings.
+func (v *ImageCustomValidator) validateImage(ctx context.Context, image *keziov1alpha2.Image) (admission.Warnings, error) {
+	warnings, err := v.validateSlotContentSizes(ctx, image)
+	if err != nil {
+		return warnings, err
+	}
+	hookWarnings, err := v.validatePostHookRefs(ctx, image)
+	return append(warnings, hookWarnings...), err
 }
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type Image.
@@ -170,6 +183,48 @@ func (v *ImageCustomValidator) validateSlotContentSizes(ctx context.Context, ima
 			return warnings, fmt.Errorf(
 				"slot %d sizeBytes (%d) is smaller than PartitionContent %q lastExtentEnd (%d): extents restore at absolute offsets, so a smaller slot would corrupt silently",
 				slot.Number, slot.SizeBytes, slot.ContentRef.Name, content.Spec.LastExtentEnd)
+		}
+	}
+	return warnings, nil
+}
+
+// validatePostHookRefs denies a spec.postHookRefs entry naming a namespace
+// other than the Image's own (the same rule validateSlotContentSizes gives
+// a slot's contentRef), and denies one whose referenced PostHook has a
+// step incompatible with this Image's OSFamily
+// (posthookvalidate.CheckOSFamilyCompatible).
+//
+// A referenced PostHook that does not exist yet is admitted, with a
+// warning naming it: creation order between an Image and the PostHook
+// objects it references is not guaranteed. planbuild's own resolve-time
+// check (Builder.resolveHook, which runs the same
+// CheckOSFamilyCompatible call) catches a referent that still does not
+// exist, or turns out incompatible, by the time a deploy actually resolves
+// it.
+func (v *ImageCustomValidator) validatePostHookRefs(ctx context.Context, image *keziov1alpha2.Image) (admission.Warnings, error) {
+	var warnings admission.Warnings
+	osFamily := image.Spec.EffectiveOSFamily()
+	for i, ref := range image.Spec.PostHookRefs {
+		if ref.Namespace != "" && ref.Namespace != image.GetNamespace() {
+			return warnings, fmt.Errorf(
+				"spec.postHookRefs[%d] references PostHook %q in namespace %q, but a postHookRefs entry must stay in the Image's own namespace %q",
+				i, ref.Name, ref.Namespace, image.GetNamespace())
+		}
+
+		hook := &keziov1alpha2.PostHook{}
+		key := client.ObjectKey{Namespace: image.GetNamespace(), Name: ref.Name}
+		if err := v.Client.Get(ctx, key, hook); err != nil {
+			if apierrors.IsNotFound(err) {
+				warnings = append(warnings, fmt.Sprintf(
+					"spec.postHookRefs[%d] references PostHook %q, which does not exist yet; its osFamily compatibility will be checked once it is created",
+					i, ref.Name))
+				continue
+			}
+			return warnings, fmt.Errorf("looking up PostHook %q referenced by spec.postHookRefs[%d]: %w", ref.Name, i, err)
+		}
+
+		if err := posthookvalidate.CheckOSFamilyCompatible(hook, osFamily); err != nil {
+			return warnings, fmt.Errorf("spec.postHookRefs[%d]: %w", i, err)
 		}
 	}
 	return warnings, nil

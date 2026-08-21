@@ -225,6 +225,73 @@ var _ = Describe("Image Webhook", func() {
 		})
 	})
 
+	Context("postHookRefs versus the referenced PostHook's osFamily", func() {
+		newPostHook := func(name string, steps ...keziov1alpha2.PostHookStep) *keziov1alpha2.PostHook {
+			ph := &keziov1alpha2.PostHook{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+				Spec:       keziov1alpha2.PostHookSpec{Steps: steps},
+			}
+			Expect(k8sClient.Create(ctx, ph)).To(Succeed())
+			return ph
+		}
+
+		// Every case below deploys an effectively-Linux image (OSFamily
+		// left unset, defaulting through EffectiveOSFamily), so only the
+		// hook side needs to vary to exercise (in)compatibility.
+		newImageWithHooks := func(name string, refs ...keziov1alpha2.NameRef) *keziov1alpha2.Image {
+			return &keziov1alpha2.Image{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+				Spec: keziov1alpha2.ImageSpec{
+					Layout: keziov1alpha2.ImageDiskLayout{
+						PartitionTable: keziov1alpha2.PartitionTableGPT,
+						SfdiskJSON:     `{"partitiontable":{"label":"gpt"}}`,
+						Slots: []keziov1alpha2.ImageSlot{
+							{Number: 1, Role: keziov1alpha2.PartitionRoleData, FSType: "ext4"},
+						},
+					},
+					PostHookRefs: refs,
+				},
+			}
+		}
+
+		It("admits an Image whose referenced PostHook is compatible", func() {
+			hook := newPostHook("hook-compatible", keziov1alpha2.PostHookStep{
+				OSFamily: keziov1alpha2.OSFamilyLinux,
+				Script:   &keziov1alpha2.PostHookScriptSource{Script: "echo hi"},
+			})
+			img := newImageWithHooks("image-posthook-compatible", keziov1alpha2.NameRef{Name: hook.Name})
+			Expect(validator.ValidateCreate(ctx, img)).Error().NotTo(HaveOccurred())
+		})
+
+		It("denies an Image whose referenced chrootScript hook step declares a mismatched osFamily, naming the step's field path", func() {
+			hook := newPostHook("hook-chroot-mismatch", keziov1alpha2.PostHookStep{
+				OSFamily:     keziov1alpha2.OSFamilyWindows,
+				ChrootScript: &keziov1alpha2.PostHookScriptSource{Script: "echo hi"},
+			})
+			img := newImageWithHooks("image-posthook-chroot-mismatch", keziov1alpha2.NameRef{Name: hook.Name})
+			_, err := validator.ValidateCreate(ctx, img)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.postHookRefs[0]"))
+			Expect(err.Error()).To(ContainSubstring("spec.steps[0]"))
+		})
+
+		It("admits an Image whose referenced PostHook does not exist yet, with a warning naming it", func() {
+			img := newImageWithHooks("image-posthook-missing", keziov1alpha2.NameRef{Name: "does-not-exist"})
+			warnings, err := validator.ValidateCreate(ctx, img)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(warnings).To(ContainElement(ContainSubstring("does-not-exist")))
+		})
+
+		It("denies a postHookRefs entry naming a namespace other than the Image's own", func() {
+			img := newImageWithHooks("image-posthook-cross-namespace",
+				keziov1alpha2.NameRef{Name: "hook-elsewhere", Namespace: "other-namespace"})
+			_, err := validator.ValidateCreate(ctx, img)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.postHookRefs[0]"))
+			Expect(err.Error()).To(ContainSubstring("other-namespace"))
+		})
+	})
+
 	Context("admission round-trip through the webhook server", func() {
 		It("admits a valid Image", func() {
 			created := &keziov1alpha2.Image{
