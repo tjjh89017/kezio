@@ -226,6 +226,11 @@ jobs:
           namespace: "default"
           manager-namespace: "scaffold-system"
 
+      - name: Run a fake-deployer disk-hint matching walk
+        uses: ./.github/actions/run-fake-disk-hints-walk
+        with:
+          namespace: "default"
+
       - name: Run the watch-churn check
         uses: ./.github/actions/run-watch-churn-check
         with:

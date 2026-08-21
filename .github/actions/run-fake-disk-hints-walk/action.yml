@@ -1,0 +1,302 @@
+name: Run a fake-deployer disk-hint matching walk
+
+description: >-
+  Exercises internal/diskmatch.Match against FakeDeployer.Inspect's opt-in
+  two-disk synthetic inventory (kezio.kojuro.date/fake-disks: "2" -
+  internal/deployer.FakeDisksAnnotation), proving an ambiguous targetDisk
+  hint stops the walk before any write and a disambiguating hint resolves
+  to the right disk. Three Machines, each with its own imageRef onto the
+  same mkfs-only Image fixture: Machine A's hint (rotational: false)
+  matches both fabricated disks and must fail with an ambiguous-match
+  error, never entering Provisioning or creating a DeployRun. Machine B's
+  hint (serialNumber of the second disk) uniquely resolves it, and reaches
+  Provisioned with spec.resolvedDisks[0].targetDisk equal to that disk's
+  device path. Machine C's hint matches neither disk and must fail with a
+  no-match error, the same way Machine A does.
+
+inputs:
+  namespace:
+    description: 'Namespace the Image, Machines, and Secret are created in.'
+    required: false
+    default: "default"
+  image-name:
+    description: 'Name of the mkfs-only Image fixture.'
+    required: false
+    default: "fake-disk-hints-walk-image"
+  credentials-secret-name:
+    description: 'Name of the placeholder BMC credentials Secret shared by every Machine this action creates.'
+    required: false
+    default: "fake-disk-hints-walk-bmc-creds"
+  ambiguous-machine-name:
+    description: 'Name of Machine A: a hint matching both fabricated disks.'
+    required: false
+    default: "fake-disk-hints-ambiguous"
+  unique-machine-name:
+    description: 'Name of Machine B: a hint uniquely matching the second fabricated disk.'
+    required: false
+    default: "fake-disk-hints-unique"
+  no-match-machine-name:
+    description: 'Name of Machine C: a hint matching neither fabricated disk.'
+    required: false
+    default: "fake-disk-hints-no-match"
+  error-timeout:
+    description: 'Timeout for Machine A/C to report status.operationalStatus=error.'
+    required: false
+    default: "60s"
+  provisioned-timeout:
+    description: 'Timeout for Machine B to reach status.state=Provisioned.'
+    required: false
+    default: "120s"
+
+runs:
+  using: composite
+  steps:
+    - name: Create the mkfs-only Image fixture (no PartitionContent, so it needs no seeder)
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha2
+        kind: Image
+        metadata:
+          name: ${IMAGE_NAME}
+          namespace: ${NAMESPACE}
+        spec:
+          osFamily: Linux
+          bootable: true
+          layout:
+            partitionTable: gpt
+            sfdiskJSON: |
+              {"partitiontable":{"label":"gpt","id":"00000000-0000-0000-0000-000000000000","device":"/dev/vda","unit":"sectors","firstlba":34,"lastlba":67108062,"partitions":[{"node":"/dev/vda1","start":2048,"size":1048576,"type":"C12A7328-F81F-11D2-BA4B-00A0C93EC93B","uuid":"00000000-0000-0000-0000-000000000001","name":"esp"},{"node":"/dev/vda2","start":1050624,"size":4194304,"type":"0657FD6D-A4AB-43C4-84E5-0933C84B4F4F","uuid":"00000000-0000-0000-0000-000000000002","name":"swap"},{"node":"/dev/vda3","start":5244928,"size":61863099,"type":"0FC63DAF-8483-4772-8E79-3D69D8477DE4","uuid":"00000000-0000-0000-0000-000000000003","name":"root"}]}}
+            slots:
+              - number: 1
+                role: esp
+                fsType: vfat
+              - number: 2
+                role: swap
+              - number: 3
+                role: data
+                fsType: ext4
+        EOF
+        kubectl wait "image/${IMAGE_NAME}" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.state}'=Ready --timeout=60s
+
+    - name: Create the placeholder BMC credentials Secret shared by every Machine below
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        SECRET_NAME: ${{ inputs.credentials-secret-name }}
+      run: |
+        set -euo pipefail
+        kubectl create secret generic "${SECRET_NAME}" \
+          --namespace "${NAMESPACE}" \
+          --from-literal=username=fake \
+          --from-literal=password=fake \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: "Machine A: create a Machine whose targetDisk hint matches both fabricated disks"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.ambiguous-machine-name }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+        SECRET_NAME: ${{ inputs.credentials-secret-name }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha2
+        kind: Machine
+        metadata:
+          name: ${MACHINE_NAME}
+          namespace: ${NAMESPACE}
+          annotations:
+            kezio.kojuro.date/fake-disks: "2"
+        spec:
+          bmc:
+            address: redfish://198.51.100.31/redfish/v1/Systems/1
+            credentialsSecretRef:
+              name: ${SECRET_NAME}
+          bootMACAddress: "aa:bb:cc:dd:ee:31"
+          subnetRef:
+            name: fake-disk-hints-walk-subnet
+          imageRef:
+            name: ${IMAGE_NAME}
+          targetDisk:
+            rotational: false
+        EOF
+
+    - name: "Machine A: wait for it to error, then assert it never started provisioning"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.ambiguous-machine-name }}
+        TIMEOUT: ${{ inputs.error-timeout }}
+      run: |
+        set -euo pipefail
+        kubectl wait "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.operationalStatus}'=error --timeout="${TIMEOUT}"
+
+        machine_json="$(kubectl get "machine/${MACHINE_NAME}" -n "${NAMESPACE}" -o json)"
+        echo "${machine_json}" | jq .
+
+        state="$(echo "${machine_json}" | jq -r '.status.state')"
+        if [ "${state}" != "Available" ]; then
+          echo "machine/${MACHINE_NAME} status.state is \"${state}\", expected \"Available\" (an ambiguous disk hint must never enter Provisioning)" >&2
+          exit 1
+        fi
+
+        error_message="$(echo "${machine_json}" | jq -r '.status.errorMessage // empty')"
+        case "${error_message}" in
+          *"multiple disks match the hints"*) ;;
+          *)
+            echo "machine/${MACHINE_NAME} status.errorMessage is \"${error_message}\", expected it to mention \"multiple disks match the hints\" (diskmatch.ErrAmbiguous)" >&2
+            exit 1
+            ;;
+        esac
+
+        current_run="$(echo "${machine_json}" | jq -r '.status.currentRunRef // empty')"
+        if [ -n "${current_run}" ]; then
+          echo "machine/${MACHINE_NAME} status.currentRunRef is set (${current_run}) despite an unresolved ambiguous disk hint" >&2
+          exit 1
+        fi
+
+        owned_runs="$(kubectl get deployruns.kezio.kojuro.date -n "${NAMESPACE}" -o json \
+          | jq -r --arg name "${MACHINE_NAME}" '[.items[] | select(.spec.machineRef.name == $name)] | length')"
+        if [ "${owned_runs}" != "0" ]; then
+          echo "found ${owned_runs} deployrun(s) owned by machine/${MACHINE_NAME}, expected 0 (ambiguous disk selection must stop before any write)" >&2
+          exit 1
+        fi
+
+        echo "machine/${MACHINE_NAME} correctly stayed Available/error with no DeployRun created, errorMessage=\"${error_message}\""
+
+    - name: "Machine B: create a Machine whose targetDisk hint uniquely selects the second fabricated disk"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.unique-machine-name }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+        SECRET_NAME: ${{ inputs.credentials-secret-name }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha2
+        kind: Machine
+        metadata:
+          name: ${MACHINE_NAME}
+          namespace: ${NAMESPACE}
+          annotations:
+            kezio.kojuro.date/fake-disks: "2"
+        spec:
+          bmc:
+            address: redfish://198.51.100.32/redfish/v1/Systems/1
+            credentialsSecretRef:
+              name: ${SECRET_NAME}
+          bootMACAddress: "aa:bb:cc:dd:ee:32"
+          subnetRef:
+            name: fake-disk-hints-walk-subnet
+          imageRef:
+            name: ${IMAGE_NAME}
+          targetDisk:
+            serialNumber: fake-disk-1
+        EOF
+
+    - name: "Machine B: wait for it to reach Provisioned, then assert the resolved disk"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.unique-machine-name }}
+        TIMEOUT: ${{ inputs.provisioned-timeout }}
+      run: |
+        set -euo pipefail
+        kubectl wait "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.state}'=Provisioned --timeout="${TIMEOUT}"
+
+        run_name="$(kubectl get "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
+          -o jsonpath='{.status.lastSuccessfulRunRef.name}')"
+        if [ -z "${run_name}" ]; then
+          echo "machine/${MACHINE_NAME} reached Provisioned but status.lastSuccessfulRunRef is unset" >&2
+          exit 1
+        fi
+
+        run_json="$(kubectl get "deployrun/${run_name}" -n "${NAMESPACE}" -o json)"
+        echo "${run_json}" | jq .
+
+        resolved_disk="$(echo "${run_json}" | jq -r '.spec.resolvedDisks[0].targetDisk // empty')"
+        if [ "${resolved_disk}" != "/dev/vdb" ]; then
+          echo "deployrun/${run_name} spec.resolvedDisks[0].targetDisk is \"${resolved_disk}\", expected \"/dev/vdb\" (the second fabricated disk, serial fake-disk-1)" >&2
+          exit 1
+        fi
+
+        echo "machine/${MACHINE_NAME} resolved its unique serialNumber hint to ${resolved_disk}"
+
+    - name: "Machine C: create a Machine whose targetDisk hint matches neither fabricated disk"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.no-match-machine-name }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+        SECRET_NAME: ${{ inputs.credentials-secret-name }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha2
+        kind: Machine
+        metadata:
+          name: ${MACHINE_NAME}
+          namespace: ${NAMESPACE}
+          annotations:
+            kezio.kojuro.date/fake-disks: "2"
+        spec:
+          bmc:
+            address: redfish://198.51.100.33/redfish/v1/Systems/1
+            credentialsSecretRef:
+              name: ${SECRET_NAME}
+          bootMACAddress: "aa:bb:cc:dd:ee:33"
+          subnetRef:
+            name: fake-disk-hints-walk-subnet
+          imageRef:
+            name: ${IMAGE_NAME}
+          targetDisk:
+            serialNumber: fake-disk-does-not-exist
+        EOF
+
+    - name: "Machine C: wait for it to error, then assert it never started provisioning"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.no-match-machine-name }}
+        TIMEOUT: ${{ inputs.error-timeout }}
+      run: |
+        set -euo pipefail
+        kubectl wait "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.operationalStatus}'=error --timeout="${TIMEOUT}"
+
+        machine_json="$(kubectl get "machine/${MACHINE_NAME}" -n "${NAMESPACE}" -o json)"
+        echo "${machine_json}" | jq .
+
+        state="$(echo "${machine_json}" | jq -r '.status.state')"
+        if [ "${state}" != "Available" ]; then
+          echo "machine/${MACHINE_NAME} status.state is \"${state}\", expected \"Available\" (a no-match disk hint must never enter Provisioning)" >&2
+          exit 1
+        fi
+
+        error_message="$(echo "${machine_json}" | jq -r '.status.errorMessage // empty')"
+        case "${error_message}" in
+          *"no disk matches the hints"*) ;;
+          *)
+            echo "machine/${MACHINE_NAME} status.errorMessage is \"${error_message}\", expected it to mention \"no disk matches the hints\" (diskmatch.ErrNoMatch)" >&2
+            exit 1
+            ;;
+        esac
+
+        owned_runs="$(kubectl get deployruns.kezio.kojuro.date -n "${NAMESPACE}" -o json \
+          | jq -r --arg name "${MACHINE_NAME}" '[.items[] | select(.spec.machineRef.name == $name)] | length')"
+        if [ "${owned_runs}" != "0" ]; then
+          echo "found ${owned_runs} deployrun(s) owned by machine/${MACHINE_NAME}, expected 0 (a no-match disk hint must stop before any write)" >&2
+          exit 1
+        fi
+
+        echo "machine/${MACHINE_NAME} correctly stayed Available/error with no DeployRun created, errorMessage=\"${error_message}\""
