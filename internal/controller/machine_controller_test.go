@@ -41,6 +41,7 @@ import (
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 	"github.com/tjjh89017/kezio/internal/deployer"
+	"github.com/tjjh89017/kezio/internal/planbuild"
 )
 
 // TestMachineControllerGoSourceDoesNotImportBMC guards the fast lane's stub
@@ -122,10 +123,11 @@ func TestShouldProvision(t *testing.T) {
 	}
 
 	cases := []struct {
-		name    string
-		spec    keziov1alpha2.MachineSpec
-		lastRun *keziov1alpha2.DeployRun
-		want    bool
+		name      string
+		spec      keziov1alpha2.MachineSpec
+		lastRun   *keziov1alpha2.DeployRun
+		hooksHash string
+		want      bool
 	}{
 		{
 			name:    "empty payload, no last run, never triggers",
@@ -199,11 +201,33 @@ func TestShouldProvision(t *testing.T) {
 			lastRun: &keziov1alpha2.DeployRun{Spec: keziov1alpha2.DeployRunSpec{ImageRef: &image1, DataImages: data1}},
 			want:    false,
 		},
+		{
+			name: "hooksHash change alone triggers, imageRef/dataImages unchanged",
+			spec: keziov1alpha2.MachineSpec{ImageRef: &image1, DataImages: data1},
+			lastRun: &keziov1alpha2.DeployRun{Spec: keziov1alpha2.DeployRunSpec{
+				ImageRef:   &image1,
+				DataImages: data1,
+				HooksHash:  "old-hash",
+			}},
+			hooksHash: "new-hash",
+			want:      true,
+		},
+		{
+			name: "identical hooksHash does not trigger",
+			spec: keziov1alpha2.MachineSpec{ImageRef: &image1, DataImages: data1},
+			lastRun: &keziov1alpha2.DeployRun{Spec: keziov1alpha2.DeployRunSpec{
+				ImageRef:   &image1,
+				DataImages: data1,
+				HooksHash:  "same-hash",
+			}},
+			hooksHash: "same-hash",
+			want:      false,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			machine := &keziov1alpha2.Machine{Spec: tc.spec}
-			if got := shouldProvision(machine, tc.lastRun); got != tc.want {
+			if got := shouldProvision(machine, tc.lastRun, tc.hooksHash); got != tc.want {
 				t.Errorf("shouldProvision() = %v, want %v", got, tc.want)
 			}
 		})
@@ -986,6 +1010,121 @@ var _ = Describe("Machine Controller", func() {
 			Expect(machine.Status.State).To(BeElementOf(keziov1alpha2.MachineStateProvisioning, keziov1alpha2.MachineStateProvisioned))
 			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
 			Expect(machine.Status.CurrentRunRef).NotTo(BeNil())
+		})
+	})
+
+	Context("When a Builder is wired, resolving the DeployRun snapshot", func() {
+		ctx := context.Background()
+
+		reconcileUntilStable := func(reconciler *MachineReconciler, name types.NamespacedName) {
+			GinkgoHelper()
+			for range 50 {
+				result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+				if result.RequeueAfter == 0 {
+					var m keziov1alpha2.Machine
+					Expect(k8sClient.Get(ctx, name, &m)).To(Succeed())
+					if m.Status.State == keziov1alpha2.MachineStateProvisioned {
+						return
+					}
+				}
+			}
+		}
+
+		It("records ResolvedDisks and HooksHash on the created DeployRun, and a PostHook edit triggers a fresh run", func() {
+			imageName := fmt.Sprintf("builder-snapshot-image-%d", GinkgoRandomSeed())
+			img := newTestImageWithSlots(imageName, []keziov1alpha2.ImageSlot{
+				{Number: 1, Role: keziov1alpha2.PartitionRoleESP, FSType: "vfat"},
+				{Number: 2, Role: keziov1alpha2.PartitionRoleData, FSType: "ext4"},
+			}, nil)
+			Expect(k8sClient.Create(ctx, img)).To(Succeed())
+			img.Status.State = keziov1alpha2.ImageStateReady
+			meta.SetStatusCondition(&img.Status.Conditions, metav1.Condition{
+				Type: keziov1alpha2.ImageConditionReady, Status: metav1.ConditionTrue,
+				ObservedGeneration: img.Generation, Reason: "Ready", Message: "test fixture",
+			})
+			Expect(k8sClient.Status().Update(ctx, img)).To(Succeed())
+
+			hookName := fmt.Sprintf("builder-snapshot-hook-%d", GinkgoRandomSeed())
+			hook := &keziov1alpha2.PostHook{
+				ObjectMeta: metav1.ObjectMeta{Name: hookName, Namespace: "default"},
+				Spec: keziov1alpha2.PostHookSpec{
+					Steps: []keziov1alpha2.PostHookStep{{
+						OSFamily: keziov1alpha2.OSFamilyLinux,
+						Builtin:  &keziov1alpha2.PostHookBuiltinStep{Name: keziov1alpha2.BuiltinStepMkswap},
+					}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, hook)).To(Succeed())
+			meta.SetStatusCondition(&hook.Status.Conditions, metav1.Condition{
+				Type: keziov1alpha2.PostHookConditionValid, Status: metav1.ConditionTrue, Reason: "TestFixture", Message: "fixture",
+			})
+			Expect(k8sClient.Status().Update(ctx, hook)).To(Succeed())
+
+			machineName := fmt.Sprintf("builder-snapshot-machine-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			imageRef := keziov1alpha2.NameRef{Name: imageName}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: fmt.Sprintf("aa:bb:cc:dd:90:%02x", GinkgoRandomSeed()%256),
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					ImageRef:       &imageRef,
+					PostHookRefs:   []keziov1alpha2.NameRef{{Name: hookName}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, resource)).To(Succeed()) })
+
+			reconciler := &MachineReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Deployer: &deployer.FakeDeployer{Client: k8sClient},
+				Builder:  &planbuild.Builder{Client: k8sClient, ManagerNamespace: "default"},
+			}
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			reconcileUntilStable(reconciler, name)
+
+			var machine keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioned))
+			firstRunName := machine.Status.LastSuccessfulRunRef.Name
+
+			var firstRun keziov1alpha2.DeployRun
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: firstRunName, Namespace: "default"}, &firstRun)).To(Succeed())
+			Expect(firstRun.Spec.ResolvedDisks).NotTo(BeEmpty())
+			Expect(firstRun.Spec.ResolvedDisks[0].TargetDisk).To(Equal("/dev/vda"))
+			Expect(firstRun.Spec.HooksHash).NotTo(BeEmpty())
+
+			By("editing the referenced PostHook: the hooksHash changes, triggering a fresh run with the same imageRef/dataImages")
+			var freshHook keziov1alpha2.PostHook
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: hookName, Namespace: "default"}, &freshHook)).To(Succeed())
+			freshHook.Spec.Steps = append(freshHook.Spec.Steps, keziov1alpha2.PostHookStep{
+				OSFamily: keziov1alpha2.OSFamilyLinux,
+				Builtin:  &keziov1alpha2.PostHookBuiltinStep{Name: keziov1alpha2.BuiltinStepGrowLastPartition},
+			})
+			Expect(k8sClient.Update(ctx, &freshHook)).To(Succeed())
+			meta.SetStatusCondition(&freshHook.Status.Conditions, metav1.Condition{
+				Type: keziov1alpha2.PostHookConditionValid, Status: metav1.ConditionTrue, Reason: "TestFixture", Message: "fixture",
+			})
+			Expect(k8sClient.Status().Update(ctx, &freshHook)).To(Succeed())
+
+			reconcileUntilStable(reconciler, name)
+
+			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioned))
+			Expect(machine.Status.LastSuccessfulRunRef.Name).NotTo(Equal(firstRunName), "a PostHook-only change must still trigger a fresh DeployRun")
+
+			var secondRun keziov1alpha2.DeployRun
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: machine.Status.LastSuccessfulRunRef.Name, Namespace: "default"}, &secondRun)).To(Succeed())
+			Expect(secondRun.Spec.HooksHash).NotTo(Equal(firstRun.Spec.HooksHash))
+			Expect(secondRun.Spec.ImageRef.Name).To(Equal(imageName))
 		})
 	})
 

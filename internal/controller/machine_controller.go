@@ -45,6 +45,7 @@ import (
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 	"github.com/tjjh89017/kezio/internal/deployer"
+	"github.com/tjjh89017/kezio/internal/planbuild"
 )
 
 // Requeue intervals for the states a Deployer step can leave a Machine in
@@ -110,6 +111,17 @@ type MachineReconciler struct {
 	// Recorder emits Kubernetes Events on Machine, notably the
 	// accept/refuse outcome of a re-inspect annotation. Required.
 	Recorder record.EventRecorder
+	// Builder resolves a Machine's deploy intent into the DeployPlan
+	// snapshot (ResolvedDisks/HooksHash) a fresh DeployRun records, and
+	// lets the provisioning trigger see a hooks-only change (a PostHook
+	// or postHookRefs edit with the same imageRef/dataImages). Optional:
+	// nil keeps the pre-snapshot fast lane - every DeployRun is created
+	// with an empty ResolvedDisks/HooksHash, exactly as before this field
+	// existed. A caller that wants snapshot resolution (cmd/main.go's
+	// production wiring) must set it explicitly; existing envtest/
+	// FakeDeployer callers that construct a MachineReconciler directly
+	// intentionally leave it unset.
+	Builder *planbuild.Builder
 }
 
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines,verbs=get;list;watch;create;update;patch;delete
@@ -653,7 +665,7 @@ func (r *MachineReconciler) reconcileIdle(ctx context.Context, machine *keziov1a
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: reading last successful DeployRun: %w", machine.Name, err)
 	}
-	if !shouldProvision(machine, lastRun) {
+	if isEmptyDeployPayload(machine) {
 		return ctrl.Result{}, nil
 	}
 
@@ -663,6 +675,14 @@ func (r *MachineReconciler) reconcileIdle(ctx context.Context, machine *keziov1a
 	}
 	if !ready {
 		return r.markDelayedForImage(ctx, machine, reason, message)
+	}
+
+	hooksHash, ok, result, err := r.currentHooksHash(ctx, machine)
+	if !ok {
+		return result, err
+	}
+	if !shouldProvision(machine, lastRun, hooksHash) {
+		return ctrl.Result{}, nil
 	}
 
 	meta.RemoveStatusCondition(&machine.Status.Conditions, keziov1alpha2.MachineConditionProgressing)
@@ -709,6 +729,62 @@ func (r *MachineReconciler) imageReadyForProvisioning(ctx context.Context, machi
 	}
 }
 
+// classifyPlanBuildError sorts a planbuild.Builder.Build error into the
+// three shapes that package's doc comment fixes: notReady means "try
+// again later" (a Delayed outcome), failed means the plan itself cannot
+// resolve as currently specified (DiskSelectionError or ValidationError -
+// a Failed outcome), and neither means a transient infrastructure error
+// the caller must return unchanged.
+func classifyPlanBuildError(err error) (notReady, failed bool) {
+	var nr *planbuild.NotReadyError
+	if errors.As(err, &nr) {
+		return true, false
+	}
+	var diskErr *planbuild.DiskSelectionError
+	var validationErr *planbuild.ValidationError
+	if errors.As(err, &diskErr) || errors.As(err, &validationErr) {
+		return false, true
+	}
+	return false, false
+}
+
+// currentHooksHash resolves the hooksHash the provisioning trigger
+// compares against lastRun's recorded snapshot: empty (ok) when r.Builder
+// is nil (the pre-snapshot fast lane - see Builder's own doc comment), or
+// whatever r.Builder.Build resolves right now otherwise. ok is false when
+// the caller must return (result, err) as-is instead of continuing the
+// walk: a NotReadyError delays without touching error state, a
+// DiskSelectionError/ValidationError records a Failed provision step
+// (the same shape a Deployer.Provision failure would), and any other
+// error is transient and returned unchanged. The DeployRun passed to
+// Build is a throwaway (never created): only its resolved Snapshot is
+// used here, not the DeployPlan Build also returns.
+func (r *MachineReconciler) currentHooksHash(ctx context.Context, machine *keziov1alpha2.Machine) (hooksHash string, ok bool, result ctrl.Result, err error) {
+	if r.Builder == nil {
+		return "", true, ctrl.Result{}, nil
+	}
+
+	_, snapshot, buildErr := r.Builder.Build(ctx, machine, &keziov1alpha2.DeployRun{})
+	if buildErr == nil {
+		return snapshot.HooksHash, true, ctrl.Result{}, nil
+	}
+
+	notReady, failed := classifyPlanBuildError(buildErr)
+	switch {
+	case notReady:
+		result, err = r.markDelayed(ctx, machine, delayedRequeueInterval)
+	case failed:
+		result, err = r.recordFailure(ctx, machine, deployer.Result{
+			Outcome:      deployer.Failed,
+			ErrorType:    keziov1alpha2.MachineErrorTypeTransient,
+			ErrorMessage: buildErr.Error(),
+		})
+	default:
+		err = fmt.Errorf("machine %q: resolving deploy plan snapshot: %w", machine.Name, buildErr)
+	}
+	return "", false, result, err
+}
+
 // markDelayedForImage records why the Machine is waiting on its imageRef's
 // Image as MachineConditionProgressing=False, then delegates to
 // markDelayed for the actual delayed-axis write. The condition uses
@@ -732,10 +808,28 @@ func (r *MachineReconciler) markDelayedForImage(ctx context.Context, machine *ke
 // current run that disappeared mid-Provisioning. The status write does not
 // itself re-trigger the watch (the Machine update predicate ignores
 // status-only changes), so this requeues explicitly to run the deployer.
+//
+// createDeployRun's plan-build error (see its own doc comment) is mapped
+// exactly like currentHooksHash's: a NotReadyError delays without
+// touching error state, a DiskSelectionError/ValidationError records a
+// Failed provision step, and anything else is a transient error returned
+// unchanged.
 func (r *MachineReconciler) startProvisioningRun(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
 	run, err := r.createDeployRun(ctx, machine)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("machine %q: creating DeployRun: %w", machine.Name, err)
+		notReady, failed := classifyPlanBuildError(err)
+		switch {
+		case notReady:
+			return r.markDelayed(ctx, machine, delayedRequeueInterval)
+		case failed:
+			return r.recordFailure(ctx, machine, deployer.Result{
+				Outcome:      deployer.Failed,
+				ErrorType:    keziov1alpha2.MachineErrorTypeTransient,
+				ErrorMessage: err.Error(),
+			})
+		default:
+			return ctrl.Result{}, fmt.Errorf("machine %q: creating DeployRun: %w", machine.Name, err)
+		}
 	}
 
 	machine.Status.State = keziov1alpha2.MachineStateProvisioning
@@ -977,8 +1071,18 @@ func (r *MachineReconciler) recordCurrentRunDeleted(ctx context.Context, machine
 }
 
 // createDeployRun creates the DeployRun for one provisioning pass, copying
-// imageRef and dataImages from machine.spec. ResolvedDisks and HooksHash
-// are left empty: disk and hook resolution are not implemented yet.
+// imageRef and dataImages from machine.spec. When r.Builder is set, it
+// also resolves machine's full deploy plan through it and writes the
+// resulting Snapshot (ResolvedDisks, HooksHash) into the run's spec before
+// Create - DeployRunSpec is immutable once the object exists, so this must
+// happen before the create call. A Build failure is returned unchanged
+// (the caller, startProvisioningRun, maps it through
+// classifyPlanBuildError); no DeployRun is created in that case.
+//
+// r.Builder nil keeps the pre-snapshot fast lane: ResolvedDisks/HooksHash
+// stay empty, exactly as before this field existed. See Builder's own doc
+// comment for why the existing envtest/FakeDeployer suites rely on this
+// (their fixture Machines/Images are not shaped for a real plan build).
 func (r *MachineReconciler) createDeployRun(ctx context.Context, machine *keziov1alpha2.Machine) (*keziov1alpha2.DeployRun, error) {
 	run := &keziov1alpha2.DeployRun{
 		ObjectMeta: metav1.ObjectMeta{
@@ -990,6 +1094,13 @@ func (r *MachineReconciler) createDeployRun(ctx context.Context, machine *keziov
 			ImageRef:   machine.Spec.ImageRef.DeepCopy(),
 			DataImages: append([]keziov1alpha2.MachineDataImage(nil), machine.Spec.DataImages...),
 		},
+	}
+	if r.Builder != nil {
+		_, snapshot, err := r.Builder.Build(ctx, machine, run)
+		if err != nil {
+			return nil, err
+		}
+		planbuild.ApplySnapshot(run, snapshot)
 	}
 	if err := controllerutil.SetControllerReference(machine, run, r.Scheme); err != nil {
 		return nil, fmt.Errorf("setting owner reference: %w", err)
@@ -1029,19 +1140,24 @@ func (r *MachineReconciler) getRun(ctx context.Context, machine *keziov1alpha2.M
 
 // shouldProvision is the provisioning trigger. It fires only when
 // spec.imageRef/spec.dataImages describe some deploy intent and that
-// intent's subset differs from the last successful run's recorded
-// snapshot. A missing lastRun - no lastSuccessfulRunRef yet, or one whose
-// DeployRun was deleted - is "no successful run known": a non-empty
-// payload triggers once, and the resulting run's own success writes a
-// fresh lastSuccessfulRunRef, so this path cannot repeat into a storm.
-func shouldProvision(machine *keziov1alpha2.Machine, lastRun *keziov1alpha2.DeployRun) bool {
+// intent's subset - including hooksHash - differs from the last
+// successful run's recorded snapshot. A missing lastRun - no
+// lastSuccessfulRunRef yet, or one whose DeployRun was deleted - is "no
+// successful run known": a non-empty payload triggers once, and the
+// resulting run's own success writes a fresh lastSuccessfulRunRef, so
+// this path cannot repeat into a storm. hooksHash is the caller's
+// currently resolved value (see MachineReconciler.currentHooksHash) - an
+// empty string when hook resolution is not wired in (no Builder), which
+// only ever compares equal to a lastRun that itself carries no
+// HooksHash.
+func shouldProvision(machine *keziov1alpha2.Machine, lastRun *keziov1alpha2.DeployRun, hooksHash string) bool {
 	if isEmptyDeployPayload(machine) {
 		return false
 	}
 	if lastRun == nil {
 		return true
 	}
-	return !intentSubsetEqual(machine, lastRun)
+	return !intentSubsetEqual(machine, lastRun, hooksHash)
 }
 
 // isEmptyDeployPayload reports whether machine.spec carries no deploy
@@ -1056,16 +1172,11 @@ func isEmptyDeployPayload(machine *keziov1alpha2.Machine) bool {
 // recorded spec. This is full equality, not a superset check, so removing
 // a dataImages entry triggers correctly. resolvedDisks is deliberately
 // excluded: device names are not stable across boots, and a
-// re-resolution must never diff into a disk-wiping redeploy. PostHook
-// resolution does not exist yet, so the Machine side of hooksHash is
-// always empty; createDeployRun likewise never sets
-// DeployRun.spec.hooksHash, so both sides agree until hook resolution
-// lands and both must be wired together.
-func intentSubsetEqual(machine *keziov1alpha2.Machine, lastRun *keziov1alpha2.DeployRun) bool {
-	const machineHooksHash = ""
+// re-resolution must never diff into a disk-wiping redeploy.
+func intentSubsetEqual(machine *keziov1alpha2.Machine, lastRun *keziov1alpha2.DeployRun, hooksHash string) bool {
 	return nameRefEqual(machine.Spec.ImageRef, lastRun.Spec.ImageRef) &&
 		reflect.DeepEqual(machine.Spec.DataImages, lastRun.Spec.DataImages) &&
-		machineHooksHash == lastRun.Spec.HooksHash
+		hooksHash == lastRun.Spec.HooksHash
 }
 
 func nameRefEqual(a, b *keziov1alpha2.NameRef) bool {
