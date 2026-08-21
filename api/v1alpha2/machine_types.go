@@ -409,6 +409,37 @@ type MachineCredentialsStatus struct {
 	ResourceVersion string `json:"resourceVersion,omitempty"`
 }
 
+// MachineNetBootStatus records the live-boot token most recently minted
+// for this machine by the boot config server (GET /boot/grub.cfg-<mac>).
+// The token itself is never stored, only its SHA-256 hash and expiry, so
+// a leaked status object cannot be replayed to impersonate the machine at
+// registration. Each grub.cfg fetch for a machine that currently needs to
+// net boot mints a fresh token and overwrites this field, invalidating
+// whatever token was here before.
+type MachineNetBootStatus struct {
+	// TokenHash is the SHA-256 hex digest of the current boot token.
+	// +optional
+	TokenHash string `json:"tokenHash,omitempty"`
+	// ExpiresAt is when the current boot token stops being accepted.
+	// +optional
+	ExpiresAt metav1.Time `json:"expiresAt,omitempty"`
+}
+
+// MachineAgentSessionStatus records the session credential most recently
+// minted for kezio-agent at registration, distinct from the single-use
+// net-boot token: the boot token is consumed by registration itself, so
+// the agent needs a separate credential to present on every subsequent
+// poll. Only the SHA-256 hash and expiry are ever persisted, for the same
+// reason as MachineNetBootStatus.
+type MachineAgentSessionStatus struct {
+	// TokenHash is the SHA-256 hex digest of the current session token.
+	// +optional
+	TokenHash string `json:"tokenHash,omitempty"`
+	// ExpiresAt is when the current session token stops being accepted.
+	// +optional
+	ExpiresAt metav1.Time `json:"expiresAt,omitempty"`
+}
+
 // MachineStatus defines the observed state of Machine.
 type MachineStatus struct {
 	// State is the machine's position in the state machine.
@@ -459,6 +490,15 @@ type MachineStatus struct {
 	// (rather than never provisioned).
 	// +optional
 	LastUpdated *metav1.Time `json:"lastUpdated,omitempty"`
+	// NetBoot records the live-boot token most recently minted for this
+	// machine by the boot config server.
+	// +optional
+	NetBoot *MachineNetBootStatus `json:"netBoot,omitempty"`
+	// AgentSession records the session credential most recently minted
+	// for kezio-agent at registration, presented on every subsequent
+	// poll.
+	// +optional
+	AgentSession *MachineAgentSessionStatus `json:"agentSession,omitempty"`
 	// Conditions report the current state of the machine.
 	// +optional
 	// +listType=map

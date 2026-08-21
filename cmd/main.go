@@ -17,8 +17,10 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -42,6 +44,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	"github.com/tjjh89017/kezio/internal/bootserver"
 	"github.com/tjjh89017/kezio/internal/controller"
 	"github.com/tjjh89017/kezio/internal/deployer"
 	webhookv1alpha2 "github.com/tjjh89017/kezio/internal/webhook/v1alpha2"
@@ -301,6 +304,21 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	bootConfig, err := bootServerConfigFromEnv()
+	if err != nil {
+		setupLog.Error(err, "invalid boot server configuration")
+		os.Exit(1)
+	}
+	if bootConfig != nil {
+		if err := bootserver.SetupFieldIndexer(context.Background(), mgr); err != nil {
+			setupLog.Error(err, "unable to set up boot MAC field indexer")
+			os.Exit(1)
+		}
+		if err := mgr.Add(bootserver.New(mgr.GetClient(), *bootConfig)); err != nil {
+			setupLog.Error(err, "unable to add boot config server")
+			os.Exit(1)
+		}
+	}
 	// +kubebuilder:scaffold:builder
 
 	if metricsCertWatcher != nil {
@@ -402,6 +420,49 @@ func partitionContentSeederConfigFromEnv() controller.PartitionContentSeederConf
 		}
 	}
 	return cfg
+}
+
+// bootServerConfigFromEnv builds the boot config server's
+// bootserver.Config from the environment. Leaving BOOT_SERVER_ADDR unset
+// returns a nil Config, and main does not add the server to the manager.
+// Setting it opts in; BOOT_ARTIFACTS_DIR and BOOT_SERVER_URL must then
+// also be set. BOOT_AGENT_SERVER_URL is ordinarily a different address
+// from BOOT_SERVER_URL (a different Service/port fronting the same Pod);
+// left unset it falls back to BOOT_SERVER_URL, correct only when both
+// servers truly share one address. BOOT_EFI_DIR defaults to
+// BOOT_ARTIFACTS_DIR.
+func bootServerConfigFromEnv() (*bootserver.Config, error) {
+	addr := os.Getenv("BOOT_SERVER_ADDR")
+	if addr == "" {
+		return nil, nil
+	}
+
+	artifactsDir := os.Getenv("BOOT_ARTIFACTS_DIR")
+	if artifactsDir == "" {
+		return nil, fmt.Errorf("BOOT_SERVER_ADDR is set but BOOT_ARTIFACTS_DIR is not")
+	}
+	serverURL := os.Getenv("BOOT_SERVER_URL")
+	if serverURL == "" {
+		return nil, fmt.Errorf("BOOT_SERVER_ADDR is set but BOOT_SERVER_URL is not")
+	}
+
+	cfg := &bootserver.Config{
+		Addr:           addr,
+		ArtifactsDir:   artifactsDir,
+		ServerURL:      serverURL,
+		AgentServerURL: os.Getenv("BOOT_AGENT_SERVER_URL"),
+		KernelPath:     os.Getenv("BOOT_KERNEL_PATH"),
+		InitrdPath:     os.Getenv("BOOT_INITRD_PATH"),
+		EFIDir:         os.Getenv("BOOT_EFI_DIR"),
+	}
+	if ttl := os.Getenv("BOOT_TOKEN_TTL"); ttl != "" {
+		d, err := time.ParseDuration(ttl)
+		if err != nil {
+			return nil, fmt.Errorf("invalid BOOT_TOKEN_TTL: %w", err)
+		}
+		cfg.TokenTTL = d
+	}
+	return cfg, nil
 }
 
 // bootdDeploymentConfigFromEnv builds the Subnet reconciler's
