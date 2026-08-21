@@ -211,6 +211,13 @@ spec:
                 - FreeBSD
                 - Other
                 type: string
+              params:
+                description: |-
+                  Params is schemaless input for the attached hooks' templating.
+                  Merge order: a PostHook's own declared param defaults first, then
+                  this field, then the deploying Machine's own spec.params; later
+                  entries override earlier ones.
+                x-kubernetes-preserve-unknown-fields: true
               source:
                 description: |-
                   Source describes where to fetch and verify a source disk image to

@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha2
 
 import (
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -180,6 +181,14 @@ type ImageSpec struct {
 	// PartitionContent objects, which triggers no ingest.
 	// +optional
 	Source *ImageSource `json:"source,omitempty"`
+	// Params is schemaless input for the attached hooks' templating.
+	// Merge order: a PostHook's own declared param defaults first, then
+	// this field, then the deploying Machine's own spec.params; later
+	// entries override earlier ones.
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	// +optional
+	Params *apiextensionsv1.JSON `json:"params,omitempty"`
 }
 
 // EffectiveBootable returns whether the image is bootable, treating a nil
