@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,17 +39,20 @@ import (
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 	"github.com/tjjh89017/kezio/internal/bootserver"
+	"github.com/tjjh89017/kezio/internal/planbuild"
 )
 
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines,verbs=get;list;watch
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machinehardwares,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=kezio.kojuro.date,resources=deployruns,verbs=get;list;watch
+// +kubebuilder:rbac:groups=kezio.kojuro.date,resources=deployruns/status,verbs=get;update;patch
 
 // Server is the HTTP handler kezio-agent registers with. See the package
 // doc comment for the full threat model.
 type Server struct {
-	// Client reads and writes Machines and MachineHardwares (through the
-	// manager's cache; the two token-hash lookups need
+	// Client reads and writes Machines, MachineHardwares, and DeployRuns
+	// (through the manager's cache; the two token-hash lookups need
 	// SetupFieldIndexer run at manager start).
 	Client client.Client
 	// Config holds the server's listen address, session TTL, and poll
@@ -61,6 +65,14 @@ type Server struct {
 	// progress report the agent just sent. Nil means POST /agent/progress
 	// always answers ActionContinue.
 	Abort AbortDecider
+	// PlanBuilder resolves a Machine's deploy intent into a DeployPlan.
+	// GET/POST /agent/next rebuilds the plan fresh from the current
+	// DeployRun on every call rather than reading one stored anywhere -
+	// Build is deterministic in machine/run/cluster state, so there is
+	// nothing to keep in sync by persisting its output. Nil (a server not
+	// wired for provisioning, or a build in this package's own tests that
+	// does not exercise it) means /agent/next never answers ActionDeploy.
+	PlanBuilder *planbuild.Builder
 }
 
 // AbortDecider decides whether the DeployRun a ProgressRequest reports
@@ -326,9 +338,12 @@ func machineOwnerReference(machine *keziov1alpha2.Machine) metav1.OwnerReference
 // target. It requires the session credential minted at registration
 // (RegisterResponse.SessionToken, presented the same way as the boot
 // token: "Authorization: Bearer <token>"), resolved directly to its
-// Machine through MachineSessionTokenHashIndexField. This build always
-// answers ActionWait: nothing here builds or hands out a deploy plan
-// yet.
+// Machine through MachineSessionTokenHashIndexField. It answers
+// ActionDeploy with a freshly built plan when the Machine's
+// status.currentRunRef names a DeployRun in a phase that expects the
+// agent to run it (see deployRunExpectsAgent); ActionWait otherwise,
+// including while PlanBuilder.Build itself fails - see
+// resolveDeployPlan's doc comment.
 func (s *Server) handleNext(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	log := logf.FromContext(ctx).WithName("agentserver")
@@ -350,10 +365,82 @@ func (s *Server) handleNext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, agentapi.NextResponse{
+	resp := agentapi.NextResponse{
 		Action:              agentapi.ActionWait,
 		PollIntervalSeconds: int32(s.Config.pollInterval().Seconds()),
-	})
+	}
+	if plan := s.resolveDeployPlan(ctx, machine, log); plan != nil {
+		resp.Action = agentapi.ActionDeploy
+		resp.Plan = plan
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// resolveDeployPlan builds the DeployPlan to hand machine at /agent/next,
+// or nil when there is none to hand out yet: no PlanBuilder configured,
+// no current run, the current run's DeployRun is missing or in a phase
+// that does not expect the agent (see deployRunExpectsAgent), or building
+// the plan itself failed. A build failure is logged and treated exactly
+// like "nothing to hand out yet" rather than surfaced as an error
+// response: internal/planbuild.Builder.Build can fail transiently (a
+// momentary API error) or because the Machine/DeployRun genuinely is not
+// ready, and either way the correct agent-facing answer is the same
+// ActionWait a still-Pending run would get.
+func (s *Server) resolveDeployPlan(ctx context.Context, machine *keziov1alpha2.Machine, log logr.Logger) *agentapi.DeployPlan {
+	if s.PlanBuilder == nil || machine.Status.CurrentRunRef == nil {
+		return nil
+	}
+
+	run, err := s.getCurrentRun(ctx, machine)
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			log.Error(err, "getting current DeployRun failed", "machine", machine.Name, "run", machine.Status.CurrentRunRef.Name)
+		}
+		return nil
+	}
+	if !deployRunExpectsAgent(run.Status.Phase) {
+		return nil
+	}
+
+	plan, _, err := s.PlanBuilder.Build(ctx, machine, run)
+	if err != nil {
+		log.Error(err, "building deploy plan for /agent/next failed; answering wait", "machine", machine.Name, "run", run.Name)
+		return nil
+	}
+	return plan
+}
+
+// getCurrentRun resolves machine.status.currentRunRef to its DeployRun,
+// defaulting to machine's own namespace when the ref carries none - the
+// same convention internal/controller.MachineReconciler.getRun uses.
+func (s *Server) getCurrentRun(ctx context.Context, machine *keziov1alpha2.Machine) (*keziov1alpha2.DeployRun, error) {
+	ns := machine.Status.CurrentRunRef.Namespace
+	if ns == "" {
+		ns = machine.Namespace
+	}
+	var run keziov1alpha2.DeployRun
+	if err := s.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: machine.Status.CurrentRunRef.Name}, &run); err != nil {
+		return nil, err
+	}
+	return &run, nil
+}
+
+// deployRunExpectsAgent reports whether phase is one where kezio-agent is
+// expected to be actively running the plan: every non-terminal phase
+// once the manager has validated it can build one (DeployRunPhasePending
+// through DeployRunPhaseFinalizing). An empty phase (Provision has not
+// validated the plan yet) and the two terminal phases both report false.
+func deployRunExpectsAgent(phase string) bool {
+	switch phase {
+	case keziov1alpha2.DeployRunPhasePending,
+		keziov1alpha2.DeployRunPhasePartitioning,
+		keziov1alpha2.DeployRunPhaseWritingContent,
+		keziov1alpha2.DeployRunPhaseRunningPostHook,
+		keziov1alpha2.DeployRunPhaseFinalizing:
+		return true
+	default:
+		return false
+	}
 }
 
 // lookupMachineByToken resolves token (unhashed, as presented) to the
@@ -412,9 +499,11 @@ const maxProgressBodyBytes = 64 << 10 // 64 KiB
 // handleProgress implements POST /agent/progress: the agent's periodic
 // step report while a DeployPlan runs. It requires the same session
 // credential as GET/POST /agent/next. The response is ActionContinue
-// unless s.Abort is set and returns true for this report - the decision
-// is stubbed out behind that field so a later change can wire "DeployRun
-// deleting means abort" without touching this transport.
+// unless s.Abort is set and returns true for this report. A failure to
+// persist the report onto its DeployRun is logged, not surfaced to the
+// agent: a missed status write does not itself justify the agent giving
+// up on an otherwise-healthy deploy, and the next report gets another
+// chance to land.
 func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	log := logf.FromContext(ctx).WithName("agentserver")
@@ -445,6 +534,9 @@ func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
 	action := agentapi.ProgressActionContinue
 	if s.Abort != nil && s.Abort(ctx, machine.Name, req.RunName, req.RunUID) {
 		action = agentapi.ProgressActionAbort
+	}
+	if err := s.persistProgress(ctx, machine, req); err != nil {
+		log.Error(err, "persisting agent progress failed", "machine", machine.Name, "run", req.RunName)
 	}
 	writeJSON(w, http.StatusOK, agentapi.ProgressResponse{Action: action})
 }

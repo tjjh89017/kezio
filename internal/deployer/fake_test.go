@@ -62,10 +62,10 @@ func newTestMachine() *keziov1alpha2.Machine {
 	}
 }
 
-func newTestDeployRun(t *testing.T, c client.Client, name string, machine *keziov1alpha2.Machine) *keziov1alpha2.DeployRun {
+func newTestDeployRun(t *testing.T, c client.Client, machine *keziov1alpha2.Machine) *keziov1alpha2.DeployRun {
 	t.Helper()
 	run := &keziov1alpha2.DeployRun{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"},
 		Spec: keziov1alpha2.DeployRunSpec{
 			MachineRef: keziov1alpha2.NameRef{Name: machine.Name},
 		},
@@ -124,7 +124,7 @@ func TestFakeDeployerInspectIsIdempotent(t *testing.T) {
 func TestFakeDeployerProvisionWalksPhasesToSucceeded(t *testing.T) {
 	c := newFakeClient(t)
 	machine := newTestMachine()
-	run := newTestDeployRun(t, c, "m1-run1", machine)
+	run := newTestDeployRun(t, c, machine)
 	f := &FakeDeployer{Client: c}
 
 	wantPhases := []string{
@@ -187,7 +187,7 @@ func TestFakeDeployerProvisionWalksPhasesToSucceeded(t *testing.T) {
 func TestFakeDeployerProvisionRejectsCallAfterTerminal(t *testing.T) {
 	c := newFakeClient(t)
 	machine := newTestMachine()
-	run := newTestDeployRun(t, c, "m1-run1", machine)
+	run := newTestDeployRun(t, c, machine)
 	f := &FakeDeployer{Client: c}
 
 	for i := 0; i < 6; i++ {
@@ -391,7 +391,7 @@ func TestFakeDeployerProvisionHonorsFakeFailAnnotation(t *testing.T) {
 	c := newFakeClient(t)
 	machine := newTestMachine()
 	machine.Annotations = map[string]string{FakeFailAnnotation: "provision:2"}
-	run := newTestDeployRun(t, c, "m1-run1", machine)
+	run := newTestDeployRun(t, c, machine)
 	f := &FakeDeployer{Client: c}
 
 	for wantErrorCount := int32(0); wantErrorCount < 2; wantErrorCount++ {

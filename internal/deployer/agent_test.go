@@ -32,6 +32,8 @@ import (
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 	"github.com/tjjh89017/kezio/internal/bmc"
+	"github.com/tjjh89017/kezio/internal/planbuild"
+	"github.com/tjjh89017/kezio/internal/posthookdefaults"
 )
 
 // errTestBMCRejected is a stand-in for a BMC-reported rejection, used
@@ -63,7 +65,7 @@ func newAgentTestClient(t *testing.T, objs ...client.Object) client.Client {
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme(corev1) error = %v", err)
 	}
-	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+	return fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&keziov1alpha2.DeployRun{}).WithObjects(objs...).Build()
 }
 
 // agentTestBMCSecret builds the Secret agentTestBMCSecretName names, with
@@ -306,20 +308,171 @@ func TestAgentDeployerInspectNetworkUnreachableReportsDelayed(t *testing.T) {
 	}
 }
 
-func TestAgentDeployerProvisionReportsDelayedUnsupported(t *testing.T) {
+// agentProvisionTestManagerNamespace is the ManagerNamespace every
+// Provision test's Builder is configured with, and where the fixture
+// default PostHook is created.
+const agentProvisionTestManagerNamespace = "kezio-system"
+
+// mustCreateDefaultPostHook creates the shipped default PostHook in
+// agentProvisionTestManagerNamespace, already Valid: resolveMachineHooks
+// attaches it whenever machine.Spec.PostHookRefs is empty.
+func mustCreateDefaultPostHook(t *testing.T, c client.Client) {
+	t.Helper()
+	ph := &keziov1alpha2.PostHook{
+		ObjectMeta: metav1.ObjectMeta{Name: posthookdefaults.DefaultFinalizeHookName, Namespace: agentProvisionTestManagerNamespace},
+		Spec:       posthookdefaults.Spec(),
+	}
+	apimeta.SetStatusCondition(&ph.Status.Conditions, metav1.Condition{
+		Type: keziov1alpha2.PostHookConditionValid, Status: metav1.ConditionTrue, Reason: "TestFixture", Message: "fixture",
+	})
+	if err := c.Create(context.Background(), ph); err != nil {
+		t.Fatalf("create default posthook: %v", err)
+	}
+}
+
+// blankDataImage builds a Ready Image with a single mkfs data slot - no
+// PartitionContent or seeder lookup needed, so it is cheap to resolve in
+// a Provision test.
+func blankDataImage(name, ns string) *keziov1alpha2.Image {
+	img := &keziov1alpha2.Image{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: keziov1alpha2.ImageSpec{
+			Layout: keziov1alpha2.ImageDiskLayout{
+				PartitionTable: keziov1alpha2.PartitionTableGPT,
+				SfdiskJSON:     `{"partitiontable":{}}`,
+				Slots:          []keziov1alpha2.ImageSlot{{Number: 1, Role: keziov1alpha2.PartitionRoleData, FSType: "ext4"}},
+			},
+		},
+	}
+	img.Status.State = keziov1alpha2.ImageStateReady
+	return img
+}
+
+func TestAgentDeployerProvisionFirstPassNotReadyReportsDelayed(t *testing.T) {
 	machine := agentTestMachine(t)
+	machine.Spec.ImageRef = &keziov1alpha2.NameRef{Name: "img1"}
 	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
-	d := &AgentDeployer{Client: newAgentTestClient(t)}
+	c := newAgentTestClient(t, machine, agentTestBMCSecret())
+	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
 
 	result, err := d.Provision(context.Background(), machine, run, false)
 	if err != nil {
 		t.Fatalf("Provision() error = %v", err)
 	}
 	if result.Outcome != Delayed {
-		t.Fatalf("Provision() outcome = %v, want Delayed", result.Outcome)
+		t.Fatalf("Provision() outcome = %v, want Delayed (no MachineHardware yet)", result.Outcome)
 	}
-	if result.ErrorMessage != agentDeployerUnsupportedMessage {
-		t.Errorf("Provision() ErrorMessage = %q, want %q", result.ErrorMessage, agentDeployerUnsupportedMessage)
+}
+
+func TestAgentDeployerProvisionFirstPassValidationErrorReportsFailed(t *testing.T) {
+	machine := agentTestMachine(t)
+	// No ImageRef and no DataImages: Build rejects this before any lookup.
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	c := newAgentTestClient(t, machine, agentTestBMCSecret())
+	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
+
+	result, err := d.Provision(context.Background(), machine, run, false)
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	if result.Outcome != Failed {
+		t.Fatalf("Provision() outcome = %v, want Failed", result.Outcome)
+	}
+	if result.ErrorType != keziov1alpha2.MachineErrorTypeTransient {
+		t.Errorf("Provision() ErrorType = %q, want %q", result.ErrorType, keziov1alpha2.MachineErrorTypeTransient)
+	}
+	if result.ErrorMessage == "" {
+		t.Error("Provision() ErrorMessage is empty, want an explanation")
+	}
+}
+
+func TestAgentDeployerProvisionFirstPassSuccessRecordsPendingAndContinues(t *testing.T) {
+	machine := agentTestMachine(t)
+	machine.Spec.ImageRef = &keziov1alpha2.NameRef{Name: "img1"}
+	hw := &keziov1alpha2.MachineHardware{
+		ObjectMeta: metav1.ObjectMeta{Name: machine.Name, Namespace: machine.Namespace},
+		Spec:       keziov1alpha2.MachineHardwareSpec{Disks: []keziov1alpha2.MachineHardwareDisk{{DeviceName: "/dev/vda", SizeBytes: 32 << 30}}},
+	}
+	img := blankDataImage("img1", machine.Namespace)
+	c := newAgentTestClient(t, machine, agentTestBMCSecret(), hw, img)
+	mustCreateDefaultPostHook(t, c)
+	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
+	run := newTestDeployRun(t, c, machine)
+
+	result, err := d.Provision(context.Background(), machine, run, false)
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	if result.Outcome != Continuing {
+		t.Fatalf("Provision() outcome = %v, want Continuing", result.Outcome)
+	}
+	if run.Status.Phase != keziov1alpha2.DeployRunPhasePending {
+		t.Fatalf("run.Status.Phase = %q, want %q", run.Status.Phase, keziov1alpha2.DeployRunPhasePending)
+	}
+	if len(run.Status.PhaseTimings) != 1 || run.Status.PhaseTimings[0].Phase != keziov1alpha2.DeployRunPhasePending {
+		t.Fatalf("run.Status.PhaseTimings = %+v, want one Pending entry", run.Status.PhaseTimings)
+	}
+
+	var stored keziov1alpha2.DeployRun
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(run), &stored); err != nil {
+		t.Fatalf("Get DeployRun: %v", err)
+	}
+	if stored.Status.Phase != keziov1alpha2.DeployRunPhasePending {
+		t.Fatalf("stored run.Status.Phase = %q, want %q", stored.Status.Phase, keziov1alpha2.DeployRunPhasePending)
+	}
+}
+
+func TestAgentDeployerProvisionLaterPassSucceededReportsComplete(t *testing.T) {
+	machine := agentTestMachine(t)
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	run.Status.Phase = keziov1alpha2.DeployRunPhaseSucceeded
+	c := newAgentTestClient(t, machine, agentTestBMCSecret())
+	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
+
+	result, err := d.Provision(context.Background(), machine, run, false)
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	if result.Outcome != Complete {
+		t.Fatalf("Provision() outcome = %v, want Complete", result.Outcome)
+	}
+}
+
+func TestAgentDeployerProvisionLaterPassFailedReportsFailedWithMessage(t *testing.T) {
+	machine := agentTestMachine(t)
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	run.Status.Phase = keziov1alpha2.DeployRunPhaseFailed
+	apimeta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+		Type: keziov1alpha2.DeployRunConditionSucceeded, Status: metav1.ConditionFalse, Reason: "DeployFailed", Message: "writing partition table: rejected",
+	})
+	c := newAgentTestClient(t, machine, agentTestBMCSecret())
+	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
+
+	result, err := d.Provision(context.Background(), machine, run, false)
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	if result.Outcome != Failed {
+		t.Fatalf("Provision() outcome = %v, want Failed", result.Outcome)
+	}
+	if result.ErrorMessage != "writing partition table: rejected" {
+		t.Errorf("Provision() ErrorMessage = %q, want the DeployRun's recorded failure message", result.ErrorMessage)
+	}
+}
+
+func TestAgentDeployerProvisionLaterPassInProgressReportsContinuing(t *testing.T) {
+	machine := agentTestMachine(t)
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	run.Status.Phase = keziov1alpha2.DeployRunPhaseWritingContent
+	c := newAgentTestClient(t, machine, agentTestBMCSecret())
+	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
+
+	result, err := d.Provision(context.Background(), machine, run, false)
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	if result.Outcome != Continuing {
+		t.Fatalf("Provision() outcome = %v, want Continuing", result.Outcome)
 	}
 }
 

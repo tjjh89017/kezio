@@ -55,7 +55,7 @@ func newTestServer(t *testing.T, now time.Time, objs ...client.Object) (*Server,
 		WithScheme(scheme).
 		WithIndex(&keziov1alpha2.Machine{}, MachineTokenHashIndexField, IndexMachineTokenHash).
 		WithIndex(&keziov1alpha2.Machine{}, MachineSessionTokenHashIndexField, IndexMachineSessionTokenHash).
-		WithStatusSubresource(&keziov1alpha2.Machine{}).
+		WithStatusSubresource(&keziov1alpha2.Machine{}, &keziov1alpha2.DeployRun{}, &keziov1alpha2.PostHook{}).
 		WithObjects(objs...)
 	c := builder.Build()
 

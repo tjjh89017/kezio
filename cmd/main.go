@@ -49,6 +49,7 @@ import (
 	"github.com/tjjh89017/kezio/internal/bootserver"
 	"github.com/tjjh89017/kezio/internal/controller"
 	"github.com/tjjh89017/kezio/internal/deployer"
+	"github.com/tjjh89017/kezio/internal/planbuild"
 	"github.com/tjjh89017/kezio/internal/posthookdefaults"
 	webhookv1alpha2 "github.com/tjjh89017/kezio/internal/webhook/v1alpha2"
 
@@ -335,7 +336,10 @@ func main() {
 			setupLog.Error(err, "unable to set up agent token field indexers")
 			os.Exit(1)
 		}
-		if err := mgr.Add(agentserver.New(mgr.GetClient(), *agentConfig)); err != nil {
+		agentSrv := agentserver.New(mgr.GetClient(), *agentConfig)
+		agentSrv.PlanBuilder = planBuilder(mgr.GetClient())
+		agentSrv.Abort = agentserver.NewAbortDecider(mgr.GetClient())
+		if err := mgr.Add(agentSrv); err != nil {
 			setupLog.Error(err, "unable to add agent registration server")
 			os.Exit(1)
 		}
@@ -404,10 +408,24 @@ func deployerFromEnv(c client.Client) (deployer.Deployer, error) {
 	case "", "fake":
 		return &deployer.FakeDeployer{Client: c}, nil
 	case "agent":
-		return &deployer.AgentDeployer{Client: c}, nil
+		return &deployer.AgentDeployer{Client: c, PlanBuilder: planBuilder(c)}, nil
 	default:
 		return nil, fmt.Errorf("unknown DEPLOYER %q (want \"fake\" or \"agent\")", v)
 	}
+}
+
+// planBuilder builds the planbuild.Builder the AgentDeployer and the
+// agent registration server each need their own instance of: resolving a
+// Machine's deploy intent into a DeployPlan needs no state beyond c and
+// the manager namespace, so both call sites build one identically.
+// ManagerNamespace falls back to empty when POD_NAMESPACE is unset (a
+// local `make run`), matching posthookdefaults.Ensurer's own fallback -
+// a Machine relying on the default PostHook simply cannot resolve a plan
+// in that case, the same "not ready" outcome an absent PostHook already
+// produces.
+func planBuilder(c client.Client) *planbuild.Builder {
+	ns, _ := posthookdefaults.Namespace()
+	return &planbuild.Builder{Client: c, ManagerNamespace: ns}
 }
 
 // imageIngestConfigFromEnv builds the Image reconciler's
