@@ -32,6 +32,8 @@ import (
 	"syscall"
 
 	"github.com/tjjh89017/kezio/internal/agent"
+	"github.com/tjjh89017/kezio/internal/agent/deploy"
+	"github.com/tjjh89017/kezio/internal/agentapi"
 )
 
 func main() {
@@ -53,10 +55,21 @@ func main() {
 	}
 	log.Printf("kezio-agent: booted; kezio.server=%s kezio.token=%s", cmdline.Server, redactToken(cmdline.Token))
 
+	executor := &deploy.Executor{
+		Runner:   agent.ExecRunner{},
+		Ezio:     agent.ExecEzioLauncher{},
+		Fetcher:  agent.HTTPTorrentFetcher{},
+		Progress: agent.LogReporter{Logf: log.Printf},
+		Logf:     log.Printf,
+	}
+
 	err = agent.Run(ctx, agent.Config{
 		Cmdline:       cmdline,
 		InventoryRoot: *inventoryRoot,
 		Logf:          log.Printf,
+		Deploy: func(ctx context.Context, plan *agentapi.DeployPlan) error {
+			return executor.Execute(ctx, plan)
+		},
 	})
 	if err != nil && ctx.Err() == nil {
 		log.Fatalf("kezio-agent: %v", err)

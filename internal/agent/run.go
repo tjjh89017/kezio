@@ -54,6 +54,13 @@ type Config struct {
 	// Logf receives progress and error messages in fmt.Printf style.
 	// Nil discards them.
 	Logf func(format string, args ...any)
+	// Deploy executes a plan once ActionDeploy is received. Nil means
+	// pollLoop logs that no deploy handler is configured and keeps
+	// polling - a production build (cmd/agent) always sets this to a
+	// real deploy.Executor's Execute method; tests exercising pollLoop's
+	// other behavior leave it nil so a stray ActionDeploy can never
+	// invoke a real Executor against the test machine.
+	Deploy func(ctx context.Context, plan *agentapi.DeployPlan) error
 }
 
 func (c Config) log(format string, args ...any) {
@@ -142,7 +149,11 @@ func pollLoop(ctx context.Context, client *Client, cfg Config, reg RegisterResul
 			cfg.log("poll failed: %v", err)
 			interval = DefaultPollInterval
 		default:
-			logNextResponse(cfg, resp)
+			if resp.Action == agentapi.ActionDeploy && resp.Plan != nil {
+				dispatchDeploy(ctx, cfg, resp.Plan)
+			} else {
+				logNextResponse(cfg, resp)
+			}
 			if resp.PollIntervalSeconds > 0 {
 				interval = time.Duration(resp.PollIntervalSeconds) * time.Second
 			} else {
@@ -170,4 +181,20 @@ func logNextResponse(cfg Config, resp agentapi.NextResponse) {
 		return
 	}
 	cfg.log("poll: unrecognized action %q, ignoring", resp.Action)
+}
+
+// dispatchDeploy hands plan off to cfg.Deploy, logging its outcome. A nil
+// cfg.Deploy (every test that does not set one, and any build that has
+// not wired a production deploy.Executor yet) logs and otherwise ignores
+// the plan rather than panicking on a nil call - see Config.Deploy's doc
+// comment.
+func dispatchDeploy(ctx context.Context, cfg Config, plan *agentapi.DeployPlan) {
+	if cfg.Deploy == nil {
+		cfg.log("poll: deploy plan received (run %s) but no deploy handler is configured; ignoring", plan.RunName)
+		return
+	}
+	cfg.log("poll: deploy plan received (run %s); executing", plan.RunName)
+	if err := cfg.Deploy(ctx, plan); err != nil {
+		cfg.log("deploy failed: %v", err)
+	}
 }
