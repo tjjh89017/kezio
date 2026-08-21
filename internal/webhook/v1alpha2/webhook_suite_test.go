@@ -126,6 +126,9 @@ var _ = BeforeSuite(func() {
 	err = SetupDeployRunWebhookWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
+	err = SetupMachineHardwareWebhookWithManager(mgr)
+	Expect(err).NotTo(HaveOccurred())
+
 	// +kubebuilder:scaffold:webhook
 
 	go func() {

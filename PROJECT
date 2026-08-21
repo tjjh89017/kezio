@@ -43,6 +43,9 @@ resources:
   kind: MachineHardware
   path: github.com/tjjh89017/kezio/api/v1alpha2
   version: v1alpha2
+  webhooks:
+    validation: true
+    webhookVersion: v1
 - api:
     crdVersion: v1
     namespaced: true
