@@ -52,7 +52,7 @@ const agentDeployerInspectDeadline = 5 * time.Minute
 
 // agentDeployerUnsupportedMessage is Deprovision's Result.ErrorMessage:
 // AgentDeployer does not drive deprovisioning yet.
-const agentDeployerUnsupportedMessage = "provisioning is not available with this deployer"
+const agentDeployerUnsupportedMessage = "deprovisioning is not supported by this deployer"
 
 // agentDeployerUnsupportedRequeueInterval is Deprovision's
 // Result.RequeueAfter.
