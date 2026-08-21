@@ -20,14 +20,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// IPv4AddressPattern is the validation pattern for a bare IPv4 address, for
-// example "192.0.2.2".
-const IPv4AddressPattern = `^(\d{1,3}\.){3}\d{1,3}$`
-
-// IPv4CIDRPattern is the validation pattern for an IPv4 CIDR block, for
-// example "192.0.2.0/24".
-const IPv4CIDRPattern = `^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$`
-
 // DHCP mode enum values for SubnetDHCP.Mode.
 const (
 	// SubnetDHCPModeProxy runs bootd's dnsmasq as proxyDHCP only: the
