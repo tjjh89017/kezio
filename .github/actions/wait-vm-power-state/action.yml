@@ -1,0 +1,108 @@
+name: Wait for a Machine-backed VM to reach a printableStatus
+
+description: >-
+  The API half of the legacy wait-vm-power-state action: polls
+  VirtualMachine.status.printableStatus until it matches target-status or
+  a deadline passes, purely observing the Kubernetes API. It never
+  triggers a power transition itself - the caller does that first (e.g.
+  deploy-machine's afterDeploy lifecycle, or the reboot annotation on
+  Machine; MachineSpec no longer carries a spec.online field to patch, so
+  there is nothing left for this action to drive). Typical callers are
+  the PowerOff assertion on a dataImages-only Machine after deploy, and
+  any step that needs to confirm a VM reached Running.
+
+  Optionally polls one extra jsonpath field against the Machine alongside
+  printableStatus, purely for diagnostics (e.g. status.state or
+  status.operationalStatus next to the VM's own power state) - it is
+  never part of the success condition, only extra context in the log and
+  in the timeout dump. machine-name defaults to vm-name rather than
+  requiring a second name: create-bmc-machine and create-target-vm are
+  always called with the same name in this lane's own convention (see
+  verify-deploy's vm-name input), so a separate required input would just
+  repeat the same string in every caller.
+
+inputs:
+  vm-name:
+    description: Name of the VirtualMachine to wait on.
+    required: true
+  machine-name:
+    description: >-
+      Name of the Machine to poll extra-field-jsonpath against, when set.
+      Defaults to vm-name (this lane's convention of enrolling the
+      Machine and the VirtualMachine under the same name). Unused when
+      extra-field-jsonpath is empty.
+    required: false
+    default: ""
+  namespace:
+    description: Namespace the VirtualMachine (and Machine, if polled) lives in.
+    required: false
+    default: "scaffold-system"
+  target-status:
+    description: VirtualMachine.status.printableStatus to wait for (e.g. Stopped, Running).
+    required: true
+  timeout:
+    description: >-
+      Timeout to wait for target-status, in seconds as an integer,
+      optionally suffixed with s.
+    required: false
+    default: "300s"
+  timeout-error-message:
+    description: "Error text logged via ::error:: when the deadline passes."
+    required: true
+  extra-field-jsonpath:
+    description: >-
+      Optional extra jsonpath (against the Machine named by machine-name)
+      to poll and print alongside printableStatus, purely for
+      diagnostics - it is not part of the success condition. Leave empty
+      to print printableStatus only.
+    required: false
+    default: ""
+  extra-field-label:
+    description: Label to print before the extra field's value. Required when extra-field-jsonpath is set.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Poll VM printableStatus
+      shell: bash
+      env:
+        VM_NAME: ${{ inputs.vm-name }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        NAMESPACE: ${{ inputs.namespace }}
+        TARGET_STATUS: ${{ inputs.target-status }}
+        TIMEOUT: ${{ inputs.timeout }}
+        TIMEOUT_ERROR_MESSAGE: ${{ inputs.timeout-error-message }}
+        EXTRA_FIELD_JSONPATH: ${{ inputs.extra-field-jsonpath }}
+        EXTRA_FIELD_LABEL: ${{ inputs.extra-field-label }}
+      run: |
+        set -euo pipefail
+        if [[ ! "${TIMEOUT}" =~ ^[0-9]+s?$ ]]; then
+          echo "::error::invalid timeout '${TIMEOUT}': want seconds like 300 or 300s" >&2
+          exit 1
+        fi
+        machine_name="${MACHINE_NAME:-${VM_NAME}}"
+        deadline=$(( $(date +%s) + ${TIMEOUT%s} ))
+
+        while true; do
+          status="$(kubectl get vm "${VM_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.printableStatus}' || true)"
+          line="$(date -Is) VM ${VM_NAME} printableStatus=${status:-<none>}"
+          if [ -n "${EXTRA_FIELD_JSONPATH}" ]; then
+            extra_value="$(kubectl get machine "${machine_name}" -n "${NAMESPACE}" -o jsonpath="${EXTRA_FIELD_JSONPATH}" || true)"
+            line="${line} ${EXTRA_FIELD_LABEL}=${extra_value:-<none>}"
+          fi
+          echo "${line}"
+          [ "${status}" = "${TARGET_STATUS}" ] && break
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::${TIMEOUT_ERROR_MESSAGE}" >&2
+            echo "===== VirtualMachine ${VM_NAME} ====="
+            kubectl get vm "${VM_NAME}" -n "${NAMESPACE}" -o yaml || true
+            if [ -n "${EXTRA_FIELD_JSONPATH}" ]; then
+              echo "===== Machine ${machine_name} ====="
+              kubectl get machine "${machine_name}" -n "${NAMESPACE}" -o yaml || true
+            fi
+            exit 1
+          fi
+          sleep 5
+        done
