@@ -884,14 +884,18 @@ jobs:
         if: always()
         uses: ./.github/actions/dump-kezio-resources
 
-      # extra-resource-refs is deliberately not set here: every resource
-      # it would name (machine, subnet, image x2, posthook, deployrun x2)
-      # is already dumped, byte-identically, by "Collect always-on
-      # diagnostics bundle" below - which also runs on this same failure
-      # since it is if: always(). dump-kezio-resources above already
-      # covers every DeployRun/Machine/Image/etc in the namespace,
-      # including ones created and deleted by the failure-injection
-      # assertions before this step ever runs.
+      # extra-resource-refs is deliberately not set here: every
+      # still-existing resource (machine, subnet, image x2, posthook,
+      # deployrun x2) is already dumped, byte-identically, by "Collect
+      # always-on diagnostics bundle" below - which also runs on this
+      # same failure since it is if: always(). The one run this dump
+      # cannot cover is the mid-write DeployRun that
+      # assert-abort-mid-write deletes: dump-kezio-resources's `kubectl
+      # get` above runs after that deletion, so a deleted object cannot
+      # come back from it, and no extra-resource-refs entry could fix
+      # that either. That run's evidence lives instead in the deleting
+      # step's own log output, the console capture, and the controller
+      # logs - see assert-abort-mid-write's own doc comment.
       - name: Dump diagnostics on failure
         if: failure()
         uses: ./.github/actions/dump-e2e-diagnostics
@@ -928,6 +932,7 @@ jobs:
           job-label-selectors: |
             app.kubernetes.io/component=image-ingest-job:ingest-job.log
             app.kubernetes.io/component=partition-content-publish:publish-job.log
+            app.kubernetes.io/name=kezio,app.kubernetes.io/component=partition-content-seeder:seeder.log
 
       - name: Upload diagnostics
         if: always()
