@@ -8,7 +8,9 @@ description: >-
   action's `namespace` instead of building an extra-resource-refs list
   by hand when the caller wants every kezio CR in the namespace, not a
   hand-picked subset. Runs under `set +e`: a kind with zero objects, or
-  not yet created, must not fail this step.
+  not yet created, must not fail this step. Teed into
+  "${RUNNER_TEMP}/kezio-resources-dump.log" so a caller's own
+  upload-artifact step can pick it up.
 
 inputs:
   namespace:
@@ -25,6 +27,10 @@ runs:
         NAMESPACE: ${{ inputs.namespace }}
       run: |
         set +e
+        # Teed into a file too, same as dump-e2e-diagnostics: only the
+        # step's own stdout would otherwise carry this dump, and that
+        # never reaches the "Upload diagnostics" artifact.
+        exec > >(tee "${RUNNER_TEMP}/kezio-resources-dump.log") 2>&1
         echo "===== kezio v1alpha2 resources in ${NAMESPACE} ====="
         kubectl get machines,machinehardwares,subnets,deployruns,images,partitioncontents \
           -n "${NAMESPACE}" -o yaml

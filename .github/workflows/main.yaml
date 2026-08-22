@@ -881,6 +881,14 @@ jobs:
         if: always()
         uses: ./.github/actions/dump-kezio-resources
 
+      # extra-resource-refs is deliberately not set here: every resource
+      # it would name (machine, subnet, image x2, posthook, deployrun x2)
+      # is already dumped, byte-identically, by "Collect always-on
+      # diagnostics bundle" below - which also runs on this same failure
+      # since it is if: always(). dump-kezio-resources above already
+      # covers every DeployRun/Machine/Image/etc in the namespace,
+      # including ones created and deleted by the failure-injection
+      # assertions before this step ever runs.
       - name: Dump diagnostics on failure
         if: failure()
         uses: ./.github/actions/dump-e2e-diagnostics
@@ -888,15 +896,13 @@ jobs:
           target-vm-name: ${{ env.TARGET_VM_NAME }}
           provisioning-bridge: ${{ env.PROVISIONING_BRIDGE }}
           bootd-label-selector: "app.kubernetes.io/component=bootd,kezio.kojuro.date/bootd-subnet=${{ env.SUBNET_NAME }}"
-          extra-resource-refs: |
-            machine ${{ env.TARGET_VM_NAME }}
-            subnet ${{ env.SUBNET_NAME }}
-            image ${{ steps.build-image.outputs.image-name }}
-            posthook ${{ steps.marker.outputs.name }}
-            deployrun ${{ steps.deploy.outputs.deploy-run-name }}
-            image ${{ steps.build-data-image.outputs.image-name }}
-            deployrun ${{ steps.poweroff.outputs.deploy-run-name }}
 
+      # opentracker and the ingest/publish Jobs have no other log
+      # channel in this lane: dump-e2e-diagnostics's extra-deployment-logs/
+      # extra-job-label-selectors are unset above, and
+      # build-deploy-test-image/ingest-test-image only dump ingest Job
+      # logs inline if their own step is the one that fails, not a later
+      # one.
       - name: Collect always-on diagnostics bundle
         if: always()
         uses: ./.github/actions/collect-e2e-diagnostics-bundle
@@ -906,6 +912,7 @@ jobs:
             kezio-bootd-${{ env.SUBNET_NAME }}:bootd.log
             scaffold-controller-manager:controller-manager.log
             kezio-image-service:image-service.log
+            opentracker:opentracker.log
           resources: |
             machine/${{ env.TARGET_VM_NAME }}:machine.yaml
             subnet/${{ env.SUBNET_NAME }}:subnet.yaml
@@ -915,6 +922,9 @@ jobs:
             deployrun/${{ steps.deploy.outputs.deploy-run-name }}:deployrun.yaml
             image/${{ steps.build-data-image.outputs.image-name }}:data-image.yaml
             deployrun/${{ steps.poweroff.outputs.deploy-run-name }}:poweroff-deployrun.yaml
+          job-label-selectors: |
+            app.kubernetes.io/component=image-ingest-job:ingest-job.log
+            app.kubernetes.io/component=partition-content-publish:publish-job.log
 
       - name: Upload diagnostics
         if: always()
@@ -926,6 +936,7 @@ jobs:
             ${{ runner.temp }}/console-${{ matrix.dhcp-scenario }}.log
             ${{ runner.temp }}/diagnostics-dump.log
             ${{ runner.temp }}/diagnostics-kubevirtbmc-dump.log
+            ${{ runner.temp }}/kezio-resources-dump.log
           retention-days: 7
           if-no-files-found: ignore
 
