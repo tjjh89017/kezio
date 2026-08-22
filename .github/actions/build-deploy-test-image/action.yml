@@ -132,18 +132,26 @@ runs:
       run: |
         set -euo pipefail
 
-        mapfile -t qga_closure < <(
-          apt-get install --simulate -o Dir::State::status=/dev/null \
-            --no-install-recommends qemu-guest-agent \
-            | awk '/^Inst /{n=$2; sub(/:.*$/, "", n); print n}' \
-            | sort -u
-        )
+        # mapfile reading straight from a process substitution can't see a
+        # failure inside it (set -o pipefail doesn't reach across <(...)),
+        # so the solver's own exit status is captured explicitly first.
+        qga_closure_out="$(mktemp)"
+        if ! apt-get install --simulate -o Dir::State::status=/dev/null \
+          --no-install-recommends qemu-guest-agent > "${qga_closure_out}"; then
+          echo "::error::apt-get install --simulate failed to resolve qemu-guest-agent's dependency closure" >&2
+          exit 1
+        fi
+        mapfile -t qga_closure < <(awk '/^Inst /{n=$2; sub(/:.*$/, "", n); print n}' "${qga_closure_out}" | sort -u)
 
-        mapfile -t qga_missing < <(
-          comm -23 \
-            <(printf '%s\n' "${qga_closure[@]}" | sort -u) \
-            <(awk -F'\t' '{n=$1; sub(/:.*$/, "", n); print n}' "${RUNNER_TEMP}/base.manifest" | sort -u)
-        )
+        qga_missing_out="$(mktemp)"
+        if ! comm -23 \
+          <(printf '%s\n' "${qga_closure[@]}" | sort -u) \
+          <(awk -F'\t' '{n=$1; sub(/:.*$/, "", n); print n}' "${RUNNER_TEMP}/base.manifest" | sort -u) \
+          > "${qga_missing_out}"; then
+          echo "::error::comm failed while diffing qemu-guest-agent's dependency closure against the base image manifest" >&2
+          exit 1
+        fi
+        mapfile -t qga_missing < "${qga_missing_out}"
         if ! printf '%s\n' "${qga_missing[@]:-}" | grep -qxF qemu-guest-agent; then
           qga_missing+=("qemu-guest-agent")
         fi
