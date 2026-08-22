@@ -774,10 +774,12 @@ jobs:
       # happy-path patch: unlike the two-axis proof above, this failure
       # surfaces from a real DeployRun against the live agent, so this
       # action sets the deploy intent itself, waits for the controller's
-      # own flat-backoff errorCount to show a real retry, then restores
-      # the corrupted content and deletes the stuck DeployRun so
-      # deploy-machine's own unmodified patch+wait (next step) is still
-      # what proves recovery to Provisioned.
+      # own flat-backoff errorCount to show two real retries of the same
+      # run (an agent-reported Failed run retries in place, no deletion
+      # involved - see this action's own doc comment), then restores the
+      # corrupted content and waits for that same run's own next restart to
+      # move off "Failed" so deploy-machine's own unmodified patch+wait
+      # (next step) is still what proves recovery to Provisioned.
       - name: Assert a bad checksum sets error with backoff
         uses: ./.github/actions/assert-bad-checksum-backoff
         with:
@@ -787,11 +789,12 @@ jobs:
       # Abort-channel proof, still strictly before deploy-machine's own
       # happy-path patch: assert-bad-checksum-backoff's own last step
       # already left a real DeployRun in flight against the full-deploy OS
-      # image (its recovery deletes the corrupted run and waits only for
-      # currentRunRef to move to a new name, not for that new run to reach
-      # any particular phase). This action rides that same in-flight run:
-      # it waits for it to actually reach WritingContent, deletes it
-      # mid-write, and proves the sanctioned recovery path
+      # image - the SAME run object throughout (its own restart-in-place
+      # recovery never creates a new one), already past its boot and
+      # registration by the time it hands off. This action rides that same
+      # in-flight run: it waits for it to actually reach WritingContent,
+      # deletes it mid-write, and proves the sanctioned recovery path for a
+      # run that disappears out from under a live deployment
       # (recordCurrentRunDeleted) starts a genuinely fresh run that itself
       # reboots into a new kezio-agent and reaches WritingContent again -
       # see this action's own doc comment for the full evidence trace,

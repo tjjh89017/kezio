@@ -11,18 +11,17 @@ description: >-
   Runs immediately after assert-bad-checksum-backoff and strictly before
   the pre-deploy timestamp capture and deploy-machine: assert-bad-checksum-backoff
   already sets the Machine's real deploy intent (the full-deploy OS image)
-  and, as its own last step, deletes the DeployRun it corrupted and waits
-  only for status.currentRunRef to move to a new name - it does not wait
-  for that fresh run to reach any particular phase. That fresh run is
-  therefore still pre-boot (its provision-boot marker was disarmed back
-  when the very first attempt for this Machine committed to
-  DeployRunPhasePending, and nothing has re-armed it since - see
-  internal/deployer/agent.go's startProvision/pollAgentBoot) when this
-  action starts, so it still needs a full PXE-boot cycle before reaching
-  DeployRunPhaseWritingContent. This action rides that same run: it never
-  patches the Machine's spec itself, it only watches the DeployRun
-  assert-bad-checksum-backoff already started, catches it mid-write, and
-  deletes it.
+  and, as its own last step, restores the content it corrupted and waits
+  for that same DeployRun's own status.phase to move off "Failed" - an
+  agent-reported Failed run retries in place (provisionResultFromPhase
+  classifies it MachineErrorTypeRestart; AgentDeployer.Provision's
+  resetProvisionAttempt/startProvision discard its state and re-arm PXE on
+  the same run object, never a different one - see that action's own
+  description), so the boot-and-registration cycle this action used to
+  need to drive itself has already happened by the time this action
+  starts: what it rides is the SAME run, already past its restart, not a
+  freshly created one. This action never patches the Machine's spec
+  itself; it only watches that run, catches it mid-write, and deletes it.
 
   Design choice: aborting here (before the OS deploy's own patch+wait)
   rather than after it lets deploy-machine's own unmodified patch+wait
@@ -119,11 +118,13 @@ inputs:
     description: >-
       Timeout to wait for the in-flight DeployRun to reach
       status.phase == "WritingContent", in seconds as an integer,
-      optionally suffixed with s. Generous: the run this action watches
-      is still pre-boot when this action starts (see this action's own
-      description), so this must absorb a full PXE-boot/registration
-      cycle (internal/deployer's own 5-minute agentDeployerProvisionBootDeadline)
-      plus partitioning, not just the content write itself.
+      optionally suffixed with s. Generous: assert-bad-checksum-backoff's
+      own recovery wait only guarantees the run has moved off "Failed"
+      by the time this action starts (see this action's own description),
+      which can be as early as its restart just committing back to
+      Pending - boot and registration have already happened by then, but
+      this must still absorb partitioning ahead of the content write
+      itself, plus normal CI scheduling jitter.
     required: false
     default: "900s"
   retry-timeout:

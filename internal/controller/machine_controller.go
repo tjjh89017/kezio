@@ -214,11 +214,12 @@ func (r *MachineReconciler) reconcilePoweringOff(ctx context.Context, machine *k
 // transient error (non-nil err) is returned unchanged, exactly like the
 // forward walk: no errorCount/state change, controller-runtime retries with
 // its own backoff. Complete advances to nextState (or releases the Machine
-// when nextState is empty). Continuing/Busy go through clearDelayed so a
-// prior Delayed outcome does not outlive it, matching
-// applyNonCompleteOutcome; Delayed itself requeues without touching error
-// state. Failed goes through recordDeleteStageFailure, which applies the
-// give-up threshold.
+// when nextState is empty). Continuing/Busy go through clearRetryStatus
+// (restarting always false: no delete-stage step returns a
+// Restart-classified Failed today) so a prior Delayed outcome does not
+// outlive it, matching applyNonCompleteOutcome; Delayed itself requeues
+// without touching error state. Failed goes through
+// recordDeleteStageFailure, which applies the give-up threshold.
 func (r *MachineReconciler) runDeleteStage(ctx context.Context, machine *keziov1alpha2.Machine, step func(context.Context, *keziov1alpha2.Machine) (deployer.Result, error), stageName, nextState string) (ctrl.Result, error) {
 	result, err := step(ctx, machine)
 	if err != nil {
@@ -229,13 +230,13 @@ func (r *MachineReconciler) runDeleteStage(ctx context.Context, machine *keziov1
 	case deployer.Complete:
 		return r.advanceDeleteStage(ctx, machine, nextState)
 	case deployer.Continuing:
-		return r.clearDelayed(ctx, machine, ctrl.Result{RequeueAfter: jitter(continuingRequeueInterval)})
+		return r.clearRetryStatus(ctx, machine, false, ctrl.Result{RequeueAfter: jitter(continuingRequeueInterval)})
 	case deployer.Busy:
 		requeueAfter := jitter(defaultBusyRequeueInterval)
 		if result.RequeueAfter > 0 {
 			requeueAfter = result.RequeueAfter
 		}
-		return r.clearDelayed(ctx, machine, ctrl.Result{RequeueAfter: requeueAfter})
+		return r.clearRetryStatus(ctx, machine, false, ctrl.Result{RequeueAfter: requeueAfter})
 	case deployer.Delayed:
 		return r.markDelayed(ctx, machine, delayedRequeueInterval)
 	case deployer.Failed:
@@ -568,7 +569,8 @@ func (r *MachineReconciler) reconcileInspecting(ctx context.Context, machine *ke
 	if err := r.recordTriedCredentials(ctx, machine, secret); err != nil {
 		return ctrl.Result{}, err
 	}
-	result, err := r.Deployer.Inspect(ctx, machine, restartOnFailure(machine))
+	restarting := restartOnFailure(machine)
+	result, err := r.Deployer.Inspect(ctx, machine, restarting)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -580,7 +582,7 @@ func (r *MachineReconciler) reconcileInspecting(ctx context.Context, machine *ke
 	if result.Outcome == deployer.Complete {
 		return r.setState(ctx, machine, keziov1alpha2.MachineStateAvailable)
 	}
-	return r.applyNonCompleteOutcome(ctx, machine, result)
+	return r.applyNonCompleteOutcome(ctx, machine, result, restarting)
 }
 
 // reInspectAcceptable reports whether machine's current status.state honors
@@ -867,7 +869,8 @@ func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *
 	if err := r.recordTriedCredentials(ctx, machine, secret); err != nil {
 		return ctrl.Result{}, err
 	}
-	result, err := r.Deployer.Provision(ctx, machine, run, restartOnFailure(machine))
+	restarting := restartOnFailure(machine)
+	result, err := r.Deployer.Provision(ctx, machine, run, restarting)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -877,7 +880,7 @@ func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *
 		}
 	}
 	if result.Outcome != deployer.Complete {
-		return r.applyNonCompleteOutcome(ctx, machine, result)
+		return r.applyNonCompleteOutcome(ctx, machine, result, restarting)
 	}
 
 	machine.Status.State = keziov1alpha2.MachineStateProvisioned
@@ -940,7 +943,7 @@ func (r *MachineReconciler) reconcileDetached(ctx context.Context, machine *kezi
 // clearDetached resumes normal operation once the detached annotation is
 // removed: it restores operationalStatus to OK in its own patch, so the
 // next reconcile's state walk starts from a clean status - the same
-// one-step-per-reconcile discipline as clearDelayed. The annotation removal
+// one-step-per-reconcile discipline as clearRetryStatus. The annotation removal
 // that reached this reconcile already happened; nothing further will
 // re-trigger the watch, so this requeues explicitly to resume the walk.
 func (r *MachineReconciler) clearDetached(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
@@ -965,7 +968,10 @@ func (r *MachineReconciler) reconcileReboot(ctx context.Context, machine *keziov
 		return ctrl.Result{}, err
 	}
 	if result.Outcome != deployer.Complete {
-		return r.applyNonCompleteOutcome(ctx, machine, result)
+		// Reboot carries no restartOnFailure argument (Deployer.Reboot's
+		// own signature has none), so there is never a Restart-classified
+		// error for this call to clear early.
+		return r.applyNonCompleteOutcome(ctx, machine, result, false)
 	}
 	if err := r.clearSuffixlessRebootAnnotation(ctx, machine); err != nil {
 		return ctrl.Result{}, err
@@ -975,16 +981,19 @@ func (r *MachineReconciler) reconcileReboot(ctx context.Context, machine *keziov
 
 // applyNonCompleteOutcome handles every deployer.Result.Outcome except
 // Complete, shared between the Inspecting and Provisioning steps.
-func (r *MachineReconciler) applyNonCompleteOutcome(ctx context.Context, machine *keziov1alpha2.Machine, result deployer.Result) (ctrl.Result, error) {
+// restarting is the restartOnFailure value the caller passed into the
+// deployer step that produced result: see clearRetryStatus's doc comment
+// for why Continuing/Busy need it.
+func (r *MachineReconciler) applyNonCompleteOutcome(ctx context.Context, machine *keziov1alpha2.Machine, result deployer.Result, restarting bool) (ctrl.Result, error) {
 	switch result.Outcome {
 	case deployer.Continuing:
-		return r.clearDelayed(ctx, machine, ctrl.Result{RequeueAfter: jitter(continuingRequeueInterval)})
+		return r.clearRetryStatus(ctx, machine, restarting, ctrl.Result{RequeueAfter: jitter(continuingRequeueInterval)})
 	case deployer.Busy:
 		requeueAfter := jitter(defaultBusyRequeueInterval)
 		if result.RequeueAfter > 0 {
 			requeueAfter = result.RequeueAfter
 		}
-		return r.clearDelayed(ctx, machine, ctrl.Result{RequeueAfter: requeueAfter})
+		return r.clearRetryStatus(ctx, machine, restarting, ctrl.Result{RequeueAfter: requeueAfter})
 	case deployer.Delayed:
 		return r.recordDelayed(ctx, machine)
 	case deployer.Failed:
@@ -1013,19 +1022,44 @@ func (r *MachineReconciler) markDelayed(ctx context.Context, machine *keziov1alp
 	return ctrl.Result{RequeueAfter: jitter(requeueAfter)}, nil
 }
 
-// clearDelayed clears a previously recorded delayed status on any outcome
-// other than Delayed itself, so "delayed" never outlives the condition that
-// caused it. It is a no-op (result returned unchanged) when the machine is
-// not currently delayed, including when it is in error: only Failed's own
-// path overwrites an error status.
-func (r *MachineReconciler) clearDelayed(ctx context.Context, machine *keziov1alpha2.Machine, result ctrl.Result) (ctrl.Result, error) {
-	if machine.Status.OperationalStatus != keziov1alpha2.MachineOperationalStatusDelayed {
+// clearRetryStatus clears whichever advisory status no longer applies now
+// that a Continuing/Busy outcome means the deployer step made progress
+// without failing: a previously recorded delayed status, so "delayed"
+// never outlives the condition that caused it (only Failed's own path
+// overwrites an error status; delayed is otherwise unconditional here). It
+// is a no-op (result returned unchanged) when neither applies.
+//
+// restarting additionally clears a Restart-classified error's
+// operationalStatus the instant the one call it was granted for succeeds:
+// MachineErrorType's own doc comment scopes restartOnFailure to "the
+// deployer's next Inspect/Provision call", and nothing else would ever
+// clear it here - Continuing/Busy do not otherwise touch operationalStatus
+// at all, so a Restart error left in place would keep restartOnFailure
+// true on every following reconcile. For AgentDeployer that means its
+// arm-PXE-and-power-on branches (`!armed || restartOnFailure`) would
+// re-arm and power-cycle the machine on every reconcile forever, instead
+// of ever reaching the poll branch that waits for it to actually
+// register.
+//
+// errorCount is deliberately left untouched here, unlike the Complete/
+// setState paths: a restart is not a success, only a discarded attempt at
+// the same unfinished goal (applyFailure's own doc comment: errorCount
+// "counts consecutive errors since the last success in the current
+// state"), so a run stuck failing the same way every restart still shows
+// a climbing errorCount for backoff/observability - this only unblocks
+// the deployer from being asked to restart forever.
+func (r *MachineReconciler) clearRetryStatus(ctx context.Context, machine *keziov1alpha2.Machine, restarting bool, result ctrl.Result) (ctrl.Result, error) {
+	switch {
+	case machine.Status.OperationalStatus == keziov1alpha2.MachineOperationalStatusDelayed:
+		machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusOK
+	case restarting && machine.Status.OperationalStatus == keziov1alpha2.MachineOperationalStatusError:
+		machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusOK
+	default:
 		return result, nil
 	}
-	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusOK
 	stampLastUpdated(machine)
 	if err := r.applyMachineStatus(ctx, machine); err != nil {
-		return ctrl.Result{}, fmt.Errorf("machine %q: clearing delayed status: %w", machine.Name, err)
+		return ctrl.Result{}, fmt.Errorf("machine %q: clearing retry status: %w", machine.Name, err)
 	}
 	return result, nil
 }

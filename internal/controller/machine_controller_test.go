@@ -1272,6 +1272,78 @@ var _ = Describe("Machine Controller", func() {
 			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
 		})
 
+		It("clears the error and passes restartOnFailure=false on the call after a Restart retry reports Continuing", func() {
+			// AgentDeployer's real restart branch cannot jump straight to
+			// Complete the way the previous test's fake does: arming PXE
+			// and powering on is its own step, reported Continuing, with
+			// registration confirmed only on a later call. If
+			// restartOnFailure stayed true past that one retry call (see
+			// MachineErrorType's own doc comment: it is scoped to "the
+			// deployer's next Inspect/Provision call"), AgentDeployer would
+			// re-arm and power-cycle the machine on every following
+			// reconcile forever instead of ever letting it register - this
+			// proves that does not happen.
+			machineName := fmt.Sprintf("restart-continuing-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: "aa:bb:cc:dd:ee:08",
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			})
+
+			var seenRestartOnFailure []bool
+			fakeDeployer := &deployer.FakeDeployer{
+				Client: k8sClient,
+				InspectFunc: func(_ context.Context, _ *keziov1alpha2.Machine, restartOnFailure bool) (deployer.Result, error) {
+					seenRestartOnFailure = append(seenRestartOnFailure, restartOnFailure)
+					switch len(seenRestartOnFailure) {
+					case 1:
+						return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeRestart, ErrorMessage: "boom"}, nil
+					case 2:
+						// The restart retry itself only re-arms; it has not
+						// registered yet.
+						return deployer.Result{Outcome: deployer.Continuing}, nil
+					default:
+						return deployer.Result{Outcome: deployer.Continuing}, nil
+					}
+				},
+			}
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: fakeDeployer}
+
+			By("reconciling through the finalizer add, Enrolling, and the first two Inspect calls")
+			for i := 0; i < 10 && len(seenRestartOnFailure) < 2; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+			}
+			Expect(seenRestartOnFailure).To(HaveLen(2))
+			Expect(seenRestartOnFailure[0]).To(BeFalse())
+			Expect(seenRestartOnFailure[1]).To(BeTrue(), "the retry after a MachineErrorTypeRestart failure must ask the deployer to restart")
+
+			var afterRestartRetry keziov1alpha2.Machine
+			Expect(k8sClient.Get(ctx, name, &afterRestartRetry)).To(Succeed())
+			Expect(afterRestartRetry.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK),
+				"the restart retry succeeded (Continuing, not Failed): operationalStatus must clear immediately so restartOnFailure does not stay true forever")
+			Expect(afterRestartRetry.Status.ErrorCount).To(Equal(int32(1)),
+				"errorCount is not a success/failure toggle - a restart is a discarded attempt at the same unfinished goal, not a success, so it stays as backoff/observability evidence")
+
+			By("reconciling once more: the third Inspect call must see restartOnFailure=false")
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(seenRestartOnFailure).To(HaveLen(3))
+			Expect(seenRestartOnFailure[2]).To(BeFalse(),
+				"restartOnFailure must not stay true past the one retry call, or AgentDeployer would re-arm and power-cycle the machine forever")
+		})
+
 		It("increases errorCount monotonically across N consecutive failures without ever changing state", func() {
 			machineName := fmt.Sprintf("monotonic-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}

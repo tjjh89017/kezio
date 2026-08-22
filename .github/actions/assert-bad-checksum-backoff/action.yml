@@ -47,35 +47,49 @@ description: >-
   DeployRun exists (not assert-two-axis-status's plan-build pre-check),
   simply leaving the Machine's spec patched and letting deploy-machine's
   own merge patch overwrite it - the sibling action's recovery mechanism
-  - would NOT be enough here. Tracing machine_controller.go:
-  provisionResultFromPhase (internal/deployer/agent.go) always reports
-  MachineErrorTypeTransient for an executor-side DeployRun failure
-  (never Restart), so restartOnFailure never fires and reconcileProvisioning
-  keeps re-reading the *same* Failed DeployRun forever, incrementing
-  status.errorCount without ever starting a new attempt on its own - a
-  stuck run only recovers once its DeployRun object is actually deleted
-  (recordCurrentRunDeleted flips errorType to Restart, clears
-  status.currentRunRef, and the next reconcile's nil-ref branch calls
-  startProvisioningRun fresh). So this action runs strictly before
-  deploy-machine, and it does the two things assert-two-axis-status never
-  had to: it sets the Machine's own deploy intent itself (there is no
-  plan-build pre-check to fail before a DeployRun exists), and once
-  status.errorCount has shown at least one real retry of the same failed
-  run, it restores the corrupted content.torrent and deletes that
-  DeployRun itself, so deploy-machine's own unmodified patch+wait
-  (called right after, redundantly re-applying the same spec values) is
-  still what proves recovery to Provisioned - exactly like the sibling
-  action, just requiring this one extra recovery step because this
-  failure class does not self-heal from a spec overwrite alone.
+  - is not the mechanism this action itself watches for, so it runs
+  strictly before deploy-machine and does the two things
+  assert-two-axis-status never had to: it sets the Machine's own deploy
+  intent itself (there is no plan-build pre-check to fail before a
+  DeployRun exists), and once status.errorCount has shown at least two
+  real retries of the same run, it restores the corrupted content.torrent
+  so deploy-machine's own unmodified patch+wait (called right after,
+  redundantly re-applying the same spec values) is still what proves
+  recovery to Provisioned - exactly like the sibling action.
+
+  What retries the run, traced through machine_controller.go and
+  internal/deployer/agent.go: provisionResultFromPhase reports
+  MachineErrorTypeRestart (not Transient) for an agent-reported Failed
+  DeployRun - the agent that reported Failed has abandoned its attempt,
+  so nothing about the run's recorded phase/partitions/timings/
+  conditions is worth resuming, the same condition MachineErrorType's own
+  doc comment describes for Restart. restartOnFailure(machine) then asks
+  the *next* Provision call to discard that state and start over:
+  AgentDeployer.Provision's resetProvisionAttempt wipes run's status back
+  to freshly-created and startProvision re-arms PXE and power-cycles the
+  same Machine, so the SAME DeployRun object (status.currentRunRef never
+  changes) reboots into the live agent and re-executes the same plan
+  against the still-corrupted content - failing the same way, since this
+  action has not restored it yet. No deletion is involved: unlike
+  recordCurrentRunDeleted's path (a DeployRun that disappeared out from
+  under a live deployment), an agent-reported Failed run is retried in
+  place. Deleting it here would not be wrong, but it would replace this
+  action's own evidence (the same run's errorCount climbing) with a
+  second, unrelated run object for no benefit - restoring the content and
+  letting the DeployRun already in flight pick up the fix on its own next
+  restart is both simpler and closer to what the fix actually guarantees.
 
   Backoff evidence: machine_controller.go's recordFailure requeues a
   failed Machine after the constant failedRequeueInterval (30s), not an
-  exponential curve, so status.errorCount only grows across separate
-  reconciles of the same stuck run roughly 30s apart - reaching 2 needs
-  at least one such reconcile after the first, so error-count-timeout
-  defaults generously above that flat floor to absorb CI scheduling
-  jitter without flaking, while staying tiny next to deploy-machine's own
-  1800s budget that starts only after this action returns.
+  exponential curve. errorCount is not reset by a restart succeeding
+  (clearRetryStatus's own doc comment: a restart is a discarded attempt
+  at the same unfinished goal, not a success), so it keeps climbing by
+  one per failed restart cycle - but each cycle is a *full* PXE-boot and
+  registration cycle (internal/deployer's own 5-minute
+  agentDeployerProvisionBootDeadline), not just the flat 30s backoff, so
+  error-count-timeout must absorb that, the same magnitude
+  assert-abort-mid-write's own write-phase-timeout budgets for the same
+  reason.
 
 inputs:
   machine-name:
@@ -127,19 +141,23 @@ inputs:
   error-count-timeout:
     description: >-
       Timeout to wait for status.errorCount to reach 2 or more on the
-      same stuck DeployRun, in seconds as an integer, optionally suffixed
-      with s. See this action's own description for the flat ~30s
-      backoff floor this must clear.
+      same retried DeployRun, in seconds as an integer, optionally
+      suffixed with s. Generous: reaching 2 needs a full restart cycle
+      (PXE-boot, agent registration, and a fresh write attempt against
+      the still-corrupted content) after the first failure, not just the
+      flat 30s backoff - see this action's own description.
     required: false
-    default: "300s"
+    default: "900s"
   recovery-timeout:
     description: >-
-      Timeout to wait, after restoring the corrupted content and
-      deleting the Failed DeployRun, for status.currentRunRef to change
-      away from the deleted run's name - evidence a fresh attempt has
-      actually started before handing off to deploy-machine's own wait.
+      Timeout to wait, after restoring the corrupted content, for the
+      same DeployRun's status.phase to move off "Failed" again -
+      evidence its own next automatic restart picked up the fix, before
+      handing off to deploy-machine's own wait. Same magnitude as
+      error-count-timeout and for the same reason: this is another full
+      restart cycle, not an instant retry.
     required: false
-    default: "120s"
+    default: "900s"
 
 runs:
   using: composite
@@ -344,7 +362,7 @@ runs:
       run: |
         set -euo pipefail
         if [[ ! "${TIMEOUT}" =~ ^[0-9]+s?$ ]]; then
-          echo "::error::invalid error-count-timeout '${TIMEOUT}': want seconds like 300 or 300s" >&2
+          echo "::error::invalid error-count-timeout '${TIMEOUT}': want seconds like 900 or 900s" >&2
           exit 1
         fi
         deadline=$(( $(date +%s) + ${TIMEOUT%s} ))
@@ -371,12 +389,12 @@ runs:
             dump_and_fail "status.state=${state:-<empty>} while waiting for the injected checksum failure to back off - want Provisioning throughout (state must never move because of an operationalStatus error)"
           fi
           if [ "${polled_run_name}" != "${RUN_NAME}" ]; then
-            dump_and_fail "status.currentRunRef changed from ${RUN_NAME} to ${polled_run_name:-<empty>} before errorCount reached 2 - the controller must keep re-attempting the same stuck DeployRun, not start a new one, until this action deletes it"
+            dump_and_fail "status.currentRunRef changed from ${RUN_NAME} to ${polled_run_name:-<empty>} before errorCount reached 2 - an agent-reported Failed run retries in place (resetProvisionAttempt/startProvision), it must never be replaced by a different run object here"
           fi
 
           if [ "${operational_status}" = "error" ] && [ "${error_count}" -ge 2 ]; then
-            if [ "${error_type}" != "Transient" ]; then
-              dump_and_fail "status.errorType=${error_type:-<empty>}, want Transient - an executor-reported DeployRun failure always classifies as MachineErrorTypeTransient (provisionResultFromPhase)"
+            if [ "${error_type}" != "Restart" ]; then
+              dump_and_fail "status.errorType=${error_type:-<empty>}, want Restart - an agent-reported Failed DeployRun classifies as MachineErrorTypeRestart (provisionResultFromPhase), so the controller's next Provision call retries this same run from scratch"
             fi
             break
           fi
@@ -441,45 +459,49 @@ runs:
           echo "restored ${content_name}'s content.torrent pieces length to ${original_len}"
         done <"${RUNNER_TEMP}/bad-checksum-original-lengths.txt"
 
-    - name: Delete the Failed DeployRun to trigger the controller's own retry
-      if: always()
-      shell: bash
-      env:
-        NAMESPACE: ${{ inputs.namespace }}
-        RUN_NAME: ${{ steps.started.outputs.run-name }}
-      run: |
-        set -euo pipefail
-        if [ -z "${RUN_NAME}" ]; then
-          echo "no DeployRun was ever started - nothing to delete"
-          exit 0
-        fi
-        kubectl delete deployrun "${RUN_NAME}" -n "${NAMESPACE}" --ignore-not-found --wait=false
-
-    - name: Wait for a fresh attempt to start against the restored content
+    - name: Wait for the same DeployRun's own next restart to pick up the fix
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
         MACHINE_NAME: ${{ inputs.machine-name }}
-        OLD_RUN_NAME: ${{ steps.started.outputs.run-name }}
+        RUN_NAME: ${{ steps.started.outputs.run-name }}
         TIMEOUT: ${{ inputs.recovery-timeout }}
       run: |
         set -euo pipefail
+        if [ -z "${RUN_NAME}" ]; then
+          echo "no DeployRun was ever started - nothing to wait for"
+          exit 0
+        fi
         if [[ ! "${TIMEOUT}" =~ ^[0-9]+s?$ ]]; then
-          echo "::error::invalid recovery-timeout '${TIMEOUT}': want seconds like 120 or 120s" >&2
+          echo "::error::invalid recovery-timeout '${TIMEOUT}': want seconds like 900 or 900s" >&2
           exit 1
         fi
         deadline=$(( $(date +%s) + ${TIMEOUT%s} ))
 
+        # No deletion here: an agent-reported Failed DeployRun retries in
+        # place (see this action's own description), so
+        # status.currentRunRef stays RUN_NAME throughout - the same run
+        # object's own status.phase moving off "Failed" is the evidence a
+        # fresh restart actually started against the now-restored content.
         while true; do
           run_name="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.currentRunRef.name}' || true)"
-          echo "$(date -Is) Machine status.currentRunRef=${run_name:-<none>} (deleted run was ${OLD_RUN_NAME})"
-          if [ -n "${run_name}" ] && [ "${run_name}" != "${OLD_RUN_NAME}" ]; then
-            echo "fresh attempt ${run_name} started against the restored content - handing off to deploy-machine's own wait"
+          phase="$(kubectl get deployrun "${RUN_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.phase}' || true)"
+          echo "$(date -Is) Machine status.currentRunRef=${run_name:-<none>} DeployRun ${RUN_NAME} status.phase=${phase:-<empty>}"
+
+          if [ "${run_name}" != "${RUN_NAME}" ]; then
+            echo "::error::status.currentRunRef changed from ${RUN_NAME} to ${run_name:-<empty>} - an agent-reported Failed run must retry in place, never be replaced by a different run object" >&2
+            kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o yaml || true
+            exit 1
+          fi
+          if [ -n "${phase}" ] && [ "${phase}" != "Failed" ]; then
+            echo "DeployRun ${RUN_NAME} restarted and reached status.phase=${phase} against the restored content - handing off to deploy-machine's own wait"
             break
           fi
+
           if [ "$(date +%s)" -ge "${deadline}" ]; then
-            echo "::error::status.currentRunRef never moved away from the deleted run ${OLD_RUN_NAME} within ${TIMEOUT}" >&2
+            echo "::error::DeployRun ${RUN_NAME} status.phase never moved off Failed within ${TIMEOUT}" >&2
             kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o yaml || true
+            kubectl get deployrun "${RUN_NAME}" -n "${NAMESPACE}" -o yaml || true
             exit 1
           fi
           sleep 5

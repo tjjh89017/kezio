@@ -808,8 +808,67 @@ func TestAgentDeployerProvisionLaterPassFailedReportsFailedWithMessage(t *testin
 	if result.Outcome != Failed {
 		t.Fatalf("Provision() outcome = %v, want Failed", result.Outcome)
 	}
+	if result.ErrorType != keziov1alpha2.MachineErrorTypeRestart {
+		t.Errorf("Provision() ErrorType = %q, want %q (an agent-reported Failed run has abandoned its attempt)", result.ErrorType, keziov1alpha2.MachineErrorTypeRestart)
+	}
 	if result.ErrorMessage != "writing partition table: rejected" {
 		t.Errorf("Provision() ErrorMessage = %q, want the DeployRun's recorded failure message", result.ErrorMessage)
+	}
+}
+
+// TestAgentDeployerProvisionRestartOnFailureAfterAgentReportedFailedStartsFreshAttempt
+// proves the self-heal path this ErrorType exists for: a Provision call
+// that observes an agent-reported Failed run, followed by the next call
+// with restartOnFailure true (as the controller sends once it has
+// recorded ErrorType Restart), discards the failed run's state and
+// re-arms the boot exactly like any other restart.
+func TestAgentDeployerProvisionRestartOnFailureAfterAgentReportedFailedStartsFreshAttempt(t *testing.T) {
+	machine := agentTestMachine(t)
+	c := newAgentTestClient(t, machine, agentTestBMCSecret())
+	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
+	run := newTestDeployRun(t, c, machine)
+	run.Status.Phase = keziov1alpha2.DeployRunPhaseFailed
+	apimeta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+		Type: keziov1alpha2.DeployRunConditionSucceeded, Status: metav1.ConditionFalse, Reason: "DeployFailed", Message: "agent reported failed",
+	})
+	if err := c.Status().Update(context.Background(), run); err != nil {
+		t.Fatalf("seed Failed DeployRun status: %v", err)
+	}
+
+	firstResult, err := d.Provision(context.Background(), machine, run, false)
+	if err != nil {
+		t.Fatalf("first Provision() error = %v", err)
+	}
+	if firstResult.Outcome != Failed || firstResult.ErrorType != keziov1alpha2.MachineErrorTypeRestart {
+		t.Fatalf("first Provision() = %+v, want Failed/Restart", firstResult)
+	}
+
+	result, err := d.Provision(context.Background(), machine, run, true)
+	if err != nil {
+		t.Fatalf("restart Provision() error = %v", err)
+	}
+	if result.Outcome != Continuing {
+		t.Fatalf("restart Provision() outcome = %v, want Continuing (a fresh attempt on the same run)", result.Outcome)
+	}
+	if run.Status.Phase != "" || len(run.Status.Conditions) != 0 {
+		t.Errorf("run.Status = %+v, want Phase/Conditions cleared for a fresh attempt", run.Status)
+	}
+
+	f := fakeBMCForAddress(machine.Spec.BMC.Address)
+	setPXE, powerOn, _, _, _, _ := f.calls()
+	if setPXE != 1 || powerOn != 1 {
+		t.Errorf("SetOneTimePXEBoot/PowerOn calls = %d/%d, want 1/1 (restart must re-arm and power the machine on again)", setPXE, powerOn)
+	}
+	if _, armed := provisionBootMarker(machine); !armed {
+		t.Error("machine has no provision-boot marker after restarting past an agent-reported Failed run")
+	}
+
+	var stored keziov1alpha2.DeployRun
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(run), &stored); err != nil {
+		t.Fatalf("Get DeployRun: %v", err)
+	}
+	if stored.Status.Phase != "" {
+		t.Errorf("stored run.Status.Phase = %q, want empty", stored.Status.Phase)
 	}
 }
 

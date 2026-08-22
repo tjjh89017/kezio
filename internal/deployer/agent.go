@@ -390,11 +390,27 @@ func (d *AgentDeployer) pollAgentRegistration(ctx context.Context, machine *kezi
 // pass (run.status.phase no longer empty) reads it, written out of band
 // by internal/agentserver's POST /agent/progress handler as the agent
 // executes the plan: Succeeded reports Complete, Failed reports Failed
-// with the recorded failure message, and every other phase reports
-// Continuing. Succeeded is recorded from the agent's terminal progress
-// report, sent just before it runs the after-deploy reboot/poweroff
-// command - see the Deployer interface's own Provision doc comment for
-// what Complete does and does not confirm.
+// with ErrorType Restart and the recorded failure message, and every
+// other phase reports Continuing. Succeeded is recorded from the agent's
+// terminal progress report, sent just before it runs the after-deploy
+// reboot/poweroff command - see the Deployer interface's own Provision
+// doc comment for what Complete does and does not confirm.
+//
+// ErrorType Restart for an agent-reported Failed run is deliberate, not
+// an oversight: the agent that reported Failed has abandoned its
+// attempt (its live process may already be gone), so nothing about
+// run's recorded phase/partitions/timings/conditions describes work
+// worth resuming - exactly the condition MachineErrorTypeRestart's own
+// doc comment describes. The next Provision call therefore arrives with
+// restartOnFailure true, which resetProvisionAttempt and startProvision
+// turn into a fresh attempt on this same run object: its spec is
+// unchanged (the deploy intent it was created for still holds), so
+// re-running it from scratch is exactly re-attempting the same goal, not
+// a different one. A payload that can never succeed retries forever this
+// way; that is surfaced through errorCount/backoff on the
+// operationalStatus axis (recordFailure/failedRequeueInterval), the same
+// place every other persistent Machine error is surfaced, rather than by
+// this deployer refusing to retry.
 //
 // restartOnFailure asks Provision to discard this attempt's in-progress
 // state and start over, mirroring Inspect's own restartOnFailure handling.
@@ -571,7 +587,7 @@ func provisionResultFromPhase(run *keziov1alpha2.DeployRun) Result {
 	case keziov1alpha2.DeployRunPhaseFailed:
 		return Result{
 			Outcome:      Failed,
-			ErrorType:    keziov1alpha2.MachineErrorTypeTransient,
+			ErrorType:    keziov1alpha2.MachineErrorTypeRestart,
 			ErrorMessage: deployRunFailureMessage(run),
 		}
 	default:
