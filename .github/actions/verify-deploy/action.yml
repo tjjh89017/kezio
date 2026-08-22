@@ -1,0 +1,211 @@
+name: Verify a deploy actually landed
+
+description: >-
+  The verification half of the full-deploy e2e lane, paired with
+  deploy-machine (which already waited for status.state to reach
+  "Provisioned" - this action does not repeat that wait). Proves the
+  deploy landed on three independent layers, run in dependency order with
+  an early exit on the first hard failure rather than accumulated into
+  one combined report: layer 3 execs into the guest through the layer 2
+  guest-agent connection, so once layer 2 fails there is nothing left for
+  layer 3 to attempt but a redundant, same-root-cause failure - running
+  in order gives a single, unambiguous cause instead of two reports of
+  the same problem.
+
+  Layer 1 (Machine status) reads api/v1alpha2/machine_types.go's
+  MachineStatus directly: status.state == "Provisioned",
+  status.operationalStatus == "OK", and
+  status.lastSuccessfulRunRef.name == deploy-run-name - the last check
+  ties this verification to the specific DeployRun deploy-machine waited
+  for, rather than an unrelated earlier success left on the same Machine.
+
+  Layer 2 (booted from disk) polls
+  VirtualMachineInstance.status.conditions[type=AgentConnected] for
+  status=True: the deployed guest's own qemu-guest-agent (baked into the
+  test image by build-deploy-test-image) only connects once the guest
+  actually boots an OS with the agent running, so this is live evidence
+  of a real reboot into the deployed disk - the live boot environment
+  kezio-agent ran from never runs qemu-guest-agent at all.
+
+  Layer 3 (marker file) reads back the marker
+  create-deploy-marker-posthook's PostHook wrote, through the same guest
+  agent: `virsh qemu-agent-command` inside the VM's own virt-launcher pod
+  issuing QGA's guest-file-open/read/close, since there is no SSH path to
+  the guest. Checked against two things, per create-deploy-marker-
+  posthook's own contract - the marker's "machine=" line must match this
+  Machine, and its "deployedAt=" nanosecond timestamp must postdate
+  pre-deploy-timestamp-ns, ruling out a stale marker a previous deploy of
+  the same disk left behind.
+
+inputs:
+  machine-name:
+    description: Name of the deployed Machine (deploy-machine's own machine-name output).
+    required: true
+  namespace:
+    description: Namespace the Machine and target VM live in (deploy-machine's own namespace output).
+    required: false
+    default: "scaffold-system"
+  deploy-run-name:
+    description: Name of the DeployRun this verifies (deploy-machine's own deploy-run-name output).
+    required: true
+  vm-name:
+    description: >-
+      Name of the target VirtualMachine/VirtualMachineInstance booted from
+      the deployed disk. Defaults to machine-name: create-bmc-machine and
+      create-target-vm are always called with the same name in this
+      lane's own convention.
+    required: false
+    default: ""
+  pre-deploy-timestamp-ns:
+    description: >-
+      Unix nanosecond timestamp captured before deploy-machine was called
+      (e.g. `date -u +%s%N`). The marker's deployedAt must be later than
+      this, or it is a stale marker left by an earlier deploy of the same
+      disk.
+    required: true
+  marker-path:
+    description: Guest path the marker file was written to (create-deploy-marker-posthook's own contract).
+    required: false
+    default: "/var/lib/kezio/e2e-deploy-marker"
+  guest-agent-timeout:
+    description: >-
+      Timeout to wait for the VMI's AgentConnected condition after the
+      post-deploy reboot, in seconds as an integer, optionally suffixed
+      with s.
+    required: false
+    default: "600s"
+
+runs:
+  using: composite
+  steps:
+    - name: "Layer 1: Machine status reflects a completed deploy"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        DEPLOY_RUN_NAME: ${{ inputs.deploy-run-name }}
+      run: |
+        set -euo pipefail
+        state="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.state}' || true)"
+        operational_status="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.operationalStatus}' || true)"
+        last_successful_run="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.lastSuccessfulRunRef.name}' || true)"
+        echo "Machine ${MACHINE_NAME}: state=${state:-<empty>} operationalStatus=${operational_status:-<empty>} lastSuccessfulRunRef=${last_successful_run:-<empty>}"
+
+        fail=0
+        if [ "${state}" != "Provisioned" ]; then
+          echo "::error::layer 1 (Machine status) failed: status.state=${state:-<empty>}, want Provisioned" >&2
+          fail=1
+        fi
+        if [ "${operational_status}" != "OK" ]; then
+          echo "::error::layer 1 (Machine status) failed: status.operationalStatus=${operational_status:-<empty>}, want OK" >&2
+          fail=1
+        fi
+        if [ "${last_successful_run}" != "${DEPLOY_RUN_NAME}" ]; then
+          echo "::error::layer 1 (Machine status) failed: status.lastSuccessfulRunRef.name=${last_successful_run:-<empty>}, want ${DEPLOY_RUN_NAME} - this Machine's last recorded success is not the DeployRun this action is verifying" >&2
+          fail=1
+        fi
+        if [ "${fail}" -ne 0 ]; then
+          kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o yaml || true
+          exit 1
+        fi
+        echo "layer 1 (Machine status) passed"
+
+    - name: "Layer 2: booted from disk (qemu-guest-agent connected)"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        VM_NAME: ${{ inputs.vm-name }}
+        TIMEOUT: ${{ inputs.guest-agent-timeout }}
+      run: |
+        set -euo pipefail
+        vm_name="${VM_NAME:-${MACHINE_NAME}}"
+        if [[ ! "${TIMEOUT}" =~ ^[0-9]+s?$ ]]; then
+          echo "::error::invalid guest-agent-timeout '${TIMEOUT}': want seconds like 600 or 600s" >&2
+          exit 1
+        fi
+        deadline=$(( $(date +%s) + ${TIMEOUT%s} ))
+
+        while true; do
+          connected="$(kubectl get vmi "${vm_name}" -n "${NAMESPACE}" \
+            -o jsonpath='{.status.conditions[?(@.type=="AgentConnected")].status}' || true)"
+          echo "$(date -Is) VMI ${vm_name} AgentConnected=${connected:-<none>}"
+          [ "${connected}" = "True" ] && break
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::layer 2 (booted from disk) failed: VMI ${vm_name} AgentConnected did not reach True within ${TIMEOUT} - the guest never reported qemu-guest-agent alive, so there is no evidence it rebooted into the deployed OS rather than staying in the live boot environment" >&2
+            kubectl get vmi "${vm_name}" -n "${NAMESPACE}" -o yaml || true
+            exit 1
+          fi
+          sleep 10
+        done
+        echo "layer 2 (booted from disk) passed"
+
+    - name: "Layer 3: marker file read back through the guest agent"
+      # No SSH path to the guest: read via QGA's guest-file-* commands
+      # issued through `virsh qemu-agent-command` inside the VM's own
+      # virt-launcher pod, the same route KubeVirt itself uses to detect
+      # AgentConnected in layer 2.
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        VM_NAME: ${{ inputs.vm-name }}
+        MARKER_PATH: ${{ inputs.marker-path }}
+        PRE_DEPLOY_TIMESTAMP_NS: ${{ inputs.pre-deploy-timestamp-ns }}
+      run: |
+        set -euo pipefail
+        vm_name="${VM_NAME:-${MACHINE_NAME}}"
+
+        launcher_pod="$(kubectl get pods -n "${NAMESPACE}" -l "kubevirt.io/vm=${vm_name}" -o json \
+          | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)][0].metadata.name')"
+        if [ -z "${launcher_pod}" ] || [ "${launcher_pod}" = "null" ]; then
+          echo "::error::layer 3 (marker file) failed: no non-terminating virt-launcher pod found for VM ${vm_name}" >&2
+          exit 1
+        fi
+        domain="${NAMESPACE}_${vm_name}"
+
+        qga_exec() {
+          kubectl exec -n "${NAMESPACE}" "${launcher_pod}" -c compute -- \
+            virsh qemu-agent-command "${domain}" "$1"
+        }
+
+        open_reply="$(qga_exec "{\"execute\":\"guest-file-open\",\"arguments\":{\"path\":\"${MARKER_PATH}\",\"mode\":\"r\"}}")"
+        handle="$(jq -r '.return' <<<"${open_reply}")"
+        if [ "${handle}" = "null" ] || [ -z "${handle}" ]; then
+          echo "::error::layer 3 (marker file) failed: guest-file-open on ${MARKER_PATH} failed - the marker is missing, meaning the PostHook that writes it never ran on this disk: ${open_reply}" >&2
+          exit 1
+        fi
+
+        read_reply="$(qga_exec "{\"execute\":\"guest-file-read\",\"arguments\":{\"handle\":${handle},\"count\":4096}}")"
+        qga_exec "{\"execute\":\"guest-file-close\",\"arguments\":{\"handle\":${handle}}}" >/dev/null
+
+        marker_content="$(jq -r '.return["buf-b64"]' <<<"${read_reply}" | base64 -d)"
+        echo "marker content: ${marker_content}"
+
+        marker_machine="$(printf '%s\n' "${marker_content}" | sed -n 's/^machine=//p')"
+        marker_deployed_at="$(printf '%s\n' "${marker_content}" | sed -n 's/^deployedAt=//p')"
+
+        fail=0
+        if [ "${marker_machine}" != "${MACHINE_NAME}" ]; then
+          echo "::error::layer 3 (marker file) failed: marker machine=${marker_machine:-<empty>}, want ${MACHINE_NAME} - the marker on disk was not written by this Machine's deploy" >&2
+          fail=1
+        fi
+        if ! [[ "${marker_deployed_at}" =~ ^[0-9]+$ ]]; then
+          echo "::error::layer 3 (marker file) failed: marker deployedAt=${marker_deployed_at:-<empty>} is not a valid unix nanosecond timestamp" >&2
+          fail=1
+        elif [ "${marker_deployed_at}" -le "${PRE_DEPLOY_TIMESTAMP_NS}" ]; then
+          echo "::error::layer 3 (marker file) failed: marker deployedAt=${marker_deployed_at} does not postdate pre-deploy-timestamp-ns=${PRE_DEPLOY_TIMESTAMP_NS} - this is a stale marker left by an earlier deploy of the same disk" >&2
+          fail=1
+        fi
+        if [ "${fail}" -ne 0 ]; then
+          exit 1
+        fi
+        echo "layer 3 (marker file) passed"
+
+    - name: Dump diagnostics on failure
+      if: failure()
+      uses: ./.github/actions/collect-diagnostics
+      with:
+        namespace: ${{ inputs.namespace }}
+        workload-namespace: ${{ inputs.namespace }}
+        output-path: verify-deploy-diagnostics
