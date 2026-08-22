@@ -447,19 +447,27 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-  # Netboot lane: a KubeVirt VM PXE-boots through a per-Subnet bootd pod
+  # Deploy lane: a KubeVirt VM PXE-boots through a per-Subnet bootd pod
   # into the live image, kezio-agent registers with a single-use token,
   # MachineHardware holds the inventory, and the Machine reaches
-  # Available - no disk write. The matrix exercises both of Subnet's DHCP
-  # modes: no-relay (an existing DHCP server stays lease authority,
-  # bootd answers proxyDHCP only) and lease (bootd's own dnsmasq issues
-  # leases). Each leg also proves the MAC gate stays fail-secure against
-  # an unenrolled MAC.
-  e2e-netboot:
-    name: Netboot lane
+  # Available - this is the register phase, carried over unchanged from
+  # the retired netboot lane, including its matrix (both of Subnet's DHCP
+  # modes: no-relay, where an existing DHCP server stays lease authority
+  # and bootd answers proxyDHCP only, and lease, where bootd's own
+  # dnsmasq issues leases) and its MAC-gate assertion (fail-secure
+  # against an unenrolled MAC). The lane then continues past
+  # registration: a real OS test image is built and ingested, a marker
+  # PostHook proves a specific deploy ran, and the Machine is driven
+  # through a full deploy - partition write over BitTorrent, hooks,
+  # finalize, reboot from disk - verified on three independent layers.
+  # This is the slowest, flakiest lane, so it deliberately gates only
+  # this minimum surface; further deploy-path assertions belong in later
+  # steps or jobs, not more matrix legs here.
+  e2e-deploy:
+    name: Deploy lane
     needs: [build-required, e2e-fast-lane]
     runs-on: ubuntu-latest
-    timeout-minutes: 100
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -495,13 +503,17 @@ jobs:
       - name: Prepare the KVM host
         uses: ./.github/actions/prepare-kvm-host
 
+      # Higher than the retired netboot lane's own budget: this lane also
+      # runs image-service/opentracker/seeder, builds and converts the
+      # real OS test image (virt-customize under KVM), and writes it to
+      # the target VM's disk over BitTorrent.
       - name: Resource check (fail fast if the runner is under-resourced)
         uses: ./.github/actions/check-runner-resources
         with:
           min-cpus: "4"
-          min-mem-mb: "14000"
-          min-disk-gb: "25"
-          context-label: "the netboot e2e lane"
+          min-mem-mb: "16000"
+          min-disk-gb: "30"
+          context-label: "the deploy e2e lane"
 
       - name: Create the provisioning bridge
         uses: ./.github/actions/create-provisioning-bridge
@@ -509,10 +521,14 @@ jobs:
           bridge-name: ${{ env.PROVISIONING_BRIDGE }}
           host-ip: ${{ env.PROVISIONING_HOST_IP }}
 
-      - name: Download the manager and bootd image tarballs
+      # manager and bootd feed the register phase (unchanged from the
+      # retired netboot lane); image-service, ingest, and seeder feed the
+      # deploy phase this lane adds, the same trio the image-path lane
+      # imports.
+      - name: Download the manager, bootd, image-service, ingest, and seeder image tarballs
         uses: actions/download-artifact@v4
         with:
-          pattern: "image-tar-@(manager|bootd)"
+          pattern: "image-tar-@(manager|bootd|image-service|ingest|seeder)"
           path: /tmp/images
           merge-multiple: true
 
@@ -532,6 +548,16 @@ jobs:
         with:
           version: "v0.0.37"
 
+      # The target VM's data disk PVC (create-target-vm) names "local-path"
+      # explicitly, so it keeps working - but every PVC the deploy phase's
+      # own controllers request (image-service staging, PartitionContent
+      # content) defaults to ReadWriteMany in production, which plain
+      # local-path-provisioner alone cannot satisfy. install-nfs-storage
+      # un-defaults local-path and takes over as the cluster default, the
+      # same pairing the image-path lane uses.
+      - name: Install csi-driver-nfs and mark it the default StorageClass
+        uses: ./.github/actions/install-nfs-storage
+
       # Packages the downloaded dist/live/ artifacts into an OCI image -
       # cheap local repackaging, not a from-source live-image rebuild.
       - name: Build the boot-artifacts image
@@ -540,10 +566,10 @@ jobs:
       - name: Save the boot-artifacts image to a tarball
         run: docker save "${{ env.BOOT_ARTIFACTS_IMG }}" -o /tmp/images/boot-artifacts.tar
 
-      - name: Import the manager, bootd, and boot-artifacts images into RKE2 containerd
+      - name: Import the manager, bootd, boot-artifacts, image-service, ingest, and seeder images into RKE2 containerd
         uses: ./.github/actions/import-image-tarballs
         with:
-          images: manager bootd boot-artifacts
+          images: manager bootd boot-artifacts image-service ingest seeder
 
       - name: Install cert-manager, KubeVirt, virtctl, and CDI
         uses: ./.github/actions/install-cluster-addons
@@ -560,6 +586,14 @@ jobs:
       # provisioning-network address: bootd's reverse proxy is what a
       # net-booting machine can actually reach, not the ClusterIP
       # Services BOOTD_DEPLOYMENT_*_UPSTREAM_URL name.
+      #
+      # The IMAGE_INGEST_*/PARTITIONCONTENT_* vars below are the same
+      # ones the image-path lane sets, wiring this one controller-manager
+      # for both halves of the lane at once - there is no second
+      # deploy-kezio call later for the deploy phase. See the image-path
+      # lane's own deploy-kezio step for what each one does;
+      # IMAGE_INGEST_SOURCE_FORMAT=raw matches build-deploy-test-image's
+      # own raw conversion, not only ingest-test-image's fixture.
       - name: Deploy kezio CRDs and controller-manager
         uses: ./.github/actions/deploy-kezio
         with:
@@ -575,6 +609,13 @@ jobs:
             BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE=${{ env.BOOT_ARTIFACTS_IMG }}
             BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL=http://boot-server.scaffold-system.svc.cluster.local:8090
             BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL=http://agent-server.scaffold-system.svc.cluster.local:8091
+            IMAGE_INGEST_STAGING_PVC=kezio-image-service-staging
+            IMAGE_INGEST_IMAGE=example.com/kezio-ingest:e2e
+            IMAGE_INGEST_SOURCE_FORMAT=raw
+            PARTITIONCONTENT_PUBLISH_IMAGE=example.com/kezio-ingest:e2e
+            PARTITIONCONTENT_TRACKER_URL=http://opentracker.scaffold-system.svc.cluster.local:6969/announce
+            PARTITIONCONTENT_SEEDER_IMAGE=example.com/kezio-seeder:e2e
+            PARTITIONCONTENT_SEEDER_GRACE_PERIOD=30s
 
       - name: Create the provisioning NetworkAttachmentDefinitions
         uses: ./.github/actions/create-provisioning-nads
@@ -678,6 +719,68 @@ jobs:
           bootd-deployment-name: "kezio-bootd-${{ env.SUBNET_NAME }}"
           wait-seconds: "90"
 
+      # Register phase ends above (carried over from the retired netboot
+      # lane, unchanged). Everything below drives the registered Machine
+      # through a real deploy - the image-path lane's own opentracker/
+      # image-service setup, then the deploy-specific prerequisites and
+      # the happy-path deploy itself.
+
+      - name: Deploy opentracker
+        uses: ./.github/actions/deploy-opentracker
+
+      - name: Create the image-service bearer token Secret
+        uses: ./.github/actions/create-image-service-token-secret
+        with:
+          token: ${{ env.IMAGE_SERVICE_TOKEN }}
+
+      # The nfs StorageClass (installed above) satisfies ReadWriteMany, so
+      # config/image-service's own default access mode applies unmodified;
+      # staging-size is capped the same way the image-path lane caps it -
+      # the runner's own disk backs the "nfs" StorageClass.
+      - name: Deploy image-service
+        uses: ./.github/actions/deploy-image-service
+        with:
+          image-service-image: example.com/kezio-image-service:e2e
+          staging-size: "2Gi"
+
+      - name: Verify image-path prerequisites
+        uses: ./.github/actions/verify-image-path-prerequisites
+
+      - name: Build and ingest the full-deploy test image
+        id: build-image
+        uses: ./.github/actions/build-deploy-test-image
+        with:
+          token: ${{ env.IMAGE_SERVICE_TOKEN }}
+
+      - name: Create the full-deploy marker PostHook
+        id: marker
+        uses: ./.github/actions/create-deploy-marker-posthook
+
+      # Captured right before deploy-machine patches the deploy intent in,
+      # so verify-deploy's layer 3 can tell this run's marker apart from a
+      # stale one left by an earlier deploy of the same disk.
+      - name: Capture the pre-deploy timestamp
+        id: pre-deploy
+        run: echo "timestamp-ns=$(date -u +%s%N)" >>"${GITHUB_OUTPUT}"
+
+      # posthook-names left at deploy-machine's own default: it already
+      # pairs create-deploy-marker-posthook's default name with
+      # kezio-default-finalize.
+      - name: Set the Machine's deploy intent and wait for Provisioned
+        id: deploy
+        uses: ./.github/actions/deploy-machine
+        with:
+          machine-name: ${{ env.TARGET_VM_NAME }}
+          image-name: ${{ steps.build-image.outputs.image-name }}
+
+      - name: Verify the deploy landed
+        uses: ./.github/actions/verify-deploy
+        with:
+          machine-name: ${{ steps.deploy.outputs.machine-name }}
+          namespace: ${{ steps.deploy.outputs.namespace }}
+          deploy-run-name: ${{ steps.deploy.outputs.deploy-run-name }}
+          pre-deploy-timestamp-ns: ${{ steps.pre-deploy.outputs.timestamp-ns }}
+
       - name: Dump all kezio v1alpha2 resources
         if: always()
         uses: ./.github/actions/dump-kezio-resources
@@ -692,6 +795,9 @@ jobs:
           extra-resource-refs: |
             machine ${{ env.TARGET_VM_NAME }}
             subnet ${{ env.SUBNET_NAME }}
+            image ${{ steps.build-image.outputs.image-name }}
+            posthook ${{ steps.marker.outputs.name }}
+            deployrun ${{ steps.deploy.outputs.deploy-run-name }}
 
       - name: Collect always-on diagnostics bundle
         if: always()
@@ -701,16 +807,20 @@ jobs:
           deployments: |
             kezio-bootd-${{ env.SUBNET_NAME }}:bootd.log
             scaffold-controller-manager:controller-manager.log
+            kezio-image-service:image-service.log
           resources: |
             machine/${{ env.TARGET_VM_NAME }}:machine.yaml
             subnet/${{ env.SUBNET_NAME }}:subnet.yaml
             machinehardware/${{ env.TARGET_VM_NAME }}:machinehardware.yaml
+            image/${{ steps.build-image.outputs.image-name }}:image.yaml
+            posthook/${{ steps.marker.outputs.name }}:posthook.yaml
+            deployrun/${{ steps.deploy.outputs.deploy-run-name }}:deployrun.yaml
 
       - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: netboot-${{ matrix.dhcp-scenario }}-diagnostics
+          name: deploy-${{ matrix.dhcp-scenario }}-diagnostics
           path: |
             e2e-bundle
             ${{ runner.temp }}/console-${{ matrix.dhcp-scenario }}.log
@@ -744,10 +854,10 @@ jobs:
     needs:
       - e2e-fast-lane
       - e2e-image-path
-      - e2e-netboot
+      - e2e-deploy
     steps:
       - name: All e2e lanes passed
         run: |
           [ "${{ needs.e2e-fast-lane.result }}" = "success" ] && \
             [ "${{ needs.e2e-image-path.result }}" = "success" ] && \
-            [ "${{ needs.e2e-netboot.result }}" = "success" ]
+            [ "${{ needs.e2e-deploy.result }}" = "success" ]
