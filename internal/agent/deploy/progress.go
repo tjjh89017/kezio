@@ -28,9 +28,11 @@ import (
 // phase (running, then succeeded or failed) plus, while content is being
 // written, once per seeding-status poll tick. A failure to report is
 // logged and otherwise ignored by Execute - a missed update does not
-// itself justify failing an in-progress deployment; only the abort
-// action a later report's ProgressResponse may carry does that (not
-// implemented by this package yet - see the package doc comment).
+// itself justify failing an in-progress deployment; only cancelling the
+// context Execute runs under does that. This package never inspects a
+// ProgressResponse itself: a Reporter implementation (internal/agent's
+// HTTPReporter) is the one that watches for the controller's abort
+// action and cancels on it.
 type Reporter interface {
 	Report(ctx context.Context, req agentapi.ProgressRequest) error
 }

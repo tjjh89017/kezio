@@ -1051,8 +1051,9 @@ func applyFailure(machine *keziov1alpha2.Machine, errorType keziov1alpha2.Machin
 
 // recordCurrentRunDeleted handles the current DeployRun having disappeared
 // out from under a Provisioning machine - GC or an operator deleting it
-// mid-run. The abort transport that would let the controller interrupt an
-// in-progress agent session ships later; until then this is reported
+// mid-run, which internal/agentserver's POST /agent/progress handler
+// (see NewAbortDecider) also uses to make the live kezio-agent stop and
+// report its own attempt failed before this ever runs. This is reported
 // through the same recordFailure semantics as any other phase failure
 // (state unchanged, operationalStatus=error) rather than a parallel error
 // path, and currentRunRef is cleared in the same patch so the next
