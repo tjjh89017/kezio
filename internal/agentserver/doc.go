@@ -22,9 +22,16 @@ limitations under the License.
 //     hardware inventory as a same-name MachineHardware, and marks the
 //     Machine's AgentRegistered condition True.
 //   - GET/POST /agent/next: the agent's poll loop target, authenticated
-//     by the session credential /agent/register minted. This build
-//     always answers agentapi.ActionWait; nothing here builds or hands
-//     out a deploy plan yet.
+//     by the session credential /agent/register minted. It answers
+//     agentapi.ActionDeploy with a freshly resolved deploy plan whenever
+//     the machine's current DeployRun is in a phase that expects the
+//     agent to run it, and agentapi.ActionWait otherwise.
+//   - POST /agent/progress: the agent's periodic step report while a
+//     deploy plan runs, authenticated the same way. It persists the
+//     reported step onto the DeployRun's status and answers
+//     agentapi.ProgressActionAbort when that run has been deleted or is
+//     being deleted, so the agent can cancel, stop its local torrents,
+//     and report a final failed step.
 //
 // Both endpoints trust only a presented token's hash matching a live,
 // unexpired value in Machine status - never the caller's identity or

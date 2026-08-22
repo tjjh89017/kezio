@@ -279,7 +279,7 @@ func TestExecute_ContextCancelledDuringSeedingReportsFailed(t *testing.T) {
 	client := newFakeEzioClient([]map[string]seeder.Torrent{{
 		"deadbeef": {Hash: "deadbeef", IsFinished: false, Total: 100, TotalDone: 10},
 	}})
-	e, _, _, reporter := newTestExecutor(client)
+	e, _, launcher, reporter := newTestExecutor(client)
 	e.PollInterval = time.Millisecond
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
@@ -296,6 +296,9 @@ func TestExecute_ContextCancelledDuringSeedingReportsFailed(t *testing.T) {
 	}
 	if last.Message == "" {
 		t.Errorf("final failed report carries no message")
+	}
+	if !launcher.stopCalled {
+		t.Errorf("EzioHandle.Stop was never called after cancellation")
 	}
 }
 
