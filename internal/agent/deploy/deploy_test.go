@@ -229,6 +229,50 @@ func TestExecute_DataImageDiskIsWritten(t *testing.T) {
 	}
 }
 
+// TestExecute_DataImagesOnlyPlanNoOSImage covers the plan shape
+// agentapi.DeployPlan.Validate documents but basicPlan-derived tests
+// never exercise: TargetDisk/SfdiskScript/Slots all empty, only
+// DataImages set. diskPlans must not synthesize an "OS image" disk
+// plan out of that empty state - an earlier version did, and its
+// disk "" failed validate's "/dev/" prefix check on every such
+// deploy.
+func TestExecute_DataImagesOnlyPlanNoOSImage(t *testing.T) {
+	client := newFakeEzioClient(nil)
+	e, runner, launcher, reporter := newTestExecutor(client)
+
+	plan := &agentapi.DeployPlan{
+		SchemaVersion: agentapi.AgentSchemaVersion,
+		RunName:       "node-01-abcde",
+		RunUID:        "uid-1",
+		MachineName:   "node-01",
+		DataImages: []agentapi.DeployDataImagePlan{{
+			ImageRef:     keziov1alpha2.NameRef{Name: "data-image"},
+			TargetDisk:   "/dev/sdb",
+			SfdiskScript: fixtureSfdisk,
+			Slots:        []agentapi.DeploySlot{{Number: 1, Device: "/dev/sdb1", Mkfs: &agentapi.DeployMkfs{Filesystem: "ext4"}}},
+		}},
+		AfterDeploy: keziov1alpha2.AfterDeployPowerOff,
+	}
+
+	if err := e.Execute(context.Background(), plan); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	calls := runner.commandNames()
+	if !slices.Contains(calls, "sfdisk /dev/sdb") {
+		t.Errorf("data image disk /dev/sdb was never partitioned; calls: %v", calls)
+	}
+	if !slices.Contains(calls, "mkfs.ext4 /dev/sdb1") {
+		t.Errorf("data image slot /dev/sdb1 was never made; calls: %v", calls)
+	}
+	if launcher.launched {
+		t.Error("ezio was launched for a plan with no torrent slots")
+	}
+	last := reporter.Reports[len(reporter.Reports)-1]
+	if last.State != agentapi.ProgressStateSucceeded {
+		t.Fatalf("last report state = %q, want succeeded", last.State)
+	}
+}
+
 func TestExecute_ContextCancelledDuringSeedingReportsFailed(t *testing.T) {
 	// GetTorrentStatus always answers "still seeding": the poll loop
 	// never sees allStopped and only exits once ctx is cancelled.

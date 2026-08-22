@@ -1126,6 +1126,55 @@ var _ = Describe("Machine Controller", func() {
 			Expect(secondRun.Spec.HooksHash).NotTo(Equal(firstRun.Spec.HooksHash))
 			Expect(secondRun.Spec.ImageRef.Name).To(Equal(imageName))
 		})
+
+		It("never reaches Provisioning when a dataImages entry names a nonexistent Image", func() {
+			machineName := fmt.Sprintf("builder-missing-dataimage-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: fmt.Sprintf("aa:bb:cc:dd:91:%02x", GinkgoRandomSeed()%256),
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					DataImages: []keziov1alpha2.MachineDataImage{
+						{ImageRef: keziov1alpha2.NameRef{Name: "no-such-data-image"}},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, resource)).To(Succeed()) })
+
+			reconciler := &MachineReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Deployer: &deployer.FakeDeployer{Client: k8sClient},
+				Builder:  &planbuild.Builder{Client: k8sClient, ManagerNamespace: "default"},
+			}
+
+			origInterval := delayedRequeueInterval
+			delayedRequeueInterval = time.Millisecond
+			DeferCleanup(func() { delayedRequeueInterval = origInterval })
+			origJitter := jitter
+			jitter = func(d time.Duration) time.Duration { return d }
+			DeferCleanup(func() { jitter = origJitter })
+
+			var machine keziov1alpha2.Machine
+			for i := 0; i < 20; i++ {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
+				if machine.Status.State == keziov1alpha2.MachineStateAvailable && machine.Status.OperationalStatus == keziov1alpha2.MachineOperationalStatusDelayed {
+					break
+				}
+			}
+			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable), "an unresolvable dataImages entry must never advance state into Provisioning")
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusDelayed))
+			Expect(machine.Status.ErrorCount).To(Equal(int32(0)), "an unresolved dataImages reference is a delay, not an error")
+			Expect(machine.Status.CurrentRunRef).To(BeNil())
+		})
 	})
 
 	Context("When a Deployer step fails", func() {

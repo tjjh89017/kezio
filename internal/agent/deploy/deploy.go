@@ -128,14 +128,18 @@ type diskPlan struct {
 }
 
 // diskPlans returns plan's disk plans in deploy order: the OS image
-// first, then each dataImages entry in spec order.
+// first (omitted entirely for a dataImages-only plan, where
+// plan.TargetDisk is empty), then each dataImages entry in spec order.
 func diskPlans(plan *agentapi.DeployPlan) []diskPlan {
-	plans := []diskPlan{{
-		label:        "OS image",
-		disk:         plan.TargetDisk,
-		sfdiskScript: plan.SfdiskScript,
-		slots:        plan.Slots,
-	}}
+	plans := make([]diskPlan, 0, 1+len(plan.DataImages))
+	if plan.TargetDisk != "" {
+		plans = append(plans, diskPlan{
+			label:        "OS image",
+			disk:         plan.TargetDisk,
+			sfdiskScript: plan.SfdiskScript,
+			slots:        plan.Slots,
+		})
+	}
 	for i, di := range plan.DataImages {
 		plans = append(plans, diskPlan{
 			label:        fmt.Sprintf("dataImages[%d] %s", i, di.ImageRef.Name),
