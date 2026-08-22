@@ -1,0 +1,177 @@
+name: Set a Machine's deploy intent and wait for Provisioned
+
+description: >-
+  The deploy half of the full-deploy e2e lane, paired with
+  create-bmc-machine (the enroll half): patches spec.imageRef and
+  spec.postHookRefs onto a Machine create-bmc-machine already created
+  and wait-agent-registered already brought to Available, then polls
+  status.state for "Provisioned". It never creates the Machine itself -
+  re-applying spec.bmc/spec.bootMACAddress/spec.subnetRef here would risk
+  racing the controller's own writes to a Machine it is actively
+  enrolling, and the register/inspect phase already needs a Machine with
+  no deploy intent set (create-bmc-machine's own doc comment).
+
+  Guards the postHookRefs footgun from PostHook.spec.steps'
+  chrootScript kind and MachineSpec.PostHookRefs' doc comment: naming
+  any hook at all opts a Machine out of the kezio-default-finalize
+  substitution the controller would otherwise apply, so a caller whose
+  posthook-names already includes a chrootScript hook (e.g. the
+  full-deploy marker from create-deploy-marker-posthook) must name
+  kezio-default-finalize alongside it to still get its mkswap/efibootmgr
+  step, or the disk is written but never made bootable. This action
+  fails before patching anything if posthook-names is non-empty and
+  omits it, rather than silently deploying a disk that cannot boot.
+
+  Waiting distinguishes the two status axes on Machine
+  (api/v1alpha2/machine_types.go's MachineStatus): status.state reaching
+  "Provisioned" is the only success signal. status.operationalStatus
+  "error" is logged every time it is observed (with errorType/errorCount/
+  errorMessage) but is never by itself a hard failure - ErrorCount exists
+  precisely so the controller can back off and retry a step in place, and
+  a CI wait loop second-guessing that would just race the controller's
+  own recovery. A timeout is the only hard failure this action raises.
+
+inputs:
+  machine-name:
+    description: Name of the Machine to set a deploy intent on. Must already exist (see create-bmc-machine).
+    required: true
+  namespace:
+    description: Namespace the Machine (and its DeployRuns) live in.
+    required: false
+    default: "scaffold-system"
+  image-name:
+    description: Name of the Image to deploy as this machine's OS - written to spec.imageRef.name.
+    required: true
+  posthook-names:
+    description: >-
+      Newline-separated PostHook names, written in order to
+      spec.postHookRefs. Blank lines are skipped. Defaults to the
+      full-deploy lane's own pair (marker plus the shipped default
+      finalize hook) - see this action's own description for why both
+      are required together whenever a chrootScript hook is named at
+      all. Pass an empty string to leave spec.postHookRefs unset instead
+      (the controller substitutes kezio-default-finalize on its own in
+      that case).
+    required: false
+    default: |
+      kezio-e2e-deploy-marker
+      kezio-default-finalize
+  timeout:
+    description: >-
+      Timeout to wait for status.state to reach "Provisioned" after the
+      deploy intent is patched in, in seconds as an integer, optionally
+      suffixed with s. Generous by default for a small test image's
+      BitTorrent write, hook run, and finalize.
+    required: false
+    default: "1800s"
+
+outputs:
+  machine-name:
+    description: 'Name of the Machine deployed (this action''s own machine-name input, echoed back for a downstream verify-deploy-shaped action).'
+    value: ${{ inputs.machine-name }}
+  namespace:
+    description: 'Namespace of the Machine deployed (this action''s own namespace input, echoed back for a downstream verify-deploy-shaped action).'
+    value: ${{ inputs.namespace }}
+  deploy-run-name:
+    description: 'Name of the DeployRun that reached status.lastSuccessfulRunRef once the Machine reached Provisioned.'
+    value: ${{ steps.wait.outputs.deploy-run-name }}
+
+runs:
+  using: composite
+  steps:
+    - name: Guard the default-finalize footgun
+      shell: bash
+      env:
+        POSTHOOK_NAMES: ${{ inputs.posthook-names }}
+      run: |
+        set -euo pipefail
+        if [ -n "${POSTHOOK_NAMES}" ] && ! grep -qxF "kezio-default-finalize" <<<"${POSTHOOK_NAMES}"; then
+          echo "::error::posthook-names names one or more hooks but omits kezio-default-finalize - naming any hook at all opts the Machine out of its automatic substitution, so the deployed disk would never get a boot entry. Add it to posthook-names (in any order), or clear posthook-names entirely to let the controller substitute it on its own." >&2
+          exit 1
+        fi
+
+    - name: Patch the Machine's deploy intent
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+        POSTHOOK_NAMES: ${{ inputs.posthook-names }}
+      run: |
+        set -euo pipefail
+        posthook_refs="$(jq -nR '[inputs | select(length > 0) | {name: .}]' <<<"${POSTHOOK_NAMES}")"
+        patch="$(jq -n --arg image "${IMAGE_NAME}" --argjson postHookRefs "${posthook_refs}" \
+          '{spec: {imageRef: {name: $image}, postHookRefs: $postHookRefs}}')"
+        kubectl patch machine "${MACHINE_NAME}" -n "${NAMESPACE}" --type=merge -p "${patch}"
+
+    - name: Wait for status.state to reach Provisioned
+      id: wait
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        TIMEOUT: ${{ inputs.timeout }}
+      run: |
+        set -euo pipefail
+        if [[ ! "${TIMEOUT}" =~ ^[0-9]+s?$ ]]; then
+          echo "::error::invalid timeout '${TIMEOUT}': want seconds like 1800 or 1800s" >&2
+          exit 1
+        fi
+        deadline=$(( $(date +%s) + ${TIMEOUT%s} ))
+
+        dump_and_fail() {
+          echo "::error::$1" >&2
+          echo "===== Machine ${MACHINE_NAME} ====="
+          kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o yaml || true
+          run_name="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.currentRunRef.name}' || true)"
+          if [ -n "${run_name}" ]; then
+            echo "===== DeployRun ${run_name} ====="
+            kubectl get deployrun "${run_name}" -n "${NAMESPACE}" -o yaml || true
+          fi
+          exit 1
+        }
+
+        while true; do
+          state="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.state}' || true)"
+          operational_status="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.operationalStatus}' || true)"
+          run_name="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.currentRunRef.name}' || true)"
+          run_phase=""
+          if [ -n "${run_name}" ]; then
+            run_phase="$(kubectl get deployrun "${run_name}" -n "${NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+          fi
+          echo "$(date -Is) Machine status.state=${state:-<empty>} operationalStatus=${operational_status:-<empty>} currentRunRef=${run_name:-<none>} deployRun.phase=${run_phase:-<none>}"
+
+          if [ "${operational_status}" = "error" ]; then
+            # Logged, not fatal - see this action's own description: the
+            # controller retries a step-level error on its own, an
+            # errorCount/errorType-driven backoff this loop must not
+            # second-guess.
+            kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" \
+              -o jsonpath='{"  errorType="}{.status.errorType}{" errorCount="}{.status.errorCount}{" errorMessage="}{.status.errorMessage}{"\n"}'
+          fi
+
+          [ "${state}" = "Provisioned" ] && break
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            dump_and_fail "Machine ${MACHINE_NAME} did not reach state Provisioned within ${TIMEOUT}"
+          fi
+          sleep 10
+        done
+
+        deploy_run_name="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.lastSuccessfulRunRef.name}' || true)"
+        if [ -z "${deploy_run_name}" ]; then
+          dump_and_fail "Machine ${MACHINE_NAME} reached Provisioned but status.lastSuccessfulRunRef is empty"
+        fi
+        echo "deploy-run-name=${deploy_run_name}" >>"${GITHUB_OUTPUT}"
+
+        echo "===== Machine conditions ====="
+        kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" \
+          -o jsonpath='{range .status.conditions[*]}{.type}{"="}{.status}{" ("}{.reason}{"): "}{.message}{"\n"}{end}'
+        echo "Machine ${MACHINE_NAME} reached Provisioned, DeployRun ${deploy_run_name}"
+
+    - name: Dump diagnostics on failure
+      if: failure()
+      uses: ./.github/actions/collect-diagnostics
+      with:
+        namespace: ${{ inputs.namespace }}
+        workload-namespace: ${{ inputs.namespace }}
+        output-path: deploy-machine-diagnostics
