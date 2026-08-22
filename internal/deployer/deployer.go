@@ -120,7 +120,9 @@ type Deployer interface {
 	// the machine has booted the deployed image, or - for a
 	// dataImages-only run - reached its after-deploy power state.
 	// restartOnFailure carries the same meaning as in Inspect, scoped to
-	// this Provision step.
+	// this Provision step: the implementation discards this attempt's
+	// in-progress state - including any progress already recorded on run
+	// itself - and starts the step over.
 	Provision(ctx context.Context, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun, restartOnFailure bool) (Result, error)
 
 	// Deprovision drives one step of tearing down machine's deployed

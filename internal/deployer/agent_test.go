@@ -518,6 +518,125 @@ func TestAgentDeployerProvisionBootDeadlineExceededFailsRestart(t *testing.T) {
 	}
 }
 
+func TestAgentDeployerProvisionBootDeadlineExceededRestartOnFailureReArms(t *testing.T) {
+	machine := agentTestMachine(t)
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	c := newAgentTestClient(t, machine, agentTestBMCSecret())
+	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
+
+	marker := agentDeployerProvisionBootMarker{ArmedAt: time.Now().Add(-2 * agentDeployerProvisionBootDeadline)}
+	data, err := json.Marshal(marker)
+	if err != nil {
+		t.Fatalf("marshal marker: %v", err)
+	}
+	machine.Annotations = map[string]string{agentDeployerProvisionBootAnnotation: string(data)}
+
+	result, err := d.Provision(context.Background(), machine, run, true)
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	if result.Outcome != Continuing {
+		t.Fatalf("Provision() outcome = %v, want Continuing (restartOnFailure must re-arm, not report the stale deadline)", result.Outcome)
+	}
+
+	f := fakeBMCForAddress(machine.Spec.BMC.Address)
+	setPXE, powerOn, _, _, _, _ := f.calls()
+	if setPXE != 1 || powerOn != 1 {
+		t.Errorf("SetOneTimePXEBoot/PowerOn calls = %d/%d, want 1/1", setPXE, powerOn)
+	}
+	newMarker, armed := provisionBootMarker(machine)
+	if !armed || time.Since(newMarker.ArmedAt) > time.Minute {
+		t.Errorf("provision-boot marker not refreshed to a recent timestamp: marker=%+v armed=%v", newMarker, armed)
+	}
+}
+
+// seedInProgressProvisionAttempt writes a mid-run DeployRun status onto
+// run (WritingContent, with partitions, phase timings, and a not-yet-
+// terminal Succeeded=False condition), the shape restartOnFailure must
+// either preserve untouched or discard wholesale depending on its value.
+func seedInProgressProvisionAttempt(t *testing.T, c client.Client, run *keziov1alpha2.DeployRun) {
+	t.Helper()
+	run.Status.Phase = keziov1alpha2.DeployRunPhaseWritingContent
+	run.Status.Partitions = []keziov1alpha2.DeployRunPartitionProgress{{Number: 1, Percent: 42}}
+	run.Status.PhaseTimings = []keziov1alpha2.DeployRunPhaseTiming{
+		{Phase: keziov1alpha2.DeployRunPhasePending, StartedAt: metav1.Now()},
+		{Phase: keziov1alpha2.DeployRunPhaseWritingContent, StartedAt: metav1.Now()},
+	}
+	apimeta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+		Type: keziov1alpha2.DeployRunConditionSucceeded, Status: metav1.ConditionFalse, Reason: "InProgress", Message: "in progress",
+	})
+	if err := c.Status().Update(context.Background(), run); err != nil {
+		t.Fatalf("seed in-progress DeployRun status: %v", err)
+	}
+}
+
+func TestAgentDeployerProvisionRestartOnFailureDiscardsInProgressAttempt(t *testing.T) {
+	machine := agentTestMachine(t)
+	c := newAgentTestClient(t, machine, agentTestBMCSecret())
+	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
+	run := newTestDeployRun(t, c, machine)
+	seedInProgressProvisionAttempt(t, c, run)
+
+	result, err := d.Provision(context.Background(), machine, run, true)
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	if result.Outcome != Continuing {
+		t.Fatalf("Provision() outcome = %v, want Continuing (restart discards the abandoned attempt and reboots)", result.Outcome)
+	}
+	if run.Status.Phase != "" {
+		t.Errorf("run.Status.Phase = %q, want empty: the abandoned attempt's phase must be discarded", run.Status.Phase)
+	}
+	if len(run.Status.Partitions) != 0 || len(run.Status.PhaseTimings) != 0 || len(run.Status.Conditions) != 0 {
+		t.Errorf("run.Status = %+v, want Partitions/PhaseTimings/Conditions all cleared", run.Status)
+	}
+
+	f := fakeBMCForAddress(machine.Spec.BMC.Address)
+	setPXE, powerOn, _, _, _, _ := f.calls()
+	if setPXE != 1 || powerOn != 1 {
+		t.Errorf("SetOneTimePXEBoot/PowerOn calls = %d/%d, want 1/1 (restart must boot the machine again)", setPXE, powerOn)
+	}
+	if _, armed := provisionBootMarker(machine); !armed {
+		t.Error("machine has no provision-boot marker after restart, want a fresh one armed")
+	}
+
+	var stored keziov1alpha2.DeployRun
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(run), &stored); err != nil {
+		t.Fatalf("Get DeployRun: %v", err)
+	}
+	if stored.Status.Phase != "" {
+		t.Errorf("stored run.Status.Phase = %q, want empty", stored.Status.Phase)
+	}
+}
+
+func TestAgentDeployerProvisionResumeDoesNotDiscardInProgressAttempt(t *testing.T) {
+	machine := agentTestMachine(t)
+	c := newAgentTestClient(t, machine, agentTestBMCSecret())
+	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
+	run := newTestDeployRun(t, c, machine)
+	seedInProgressProvisionAttempt(t, c, run)
+
+	result, err := d.Provision(context.Background(), machine, run, false)
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	if result.Outcome != Continuing {
+		t.Fatalf("Provision() outcome = %v, want Continuing", result.Outcome)
+	}
+	if run.Status.Phase != keziov1alpha2.DeployRunPhaseWritingContent {
+		t.Errorf("run.Status.Phase = %q, want %q untouched", run.Status.Phase, keziov1alpha2.DeployRunPhaseWritingContent)
+	}
+	if len(run.Status.Partitions) != 1 || len(run.Status.PhaseTimings) != 2 || len(run.Status.Conditions) != 1 {
+		t.Errorf("run.Status = %+v, want Partitions/PhaseTimings/Conditions left as seeded", run.Status)
+	}
+
+	f := fakeBMCForAddress(machine.Spec.BMC.Address)
+	setPXE, powerOn, _, _, _, _ := f.calls()
+	if setPXE != 0 || powerOn != 0 {
+		t.Errorf("SetOneTimePXEBoot/PowerOn calls = %d/%d, want 0/0 (resuming must not reboot the machine)", setPXE, powerOn)
+	}
+}
+
 func TestAgentDeployerProvisionMissingCredentialsSecretFailsTransientWithoutLeakingCredentials(t *testing.T) {
 	machine := agentTestMachine(t)
 	machine.Spec.BMC.CredentialsSecretRef.Name = agentTestMissingSecretName

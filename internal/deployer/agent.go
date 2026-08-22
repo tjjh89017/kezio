@@ -392,20 +392,51 @@ func (d *AgentDeployer) pollAgentRegistration(ctx context.Context, machine *kezi
 // executes the plan: Succeeded reports Complete, Failed reports Failed
 // with the recorded failure message, and every other phase reports
 // Continuing.
+//
+// restartOnFailure asks Provision to discard this attempt's in-progress
+// state and start over, mirroring Inspect's own restartOnFailure handling.
+// Two pieces of state can be in progress: the provision-boot marker, and
+// run's own phase/partitions/timings/conditions once commitProvisionPending
+// has written them. resetProvisionAttempt wipes the latter - whatever run
+// currently records describes the attempt being abandoned, not the one
+// about to start - so run reads as freshly created, and startProvision
+// forces a fresh marker (armProvisionBootAndPowerOn always overwrites
+// unconditionally) regardless of whether one was already armed, so the
+// machine is booted again rather than trusted to still be mid-boot.
 func (d *AgentDeployer) Provision(ctx context.Context, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun, restartOnFailure bool) (Result, error) {
+	if restartOnFailure && run.Status.Phase != "" {
+		if err := d.resetProvisionAttempt(ctx, run); err != nil {
+			return Result{}, err
+		}
+	}
 	if run.Status.Phase == "" {
-		return d.startProvision(ctx, machine, run)
+		return d.startProvision(ctx, machine, run, restartOnFailure)
 	}
 	return provisionResultFromPhase(run), nil
 }
 
+// resetProvisionAttempt clears run's in-progress attempt state so it reads
+// as freshly created: see Provision's restartOnFailure doc comment.
+func (d *AgentDeployer) resetProvisionAttempt(ctx context.Context, run *keziov1alpha2.DeployRun) error {
+	run.Status.Phase = ""
+	run.Status.Partitions = nil
+	run.Status.PhaseTimings = nil
+	run.Status.Conditions = nil
+	if err := d.Client.Status().Update(ctx, run); err != nil {
+		return fmt.Errorf("agent deployer: resetting DeployRun %q for restart: %w", run.Name, err)
+	}
+	return nil
+}
+
 // startProvision is Provision's first-pass branch: see Provision's doc
 // comment. It dispatches on agentDeployerProvisionBootAnnotation exactly
-// as Inspect dispatches on agentDeployerPXEArmedAnnotation: no marker yet
-// arms PXE boot and powers on, a marker present hands off to pollAgentBoot.
-func (d *AgentDeployer) startProvision(ctx context.Context, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun) (Result, error) {
+// as Inspect dispatches on agentDeployerPXEArmedAnnotation: no marker yet,
+// or restartOnFailure asking to discard whatever marker is there, arms PXE
+// boot and powers on; otherwise a marker present hands off to
+// pollAgentBoot.
+func (d *AgentDeployer) startProvision(ctx context.Context, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun, restartOnFailure bool) (Result, error) {
 	marker, armed := provisionBootMarker(machine)
-	if !armed {
+	if !armed || restartOnFailure {
 		return d.armProvisionBootAndPowerOn(ctx, machine)
 	}
 	return d.pollAgentBoot(ctx, machine, run, marker)
