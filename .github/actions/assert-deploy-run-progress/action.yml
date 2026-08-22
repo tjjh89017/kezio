@@ -1,0 +1,99 @@
+name: Assert a completed DeployRun's recorded progress detail
+
+description: >-
+  Closes the one evidence gap the full-deploy e2e lane leaves in the
+  DeployRun itself: nothing else in the lane asserts that the agentserver's
+  progress endpoint actually recorded phase transitions, per-partition
+  percent, and phase timings into DeployRunStatus - only that the Machine
+  ended up Provisioned (deploy-machine) and that the deploy's outward
+  effects landed (verify-deploy's three layers). Reads the completed
+  DeployRun once, after deploy-machine already waited for it to go
+  terminal, so this makes no poll of its own.
+
+  Checks, against api/v1alpha2/deployrun_types.go's DeployRunStatus:
+  status.phase is "Succeeded"; status.conditions has a "Succeeded" entry
+  with status "True"; status.partitions is non-empty and every entry's
+  percent reached 100 (the type's own documented ceiling, so this is the
+  terminal value rather than an arbitrary threshold); and status.phaseTimings
+  carries a startedAt and a finishedAt for each of Partitioning,
+  WritingContent, RunningPostHook, and Finalizing - the last two are this
+  action's evidence that the PostHook step and the finalize step
+  (efibootmgr/growLastPartition) each actually ran and completed, distinct
+  from verify-deploy's own evidence (the marker file, and the boot itself)
+  which prove their outward effect but not that the DeployRun recorded
+  having run them.
+
+  Does not assert bytesDone (no documented target to compare against), does
+  not assert phaseTimings ordering or duration, and does not poll - a
+  DeployRun this action is pointed at is assumed already terminal.
+
+inputs:
+  deploy-run-name:
+    description: Name of the completed DeployRun to inspect (deploy-machine's own deploy-run-name output).
+    required: true
+  namespace:
+    description: Namespace the DeployRun lives in (deploy-machine's own namespace output).
+    required: false
+    default: "scaffold-system"
+
+runs:
+  using: composite
+  steps:
+    - name: Assert recorded phase, partition percent, and phase timings
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        DEPLOY_RUN_NAME: ${{ inputs.deploy-run-name }}
+      run: |
+        set -euo pipefail
+        run_json="$(kubectl get deployrun "${DEPLOY_RUN_NAME}" -n "${NAMESPACE}" -o json)"
+
+        fail=0
+
+        phase="$(jq -r '.status.phase // ""' <<<"${run_json}")"
+        echo "DeployRun ${DEPLOY_RUN_NAME}: status.phase=${phase:-<empty>}"
+        if [ "${phase}" != "Succeeded" ]; then
+          echo "::error::status.phase=${phase:-<empty>}, want Succeeded" >&2
+          fail=1
+        fi
+
+        succeeded_condition="$(jq -r '(.status.conditions // []) | map(select(.type == "Succeeded")) | first | .status // ""' <<<"${run_json}")"
+        echo "status.conditions[type=Succeeded].status=${succeeded_condition:-<empty>}"
+        if [ "${succeeded_condition}" != "True" ]; then
+          echo "::error::status.conditions has no Succeeded condition with status=True (got '${succeeded_condition:-<empty>}')" >&2
+          fail=1
+        fi
+
+        partition_count="$(jq -r '(.status.partitions // []) | length' <<<"${run_json}")"
+        echo "status.partitions: ${partition_count} entries"
+        if [ "${partition_count}" -eq 0 ]; then
+          echo "::error::status.partitions is empty - no per-partition progress was recorded" >&2
+          fail=1
+        else
+          incomplete="$(jq -r '(.status.partitions // []) | map(select(.percent != 100)) | map("number=" + (.number|tostring) + " percent=" + ((.percent // 0)|tostring)) | join(", ")' <<<"${run_json}")"
+          if [ -n "${incomplete}" ]; then
+            echo "::error::status.partitions has entries that did not reach percent=100: ${incomplete}" >&2
+            fail=1
+          fi
+        fi
+
+        for want_phase in Partitioning WritingContent RunningPostHook Finalizing; do
+          started="$(jq -r --arg p "${want_phase}" '(.status.phaseTimings // []) | map(select(.phase == $p)) | first | .startedAt // ""' <<<"${run_json}")"
+          finished="$(jq -r --arg p "${want_phase}" '(.status.phaseTimings // []) | map(select(.phase == $p)) | first | .finishedAt // ""' <<<"${run_json}")"
+          echo "status.phaseTimings[phase=${want_phase}]: startedAt=${started:-<empty>} finishedAt=${finished:-<empty>}"
+          if [ -z "${started}" ]; then
+            echo "::error::status.phaseTimings has no entry for phase=${want_phase} with startedAt set - this phase was never recorded as entered" >&2
+            fail=1
+          fi
+          if [ -z "${finished}" ]; then
+            echo "::error::status.phaseTimings[phase=${want_phase}].finishedAt is empty on a terminal DeployRun - this phase was never recorded as left" >&2
+            fail=1
+          fi
+        done
+
+        if [ "${fail}" -ne 0 ]; then
+          echo "===== DeployRun ${DEPLOY_RUN_NAME} ====="
+          echo "${run_json}" | jq .
+          exit 1
+        fi
+        echo "DeployRun progress detail assertion passed"

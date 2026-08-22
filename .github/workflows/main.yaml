@@ -781,6 +781,16 @@ jobs:
           deploy-run-name: ${{ steps.deploy.outputs.deploy-run-name }}
           pre-deploy-timestamp-ns: ${{ steps.pre-deploy.outputs.timestamp-ns }}
 
+      # After verify-deploy: this asserts recorded history on the DeployRun
+      # itself (phase, per-partition percent, phase timings), not an
+      # outward effect of the deploy, so verify-deploy's three layers stay
+      # the first and clearest signal if the deploy itself is broken.
+      - name: Assert the DeployRun's recorded progress detail
+        uses: ./.github/actions/assert-deploy-run-progress
+        with:
+          deploy-run-name: ${{ steps.deploy.outputs.deploy-run-name }}
+          namespace: ${{ steps.deploy.outputs.namespace }}
+
       - name: Dump all kezio v1alpha2 resources
         if: always()
         uses: ./.github/actions/dump-kezio-resources
