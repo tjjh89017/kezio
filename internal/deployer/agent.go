@@ -18,6 +18,7 @@ package deployer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -50,6 +51,44 @@ const agentDeployerPXEArmedAnnotation = "kezio.kojuro.date/agent-pxe-armed-at"
 // net-booted.
 const agentDeployerInspectDeadline = 5 * time.Minute
 
+// agentDeployerProvisionBootAnnotation records, as JSON
+// (agentDeployerProvisionBootMarker), the marker Provision's boot-into-
+// agent step needs to survive a manager restart: when it last armed
+// one-time PXE boot and powered the machine on for the current DeployRun,
+// and the agent session token hash observed at that exact moment.
+//
+// This is deliberately not agentDeployerPXEArmedAnnotation:
+// MachineConditionAgentRegistered is set True once by POST
+// /agent/register and never cleared afterward (see internal/agentserver's
+// ingestRegistration), so it stays True across every reboot and power-off
+// that follows the Inspect that first set it. Provision's boot-into-agent
+// step cannot reuse Inspect's "wait for the condition to read True" check
+// the way pollAgentRegistration does - it would read True immediately,
+// before the machine has even powered back on for this deploy. The
+// session token hash baseline lets pollAgentBoot tell a fresh
+// registration from this boot apart from whatever stale session an
+// earlier Inspect or Provision attempt already left behind: kezio-agent
+// mints a brand new session on every registration, unconditionally
+// overwriting the old one.
+const agentDeployerProvisionBootAnnotation = "kezio.kojuro.date/agent-provision-boot-armed"
+
+// agentDeployerProvisionBootMarker is agentDeployerProvisionBootAnnotation's
+// JSON value.
+type agentDeployerProvisionBootMarker struct {
+	ArmedAt time.Time `json:"armedAt"`
+	// BaselineSessionHash is machine.status.agentSession.tokenHash as
+	// observed at ArmedAt, or empty when no session existed yet.
+	BaselineSessionHash string `json:"baselineSessionHash,omitempty"`
+}
+
+// agentDeployerProvisionBootDeadline bounds how long Provision's
+// boot-into-agent step waits for kezio-agent to register a fresh session
+// after arming PXE boot. Past this, it reports Failed with ErrorType
+// Restart so the controller's restartOnFailure re-arms PXE and
+// power-cycles the machine on the next attempt, the same reasoning as
+// agentDeployerInspectDeadline.
+const agentDeployerProvisionBootDeadline = 5 * time.Minute
+
 // agentDeployerUnsupportedMessage is Deprovision's Result.ErrorMessage:
 // AgentDeployer does not drive deprovisioning yet.
 const agentDeployerUnsupportedMessage = "deprovisioning is not supported by this deployer"
@@ -62,30 +101,33 @@ const agentDeployerUnsupportedRequeueInterval = time.Hour
 // through a Machine's BMC (internal/bmc), the live kezio-agent
 // registration recorded by internal/agentserver, and the DeployRun phase
 // internal/agentserver's POST /agent/progress handler writes as the agent
-// executes the plan. Provision itself never talks to the agent directly:
-// internal/agentserver hands out the plan (rebuilding it fresh from the
-// same DeployRun on every GET /agent/next - see PlanBuilder's doc
-// comment) and records its progress; Provision only validates once that a
-// plan can be built at all and then polls the DeployRun's status.phase.
+// executes the plan. AgentDeployer itself never talks to the agent's HTTP
+// API directly: internal/agentserver hands out the plan (rebuilding it
+// fresh from the same DeployRun on every GET /agent/next - see
+// PlanBuilder's doc comment) and records its progress. Provision arms PXE
+// boot and power-cycles the machine the same way Inspect does, waits for
+// a fresh agent registration, then validates once that a plan can be
+// built at all and polls the DeployRun's status.phase.
 //
-// Inspect's "PXE already armed" fact must survive a manager restart (the
-// Deployer interface promises no in-memory state between calls), so it is
-// recorded on the Machine as agentDeployerPXEArmedAnnotation rather than
-// kept in this struct. status.netBoot is not used for this: it is written
-// by the boot config server when the machine actually fetches its grub
-// config, a different event than "Inspect commanded a PXE boot", and
-// owned by a different component.
+// Both Inspect's "PXE already armed" fact and Provision's own boot marker
+// must survive a manager restart (the Deployer interface promises no
+// in-memory state between calls), so they are recorded on the Machine as
+// agentDeployerPXEArmedAnnotation and agentDeployerProvisionBootAnnotation
+// respectively, rather than kept in this struct. status.netBoot is not
+// used for this: it is written by the boot config server when the machine
+// actually fetches its grub config, a different event than "arm PXE
+// boot", and owned by a different component.
 type AgentDeployer struct {
 	// Client reads and writes Machine, MachineHardware, DeployRun, and the
 	// BMC credentials Secret. Required.
 	Client client.Client
 	// PlanBuilder resolves a Machine's deploy intent into a DeployPlan.
-	// Provision's first pass calls it only to validate that resolution
-	// succeeds before committing the DeployRun to Pending and waiting on
-	// the agent; the resolved plan itself is discarded here, since
-	// internal/agentserver rebuilds an identical one (Build is
-	// deterministic in its inputs) for the agent's own GET /agent/next.
-	// Required.
+	// Provision calls it, once the live agent has confirmed booted, only
+	// to validate that resolution succeeds before committing the
+	// DeployRun to Pending and waiting on the agent; the resolved plan
+	// itself is discarded here, since internal/agentserver rebuilds an
+	// identical one (Build is deterministic in its inputs) for the
+	// agent's own GET /agent/next. Required.
 	PlanBuilder *planbuild.Builder
 }
 
@@ -186,6 +228,77 @@ func (d *AgentDeployer) disarmPXE(ctx context.Context, machine *keziov1alpha2.Ma
 	return nil
 }
 
+// provisionBootMarker reads and parses agentDeployerProvisionBootAnnotation
+// off machine. The second return is false when the annotation is absent or
+// fails to parse - both treated as "not armed yet", never as an error.
+func provisionBootMarker(machine *keziov1alpha2.Machine) (agentDeployerProvisionBootMarker, bool) {
+	raw, ok := machine.Annotations[agentDeployerProvisionBootAnnotation]
+	if !ok {
+		return agentDeployerProvisionBootMarker{}, false
+	}
+	var marker agentDeployerProvisionBootMarker
+	if err := json.Unmarshal([]byte(raw), &marker); err != nil {
+		return agentDeployerProvisionBootMarker{}, false
+	}
+	return marker, true
+}
+
+// armProvisionBoot stamps agentDeployerProvisionBootAnnotation with the
+// current time and the agent session token hash observed right now (empty
+// when machine has no session yet), mutating machine in place so the
+// caller's copy reflects it immediately.
+func (d *AgentDeployer) armProvisionBoot(ctx context.Context, machine *keziov1alpha2.Machine) error {
+	baseline := ""
+	if machine.Status.AgentSession != nil {
+		baseline = machine.Status.AgentSession.TokenHash
+	}
+	marker := agentDeployerProvisionBootMarker{ArmedAt: time.Now().UTC(), BaselineSessionHash: baseline}
+	data, err := json.Marshal(marker)
+	if err != nil {
+		return fmt.Errorf("agent deployer: encoding provision boot marker: %w", err)
+	}
+
+	patch := client.MergeFrom(machine.DeepCopy())
+	if machine.Annotations == nil {
+		machine.Annotations = map[string]string{}
+	}
+	machine.Annotations[agentDeployerProvisionBootAnnotation] = string(data)
+	if err := d.Client.Patch(ctx, machine, patch); err != nil {
+		return fmt.Errorf("agent deployer: recording provision-boot marker: %w", err)
+	}
+	return nil
+}
+
+// disarmProvisionBoot removes agentDeployerProvisionBootAnnotation once
+// the boot-into-agent step confirms a fresh registration and commits the
+// DeployRun to Pending, so a later DeployRun for the same Machine starts
+// its own boot-into-agent step from "not armed" instead of reading a stale
+// marker left over from this one.
+func (d *AgentDeployer) disarmProvisionBoot(ctx context.Context, machine *keziov1alpha2.Machine) error {
+	if _, ok := machine.Annotations[agentDeployerProvisionBootAnnotation]; !ok {
+		return nil
+	}
+	patch := client.MergeFrom(machine.DeepCopy())
+	delete(machine.Annotations, agentDeployerProvisionBootAnnotation)
+	if err := d.Client.Patch(ctx, machine, patch); err != nil {
+		return fmt.Errorf("agent deployer: clearing provision-boot marker: %w", err)
+	}
+	return nil
+}
+
+// agentSessionFresh reports whether machine's current agent session was
+// minted after Provision's boot-into-agent step armed PXE boot: a
+// registration that happened since then mints a new session token hash
+// (internal/agentserver's ingestRegistration always overwrites
+// machine.status.agentSession), so any hash other than baseline - the one
+// observed at arm time - proves this boot's kezio-agent actually
+// registered, rather than a stale session an earlier Inspect or Provision
+// attempt already left in place.
+func agentSessionFresh(machine *keziov1alpha2.Machine, baseline string) bool {
+	session := machine.Status.AgentSession
+	return session != nil && session.TokenHash != baseline
+}
+
 // Inspect implements Deployer. The first pass for a given inspection walk
 // (no armed marker yet, or restartOnFailure asking to discard the
 // in-progress one) sets one-time PXE boot and powers the machine on -
@@ -263,15 +376,22 @@ func (d *AgentDeployer) pollAgentRegistration(ctx context.Context, machine *kezi
 }
 
 // Provision implements Deployer. The first pass for a given run
-// (status.phase still empty) validates that PlanBuilder can resolve a
-// plan at all before committing to wait on the agent: a NotReadyError
-// reports Delayed, a DiskSelectionError or ValidationError reports Failed
-// with ErrorType/ErrorMessage, and success records run at
-// DeployRunPhasePending and reports Continuing. Every later pass reads
-// run.status.phase, written out of band by internal/agentserver's POST
-// /agent/progress handler as the agent executes the plan: Succeeded
-// reports Complete, Failed reports Failed with the recorded failure
-// message, and every other phase reports Continuing.
+// (status.phase still empty) first gets machine booted into the live
+// kezio-agent: it arms one-time PXE boot and powers the machine on
+// (armProvisionBootAndPowerOn), then waits for a fresh agent registration
+// (pollAgentBoot) before it ever touches run - a Machine reaching
+// Provisioning may be powered off, or booted into whatever OS its disk
+// carries, so nothing here can be trusted to already be running the live
+// agent. Only once that is confirmed does startProvision validate that
+// PlanBuilder can resolve a plan at all before committing to wait on the
+// agent: a NotReadyError reports Delayed, a DiskSelectionError or
+// ValidationError reports Failed with ErrorType/ErrorMessage, and success
+// records run at DeployRunPhasePending and reports Continuing. Every later
+// pass (run.status.phase no longer empty) reads it, written out of band
+// by internal/agentserver's POST /agent/progress handler as the agent
+// executes the plan: Succeeded reports Complete, Failed reports Failed
+// with the recorded failure message, and every other phase reports
+// Continuing.
 func (d *AgentDeployer) Provision(ctx context.Context, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun, restartOnFailure bool) (Result, error) {
 	if run.Status.Phase == "" {
 		return d.startProvision(ctx, machine, run)
@@ -280,8 +400,89 @@ func (d *AgentDeployer) Provision(ctx context.Context, machine *keziov1alpha2.Ma
 }
 
 // startProvision is Provision's first-pass branch: see Provision's doc
-// comment.
+// comment. It dispatches on agentDeployerProvisionBootAnnotation exactly
+// as Inspect dispatches on agentDeployerPXEArmedAnnotation: no marker yet
+// arms PXE boot and powers on, a marker present hands off to pollAgentBoot.
 func (d *AgentDeployer) startProvision(ctx context.Context, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun) (Result, error) {
+	marker, armed := provisionBootMarker(machine)
+	if !armed {
+		return d.armProvisionBootAndPowerOn(ctx, machine)
+	}
+	return d.pollAgentBoot(ctx, machine, run, marker)
+}
+
+// pollAgentBoot is startProvision's later-pass branch: see Provision's
+// doc comment. marker is armProvisionBootAndPowerOn's last recorded
+// marker, read back from agentDeployerProvisionBootAnnotation. A fresh
+// registration proceeds to validate the plan and commit run to Pending;
+// otherwise this waits, or gives up past the deadline.
+func (d *AgentDeployer) pollAgentBoot(ctx context.Context, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun, marker agentDeployerProvisionBootMarker) (Result, error) {
+	if agentSessionFresh(machine, marker.BaselineSessionHash) {
+		result, err := d.commitProvisionPending(ctx, machine, run)
+		if err != nil {
+			return Result{}, err
+		}
+		// Only a successful commit (run actually moved to Pending) retires
+		// the marker: a Failed outcome here is a plan-build problem, not a
+		// boot problem, and the agent it already confirmed live must not be
+		// power-cycled again just to retry validating the same plan.
+		if result.Outcome == Continuing {
+			if err := d.disarmProvisionBoot(ctx, machine); err != nil {
+				return Result{}, err
+			}
+		}
+		return result, nil
+	}
+
+	if time.Since(marker.ArmedAt) > agentDeployerProvisionBootDeadline {
+		return Result{
+			Outcome:      Failed,
+			ErrorType:    keziov1alpha2.MachineErrorTypeRestart,
+			ErrorMessage: fmt.Sprintf("agent deployer: no agent registration observed within %s of arming PXE boot for provisioning", agentDeployerProvisionBootDeadline),
+		}, nil
+	}
+	return Result{Outcome: Continuing}, nil
+}
+
+// armProvisionBootAndPowerOn is startProvision's first-pass branch:
+// arms one-time PXE boot and powers the machine on - PowerCycle instead of
+// PowerOn when the BMC already reports it on, mirroring
+// armPXEAndPowerOn's reasoning: a machine stuck in an old OS (or the OS
+// this same deploy just wrote on a prior attempt) must actually reboot
+// into the PXE override, not merely be told it is already running.
+func (d *AgentDeployer) armProvisionBootAndPowerOn(ctx context.Context, machine *keziov1alpha2.Machine) (Result, error) {
+	bmcClient, err := d.connectBMC(ctx, machine)
+	if err != nil {
+		return classifyBMCError(err), nil
+	}
+
+	if err := bmcClient.SetOneTimePXEBoot(ctx); err != nil {
+		return classifyBMCError(fmt.Errorf("agent deployer: setting one-time PXE boot: %w", err)), nil
+	}
+
+	state, err := bmcClient.GetPowerState(ctx)
+	if err != nil {
+		return classifyBMCError(fmt.Errorf("agent deployer: reading BMC power state: %w", err)), nil
+	}
+	if state == bmc.PowerStateOn {
+		err = bmcClient.PowerCycle(ctx)
+	} else {
+		err = bmcClient.PowerOn(ctx)
+	}
+	if err != nil {
+		return classifyBMCError(fmt.Errorf("agent deployer: powering on machine for net boot: %w", err)), nil
+	}
+
+	if err := d.armProvisionBoot(ctx, machine); err != nil {
+		return Result{}, err
+	}
+	return Result{Outcome: Continuing}, nil
+}
+
+// commitProvisionPending validates that PlanBuilder can resolve a plan for
+// run at all, then records run at DeployRunPhasePending: see Provision's
+// doc comment.
+func (d *AgentDeployer) commitProvisionPending(ctx context.Context, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun) (Result, error) {
 	if _, _, err := d.PlanBuilder.Build(ctx, machine, run); err != nil {
 		result, ok := planBuildErrorResult(err)
 		if !ok {
