@@ -177,9 +177,14 @@ runs:
         fi
 
         read_reply="$(qga_exec "{\"execute\":\"guest-file-read\",\"arguments\":{\"handle\":${handle},\"count\":4096}}")"
+        buf_b64="$(jq -r '.return["buf-b64"] // empty' <<<"${read_reply}")"
         qga_exec "{\"execute\":\"guest-file-close\",\"arguments\":{\"handle\":${handle}}}" >/dev/null
+        if [ -z "${buf_b64}" ]; then
+          echo "::error::layer 3 (marker file) failed: guest-file-read on ${MARKER_PATH} failed - the guest agent did not return marker content: ${read_reply}" >&2
+          exit 1
+        fi
 
-        marker_content="$(jq -r '.return["buf-b64"]' <<<"${read_reply}" | base64 -d)"
+        marker_content="$(printf '%s' "${buf_b64}" | base64 -d)"
         echo "marker content: ${marker_content}"
 
         marker_machine="$(printf '%s\n' "${marker_content}" | sed -n 's/^machine=//p')"
