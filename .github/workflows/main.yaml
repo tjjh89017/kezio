@@ -506,12 +506,14 @@ jobs:
       # Higher than the retired netboot lane's own budget: this lane also
       # runs image-service/opentracker/seeder, builds and converts the
       # real OS test image (virt-customize under KVM), and writes it to
-      # the target VM's disk over BitTorrent.
+      # the target VM's disk over BitTorrent. 15800, not 16384: a GitHub
+      # 16 GB runner reports ~15989 usable MiB, so a round-16-GB
+      # threshold rejects the very runner class this lane targets.
       - name: Resource check (fail fast if the runner is under-resourced)
         uses: ./.github/actions/check-runner-resources
         with:
           min-cpus: "4"
-          min-mem-mb: "16000"
+          min-mem-mb: "15800"
           min-disk-gb: "30"
           context-label: "the deploy e2e lane"
 
