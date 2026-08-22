@@ -141,6 +141,48 @@ func TestBuilder_Build_Envtest(t *testing.T) {
 	t.Run("HooksHash changes when the image's own hooks change", func(t *testing.T) {
 		testHooksHashChangesWithImageHooks(t, fx)
 	})
+	t.Run("a configMap-sourced script step resolves and templates", func(t *testing.T) {
+		testConfigMapScriptSourceResolvesAndTemplates(t, fx)
+	})
+	t.Run("a secret-sourced script step resolves and templates", func(t *testing.T) {
+		testSecretScriptSourceResolvesAndTemplates(t, fx)
+	})
+	t.Run("a missing ConfigMap script source is a not-ready error", func(t *testing.T) {
+		testConfigMapScriptSourceMissingConfigMapIsNotReady(t, fx)
+	})
+	t.Run("a missing key in an existing ConfigMap script source is a not-ready error", func(t *testing.T) {
+		testConfigMapScriptSourceMissingKeyIsNotReady(t, fx)
+	})
+	t.Run("a missing Secret script source is a not-ready error", func(t *testing.T) {
+		testSecretScriptSourceMissingSecretIsNotReady(t, fx)
+	})
+	t.Run("a missing key in an existing Secret script source is a not-ready error", func(t *testing.T) {
+		testSecretScriptSourceMissingKeyIsNotReady(t, fx)
+	})
+	t.Run("no seeder deployment yet for the content is a not-ready error", func(t *testing.T) {
+		testSeederDeploymentMissingIsNotReady(t, fx)
+	})
+	t.Run("a seeder pod with no PodIP yet is a not-ready error", func(t *testing.T) {
+		testSeederPodNoIPIsNotReady(t, fx)
+	})
+	t.Run("a missing MachineHardware is a not-ready error", func(t *testing.T) {
+		testMachineHardwareMissingIsNotReady(t, fx)
+	})
+	t.Run("a missing image is a not-ready error", func(t *testing.T) {
+		testImageMissingIsNotReady(t, fx)
+	})
+	t.Run("an image that is not Ready yet is a not-ready error", func(t *testing.T) {
+		testImageNotReadyYetIsNotReady(t, fx)
+	})
+	t.Run("a missing posthook is a not-ready error", func(t *testing.T) {
+		testPostHookMissingIsNotReady(t, fx)
+	})
+	t.Run("a posthook that is not Valid yet is a not-ready error", func(t *testing.T) {
+		testPostHookNotValidYetIsNotReady(t, fx)
+	})
+	t.Run("the OS image and a dataImages entry resolving to the same disk is a disk-selection error", func(t *testing.T) {
+		testOSAndDataImageSameDiskIsDiskSelectionError(t, fx)
+	})
 }
 
 func testImageHooksResolveBeforeMachineHooks(t *testing.T, fx *fixtures) {
@@ -258,6 +300,388 @@ func testHooksHashChangesWithImageHooks(t *testing.T, fx *fixtures) {
 	hashWithout := buildFor(withoutHooks, "m-without-hooks")
 	if hashWith == hashWithout {
 		t.Fatalf("HooksHash = %q for both, want different hashes since one machine's image attaches a hook the other's does not", hashWith)
+	}
+}
+
+func testConfigMapScriptSourceResolvesAndTemplates(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+	fx.mustCreateConfigMap(ns, "script-cm", map[string]string{"script.sh": "echo {{ .machineName }}"})
+	fx.mustCreatePostHook(ns, "cm-hook", keziov1alpha2.PostHookSpec{
+		Steps: []keziov1alpha2.PostHookStep{{
+			OSFamily: keziov1alpha2.OSFamilyLinux,
+			Script:   &keziov1alpha2.PostHookScriptSource{ConfigMapRef: &keziov1alpha2.ConfigMapKeyRef{Name: "script-cm", Key: "script.sh"}},
+		}},
+	})
+	image := fx.mustCreateImage(ns, blankDataLayout())
+
+	b := &Builder{Client: fx.client}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec: keziov1alpha2.MachineSpec{
+			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha2.NameRef{{Name: "cm-hook"}},
+		},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	plan, _, err := b.Build(context.Background(), machine, run)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	want := "echo m1"
+	if len(plan.Hooks) != 1 || len(plan.Hooks[0].Steps) != 1 || plan.Hooks[0].Steps[0].Content != want {
+		t.Fatalf("rendered content = %+v, want %q", plan.Hooks, want)
+	}
+}
+
+func testSecretScriptSourceResolvesAndTemplates(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+	fx.mustCreateSecret(ns, "script-secret", map[string][]byte{"script.sh": []byte("echo {{ .machineName }}")})
+	fx.mustCreatePostHook(ns, "secret-hook", keziov1alpha2.PostHookSpec{
+		Steps: []keziov1alpha2.PostHookStep{{
+			OSFamily: keziov1alpha2.OSFamilyLinux,
+			Script:   &keziov1alpha2.PostHookScriptSource{SecretRef: &keziov1alpha2.SecretKeyRef{Name: "script-secret", Key: "script.sh"}},
+		}},
+	})
+	image := fx.mustCreateImage(ns, blankDataLayout())
+
+	b := &Builder{Client: fx.client}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec: keziov1alpha2.MachineSpec{
+			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha2.NameRef{{Name: "secret-hook"}},
+		},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	plan, _, err := b.Build(context.Background(), machine, run)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	want := "echo m1"
+	if len(plan.Hooks) != 1 || len(plan.Hooks[0].Steps) != 1 || plan.Hooks[0].Steps[0].Content != want {
+		t.Fatalf("rendered content = %+v, want %q", plan.Hooks, want)
+	}
+}
+
+func testConfigMapScriptSourceMissingConfigMapIsNotReady(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+	fx.mustCreatePostHook(ns, "cm-hook", keziov1alpha2.PostHookSpec{
+		Steps: []keziov1alpha2.PostHookStep{{
+			OSFamily: keziov1alpha2.OSFamilyLinux,
+			Script:   &keziov1alpha2.PostHookScriptSource{ConfigMapRef: &keziov1alpha2.ConfigMapKeyRef{Name: "does-not-exist", Key: "script.sh"}},
+		}},
+	})
+	image := fx.mustCreateImage(ns, blankDataLayout())
+
+	b := &Builder{Client: fx.client}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec: keziov1alpha2.MachineSpec{
+			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha2.NameRef{{Name: "cm-hook"}},
+		},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	_, _, err := b.Build(context.Background(), machine, run)
+	var notReady *NotReadyError
+	if !errors.As(err, &notReady) {
+		t.Fatalf("Build err = %v, want a *NotReadyError", err)
+	}
+}
+
+func testConfigMapScriptSourceMissingKeyIsNotReady(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+	fx.mustCreateConfigMap(ns, "script-cm", map[string]string{"other-key": "echo hi"})
+	fx.mustCreatePostHook(ns, "cm-hook", keziov1alpha2.PostHookSpec{
+		Steps: []keziov1alpha2.PostHookStep{{
+			OSFamily: keziov1alpha2.OSFamilyLinux,
+			Script:   &keziov1alpha2.PostHookScriptSource{ConfigMapRef: &keziov1alpha2.ConfigMapKeyRef{Name: "script-cm", Key: "script.sh"}},
+		}},
+	})
+	image := fx.mustCreateImage(ns, blankDataLayout())
+
+	b := &Builder{Client: fx.client}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec: keziov1alpha2.MachineSpec{
+			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha2.NameRef{{Name: "cm-hook"}},
+		},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	_, _, err := b.Build(context.Background(), machine, run)
+	var notReady *NotReadyError
+	if !errors.As(err, &notReady) {
+		t.Fatalf("Build err = %v, want a *NotReadyError", err)
+	}
+}
+
+func testSecretScriptSourceMissingSecretIsNotReady(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+	fx.mustCreatePostHook(ns, "secret-hook", keziov1alpha2.PostHookSpec{
+		Steps: []keziov1alpha2.PostHookStep{{
+			OSFamily: keziov1alpha2.OSFamilyLinux,
+			Script:   &keziov1alpha2.PostHookScriptSource{SecretRef: &keziov1alpha2.SecretKeyRef{Name: "does-not-exist", Key: "script.sh"}},
+		}},
+	})
+	image := fx.mustCreateImage(ns, blankDataLayout())
+
+	b := &Builder{Client: fx.client}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec: keziov1alpha2.MachineSpec{
+			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha2.NameRef{{Name: "secret-hook"}},
+		},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	_, _, err := b.Build(context.Background(), machine, run)
+	var notReady *NotReadyError
+	if !errors.As(err, &notReady) {
+		t.Fatalf("Build err = %v, want a *NotReadyError", err)
+	}
+}
+
+func testSecretScriptSourceMissingKeyIsNotReady(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+	fx.mustCreateSecret(ns, "script-secret", map[string][]byte{"other-key": []byte("echo hi")})
+	fx.mustCreatePostHook(ns, "secret-hook", keziov1alpha2.PostHookSpec{
+		Steps: []keziov1alpha2.PostHookStep{{
+			OSFamily: keziov1alpha2.OSFamilyLinux,
+			Script:   &keziov1alpha2.PostHookScriptSource{SecretRef: &keziov1alpha2.SecretKeyRef{Name: "script-secret", Key: "script.sh"}},
+		}},
+	})
+	image := fx.mustCreateImage(ns, blankDataLayout())
+
+	b := &Builder{Client: fx.client}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec: keziov1alpha2.MachineSpec{
+			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha2.NameRef{{Name: "secret-hook"}},
+		},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	_, _, err := b.Build(context.Background(), machine, run)
+	var notReady *NotReadyError
+	if !errors.As(err, &notReady) {
+		t.Fatalf("Build err = %v, want a *NotReadyError", err)
+	}
+}
+
+// testSeederDeploymentMissingIsNotReady covers resolveTorrentURL's first
+// not-ready branch: a torrent slot whose content has no seeder Deployment
+// yet at all.
+func testSeederDeploymentMissingIsNotReady(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+
+	hash := fixtureInfoHash("seeder-missing-deployment")
+	fx.mustCreatePartitionContentReady(ns, hash)
+
+	layout := keziov1alpha2.ImageDiskLayout{
+		PartitionTable: keziov1alpha2.PartitionTableGPT,
+		SfdiskJSON:     `{"partitiontable":{}}`,
+		Slots: []keziov1alpha2.ImageSlot{
+			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: store.ObjectName(hash)}},
+		},
+	}
+	image := fx.mustCreateImage(ns, layout)
+
+	b := &Builder{Client: fx.client}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: image.Name}},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	_, _, err := b.Build(context.Background(), machine, run)
+	var notReady *NotReadyError
+	if !errors.As(err, &notReady) {
+		t.Fatalf("Build err = %v, want a *NotReadyError", err)
+	}
+}
+
+// testSeederPodNoIPIsNotReady covers resolveTorrentURL's second not-ready
+// branch: the seeder Deployment exists but its Pod has not reported a
+// PodIP yet.
+func testSeederPodNoIPIsNotReady(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+
+	hash := fixtureInfoHash("seeder-no-podip")
+	fx.mustCreatePartitionContentReady(ns, hash)
+	fx.mustCreateSeederPodNoIP(ns, hash)
+
+	layout := keziov1alpha2.ImageDiskLayout{
+		PartitionTable: keziov1alpha2.PartitionTableGPT,
+		SfdiskJSON:     `{"partitiontable":{}}`,
+		Slots: []keziov1alpha2.ImageSlot{
+			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: store.ObjectName(hash)}},
+		},
+	}
+	image := fx.mustCreateImage(ns, layout)
+
+	b := &Builder{Client: fx.client}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: image.Name}},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	_, _, err := b.Build(context.Background(), machine, run)
+	var notReady *NotReadyError
+	if !errors.As(err, &notReady) {
+		t.Fatalf("Build err = %v, want a *NotReadyError", err)
+	}
+}
+
+// testMachineHardwareMissingIsNotReady covers getMachineHardware's
+// not-found branch.
+func testMachineHardwareMissingIsNotReady(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	image := fx.mustCreateImage(ns, blankDataLayout())
+
+	b := &Builder{Client: fx.client}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: image.Name}},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	_, _, err := b.Build(context.Background(), machine, run)
+	var notReady *NotReadyError
+	if !errors.As(err, &notReady) {
+		t.Fatalf("Build err = %v, want a *NotReadyError", err)
+	}
+}
+
+// testImageMissingIsNotReady covers resolveImage's image-not-found branch.
+func testImageMissingIsNotReady(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+
+	b := &Builder{Client: fx.client}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: "does-not-exist"}},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	_, _, err := b.Build(context.Background(), machine, run)
+	var notReady *NotReadyError
+	if !errors.As(err, &notReady) {
+		t.Fatalf("Build err = %v, want a *NotReadyError", err)
+	}
+}
+
+// testImageNotReadyYetIsNotReady covers resolveImage's
+// image-not-Ready-yet branch: the Image exists but its Status.State has
+// not reached ImageStateReady.
+func testImageNotReadyYetIsNotReady(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+	image := fx.mustCreateImagePending(ns, blankDataLayout())
+
+	b := &Builder{Client: fx.client}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: image.Name}},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	_, _, err := b.Build(context.Background(), machine, run)
+	var notReady *NotReadyError
+	if !errors.As(err, &notReady) {
+		t.Fatalf("Build err = %v, want a *NotReadyError", err)
+	}
+}
+
+// testPostHookMissingIsNotReady covers resolveHook's posthook-not-found
+// branch.
+func testPostHookMissingIsNotReady(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+	image := fx.mustCreateImage(ns, blankDataLayout())
+
+	b := &Builder{Client: fx.client}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec: keziov1alpha2.MachineSpec{
+			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha2.NameRef{{Name: "does-not-exist"}},
+		},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	_, _, err := b.Build(context.Background(), machine, run)
+	var notReady *NotReadyError
+	if !errors.As(err, &notReady) {
+		t.Fatalf("Build err = %v, want a *NotReadyError", err)
+	}
+}
+
+// testPostHookNotValidYetIsNotReady covers resolveHook's
+// posthook-not-Valid-yet branch: the PostHook exists but its Valid
+// condition has not been set True.
+func testPostHookNotValidYetIsNotReady(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+	image := fx.mustCreateImage(ns, blankDataLayout())
+	fx.mustCreatePostHookPending(ns, "pending-hook", scriptHookSpec("pending"))
+
+	b := &Builder{Client: fx.client}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec: keziov1alpha2.MachineSpec{
+			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha2.NameRef{{Name: "pending-hook"}},
+		},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	_, _, err := b.Build(context.Background(), machine, run)
+	var notReady *NotReadyError
+	if !errors.As(err, &notReady) {
+		t.Fatalf("Build err = %v, want a *NotReadyError", err)
+	}
+}
+
+// testOSAndDataImageSameDiskIsDiskSelectionError exercises Build's glue
+// around diskmatch.CheckDistinct: the OS image and a dataImages entry
+// with no disambiguating hints both fall back to "the only disk" on a
+// single-disk machine, so they resolve to the same physical disk.
+func testOSAndDataImageSameDiskIsDiskSelectionError(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
+	image := fx.mustCreateImage(ns, blankDataLayout())
+
+	b := &Builder{Client: fx.client}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
+		Spec: keziov1alpha2.MachineSpec{
+			ImageRef:   &keziov1alpha2.NameRef{Name: image.Name},
+			DataImages: []keziov1alpha2.MachineDataImage{{ImageRef: keziov1alpha2.NameRef{Name: image.Name}}},
+		},
+	}
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+
+	_, _, err := b.Build(context.Background(), machine, run)
+	var diskErr *DiskSelectionError
+	if !errors.As(err, &diskErr) {
+		t.Fatalf("Build err = %v, want a *DiskSelectionError", err)
 	}
 }
 
@@ -778,7 +1202,57 @@ func (fx *fixtures) mustCreateImageFull(ns, name string, layout keziov1alpha2.Im
 	return img
 }
 
+// mustCreateImagePending creates an Image whose Status.State is left at
+// its zero value (never set to ImageStateReady), standing in for an image
+// resolveImage's reconciler has not finished processing yet.
+func (fx *fixtures) mustCreateImagePending(ns string, layout keziov1alpha2.ImageDiskLayout) *keziov1alpha2.Image {
+	fx.t.Helper()
+	img := &keziov1alpha2.Image{
+		ObjectMeta: metav1.ObjectMeta{Name: testImageName, Namespace: ns},
+		Spec:       keziov1alpha2.ImageSpec{Layout: layout},
+	}
+	if err := fx.client.Create(context.Background(), img); err != nil {
+		fx.t.Fatalf("create image %s/%s: %v", ns, img.Name, err)
+	}
+	return img
+}
+
+func (fx *fixtures) mustCreateConfigMap(ns, name string, data map[string]string) {
+	fx.t.Helper()
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Data:       data,
+	}
+	if err := fx.client.Create(context.Background(), cm); err != nil {
+		fx.t.Fatalf("create configmap %s/%s: %v", ns, name, err)
+	}
+}
+
+func (fx *fixtures) mustCreateSecret(ns, name string, data map[string][]byte) {
+	fx.t.Helper()
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Data:       data,
+	}
+	if err := fx.client.Create(context.Background(), secret); err != nil {
+		fx.t.Fatalf("create secret %s/%s: %v", ns, name, err)
+	}
+}
+
 func (fx *fixtures) mustCreatePostHook(ns, name string, spec keziov1alpha2.PostHookSpec) {
+	fx.t.Helper()
+	fx.mustCreatePostHookWithValidity(ns, name, spec, true)
+}
+
+// mustCreatePostHookPending creates a PostHook without setting its Valid
+// condition, standing in for one the PostHookReconciler has not finished
+// validating yet.
+func (fx *fixtures) mustCreatePostHookPending(ns, name string, spec keziov1alpha2.PostHookSpec) {
+	fx.t.Helper()
+	fx.mustCreatePostHookWithValidity(ns, name, spec, false)
+}
+
+func (fx *fixtures) mustCreatePostHookWithValidity(ns, name string, spec keziov1alpha2.PostHookSpec, valid bool) {
 	fx.t.Helper()
 	ph := &keziov1alpha2.PostHook{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
@@ -786,6 +1260,9 @@ func (fx *fixtures) mustCreatePostHook(ns, name string, spec keziov1alpha2.PostH
 	}
 	if err := fx.client.Create(context.Background(), ph); err != nil {
 		fx.t.Fatalf("create posthook %s/%s: %v", ns, name, err)
+	}
+	if !valid {
+		return
 	}
 	meta.SetStatusCondition(&ph.Status.Conditions, metav1.Condition{
 		Type: keziov1alpha2.PostHookConditionValid, Status: metav1.ConditionTrue, Reason: "TestFixture", Message: "fixture",
@@ -833,6 +1310,28 @@ func (fx *fixtures) mustCreatePartitionContent(ns string, hash store.InfoHash, r
 // assign one itself.
 func (fx *fixtures) mustCreateSeederPod(ns string, hash store.InfoHash, podIP string) {
 	fx.t.Helper()
+	pod := fx.mustCreateSeederDeploymentAndPod(ns, hash)
+	pod.Status.PodIP = podIP
+	if err := fx.client.Status().Update(context.Background(), pod); err != nil {
+		fx.t.Fatalf("update seeder pod %s/%s status: %v", ns, pod.Name, err)
+	}
+}
+
+// mustCreateSeederPodNoIP creates the seeder Deployment plus a matching
+// Pod that has not reported a PodIP yet, standing in for a pod still
+// pending scheduling.
+func (fx *fixtures) mustCreateSeederPodNoIP(ns string, hash store.InfoHash) {
+	fx.t.Helper()
+	fx.mustCreateSeederDeploymentAndPod(ns, hash)
+}
+
+// mustCreateSeederDeploymentAndPod creates the per-content seeder
+// Deployment (matching seederdeploy.Name's naming, the identity
+// Builder.resolveTorrentURL looks up by) plus one matching Pod, with no
+// PodIP set - envtest runs no kubelet to ever assign one itself. Callers
+// set Status.PodIP themselves when a ready pod is wanted.
+func (fx *fixtures) mustCreateSeederDeploymentAndPod(ns string, hash store.InfoHash) *corev1.Pod {
+	fx.t.Helper()
 	labels := map[string]string{"app": "kezio-seeder", "content": hash.String()}
 	replicas := int32(1)
 	dep := &appsv1.Deployment{
@@ -861,10 +1360,7 @@ func (fx *fixtures) mustCreateSeederPod(ns string, hash store.InfoHash, podIP st
 	if err := fx.client.Create(context.Background(), pod); err != nil {
 		fx.t.Fatalf("create seeder pod %s/%s: %v", ns, pod.Name, err)
 	}
-	pod.Status.PodIP = podIP
-	if err := fx.client.Status().Update(context.Background(), pod); err != nil {
-		fx.t.Fatalf("update seeder pod %s/%s status: %v", ns, pod.Name, err)
-	}
+	return pod
 }
 
 func oneDisk(deviceName string) []keziov1alpha2.MachineHardwareDisk {
