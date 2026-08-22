@@ -784,9 +784,37 @@ jobs:
           machine-name: ${{ env.TARGET_VM_NAME }}
           image-name: ${{ steps.build-image.outputs.image-name }}
 
+      # Abort-channel proof, still strictly before deploy-machine's own
+      # happy-path patch: assert-bad-checksum-backoff's own last step
+      # already left a real DeployRun in flight against the full-deploy OS
+      # image (its recovery deletes the corrupted run and waits only for
+      # currentRunRef to move to a new name, not for that new run to reach
+      # any particular phase). This action rides that same in-flight run:
+      # it waits for it to actually reach WritingContent, deletes it
+      # mid-write, and proves the sanctioned recovery path
+      # (recordCurrentRunDeleted) starts a genuinely fresh run that itself
+      # reboots into a new kezio-agent and reaches WritingContent again -
+      # see this action's own doc comment for the full evidence trace,
+      # including why a deleted run's own "failed" status is never
+      # observable after the fact. No deploy intent is set here and no
+      # Provisioned wait happens here either: deploy-machine's own
+      # unmodified patch+wait (next step, a no-op re-patch of the same
+      # imageRef/postHookRefs) and verify-deploy are what prove the
+      # controller's automatic retry actually lands, exactly like the
+      # sibling negative-test actions above.
+      - name: Assert deleting a mid-write DeployRun aborts the agent and retries cleanly
+        uses: ./.github/actions/assert-abort-mid-write
+        with:
+          machine-name: ${{ env.TARGET_VM_NAME }}
+
       # Captured right before deploy-machine patches the deploy intent in,
       # so verify-deploy's layer 3 can tell this run's marker apart from a
-      # stale one left by an earlier deploy of the same disk.
+      # stale one left by an earlier deploy of the same disk. The aborted
+      # run above never reached DeployRunPhaseRunningPostHook (it was
+      # caught and deleted mid-WritingContent), so it never wrote a
+      # full-deploy marker - this timestamp's position relative to the
+      # abort action above is therefore immaterial to freshness, only its
+      # position relative to deploy-machine's own patch matters.
       - name: Capture the pre-deploy timestamp
         id: pre-deploy
         run: echo "timestamp-ns=$(date -u +%s%N)" >>"${GITHUB_OUTPUT}"

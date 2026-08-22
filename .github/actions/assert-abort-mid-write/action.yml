@@ -1,0 +1,384 @@
+name: Assert deleting a mid-write DeployRun aborts the agent and retries cleanly
+
+description: >-
+  Proves the abort channel end to end against a real deploy: deleting the
+  Machine's currentRunRef while kezio-agent is actively writing partition
+  content makes the agent stop, and the controller's own sanctioned
+  recovery path (internal/controller's recordCurrentRunDeleted, traced in
+  this action's own comments) starts a genuinely fresh DeployRun that goes
+  on to complete normally.
+
+  Runs immediately after assert-bad-checksum-backoff and strictly before
+  the pre-deploy timestamp capture and deploy-machine: assert-bad-checksum-backoff
+  already sets the Machine's real deploy intent (the full-deploy OS image)
+  and, as its own last step, deletes the DeployRun it corrupted and waits
+  only for status.currentRunRef to move to a new name - it does not wait
+  for that fresh run to reach any particular phase. That fresh run is
+  therefore still pre-boot (its provision-boot marker was disarmed back
+  when the very first attempt for this Machine committed to
+  DeployRunPhasePending, and nothing has re-armed it since - see
+  internal/deployer/agent.go's startProvision/pollAgentBoot) when this
+  action starts, so it still needs a full PXE-boot cycle before reaching
+  DeployRunPhaseWritingContent. This action rides that same run: it never
+  patches the Machine's spec itself, it only watches the DeployRun
+  assert-bad-checksum-backoff already started, catches it mid-write, and
+  deletes it.
+
+  Design choice: aborting here (before the OS deploy's own patch+wait)
+  rather than after it lets deploy-machine's own unmodified patch+wait
+  (next step, a no-op merge patch re-applying the same imageRef/
+  postHookRefs) and verify-deploy be the proof that the controller's
+  automatic retry actually lands - no separate Provisioned wait is
+  duplicated here. It also must run strictly before
+  assert-poweroff-after-deploy, which deliberately destroys the OS disk's
+  content and clears the deploy intent as the lane's last disk-touching
+  step.
+
+  Detecting "mid-write" without flaking: this action polls the DeployRun
+  already in flight for status.phase == "WritingContent"
+  (DeployRunPhaseWritingContent) and deletes it the moment that phase is
+  observed - it does not additionally wait for a nonzero
+  status.partitions[].percent, since the full-deploy image's OS content
+  slot is multi-GiB and the phase itself already proves the BitTorrent
+  transfer is underway. Right before deleting, it re-reads the run's
+  phase one more time and fails loudly (not silently) if it has already
+  reached a terminal phase (Succeeded or Failed) - the practical
+  likelihood of losing that race against a multi-GiB transfer with a
+  5-second poll interval is very low, but this action never lets that
+  possibility pass as a silent success.
+
+  Evidence gathered, cross-checked against api/v1alpha2's own json tags:
+    - status.currentRunRef.name (Machine) moves off the deleted run's
+      name - through the nil interval recordCurrentRunDeleted's own
+      comment documents (currentRunRef cleared, errorType Restart,
+      requeued after the controller's fixed 30s failedRequeueInterval)
+      and on to a new run's name once reconcileProvisioning's nil-ref
+      branch (startProvisioningRun) creates one. Only the "moved to a
+      different, non-empty name" endpoint is asserted as a hard gate,
+      since the transient nil/Restart snapshot only lasts as long as
+      that fixed backoff window and this action's poll interval could in
+      principle straddle it without ever sampling it; when this action
+      does observe operationalStatus=error/errorType=Restart/
+      currentRunRef=<empty> along the way, it logs that observation
+      explicitly.
+    - kubectl get deployrun <deleted-name> reports NotFound.
+    - the fresh run's own spec.machineRef.name (DeployRunSpec.MachineRef)
+      equals machine-name.
+    - the fresh run itself reaches status.phase == "WritingContent" again
+      - proof the retry is not just "a new object exists" but that the
+        agent genuinely re-executed partitioning and started writing
+        content over again, which can only happen after a real reboot
+        into a fresh kezio-agent process (internal/deployer/agent.go's
+        startProvision has no marker left armed for this Machine at this
+        point, so it always re-arms PXE and power-cycles for this fresh
+        run - see this action's own first paragraph).
+    - status.agentSession.tokenHash (MachineAgentSessionStatus.TokenHash)
+      on the Machine differs, once the fresh run reaches WritingContent,
+      from the value captured before this action deleted the aborted
+      run: internal/agentserver's ingestRegistration unconditionally
+      overwrites this field on every POST /agent/register, so a changed
+      hash is direct proof a brand new kezio-agent process registered in
+      between - the old agent's process is not the one now writing this
+      fresh run's content.
+
+  What "the run reports failed" does NOT mean here, stated plainly rather
+  than asserted as something this API surface cannot support: the
+  deleted DeployRun object is gone, so no terminal Failed status,
+  condition, or phase is ever observable on it after the fact - there is
+  no Kubernetes Event, no DeployRun status, and no controller log line
+  recording that outcome either. Tracing why: internal/agentserver's
+  NewAbortDecider answers abort on the very next POST /agent/progress
+  once it sees the DeployRun deleting or gone, internal/agent's
+  HTTPReporter.Cancel then stops the Executor's context, and
+  internal/agent/deploy.Executor.Execute's deferred reportFailed sends
+  one last ProgressStateFailed report - but internal/agent's HTTPReporter
+  always posts that report against context.Background() (not the
+  cancelled deploy context), specifically so it still reaches the wire
+  after cancellation. It reaches the wire, but internal/agentserver's
+  persistProgress does a plain Get on the run name first and returns nil
+  (not an error, nothing logged) the moment that Get 404s - a report for
+  an already-deleted DeployRun is silently discarded by design, the same
+  no-op path a report racing a same-named run's re-creation takes. This
+  action therefore never looks for a Failed status on the deleted run;
+  the agentSession.tokenHash change above is the strongest evidence this
+  API surface actually offers that the old agent process stopped.
+
+inputs:
+  machine-name:
+    description: >-
+      Name of the Machine already mid-deploy with a real DeployRun in
+      flight (see assert-bad-checksum-backoff, which must run
+      immediately before this action). Must have status.currentRunRef
+      set and status.state == "Provisioning" when this action starts.
+    required: true
+  namespace:
+    description: Namespace the Machine and its DeployRuns live in.
+    required: false
+    default: "scaffold-system"
+  write-phase-timeout:
+    description: >-
+      Timeout to wait for the in-flight DeployRun to reach
+      status.phase == "WritingContent", in seconds as an integer,
+      optionally suffixed with s. Generous: the run this action watches
+      is still pre-boot when this action starts (see this action's own
+      description), so this must absorb a full PXE-boot/registration
+      cycle (internal/deployer's own 5-minute agentDeployerProvisionBootDeadline)
+      plus partitioning, not just the content write itself.
+    required: false
+    default: "900s"
+  retry-timeout:
+    description: >-
+      Timeout to wait, after deleting the mid-write DeployRun, for
+      status.currentRunRef to become a new, non-empty name different
+      from the deleted run's, in seconds as an integer, optionally
+      suffixed with s. Bounds recordCurrentRunDeleted's fixed 30s
+      failedRequeueInterval backoff plus normal CI scheduling jitter.
+    required: false
+    default: "180s"
+  retry-write-phase-timeout:
+    description: >-
+      Timeout to wait for the fresh retry DeployRun to itself reach
+      status.phase == "WritingContent", in seconds as an integer,
+      optionally suffixed with s. Same magnitude as write-phase-timeout
+      and for the same reason: the fresh run also starts pre-boot.
+    required: false
+    default: "900s"
+
+runs:
+  using: composite
+  steps:
+    - name: Capture the in-flight run and the current agent session baseline
+      id: before
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+      run: |
+        set -euo pipefail
+
+        machine_json="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o json)"
+        state="$(jq -r '.status.state // ""' <<<"${machine_json}")"
+        run_name="$(jq -r '.status.currentRunRef.name // ""' <<<"${machine_json}")"
+        session_hash="$(jq -r '.status.agentSession.tokenHash // ""' <<<"${machine_json}")"
+
+        if [ "${state}" != "Provisioning" ]; then
+          echo "::error::Machine ${MACHINE_NAME} status.state=${state:-<empty>}, want Provisioning - this action must run immediately after assert-bad-checksum-backoff with a real deploy already in flight" >&2
+          exit 1
+        fi
+        if [ -z "${run_name}" ]; then
+          echo "::error::Machine ${MACHINE_NAME} has no status.currentRunRef set despite status.state=Provisioning" >&2
+          exit 1
+        fi
+
+        echo "run-name=${run_name}" >>"${GITHUB_OUTPUT}"
+        echo "session-hash-baseline=${session_hash}" >>"${GITHUB_OUTPUT}"
+        echo "watching DeployRun ${run_name} for mid-write evidence, agentSession.tokenHash baseline=${session_hash:-<none>}"
+
+    - name: Wait for the in-flight run to reach WritingContent, then delete it mid-write
+      id: aborted
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        RUN_NAME: ${{ steps.before.outputs.run-name }}
+        TIMEOUT: ${{ inputs.write-phase-timeout }}
+      run: |
+        set -euo pipefail
+        if [[ ! "${TIMEOUT}" =~ ^[0-9]+s?$ ]]; then
+          echo "::error::invalid write-phase-timeout '${TIMEOUT}': want seconds like 900 or 900s" >&2
+          exit 1
+        fi
+        deadline=$(( $(date +%s) + ${TIMEOUT%s} ))
+
+        dump_and_fail() {
+          echo "::error::$1" >&2
+          echo "===== Machine ${MACHINE_NAME} ====="
+          kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o yaml || true
+          echo "===== DeployRun ${RUN_NAME} ====="
+          kubectl get deployrun "${RUN_NAME}" -n "${NAMESPACE}" -o yaml || true
+          exit 1
+        }
+
+        while true; do
+          run_json="$(kubectl get deployrun "${RUN_NAME}" -n "${NAMESPACE}" -o json 2>/dev/null || true)"
+          if [ -z "${run_json}" ]; then
+            dump_and_fail "DeployRun ${RUN_NAME} disappeared before reaching status.phase=WritingContent - it must still exist for this action to catch it mid-write"
+          fi
+          phase="$(jq -r '.status.phase // ""' <<<"${run_json}")"
+          percents="$(jq -r '[.status.partitions[]?.percent // 0] | join(",")' <<<"${run_json}")"
+          echo "$(date -Is) DeployRun ${RUN_NAME} status.phase=${phase:-<empty>} partitions.percent=[${percents}]"
+
+          if [ "${phase}" = "WritingContent" ]; then
+            break
+          fi
+          if [ "${phase}" = "Succeeded" ] || [ "${phase}" = "Failed" ]; then
+            dump_and_fail "DeployRun ${RUN_NAME} reached terminal status.phase=${phase} without this action ever observing WritingContent - cannot prove a mid-write abort"
+          fi
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            dump_and_fail "DeployRun ${RUN_NAME} did not reach status.phase=WritingContent within ${TIMEOUT}"
+          fi
+          sleep 5
+        done
+
+        # Re-read once more, right before deleting: the window between the
+        # WritingContent observation above and the delete call below is the
+        # one place a genuine race against run completion could slip a false
+        # pass through - fail loudly instead of deleting a run that already
+        # finished.
+        final_phase="$(kubectl get deployrun "${RUN_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+        if [ "${final_phase}" = "Succeeded" ] || [ "${final_phase}" = "Failed" ]; then
+          dump_and_fail "DeployRun ${RUN_NAME} reached terminal status.phase=${final_phase} between this action's WritingContent observation and delete - lost the race against a multi-GiB transfer finishing; this is not a mid-write abort proof"
+        fi
+
+        echo "DeployRun ${RUN_NAME} confirmed mid-write (status.phase=WritingContent) - deleting it now"
+        kubectl delete deployrun "${RUN_NAME}" -n "${NAMESPACE}" --wait=false
+
+        echo "deleted-at=$(date -u +%s)" >>"${GITHUB_OUTPUT}"
+
+    - name: Confirm the deleted run is gone
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        RUN_NAME: ${{ steps.before.outputs.run-name }}
+      run: |
+        set -euo pipefail
+        deadline=$(( $(date +%s) + 60 ))
+        while kubectl get deployrun "${RUN_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1; do
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::DeployRun ${RUN_NAME} still exists 60s after its delete was issued" >&2
+            kubectl get deployrun "${RUN_NAME}" -n "${NAMESPACE}" -o yaml || true
+            exit 1
+          fi
+          sleep 2
+        done
+        echo "DeployRun ${RUN_NAME} confirmed deleted"
+
+    - name: Wait for the controller's sanctioned recovery to start a fresh run
+      id: retried
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        OLD_RUN_NAME: ${{ steps.before.outputs.run-name }}
+        TIMEOUT: ${{ inputs.retry-timeout }}
+      run: |
+        set -euo pipefail
+        if [[ ! "${TIMEOUT}" =~ ^[0-9]+s?$ ]]; then
+          echo "::error::invalid retry-timeout '${TIMEOUT}': want seconds like 180 or 180s" >&2
+          exit 1
+        fi
+        deadline=$(( $(date +%s) + ${TIMEOUT%s} ))
+        saw_restart_gap=false
+
+        dump_and_fail() {
+          echo "::error::$1" >&2
+          echo "===== Machine ${MACHINE_NAME} ====="
+          kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o yaml || true
+          exit 1
+        }
+
+        while true; do
+          machine_json="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o json)"
+          state="$(jq -r '.status.state // ""' <<<"${machine_json}")"
+          operational_status="$(jq -r '.status.operationalStatus // ""' <<<"${machine_json}")"
+          error_type="$(jq -r '.status.errorType // ""' <<<"${machine_json}")"
+          run_name="$(jq -r '.status.currentRunRef.name // ""' <<<"${machine_json}")"
+          echo "$(date -Is) Machine status.state=${state:-<empty>} operationalStatus=${operational_status:-<empty>} errorType=${error_type:-<empty>} currentRunRef=${run_name:-<none>}"
+
+          if [ -z "${run_name}" ] && [ "${operational_status}" = "error" ] && [ "${error_type}" = "Restart" ]; then
+            saw_restart_gap=true
+            echo "  observed the recordCurrentRunDeleted gap: currentRunRef cleared, errorType=Restart"
+          fi
+
+          if [ "${state}" != "Provisioning" ]; then
+            dump_and_fail "Machine ${MACHINE_NAME} status.state=${state:-<empty>} while waiting for the deleted run's retry - want Provisioning throughout"
+          fi
+
+          if [ -n "${run_name}" ] && [ "${run_name}" != "${OLD_RUN_NAME}" ]; then
+            echo "run-name=${run_name}" >>"${GITHUB_OUTPUT}"
+            break
+          fi
+
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            dump_and_fail "status.currentRunRef never moved off the deleted run ${OLD_RUN_NAME} within ${TIMEOUT}"
+          fi
+          sleep 3
+        done
+
+        if [ "${saw_restart_gap}" = "true" ]; then
+          echo "fresh run started after the sanctioned recordCurrentRunDeleted recovery path (nil currentRunRef / errorType=Restart observed along the way)"
+        else
+          echo "fresh run started; this action's poll interval did not happen to sample the transient nil-currentRunRef/errorType=Restart gap, which is expected on occasion given its fixed ~30s window"
+        fi
+
+    - name: Confirm the fresh run belongs to this Machine
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        RUN_NAME: ${{ steps.retried.outputs.run-name }}
+      run: |
+        set -euo pipefail
+        owner="$(kubectl get deployrun "${RUN_NAME}" -n "${NAMESPACE}" -o jsonpath='{.spec.machineRef.name}')"
+        if [ "${owner}" != "${MACHINE_NAME}" ]; then
+          echo "::error::fresh DeployRun ${RUN_NAME} spec.machineRef.name=${owner:-<empty>}, want ${MACHINE_NAME}" >&2
+          kubectl get deployrun "${RUN_NAME}" -n "${NAMESPACE}" -o yaml || true
+          exit 1
+        fi
+        echo "fresh DeployRun ${RUN_NAME} confirmed for Machine ${MACHINE_NAME}"
+
+    - name: Wait for the fresh run to reach WritingContent, proving a real reboot happened
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        RUN_NAME: ${{ steps.retried.outputs.run-name }}
+        SESSION_HASH_BASELINE: ${{ steps.before.outputs.session-hash-baseline }}
+        TIMEOUT: ${{ inputs.retry-write-phase-timeout }}
+      run: |
+        set -euo pipefail
+        if [[ ! "${TIMEOUT}" =~ ^[0-9]+s?$ ]]; then
+          echo "::error::invalid retry-write-phase-timeout '${TIMEOUT}': want seconds like 900 or 900s" >&2
+          exit 1
+        fi
+        deadline=$(( $(date +%s) + ${TIMEOUT%s} ))
+
+        dump_and_fail() {
+          echo "::error::$1" >&2
+          echo "===== Machine ${MACHINE_NAME} ====="
+          kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o yaml || true
+          echo "===== DeployRun ${RUN_NAME} ====="
+          kubectl get deployrun "${RUN_NAME}" -n "${NAMESPACE}" -o yaml || true
+          exit 1
+        }
+
+        while true; do
+          phase="$(kubectl get deployrun "${RUN_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+          echo "$(date -Is) DeployRun ${RUN_NAME} status.phase=${phase:-<empty>}"
+          if [ "${phase}" = "WritingContent" ]; then
+            break
+          fi
+          if [ "${phase}" = "Failed" ]; then
+            dump_and_fail "fresh DeployRun ${RUN_NAME} status.phase=Failed before ever reaching WritingContent - the clean retry itself failed"
+          fi
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            dump_and_fail "fresh DeployRun ${RUN_NAME} did not reach status.phase=WritingContent within ${TIMEOUT}"
+          fi
+          sleep 5
+        done
+
+        session_hash_now="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.agentSession.tokenHash}' || true)"
+        echo "status.agentSession.tokenHash baseline=${SESSION_HASH_BASELINE:-<none>} now=${session_hash_now:-<none>}"
+        if [ -z "${session_hash_now}" ] || [ "${session_hash_now}" = "${SESSION_HASH_BASELINE}" ]; then
+          dump_and_fail "status.agentSession.tokenHash did not change from the pre-delete baseline (${SESSION_HASH_BASELINE:-<none>}) - no fresh kezio-agent registration observed, so the old agent stopping is not proven"
+        fi
+
+        echo "fresh DeployRun ${RUN_NAME} reached WritingContent with a new agentSession.tokenHash - the old agent stopped and a newly booted one is writing this retry"
+
+    - name: Dump diagnostics on failure
+      if: failure()
+      uses: ./.github/actions/collect-diagnostics
+      with:
+        namespace: ${{ inputs.namespace }}
+        workload-namespace: ${{ inputs.namespace }}
+        output-path: assert-abort-mid-write-diagnostics
