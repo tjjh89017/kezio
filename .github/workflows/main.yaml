@@ -770,6 +770,20 @@ jobs:
           machine-name: ${{ env.TARGET_VM_NAME }}
           image-name: ${{ steps.build-image.outputs.image-name }}
 
+      # Negative test, still strictly before deploy-machine's own
+      # happy-path patch: unlike the two-axis proof above, this failure
+      # surfaces from a real DeployRun against the live agent, so this
+      # action sets the deploy intent itself, waits for the controller's
+      # own flat-backoff errorCount to show a real retry, then restores
+      # the corrupted content and deletes the stuck DeployRun so
+      # deploy-machine's own unmodified patch+wait (next step) is still
+      # what proves recovery to Provisioned.
+      - name: Assert a bad checksum sets error with backoff
+        uses: ./.github/actions/assert-bad-checksum-backoff
+        with:
+          machine-name: ${{ env.TARGET_VM_NAME }}
+          image-name: ${{ steps.build-image.outputs.image-name }}
+
       # Captured right before deploy-machine patches the deploy intent in,
       # so verify-deploy's layer 3 can tell this run's marker apart from a
       # stale one left by an earlier deploy of the same disk.
