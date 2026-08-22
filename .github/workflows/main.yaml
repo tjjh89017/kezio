@@ -756,6 +756,20 @@ jobs:
         id: marker
         uses: ./.github/actions/create-deploy-marker-posthook
 
+      # Two-axis status proof, strictly before the happy-path deploy
+      # below: injects one plan-build failure, asserts status.state stays
+      # unchanged while status.operationalStatus becomes "error", then
+      # returns with the failing deploy intent still on the Machine.
+      # deploy-machine's own merge patch (next step, unmodified) overwrites
+      # spec.imageRef/postHookRefs unconditionally, so it is itself the
+      # retry-to-success proof - see this action's own doc comment for why
+      # the injected failure cannot leak into the happy-path deploy.
+      - name: Prove state and operationalStatus are independent axes
+        uses: ./.github/actions/assert-two-axis-status
+        with:
+          machine-name: ${{ env.TARGET_VM_NAME }}
+          image-name: ${{ steps.build-image.outputs.image-name }}
+
       # Captured right before deploy-machine patches the deploy intent in,
       # so verify-deploy's layer 3 can tell this run's marker apart from a
       # stale one left by an earlier deploy of the same disk.

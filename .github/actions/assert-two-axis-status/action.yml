@@ -1,0 +1,242 @@
+name: Assert a Machine's state and operationalStatus are independent axes
+
+description: >-
+  Proves the two-axis status design the full-deploy e2e lane's redesign
+  claims for api/v1alpha2/machine_types.go's MachineStatus: an error never
+  changes status.state, only status.operationalStatus. Runs strictly
+  before deploy-machine's own happy-path patch, so deploy-machine
+  (unmodified, called right after this action) is itself the recovery/
+  retry proof - the controller's own ErrorCount backoff heals the
+  Machine, not any manual status surgery here.
+
+  The injected failure is a PostHook whose inline script content
+  references a template placeholder no declared param or reserved name
+  covers, wrapped in a function call ("{{ printf \"%s\" .noSuchPlaceholder
+  }}") rather than the bare "{{ .name }}" form: internal/posthookvalidate's
+  own validatePlaceholders only matches the bare form (see its doc
+  comment - "anything more elaborate the template engine supports ...
+  passes through unexamined"), so this PostHook reaches
+  PostHookConditionValid=True at admission and reconcile time exactly
+  like a well-formed one. Only internal/planbuild's Builder.Build ever
+  renders the content (text/template with Option("missingkey=error")),
+  and only once a Machine actually names this PostHook in
+  spec.postHookRefs - so the failure surfaces deterministically at plan-
+  build time, with no dependency on the BMC, PXE, or a live agent, and
+  reports *planbuild.ValidationError, which
+  internal/controller/machine_controller.go's classifyPlanBuildError maps
+  to a Failed provisioning outcome (ErrorType Transient).
+
+  This is deliberately not a bad-checksum or an ambiguous-disk-hints
+  failure: a bad checksum is a separate lane assertion of its own, and
+  ambiguous disk hints are already covered cheaply in the fast lane (see
+  internal/planbuild's DiskSelectionError). It is also deliberately not a
+  ValidationError from a NON-existent Image, missing MachineHardware, or
+  a not-yet-Valid PostHook: every one of those is a *planbuild.NotReadyError
+  in disguise, which the controller maps to operationalStatus=delayed, not
+  error - this action's whole point is to distinguish the two.
+
+  Because the injected failure lives entirely in
+  MachineReconciler.reconcileIdle's currentHooksHash pre-check (it never
+  reaches startProvisioningRun), no DeployRun is ever created and the
+  deployer (BMC/PXE/agent state) is never touched for this failing
+  attempt - this action also asserts status.currentRunRef stays empty
+  throughout, extra evidence that nothing here can leak into
+  deploy-machine's own DeployRun. spec.imageRef and spec.postHookRefs are
+  left patched to this action's failing values on return; deploy-machine's
+  own merge patch (a JSON merge patch replaces both fields wholesale)
+  overwrites them unconditionally on its very next step, which is what
+  proves recovery rather than this action reverting anything itself.
+
+inputs:
+  machine-name:
+    description: Name of the Machine to inject the failure onto. Must already be Available (see wait-agent-registered) with no deploy intent set yet.
+    required: true
+  namespace:
+    description: Namespace the Machine (and the PostHook this action creates) live in.
+    required: false
+    default: "scaffold-system"
+  image-name:
+    description: >-
+      Name of an already-Ready Image (e.g. build-deploy-test-image's own
+      output) to write to spec.imageRef.name. Must be Ready: an Image
+      that is not Ready yet maps to operationalStatus=delayed
+      (NotReadyError), not the error this action asserts.
+    required: true
+  broken-posthook-name:
+    description: Name of the PostHook this action creates with the unresolvable template placeholder.
+    required: false
+    default: "kezio-e2e-broken-posthook"
+  posthook-valid-timeout:
+    description: >-
+      Timeout to wait for the broken PostHook's Valid condition to reach
+      True, in seconds as an integer, optionally suffixed with s.
+    required: false
+    default: "60s"
+  error-timeout:
+    description: >-
+      Timeout to wait for status.operationalStatus to reach "error" after
+      the failing deploy intent is patched in, in seconds as an integer,
+      optionally suffixed with s.
+    required: false
+    default: "120s"
+
+runs:
+  using: composite
+  steps:
+    - name: Record the pre-injection status.state
+      id: pre
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+      run: |
+        set -euo pipefail
+        state="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.state}' || true)"
+        if [ -z "${state}" ]; then
+          echo "::error::Machine ${MACHINE_NAME} has no status.state yet - this action must run after the Machine reaches a stable state (e.g. Available), not before" >&2
+          exit 1
+        fi
+        echo "pre-injection status.state=${state}"
+        echo "state=${state}" >>"${GITHUB_OUTPUT}"
+
+    - name: Create a PostHook whose template only fails at plan-build time
+      shell: bash
+      env:
+        NAME: ${{ inputs.broken-posthook-name }}
+        NAMESPACE: ${{ inputs.namespace }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha2
+        kind: PostHook
+        metadata:
+          name: ${NAME}
+          namespace: ${NAMESPACE}
+        spec:
+          steps:
+            - script:
+                script: |
+                  #!/bin/sh
+                  echo "{{ printf "%s" .noSuchPlaceholder }}"
+        EOF
+
+    - name: Wait for the broken PostHook to pass static validation
+      shell: bash
+      env:
+        NAME: ${{ inputs.broken-posthook-name }}
+        NAMESPACE: ${{ inputs.namespace }}
+        TIMEOUT: ${{ inputs.posthook-valid-timeout }}
+      run: |
+        set -euo pipefail
+        if [[ ! "${TIMEOUT}" =~ ^[0-9]+s?$ ]]; then
+          echo "::error::invalid posthook-valid-timeout '${TIMEOUT}': want seconds like 60 or 60s" >&2
+          exit 1
+        fi
+        deadline=$(( $(date +%s) + ${TIMEOUT%s} ))
+
+        while true; do
+          valid="$(kubectl get posthook "${NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.conditions[?(@.type=="Valid")].status}' || true)"
+          echo "$(date -Is) PostHook ${NAME} Valid=${valid:-<none>}"
+          [ "${valid}" = "True" ] && break
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::PostHook ${NAME} did not reach Valid=True within ${TIMEOUT} - it must pass static validation (spec-only checks) so the failure this action injects surfaces only at plan-build time, not here" >&2
+            kubectl get posthook "${NAME}" -n "${NAMESPACE}" -o yaml || true
+            exit 1
+          fi
+          sleep 5
+        done
+
+    - name: Inject the failing deploy intent
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+        BROKEN_POSTHOOK_NAME: ${{ inputs.broken-posthook-name }}
+      run: |
+        set -euo pipefail
+        patch="$(jq -n --arg image "${IMAGE_NAME}" --arg posthook "${BROKEN_POSTHOOK_NAME}" \
+          '{spec: {imageRef: {name: $image}, postHookRefs: [{name: $posthook}]}}')"
+        kubectl patch machine "${MACHINE_NAME}" -n "${NAMESPACE}" --type=merge -p "${patch}"
+
+    - name: Wait for operationalStatus=error with state unchanged
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        PRE_STATE: ${{ steps.pre.outputs.state }}
+        TIMEOUT: ${{ inputs.error-timeout }}
+      run: |
+        set -euo pipefail
+        if [[ ! "${TIMEOUT}" =~ ^[0-9]+s?$ ]]; then
+          echo "::error::invalid error-timeout '${TIMEOUT}': want seconds like 120 or 120s" >&2
+          exit 1
+        fi
+        deadline=$(( $(date +%s) + ${TIMEOUT%s} ))
+
+        dump_and_fail() {
+          echo "::error::$1" >&2
+          echo "===== Machine ${MACHINE_NAME} ====="
+          kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o yaml || true
+          exit 1
+        }
+
+        while true; do
+          machine_json="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o json)"
+          state="$(jq -r '.status.state // ""' <<<"${machine_json}")"
+          operational_status="$(jq -r '.status.operationalStatus // ""' <<<"${machine_json}")"
+          current_run="$(jq -r '.status.currentRunRef.name // ""' <<<"${machine_json}")"
+          echo "$(date -Is) Machine status.state=${state:-<empty>} operationalStatus=${operational_status:-<empty>} currentRunRef=${current_run:-<none>}"
+
+          if [ "${state}" != "${PRE_STATE}" ]; then
+            dump_and_fail "status.state changed from ${PRE_STATE} to ${state:-<empty>} while waiting for the injected failure - state must never move because of an operationalStatus error"
+          fi
+          if [ -n "${current_run}" ]; then
+            dump_and_fail "status.currentRunRef=${current_run} is set - the injected failure must never reach DeployRun creation (it fails in the plan-build pre-check, before startProvisioningRun)"
+          fi
+
+          if [ "${operational_status}" = "error" ]; then
+            break
+          fi
+          if [ "${operational_status}" = "delayed" ]; then
+            dump_and_fail "status.operationalStatus=delayed, not error - the injected PostHook must have been treated as not-ready (NotReadyError) rather than failing to render (ValidationError); check that it reached Valid=True with an unresolvable template placeholder"
+          fi
+
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            dump_and_fail "status.operationalStatus did not reach 'error' within ${TIMEOUT}"
+          fi
+          sleep 5
+        done
+
+        error_type="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.errorType}' || true)"
+        error_count="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.errorCount}' || true)"
+        error_message="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.errorMessage}' || true)"
+        echo "status.errorType=${error_type:-<empty>} status.errorCount=${error_count:-<empty>} status.errorMessage=${error_message:-<empty>}"
+
+        fail=0
+        if [ "${error_type}" != "Transient" ]; then
+          echo "::error::status.errorType=${error_type:-<empty>}, want Transient - classifyPlanBuildError always maps a ValidationError to MachineErrorTypeTransient" >&2
+          fail=1
+        fi
+        if [ -z "${error_count}" ] || [ "${error_count}" -lt 1 ]; then
+          echo "::error::status.errorCount=${error_count:-<empty>}, want at least 1" >&2
+          fail=1
+        fi
+        if [ -z "${error_message}" ]; then
+          echo "::error::status.errorMessage is empty on an operationalStatus=error Machine" >&2
+          fail=1
+        fi
+        if [ "${fail}" -ne 0 ]; then
+          kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o yaml || true
+          exit 1
+        fi
+
+        echo "two-axis status proven: status.state stayed ${PRE_STATE} while status.operationalStatus reached error"
+
+    - name: Dump diagnostics on failure
+      if: failure()
+      uses: ./.github/actions/collect-diagnostics
+      with:
+        namespace: ${{ inputs.namespace }}
+        workload-namespace: ${{ inputs.namespace }}
+        output-path: assert-two-axis-status-diagnostics
