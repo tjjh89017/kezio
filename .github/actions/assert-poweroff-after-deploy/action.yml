@@ -1,0 +1,214 @@
+name: Assert a dataImages-only deploy powers the machine off
+
+description: >-
+  Proves the AfterDeploy=PowerOff lane assertion: a dataImages-only
+  Machine (MachineSpec.AfterDeploy's own doc comment - the mechanism
+  applies only when a deployment finishes with no OS image to reboot
+  into) actually powers its guest off once the agent finishes, not just
+  that the controller believes it did.
+
+  Runs strictly last among this lane's disk-touching steps, reusing the
+  same target VM's only disk rather than a second one: reshaping
+  spec.imageRef away from the already-verified OS deploy and onto a
+  dataImages-only intent overwrites that disk's content, so nothing later
+  in this job may depend on the previously deployed OS still being there.
+  A future assertion that does need that OS intact (an abort-mid-write
+  proof, or a post-deploy power-cycle proof through the reboot
+  annotation) belongs strictly before this step in the job, not after -
+  this step is deliberately wired in as the last disk-touching one.
+
+  Clears spec.postHookRefs (patched to null) alongside spec.imageRef:
+  planbuild.Builder.resolveMachineHooks's own doc comment is explicit
+  that a dataImages-only run with no postHookRefs on either side resolves
+  no hooks at all, which is what this assertion wants - the shipped
+  default hook's mkswap/efibootmgr builtins have no OS ESP to act on once
+  spec.imageRef is gone, and leaving the happy-path deploy's marker/
+  default-finalize pair in place would try to run them anyway (see
+  deriveBuiltinDefaults returning the zero value once osImage is nil) and
+  fail the run for a reason unrelated to what this assertion is proving.
+
+  Waiting is two separate proofs, not one: status.state reaching
+  "Provisioned" only proves the controller observed the executor-side
+  DeployRun succeed - internal/agent/deploy's Executor.Execute sends its
+  terminal Succeeded progress report *before* calling
+  rebootOrPowerOff(ctx, plan.AfterDeploy), so a Machine can already read
+  Provisioned while the guest is still mid-poweroff. Only
+  wait-vm-power-state's own poll of the KubeVirt VirtualMachine's
+  printableStatus (a property of the guest, not the Kubernetes controller
+  loop) proves the agent's own `systemctl poweroff` actually landed. A
+  short bounded settle check after that confirms the guest does not come
+  back on by itself (nothing in this lane's own components would power it
+  back on, but a stuck one-shot BMC boot override or a KubeVirt quirk
+  restarting the VMI would be exactly the kind of silent regression this
+  assertion exists to catch).
+
+inputs:
+  machine-name:
+    description: Name of the Machine to reshape into a dataImages-only, PowerOff deploy intent. Must already be Provisioned from a prior OS deploy (see deploy-machine).
+    required: true
+  namespace:
+    description: Namespace the Machine and its DeployRuns live in.
+    required: false
+    default: "scaffold-system"
+  vm-name:
+    description: Name of the VirtualMachine backing machine-name. Defaults to machine-name (this lane's own enroll convention).
+    required: false
+    default: ""
+  image-name:
+    description: Name of an already-Ready, non-bootable Image (e.g. ingest-test-image's own fixture) to deploy as this Machine's sole data image.
+    required: true
+  run-timeout:
+    description: >-
+      Timeout to wait for status.state to return to "Provisioned" with a
+      lastSuccessfulRunRef different from the one recorded before this
+      action patched the deploy intent, in seconds as an integer,
+      optionally suffixed with s. Small next to deploy-machine's own
+      budget: a tiny data-only fixture has no OS partitions, no hooks,
+      and a content write of a few tens of MiB.
+    required: false
+    default: "600s"
+  power-off-timeout:
+    description: >-
+      Timeout to wait for the VirtualMachine's printableStatus to reach
+      Stopped after status.state reaches Provisioned, in seconds as an
+      integer, optionally suffixed with s.
+    required: false
+    default: "300s"
+  settle-seconds:
+    description: >-
+      How long to wait after the VM is first observed Stopped before
+      re-checking it is still Stopped, proving it did not power back on
+      by itself. Kept small: this is a bounded sanity check, not a
+      substitute for the wait above.
+    required: false
+    default: "20"
+
+outputs:
+  deploy-run-name:
+    description: 'Name of the dataImages-only DeployRun that reached status.lastSuccessfulRunRef.'
+    value: ${{ steps.wait-provisioned.outputs.deploy-run-name }}
+
+runs:
+  using: composite
+  steps:
+    - name: Capture the deploy intent's pre-patch state
+      id: before
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+      run: |
+        set -euo pipefail
+        prev_run="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.lastSuccessfulRunRef.name}' || true)"
+        echo "previous-run-name=${prev_run}" >>"${GITHUB_OUTPUT}"
+        echo "lastSuccessfulRunRef before this action: ${prev_run:-<none>}"
+
+    - name: Patch the Machine into a dataImages-only, PowerOff deploy intent
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+      run: |
+        set -euo pipefail
+        patch="$(jq -n --arg image "${IMAGE_NAME}" '{
+          spec: {
+            imageRef: null,
+            postHookRefs: null,
+            dataImages: [{imageRef: {name: $image}}],
+            afterDeploy: "PowerOff"
+          }
+        }')"
+        kubectl patch machine "${MACHINE_NAME}" -n "${NAMESPACE}" --type=merge -p "${patch}"
+
+    - name: Wait for a fresh DeployRun to reach Provisioned
+      id: wait-provisioned
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        PREVIOUS_RUN_NAME: ${{ steps.before.outputs.previous-run-name }}
+        TIMEOUT: ${{ inputs.run-timeout }}
+      run: |
+        set -euo pipefail
+        if [[ ! "${TIMEOUT}" =~ ^[0-9]+s?$ ]]; then
+          echo "::error::invalid run-timeout '${TIMEOUT}': want seconds like 600 or 600s" >&2
+          exit 1
+        fi
+        deadline=$(( $(date +%s) + ${TIMEOUT%s} ))
+
+        dump_and_fail() {
+          echo "::error::$1" >&2
+          echo "===== Machine ${MACHINE_NAME} ====="
+          kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o yaml || true
+          run_name="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.currentRunRef.name}' || true)"
+          if [ -n "${run_name}" ]; then
+            echo "===== DeployRun ${run_name} ====="
+            kubectl get deployrun "${run_name}" -n "${NAMESPACE}" -o yaml || true
+          fi
+          exit 1
+        }
+
+        while true; do
+          machine_json="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o json)"
+          state="$(jq -r '.status.state // ""' <<<"${machine_json}")"
+          operational_status="$(jq -r '.status.operationalStatus // ""' <<<"${machine_json}")"
+          run_name="$(jq -r '.status.currentRunRef.name // ""' <<<"${machine_json}")"
+          last_success="$(jq -r '.status.lastSuccessfulRunRef.name // ""' <<<"${machine_json}")"
+          echo "$(date -Is) Machine status.state=${state:-<empty>} operationalStatus=${operational_status:-<empty>} currentRunRef=${run_name:-<none>} lastSuccessfulRunRef=${last_success:-<none>}"
+
+          if [ "${operational_status}" = "error" ]; then
+            kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" \
+              -o jsonpath='{"  errorType="}{.status.errorType}{" errorCount="}{.status.errorCount}{" errorMessage="}{.status.errorMessage}{"\n"}'
+          fi
+
+          if [ "${state}" = "Provisioned" ] && [ -n "${last_success}" ] && [ "${last_success}" != "${PREVIOUS_RUN_NAME}" ]; then
+            echo "deploy-run-name=${last_success}" >>"${GITHUB_OUTPUT}"
+            break
+          fi
+
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            dump_and_fail "Machine ${MACHINE_NAME} did not reach a fresh Provisioned (lastSuccessfulRunRef != ${PREVIOUS_RUN_NAME:-<none>}) within ${TIMEOUT}"
+          fi
+          sleep 5
+        done
+
+        echo "Machine ${MACHINE_NAME} completed its dataImages-only deploy, DeployRun $(jq -r '.status.lastSuccessfulRunRef.name' <<<"$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o json)")"
+
+    - name: Wait for the guest to actually power off
+      uses: ./.github/actions/wait-vm-power-state
+      with:
+        vm-name: ${{ inputs.vm-name != '' && inputs.vm-name || inputs.machine-name }}
+        machine-name: ${{ inputs.machine-name }}
+        namespace: ${{ inputs.namespace }}
+        target-status: "Stopped"
+        timeout: ${{ inputs.power-off-timeout }}
+        timeout-error-message: "VM did not reach printableStatus=Stopped after the dataImages-only PowerOff deploy - controller reported Provisioned, but the guest's own systemctl poweroff never landed"
+        extra-field-jsonpath: "{.status.state}"
+        extra-field-label: "machine.status.state"
+
+    - name: Assert the VM does not power back on by itself
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        VM_NAME: ${{ inputs.vm-name != '' && inputs.vm-name || inputs.machine-name }}
+        SETTLE_SECONDS: ${{ inputs.settle-seconds }}
+      run: |
+        set -euo pipefail
+        echo "settling ${SETTLE_SECONDS}s before re-checking the VM is still Stopped"
+        sleep "${SETTLE_SECONDS}"
+        status="$(kubectl get vm "${VM_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.printableStatus}' || true)"
+        echo "$(date -Is) VM ${VM_NAME} printableStatus=${status:-<none>}"
+        if [ "${status}" != "Stopped" ]; then
+          echo "::error::VM ${VM_NAME} printableStatus=${status:-<none>} after settling, want Stopped - it powered back on by itself" >&2
+          kubectl get vm "${VM_NAME}" -n "${NAMESPACE}" -o yaml || true
+          exit 1
+        fi
+
+    - name: Dump diagnostics on failure
+      if: failure()
+      uses: ./.github/actions/collect-diagnostics
+      with:
+        namespace: ${{ inputs.namespace }}
+        workload-namespace: ${{ inputs.namespace }}
+        output-path: assert-poweroff-after-deploy-diagnostics

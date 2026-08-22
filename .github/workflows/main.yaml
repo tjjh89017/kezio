@@ -819,6 +819,27 @@ jobs:
           deploy-run-name: ${{ steps.deploy.outputs.deploy-run-name }}
           namespace: ${{ steps.deploy.outputs.namespace }}
 
+      # Last disk-touching step in this lane, deliberately: it reshapes the
+      # Machine's spec away from the OS image just verified above onto a
+      # dataImages-only intent, overwriting the same disk. A future
+      # assertion that still needs the deployed OS intact (an
+      # abort-mid-write proof, or a post-deploy power-cycle proof through
+      # the reboot annotation) belongs above this step, not below it - see
+      # this action's own doc comment.
+      - name: Build and ingest the dataImages-only test image
+        id: build-data-image
+        uses: ./.github/actions/ingest-test-image
+        with:
+          image-name: "kezio-e2e-deploy-poweroff-data"
+          token: ${{ env.IMAGE_SERVICE_TOKEN }}
+
+      - name: Assert a dataImages-only deploy powers the machine off
+        id: poweroff
+        uses: ./.github/actions/assert-poweroff-after-deploy
+        with:
+          machine-name: ${{ env.TARGET_VM_NAME }}
+          image-name: ${{ steps.build-data-image.outputs.image-name }}
+
       - name: Dump all kezio v1alpha2 resources
         if: always()
         uses: ./.github/actions/dump-kezio-resources
@@ -836,6 +857,8 @@ jobs:
             image ${{ steps.build-image.outputs.image-name }}
             posthook ${{ steps.marker.outputs.name }}
             deployrun ${{ steps.deploy.outputs.deploy-run-name }}
+            image ${{ steps.build-data-image.outputs.image-name }}
+            deployrun ${{ steps.poweroff.outputs.deploy-run-name }}
 
       - name: Collect always-on diagnostics bundle
         if: always()
@@ -853,6 +876,8 @@ jobs:
             image/${{ steps.build-image.outputs.image-name }}:image.yaml
             posthook/${{ steps.marker.outputs.name }}:posthook.yaml
             deployrun/${{ steps.deploy.outputs.deploy-run-name }}:deployrun.yaml
+            image/${{ steps.build-data-image.outputs.image-name }}:data-image.yaml
+            deployrun/${{ steps.poweroff.outputs.deploy-run-name }}:poweroff-deployrun.yaml
 
       - name: Upload diagnostics
         if: always()
