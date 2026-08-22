@@ -847,6 +847,15 @@ jobs:
           deploy-run-name: ${{ steps.deploy.outputs.deploy-run-name }}
           namespace: ${{ steps.deploy.outputs.namespace }}
 
+      # Post-deploy power-cycle proof through the reboot annotation, still
+      # strictly before the disk-destroying step below: the deployed OS
+      # disk from deploy-machine/verify-deploy above is still intact here,
+      # which this action's own marker-unchanged check depends on.
+      - name: Assert a post-deploy power cycle runs through the reboot annotation
+        uses: ./.github/actions/assert-reboot-annotation-cycle
+        with:
+          machine-name: ${{ env.TARGET_VM_NAME }}
+
       # Last disk-touching step in this lane, deliberately: it reshapes the
       # Machine's spec away from the OS image just verified above onto a
       # dataImages-only intent, overwriting the same disk. A future

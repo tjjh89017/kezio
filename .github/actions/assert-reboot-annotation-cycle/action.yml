@@ -1,0 +1,336 @@
+name: Assert a post-deploy power cycle through the reboot annotation
+
+description: >-
+  Proves the reboot-annotation lane assertion: with spec.online gone, a
+  reboot annotation is the only power choreography left for an
+  already-Provisioned Machine, and this exercises it end to end through
+  the real KubeVirtBMC/Redfish endpoint - the same BMC path
+  provision-target-vm-via-bmc set up for the happy-path deploy. Runs
+  strictly after verify-deploy/assert-deploy-run-progress (needs a
+  Provisioned Machine booted from its deployed disk) and strictly before
+  assert-poweroff-after-deploy (which overwrites the same disk) - see
+  that action's own doc comment for the insertion point it reserves.
+
+  Sets the suffixless reboot annotation
+  (api/v1alpha2/machine_types.go's MachineAnnotationRebootPrefix) with
+  mode "hard": internal/deployer/agent.go's AgentDeployer.Reboot maps
+  hard to a single bmc.BMC.PowerCycle call, which the redfish driver
+  sends as one ComputerSystem.Reset(ForceRestart). KubeVirtBMC's Redfish
+  handler maps ForceRestart to ResourceManager.ForcePowerCycle, which
+  issues a VirtualMachine Restart - one atomic BMC action producing one
+  unambiguous VMI-recreation event. A soft reboot instead decomposes into
+  two independent BMC calls (GracefulShutdown then On - see Reboot's own
+  doc comment calling this "best effort"), with no atomicity between them
+  and a variable-length down window, which would make the cycle harder to
+  bound and assert against for no extra coverage: both modes exercise the
+  same annotation-parse and BMC-dispatch code paths.
+
+  Cycle evidence is the VMI's metadata.uid changing: KubeVirt's Restart
+  always recreates the VirtualMachineInstance, so a new uid is
+  unambiguous proof the guest actually cycled, not just that the BMC call
+  returned success. Boot-from-the-deployed-disk evidence is
+  VirtualMachineInstance.status.conditions[type=AgentConnected]
+  returning to True (the deployed guest's own qemu-guest-agent
+  reconnecting - see verify-deploy's own layer 2) plus
+  create-deploy-marker-posthook's marker file still present with the
+  EXACT SAME deployedAt nanosecond timestamp read before the cycle, read
+  directly through the guest agent (not through verify-deploy, whose own
+  marker check only asserts "not older than a given point," not
+  "unchanged" - a re-deploy would still pass that weaker check but must
+  fail this one). An unchanged deployedAt rules out the guest having
+  net-booted and re-run the deploy instead of falling through PXE to the
+  already-deployed disk.
+
+  KubeVirtBMC's one-shot-PXE quirk (the override recorded in
+  VirtualMachineBMC.status.bootOverride is restored to its pre-override
+  boot order only once the VMI is recreated - see
+  kubevirtbmc/internal/controller/bootorderrestore) does not need an
+  e2e-only accommodation here: create-target-vm bakes the VM's own boot
+  order as PXE-first (interface bootOrder 1, disk bootOrder 2)
+  permanently, and this Reboot call never calls
+  bmc.BMC.SetOneTimePXEBoot at all - only the deploy's own
+  boot-into-agent step (AgentDeployer.Provision) does that, and its
+  oneshot override was already consumed and cleared by
+  bootorderrestore's controller on the VMI transition that landed the
+  original deploy, well before this action runs. Falling through PXE to
+  disk on every boot (including this one) depends only on bootd
+  declining to serve this already-deployed MAC, the same mechanism
+  verify-deploy's own layer 2 already relies on for the initial
+  post-deploy boot - nothing about this action's BMC-driven cycle changes
+  that.
+
+inputs:
+  machine-name:
+    description: Name of the already-Provisioned Machine to cycle. Must still carry its deployed OS disk (run before assert-poweroff-after-deploy).
+    required: true
+  namespace:
+    description: Namespace the Machine and its VirtualMachine/VirtualMachineInstance live in.
+    required: false
+    default: "scaffold-system"
+  vm-name:
+    description: Name of the VirtualMachine/VirtualMachineInstance backing machine-name. Defaults to machine-name (this lane's own enroll convention).
+    required: false
+    default: ""
+  reboot-mode:
+    description: >-
+      Reboot annotation mode to set: "hard" or "soft". Defaults to "hard"
+      - see this action's own description for why.
+    required: false
+    default: "hard"
+  marker-path:
+    description: Guest path the marker file was written to (create-deploy-marker-posthook's own contract).
+    required: false
+    default: "/var/lib/kezio/e2e-deploy-marker"
+  annotation-clear-timeout:
+    description: >-
+      Timeout to wait for the controller to clear the suffixless reboot
+      annotation, in seconds as an integer, optionally suffixed with s.
+      Short: the controller clears it right after the BMC call succeeds,
+      not after the guest finishes rebooting.
+    required: false
+    default: "60s"
+  vmi-recreate-timeout:
+    description: Timeout to wait for the VirtualMachineInstance's metadata.uid to change, in seconds as an integer, optionally suffixed with s.
+    required: false
+    default: "300s"
+  guest-agent-timeout:
+    description: Timeout to wait for the VMI's AgentConnected condition to return to True after the cycle, in seconds as an integer, optionally suffixed with s.
+    required: false
+    default: "600s"
+
+runs:
+  using: composite
+  steps:
+    - name: Capture the pre-cycle VMI uid and marker baseline
+      id: before
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        VM_NAME: ${{ inputs.vm-name }}
+        MARKER_PATH: ${{ inputs.marker-path }}
+      run: |
+        set -euo pipefail
+        vm_name="${VM_NAME:-${MACHINE_NAME}}"
+        echo "vm-name=${vm_name}" >>"${GITHUB_OUTPUT}"
+
+        state="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.state}' || true)"
+        operational_status="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.operationalStatus}' || true)"
+        echo "precondition: Machine ${MACHINE_NAME} state=${state:-<empty>} operationalStatus=${operational_status:-<empty>}"
+        if [ "${state}" != "Provisioned" ] || [ "${operational_status}" != "OK" ]; then
+          echo "::error::precondition failed: Machine ${MACHINE_NAME} must be Provisioned/OK before this action cycles it, got state=${state:-<empty>} operationalStatus=${operational_status:-<empty>}" >&2
+          exit 1
+        fi
+
+        pre_uid="$(kubectl get vmi "${vm_name}" -n "${NAMESPACE}" -o jsonpath='{.metadata.uid}' || true)"
+        if [ -z "${pre_uid}" ]; then
+          echo "::error::precondition failed: no VirtualMachineInstance ${vm_name} found to capture a baseline uid from" >&2
+          exit 1
+        fi
+        echo "pre-vmi-uid=${pre_uid}" >>"${GITHUB_OUTPUT}"
+        echo "baseline VMI ${vm_name} uid=${pre_uid}"
+
+        launcher_pod="$(kubectl get pods -n "${NAMESPACE}" -l "kubevirt.io/vm=${vm_name}" -o json \
+          | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)][0].metadata.name')"
+        if [ -z "${launcher_pod}" ] || [ "${launcher_pod}" = "null" ]; then
+          echo "::error::no non-terminating virt-launcher pod found for VM ${vm_name} to read the baseline marker from" >&2
+          exit 1
+        fi
+        domain="${NAMESPACE}_${vm_name}"
+        open_reply="$(kubectl exec -n "${NAMESPACE}" "${launcher_pod}" -c compute -- \
+          virsh qemu-agent-command "${domain}" "{\"execute\":\"guest-file-open\",\"arguments\":{\"path\":\"${MARKER_PATH}\",\"mode\":\"r\"}}")"
+        handle="$(jq -r '.return' <<<"${open_reply}")"
+        if [ "${handle}" = "null" ] || [ -z "${handle}" ]; then
+          echo "::error::guest-file-open on ${MARKER_PATH} failed while capturing the baseline marker: ${open_reply}" >&2
+          exit 1
+        fi
+        read_reply="$(kubectl exec -n "${NAMESPACE}" "${launcher_pod}" -c compute -- \
+          virsh qemu-agent-command "${domain}" "{\"execute\":\"guest-file-read\",\"arguments\":{\"handle\":${handle},\"count\":4096}}")"
+        kubectl exec -n "${NAMESPACE}" "${launcher_pod}" -c compute -- \
+          virsh qemu-agent-command "${domain}" "{\"execute\":\"guest-file-close\",\"arguments\":{\"handle\":${handle}}}" >/dev/null
+
+        marker_content="$(jq -r '.return["buf-b64"]' <<<"${read_reply}" | base64 -d)"
+        pre_deployed_at="$(printf '%s\n' "${marker_content}" | sed -n 's/^deployedAt=//p')"
+        if ! [[ "${pre_deployed_at}" =~ ^[0-9]+$ ]]; then
+          echo "::error::baseline marker deployedAt=${pre_deployed_at:-<empty>} is not a valid unix nanosecond timestamp: ${marker_content}" >&2
+          exit 1
+        fi
+        echo "pre-marker-deployed-at=${pre_deployed_at}" >>"${GITHUB_OUTPUT}"
+        echo "baseline marker deployedAt=${pre_deployed_at}"
+
+    - name: Set the suffixless reboot annotation
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        REBOOT_MODE: ${{ inputs.reboot-mode }}
+      run: |
+        set -euo pipefail
+        value="$(jq -nc --arg mode "${REBOOT_MODE}" '{mode: $mode}')"
+        kubectl annotate machine "${MACHINE_NAME}" -n "${NAMESPACE}" \
+          "kezio.kojuro.date/reboot=${value}" --overwrite
+        echo "set kezio.kojuro.date/reboot=${value} on Machine ${MACHINE_NAME}"
+
+    - name: Assert the controller cleared the suffixless reboot annotation
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        TIMEOUT: ${{ inputs.annotation-clear-timeout }}
+      run: |
+        set -euo pipefail
+        if [[ ! "${TIMEOUT}" =~ ^[0-9]+s?$ ]]; then
+          echo "::error::invalid annotation-clear-timeout '${TIMEOUT}': want seconds like 60 or 60s" >&2
+          exit 1
+        fi
+        deadline=$(( $(date +%s) + ${TIMEOUT%s} ))
+        while true; do
+          value="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o json \
+            | jq -r '.metadata.annotations["kezio.kojuro.date/reboot"] // ""')"
+          echo "$(date -Is) Machine ${MACHINE_NAME} kezio.kojuro.date/reboot=${value:-<absent>}"
+          [ -z "${value}" ] && break
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::the controller never cleared the suffixless kezio.kojuro.date/reboot annotation within ${TIMEOUT}" >&2
+            kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o yaml || true
+            exit 1
+          fi
+          sleep 3
+        done
+        echo "suffixless reboot annotation cleared"
+
+    - name: Assert the VirtualMachineInstance was recreated (cycle evidence)
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        VM_NAME: ${{ steps.before.outputs.vm-name }}
+        PRE_VMI_UID: ${{ steps.before.outputs.pre-vmi-uid }}
+        TIMEOUT: ${{ inputs.vmi-recreate-timeout }}
+      run: |
+        set -euo pipefail
+        if [[ ! "${TIMEOUT}" =~ ^[0-9]+s?$ ]]; then
+          echo "::error::invalid vmi-recreate-timeout '${TIMEOUT}': want seconds like 300 or 300s" >&2
+          exit 1
+        fi
+        deadline=$(( $(date +%s) + ${TIMEOUT%s} ))
+        while true; do
+          current_uid="$(kubectl get vmi "${VM_NAME}" -n "${NAMESPACE}" -o jsonpath='{.metadata.uid}' || true)"
+          echo "$(date -Is) VMI ${VM_NAME} uid=${current_uid:-<absent>} (baseline ${PRE_VMI_UID})"
+          if [ -n "${current_uid}" ] && [ "${current_uid}" != "${PRE_VMI_UID}" ]; then
+            break
+          fi
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::VirtualMachineInstance ${VM_NAME} never showed a new metadata.uid within ${TIMEOUT} - no evidence the BMC-driven power cycle actually recreated it" >&2
+            kubectl get vm "${VM_NAME}" -n "${NAMESPACE}" -o yaml || true
+            kubectl get vmi "${VM_NAME}" -n "${NAMESPACE}" -o yaml || true
+            exit 1
+          fi
+          sleep 5
+        done
+        echo "VMI recreation confirmed (uid changed from ${PRE_VMI_UID})"
+
+    - name: Assert the guest agent reconnected after the cycle
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        VM_NAME: ${{ steps.before.outputs.vm-name }}
+        TIMEOUT: ${{ inputs.guest-agent-timeout }}
+      run: |
+        set -euo pipefail
+        if [[ ! "${TIMEOUT}" =~ ^[0-9]+s?$ ]]; then
+          echo "::error::invalid guest-agent-timeout '${TIMEOUT}': want seconds like 600 or 600s" >&2
+          exit 1
+        fi
+        deadline=$(( $(date +%s) + ${TIMEOUT%s} ))
+        while true; do
+          connected="$(kubectl get vmi "${VM_NAME}" -n "${NAMESPACE}" \
+            -o jsonpath='{.status.conditions[?(@.type=="AgentConnected")].status}' || true)"
+          echo "$(date -Is) VMI ${VM_NAME} AgentConnected=${connected:-<none>}"
+          [ "${connected}" = "True" ] && break
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::VMI ${VM_NAME} AgentConnected did not return to True within ${TIMEOUT} after the cycle - no evidence the guest booted an OS with qemu-guest-agent running" >&2
+            kubectl get vmi "${VM_NAME}" -n "${NAMESPACE}" -o yaml || true
+            exit 1
+          fi
+          sleep 10
+        done
+        echo "guest agent reconnected"
+
+    - name: Assert the guest booted the deployed disk, not a fresh PXE install
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        VM_NAME: ${{ steps.before.outputs.vm-name }}
+        MARKER_PATH: ${{ inputs.marker-path }}
+        PRE_MARKER_DEPLOYED_AT: ${{ steps.before.outputs.pre-marker-deployed-at }}
+      run: |
+        set -euo pipefail
+        launcher_pod="$(kubectl get pods -n "${NAMESPACE}" -l "kubevirt.io/vm=${VM_NAME}" -o json \
+          | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)][0].metadata.name')"
+        if [ -z "${launcher_pod}" ] || [ "${launcher_pod}" = "null" ]; then
+          echo "::error::no non-terminating virt-launcher pod found for VM ${VM_NAME} to read the post-cycle marker from" >&2
+          exit 1
+        fi
+        domain="${NAMESPACE}_${VM_NAME}"
+        open_reply="$(kubectl exec -n "${NAMESPACE}" "${launcher_pod}" -c compute -- \
+          virsh qemu-agent-command "${domain}" "{\"execute\":\"guest-file-open\",\"arguments\":{\"path\":\"${MARKER_PATH}\",\"mode\":\"r\"}}")"
+        handle="$(jq -r '.return' <<<"${open_reply}")"
+        if [ "${handle}" = "null" ] || [ -z "${handle}" ]; then
+          echo "::error::guest-file-open on ${MARKER_PATH} failed after the cycle - the marker is gone, meaning the guest did not come back up on the same deployed disk: ${open_reply}" >&2
+          exit 1
+        fi
+        read_reply="$(kubectl exec -n "${NAMESPACE}" "${launcher_pod}" -c compute -- \
+          virsh qemu-agent-command "${domain}" "{\"execute\":\"guest-file-read\",\"arguments\":{\"handle\":${handle},\"count\":4096}}")"
+        kubectl exec -n "${NAMESPACE}" "${launcher_pod}" -c compute -- \
+          virsh qemu-agent-command "${domain}" "{\"execute\":\"guest-file-close\",\"arguments\":{\"handle\":${handle}}}" >/dev/null
+
+        marker_content="$(jq -r '.return["buf-b64"]' <<<"${read_reply}" | base64 -d)"
+        echo "post-cycle marker content: ${marker_content}"
+        marker_machine="$(printf '%s\n' "${marker_content}" | sed -n 's/^machine=//p')"
+        marker_deployed_at="$(printf '%s\n' "${marker_content}" | sed -n 's/^deployedAt=//p')"
+
+        fail=0
+        if [ "${marker_machine}" != "${MACHINE_NAME}" ]; then
+          echo "::error::post-cycle marker machine=${marker_machine:-<empty>}, want ${MACHINE_NAME}" >&2
+          fail=1
+        fi
+        if [ "${marker_deployed_at}" != "${PRE_MARKER_DEPLOYED_AT}" ]; then
+          echo "::error::post-cycle marker deployedAt=${marker_deployed_at:-<empty>} changed from the pre-cycle baseline ${PRE_MARKER_DEPLOYED_AT} - the guest ran a fresh deploy instead of falling through PXE to the already-deployed disk" >&2
+          fail=1
+        fi
+        if [ "${fail}" -ne 0 ]; then
+          exit 1
+        fi
+        echo "marker unchanged (deployedAt=${marker_deployed_at}): the guest booted the same deployed disk"
+
+    - name: Assert the Machine stayed Provisioned/OK across the cycle
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+      run: |
+        set -euo pipefail
+        state="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.state}' || true)"
+        operational_status="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.operationalStatus}' || true)"
+        echo "Machine ${MACHINE_NAME}: state=${state:-<empty>} operationalStatus=${operational_status:-<empty>}"
+        fail=0
+        if [ "${state}" != "Provisioned" ]; then
+          echo "::error::Machine ${MACHINE_NAME} status.state=${state:-<empty>} after the cycle, want Provisioned - the reboot annotation must never move state" >&2
+          fail=1
+        fi
+        if [ "${operational_status}" != "OK" ]; then
+          echo "::error::Machine ${MACHINE_NAME} status.operationalStatus=${operational_status:-<empty>} after the cycle, want OK" >&2
+          fail=1
+        fi
+        if [ "${fail}" -ne 0 ]; then
+          kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o yaml || true
+          exit 1
+        fi
+
+    - name: Dump diagnostics on failure
+      if: failure()
+      uses: ./.github/actions/collect-diagnostics
+      with:
+        namespace: ${{ inputs.namespace }}
+        workload-namespace: ${{ inputs.namespace }}
+        output-path: assert-reboot-annotation-cycle-diagnostics
