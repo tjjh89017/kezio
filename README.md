@@ -116,10 +116,10 @@ See `make help` for the full list of targets.
 - [`docs/physical-lab-deployment.md`](docs/physical-lab-deployment.md):
   the manual guide for building a kezio lab on bare metal, including
   network and DHCP setup.
-- [`docs/bmc.md`](docs/bmc.md): the `redfish://`, `ipmi://`, and
-  `ipmitool://` BMC drivers, why `redfish://` and `ipmi://` both work
-  in the default manager image, and how to build the opt-in
-  ipmitool-enabled manager image for `ipmitool://` BMCs.
+- [`docs/bmc.md`](docs/bmc.md): the `redfish://` and `ipmi://` BMC
+  drivers, why both work in the default manager image, and how the
+  graceful-then-forced power-off and the reboot annotation each drive
+  the BMC.
 - [`docs/secure-boot.md`](docs/secure-boot.md): the UEFI Secure Boot
   signature chain the network boot path relies on, the kernel-signing
   story, and what CI does and does not verify.

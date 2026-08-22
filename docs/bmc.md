@@ -10,31 +10,35 @@ address you configure:
 - `ipmi://` (`internal/bmc/ipmi`): talks IPMI directly using the
   pure-Go `bougou/go-ipmi` library. It needs no external binary and
   works in the default manager image.
-- `ipmitool://` (`internal/bmc/ipmitool`): shells out to the
-  `ipmitool` binary for every call. It needs `ipmitool` on the manager
-  container's PATH, so it only works with the opt-in ipmitool-enabled
-  manager image (see below).
 
 ## Powering a machine off: graceful first, forced if it is ignored
 
-`spec.online: false` first asks the machine to shut down gracefully
-(Redfish `GracefulShutdown`, IPMI's soft shutdown), so a machine
-running a deployed OS closes its files instead of losing in-flight
-writes.
+MachineSpec carries no power-intent field: there is no `spec.online`
+switch, and the reboot annotation
+(`kezio.kojuro.date/reboot[-<client>]`) is the only extra power lever a
+client holds over an otherwise idle or provisioned machine (see
+`api/v1alpha2/machine_types.go`'s own doc comment on MachineSpec). The
+BMC-level graceful-then-forced power-off only runs as part of deleting
+a Machine: `MachineReconciler`'s delete walk powers the machine off
+(`AgentDeployer.PowerOff`) once deprovisioning finishes, before
+releasing it. That step asks for a graceful shutdown (Redfish
+`GracefulShutdown`, IPMI's soft shutdown) first, so a machine running a
+deployed OS closes its files instead of losing in-flight writes, then
+checks the BMC's own reported power state once and escalates
+immediately to a forced power-off (Redfish `ForceOff`, IPMI `chassis
+power off`) if it still reports on - a machine with no running OS (one
+sitting in its firmware setup or boot menu, or with a hung kernel) has
+nothing to receive the graceful request, so this escalation is what
+actually powers it down.
 
-A machine with no running OS - one sitting in its firmware setup or
-boot menu, or with a hung kernel - has nothing to receive that
-request. The BMC accepts it and the machine simply stays on. When the
-machine keeps reporting itself powered on 5 minutes after the graceful
-request, the controller escalates once to a forced power-off (Redfish
-`ForceOff`, IPMI `chassis power off`), which the BMC carries out
-itself. `spec.online: false` therefore takes effect even on a machine
-that is wedged before any OS runs.
-
-`afterDeploy: PowerOff` reaches the same path: it makes one graceful
-request of its own at the end of the deployment and then sets
-`spec.online: false`, so a machine that ignores that request is
-escalated by the same rule.
+`afterDeploy: PowerOff` is a different mechanism entirely and never
+reaches the BMC: it only applies when a deployment finishes with no OS
+image to reboot into (a dataImages-only deploy), and kezio-agent itself
+runs the guest-side power-off (`systemctl poweroff`) from inside the
+live environment at the end of the deploy, before it ever hands control
+back to firmware. A machine whose guest never receives or acts on that
+command stays on; only an operator-driven reboot annotation, or a
+Machine deletion, reaches it through the BMC afterward.
 
 ## Redfish is the recommended path
 
@@ -60,34 +64,3 @@ has no extra binary dependency and works with the default manager
 image: `internal/bmc/ipmi` opens an IPMI 2.0/RMCP+ session directly
 over the network using `bougou/go-ipmi`, without shelling out to any
 external tool.
-
-## Using ipmitool:// as a fallback
-
-`ipmitool://` exists as an operator-selectable escape hatch, not the
-default IPMI path: IPMI's long history of inconsistent vendor firmware
-means a specific BMC can occasionally misbehave against the pure-Go
-`ipmi://` driver while working fine against `ipmitool`'s
-battle-tested reference implementation. Reach for `ipmitool://` only
-when a specific BMC demonstrably needs it.
-
-`ipmitool://` requires the opt-in, ipmitool-enabled manager image
-instead of the default one:
-
-```sh
-make docker-build-manager-ipmi   # builds docker/manager-ipmi/Dockerfile, tag: $(IMG_IPMI)
-make docker-push-manager-ipmi
-```
-
-`docker/manager-ipmi/Dockerfile` builds the same manager binary as the
-default `Dockerfile`, but finishes on `debian:stable-slim` with
-`ipmitool` installed via `apt-get`, instead of on distroless. Deploy
-the resulting image the same way as the default manager image (e.g.
-`make deploy IMG=<your-ipmitool-enabled-tag>`), and `ipmitool://` BMCs
-work as normal from there.
-
-If an `ipmitool://` BMC is configured against the default manager
-image, `internal/bmc/ipmitool`'s driver returns a clear error the
-first time it tries to run `ipmitool` and cannot find it on PATH,
-naming both `ipmi://` and `redfish://` as alternatives that already
-work in that image, alongside the ipmitool-enabled image if
-`ipmitool://` itself is genuinely required.

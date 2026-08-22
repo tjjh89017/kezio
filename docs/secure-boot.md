@@ -150,7 +150,7 @@ untrusted one.
 
 None of kezio's CI workflows boot with Secure Boot enabled:
 
-- `.github/workflows/main.yaml`'s `e2e-bmc` job defines its target VM
+- `.github/workflows/main.yaml`'s `e2e-deploy` job defines its target VM
   with OVMF UEFI firmware and `firmware.bootloader.efi.secureBoot:
   false` - no Secure Boot keys are enrolled, so it does not exercise the
   shim/GRUB/kernel signature checks at all. The shim and GRUB binaries
