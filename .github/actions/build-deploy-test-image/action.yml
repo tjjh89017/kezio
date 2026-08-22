@@ -1,0 +1,337 @@
+name: Build and ingest the full-deploy test image
+
+description: >-
+  Builds the OS test image the full-deploy e2e lane writes to a target
+  VM's disk over BitTorrent: downloads a pinned Ubuntu minimal cloud
+  image (UEFI/GPT bootable, ~250MiB compressed - small enough to keep
+  this lane's own surface minimal), injects qemu-guest-agent into it
+  offline, slices and content-hashes every one of its partitions the same
+  way the ingest Job will, then uploads it and waits for the resulting
+  Image to reach Ready. The guest agent is baked in at build time rather
+  than installed by a deploy-time hook: the provisioning network a
+  deployed guest boots into has no guaranteed internet egress, so
+  package installation belongs on the runner (which already needs
+  network access to fetch the base image) rather than added as a second,
+  less reliable network dependency inside the deploy path itself.
+  Ingest itself (internal/ingest) auto-detects partition roles and falls
+  back to a raw sector-for-sector clone for any partition blkid does not
+  recognize (e.g. the image's unformatted BIOS-boot partition) - see
+  internal/ingest/role.go and blkid.go - so this action mirrors that
+  same classification client-side, generalized across however many
+  partitions the source image carries, rather than assuming a fixed
+  count or a single content partition the way ingest-test-image's
+  synthetic fixture does.
+
+  Needs a KubeVirt-capable, KVM-usable runner for the guest-agent
+  injection step (virt-customize boots a supermin appliance under KVM):
+  the calling job must make /dev/kvm usable before this action runs (see
+  prepare-kvm-host, already required by every lane that starts a real
+  VM).
+
+inputs:
+  image-name:
+    description: 'Name to give the uploaded Image (and image-service upload).'
+    required: false
+    default: "kezio-e2e-deploy-test"
+  namespace:
+    description: 'Namespace the image-service Service and the Image live in.'
+    required: false
+    default: "scaffold-system"
+  token:
+    description: Bearer token kezioctl authenticates the upload with.
+    required: true
+  image-service-service-name:
+    description: 'Name of the image-service Service to port-forward.'
+    required: false
+    default: "kezio-image-service"
+  local-port:
+    description: 'Local port the image-service Service is port-forwarded to.'
+    required: false
+    default: "18080"
+  wait-timeout-seconds:
+    description: >-
+      How long to poll for the Image to reach Ready before failing. Higher
+      than ingest-test-image's default: this image carries real partition
+      content (hundreds of MiB), not a 2MiB fixture.
+    required: false
+    default: "600"
+  cloud-image-url:
+    description: 'URL of the pristine Ubuntu minimal cloud image to download.'
+    required: false
+    default: "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img"
+  cloud-image-sha256:
+    description: 'Expected sha256 of cloud-image-url''s content, verified before any tool touches it.'
+    required: false
+    default: "b3064efb500d71d6ccbe619b1716062b803e285116e040627b430aaee14cced6"
+
+outputs:
+  image-name:
+    description: 'Name of the Image object created (this action''s own image-name input, echoed back for a downstream step that only has this action''s outputs to work from).'
+    value: ${{ inputs.image-name }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install partclone, qemu-utils, and libguestfs-tools (not preinstalled on the runner)
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq --no-install-recommends partclone qemu-utils libguestfs-tools
+
+    - name: Build kezioctl
+      shell: bash
+      run: go build -o bin/kezioctl ./cmd/kezioctl
+
+    - name: Download and verify the base cloud image
+      shell: bash
+      env:
+        CLOUD_IMAGE_URL: ${{ inputs.cloud-image-url }}
+        CLOUD_IMAGE_SHA256: ${{ inputs.cloud-image-sha256 }}
+      run: |
+        set -euo pipefail
+        curl -fL --retry 3 --max-time 300 -o "${RUNNER_TEMP}/base.img" "${CLOUD_IMAGE_URL}"
+        echo "${CLOUD_IMAGE_SHA256}  ${RUNNER_TEMP}/base.img" | sha256sum -c -
+
+    - name: Download the base image's package manifest
+      shell: bash
+      env:
+        CLOUD_IMAGE_URL: ${{ inputs.cloud-image-url }}
+      run: |
+        set -euo pipefail
+        manifest_url="${CLOUD_IMAGE_URL%.img}.manifest"
+        curl -fsSL --retry 3 -o "${RUNNER_TEMP}/base.manifest" "${manifest_url}"
+
+    - name: Inject qemu-guest-agent offline
+      # --no-network + dpkg -i rather than --network + --install: booting
+      # the appliance's networking hit unresolvable passt/DHCP failures
+      # in a runner environment in the past (see this repo's history for
+      # the debugging trail), so every package the chroot needs is
+      # resolved and downloaded from the runner's own network access
+      # first, then installed into the guest with no network of its own.
+      #
+      # qemu-guest-agent's Depends: is not fully covered by the minimal
+      # cloud image's own package set (e.g. liburing2/libnuma1), which
+      # would otherwise crash-loop the daemon on start. A fixed
+      # dependency list would only be a stopgap against future version
+      # bumps, so the closure is resolved dynamically via `apt-get
+      # install --simulate` (apt's real solver, resolving `a | b`
+      # alternatives and virtual packages) with
+      # `-o Dir::State::status=/dev/null` so it reflects
+      # qemu-guest-agent's complete dependency tree, not whatever this
+      # runner already has installed. What is actually missing from the
+      # image is found by diffing that closure against the image's own
+      # sibling .manifest file (dpkg-query -W format), not assumed.
+      #
+      # No "systemctl enable" step: the shipped unit
+      # (BindsTo=dev-virtio\x2dports-org.qemu.guest_agent.0.device) has
+      # no [Install] section - it is systemd device-activated, starting
+      # itself the moment the guest's virtio-serial guest-agent channel
+      # appears (which KubeVirt always exposes), with nothing to enable.
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        mapfile -t qga_closure < <(
+          apt-get install --simulate -o Dir::State::status=/dev/null \
+            --no-install-recommends qemu-guest-agent \
+            | awk '/^Inst /{n=$2; sub(/:.*$/, "", n); print n}' \
+            | sort -u
+        )
+
+        mapfile -t qga_missing < <(
+          comm -23 \
+            <(printf '%s\n' "${qga_closure[@]}" | sort -u) \
+            <(awk -F'\t' '{n=$1; sub(/:.*$/, "", n); print n}' "${RUNNER_TEMP}/base.manifest" | sort -u)
+        )
+        if ! printf '%s\n' "${qga_missing[@]:-}" | grep -qxF qemu-guest-agent; then
+          qga_missing+=("qemu-guest-agent")
+        fi
+        echo "missing from the image manifest, to be downloaded and injected (${#qga_missing[@]} packages): ${qga_missing[*]}"
+
+        qga_deb_dir="${RUNNER_TEMP}/qga-debs"
+        mkdir -p "${qga_deb_dir}"
+        (
+          cd "${qga_deb_dir}"
+          for pkg in "${qga_missing[@]}"; do
+            if ! apt-get download "${pkg}"; then
+              echo "::error::apt-get download failed for '${pkg}' (part of qemu-guest-agent's dependency closure)" >&2
+              exit 1
+            fi
+          done
+        )
+
+        # LIBGUESTFS_BACKEND=direct skips libguestfs's backend probe and
+        # forces it onto /dev/kvm (made usable by the calling job's own
+        # prepare-kvm-host step, or equivalent - see this action's own
+        # description).
+        export LIBGUESTFS_BACKEND=direct
+        # Ubuntu ships /boot/vmlinuz-* mode 0600; virt-customize runs
+        # unprivileged, so supermin needs it world-readable to build its appliance.
+        sudo chmod 0644 /boot/vmlinuz-*
+        guestfs_log="$(mktemp)"
+
+        # 300s bound: guards a silent regression to a slow TCG fallback,
+        # not a genuinely slow but successful run (normally well under a
+        # minute on KVM).
+        if ! timeout 300 virt-customize -a "${RUNNER_TEMP}/base.img" \
+          --no-network \
+          --copy-in "${qga_deb_dir}:/tmp" \
+          --run-command 'dpkg -i /tmp/qga-debs/*.deb' \
+          --verbose >"${guestfs_log}" 2>&1; then
+          echo "::error::virt-customize failed or timed out; full --verbose output follows" >&2
+          cat "${guestfs_log}" >&2
+          exit 1
+        fi
+
+    - name: Convert the customized image to raw and dump its partition table
+      id: disk
+      shell: bash
+      run: |
+        set -euo pipefail
+        disk="${RUNNER_TEMP}/deploy-test.raw"
+        qemu-img convert -O raw "${RUNNER_TEMP}/base.img" "${disk}"
+        sfdisk --json "${disk}" >"${RUNNER_TEMP}/sfdisk.json"
+        echo "disk-path=${disk}" >>"${GITHUB_OUTPUT}"
+
+    - name: Slice, classify, and content-hash every partition
+      # Mirrors internal/ingest/role.go's classifyRole and cmd/ingest's
+      # blkid/partclone selection so the layout this uploads names the
+      # exact PartitionContent objects the ingest Job will independently
+      # produce from the same bytes (kezioctl image upload --layout has
+      # no way to derive this itself - see internal/kezioctl/layout.go's
+      # doc comment). Generalized over however many partitions sfdisk
+      # reports: unlike ingest-test-image's single-partition synthetic
+      # fixture, a real distro image carries several (root, a separate
+      # /boot, an ESP, and - on this Ubuntu layout - an unformatted
+      # BIOS-boot partition with no recognizable file system, which
+      # falls back to partclone.dd exactly as ingest itself would).
+      id: fixture
+      shell: bash
+      env:
+        DISK_PATH: ${{ steps.disk.outputs.disk-path }}
+      run: |
+        set -euo pipefail
+
+        sector_size="$(jq -r '.partitiontable.sectorsize // 512' "${RUNNER_TEMP}/sfdisk.json")"
+        n="$(jq '.partitiontable.partitions | length' "${RUNNER_TEMP}/sfdisk.json")"
+
+        slots="[]"
+        for i in $(seq 0 $((n - 1))); do
+          num=$((i + 1))
+          start_sectors="$(jq -r ".partitiontable.partitions[$i].start" "${RUNNER_TEMP}/sfdisk.json")"
+          size_sectors="$(jq -r ".partitiontable.partitions[$i].size" "${RUNNER_TEMP}/sfdisk.json")"
+          type_guid="$(jq -r ".partitiontable.partitions[$i].type" "${RUNNER_TEMP}/sfdisk.json")"
+          start_bytes=$((start_sectors * sector_size))
+          size_bytes=$((size_sectors * sector_size))
+
+          slice="${RUNNER_TEMP}/part${num}.raw"
+          dd if="${DISK_PATH}" of="${slice}" bs=1M iflag=skip_bytes,count_bytes \
+            skip="${start_bytes}" count="${size_bytes}" status=none
+
+          fstype="$(blkid -o value -s TYPE "${slice}" || true)"
+
+          # Same rule as internal/ingest/role.go's classifyRole: ESP and
+          # MSR are identified by GPT type GUID (or the legacy MBR "ef"
+          # code for ESP); everything else is "data" unless blkid itself
+          # reports a Linux swap signature.
+          lc_type="$(echo "${type_guid}" | tr 'A-Z' 'a-z')"
+          role="data"
+          case "${lc_type}" in
+          c12a7328-f81f-11d2-ba4b-00a0c93ec93b | ef) role="esp" ;;
+          e3c9e316-0b5c-4db8-817d-f92df00215ae) role="msr" ;;
+          *) [ "${fstype}" = "swap" ] && role="swap" ;;
+          esac
+
+          # cmd/ingest's blkidToPartcloneFSType alias: every other blkid
+          # TYPE matches its partclone binary suffix one-for-one.
+          partclone_suffix="${fstype}"
+          [ "${fstype}" = "msdos" ] && partclone_suffix="fat"
+
+          content_dir="${RUNNER_TEMP}/content${num}"
+          mkdir -p "${content_dir}"
+          if [ -n "${fstype}" ] && command -v "partclone.${partclone_suffix}" >/dev/null 2>&1; then
+            partclone."${partclone_suffix}" -c -F -s "${slice}" -o "${content_dir}" -T -L "${RUNNER_TEMP}/partclone${num}.log"
+          else
+            partclone.dd -F -s "${slice}" -o "${content_dir}" -T -L "${RUNNER_TEMP}/partclone${num}.log"
+          fi
+          rm -f "${slice}"
+
+          content_ref="$(bin/kezioctl content hash "${content_dir}")"
+          echo "partition ${num}: role=${role} fstype='${fstype}' contentRef=${content_ref}"
+
+          slots="$(echo "${slots}" | jq --argjson num "${num}" --arg role "${role}" --arg ref "${content_ref}" \
+            '. + [{number: $num, role: $role, contentRef: {name: $ref}}]')"
+        done
+
+        jq -n --arg pt gpt --slurpfile sf "${RUNNER_TEMP}/sfdisk.json" --argjson slots "${slots}" '{
+          partitionTable: $pt,
+          sfdisk: $sf[0],
+          slots: $slots
+        }' >"${RUNNER_TEMP}/layout.json"
+
+        echo "layout-path=${RUNNER_TEMP}/layout.json" >>"${GITHUB_OUTPUT}"
+
+    - name: Upload the deploy test image and wait for its Image to reach Ready
+      shell: bash
+      env:
+        IMAGE_NAME: ${{ inputs.image-name }}
+        NAMESPACE: ${{ inputs.namespace }}
+        TOKEN: ${{ inputs.token }}
+        SERVICE_NAME: ${{ inputs.image-service-service-name }}
+        LOCAL_PORT: ${{ inputs.local-port }}
+        WAIT_TIMEOUT_SECONDS: ${{ inputs.wait-timeout-seconds }}
+        DISK_PATH: ${{ steps.disk.outputs.disk-path }}
+        LAYOUT_PATH: ${{ steps.fixture.outputs.layout-path }}
+      run: |
+        set -euo pipefail
+
+        dump_diagnostics() {
+          echo "::group::Image ${IMAGE_NAME}"
+          kubectl get image "${IMAGE_NAME}" -n "${NAMESPACE}" -o yaml || true
+          echo "::endgroup::"
+          echo "::group::ingest Job/pod"
+          kubectl describe jobs -n "${NAMESPACE}" -l "app.kubernetes.io/component=image-ingest-job" || true
+          kubectl logs -n "${NAMESPACE}" -l "app.kubernetes.io/component=image-ingest-job" --all-containers --tail=1000 || true
+          echo "::endgroup::"
+        }
+
+        kubectl -n "${NAMESPACE}" port-forward "svc/${SERVICE_NAME}" "${LOCAL_PORT}:8080" &
+        pf_pid=$!
+        trap 'kill "${pf_pid}" 2>/dev/null || true' EXIT
+
+        for _ in $(seq 1 30); do
+          curl -sf -o /dev/null "http://127.0.0.1:${LOCAL_PORT}/healthz" && break
+          sleep 1
+        done
+
+        trap 'dump_diagnostics; kill "${pf_pid}" 2>/dev/null || true' ERR
+        bin/kezioctl image upload "${DISK_PATH}" \
+          --name "${IMAGE_NAME}" \
+          --namespace "${NAMESPACE}" \
+          --server "http://127.0.0.1:${LOCAL_PORT}" \
+          --token "${TOKEN}" \
+          --layout "${LAYOUT_PATH}"
+
+        deadline=$(( $(date +%s) + WAIT_TIMEOUT_SECONDS ))
+        while true; do
+          state="$(kubectl get image "${IMAGE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || true)"
+          echo "image ${IMAGE_NAME} state=${state:-<none>}"
+          if [ "${state}" = "Ready" ]; then
+            break
+          fi
+          if [ "${state}" = "Failed" ]; then
+            echo "::error::Image ${IMAGE_NAME} reached Failed" >&2
+            dump_diagnostics
+            exit 1
+          fi
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::Image ${IMAGE_NAME} did not reach Ready within ${WAIT_TIMEOUT_SECONDS}s" >&2
+            dump_diagnostics
+            exit 1
+          fi
+          sleep 5
+        done
+        trap 'kill "${pf_pid}" 2>/dev/null || true' EXIT
+
+        echo "Image ${IMAGE_NAME} reached Ready"
