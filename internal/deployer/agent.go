@@ -391,7 +391,10 @@ func (d *AgentDeployer) pollAgentRegistration(ctx context.Context, machine *kezi
 // by internal/agentserver's POST /agent/progress handler as the agent
 // executes the plan: Succeeded reports Complete, Failed reports Failed
 // with the recorded failure message, and every other phase reports
-// Continuing.
+// Continuing. Succeeded is recorded from the agent's terminal progress
+// report, sent just before it runs the after-deploy reboot/poweroff
+// command - see the Deployer interface's own Provision doc comment for
+// what Complete does and does not confirm.
 //
 // restartOnFailure asks Provision to discard this attempt's in-progress
 // state and start over, mirroring Inspect's own restartOnFailure handling.

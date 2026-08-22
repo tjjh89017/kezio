@@ -117,8 +117,16 @@ type Deployer interface {
 	Inspect(ctx context.Context, machine *keziov1alpha2.Machine, restartOnFailure bool) (Result, error)
 
 	// Provision drives one step of deploying run to machine. On Complete,
-	// the machine has booted the deployed image, or - for a
-	// dataImages-only run - reached its after-deploy power state.
+	// run finished successfully and kezio-agent has already committed to
+	// the after-deploy action (internal/agent/deploy's systemctl reboot
+	// or poweroff) as its last act before handing the machine back -
+	// booting the deployed image, or for a dataImages-only run reaching
+	// its after-deploy power state, races that observation and is not
+	// separately confirmed here: the terminal success report lands
+	// before that command runs, since nothing sent after it is
+	// guaranteed to land. A reboot falls through to the disk (the
+	// one-time PXE override armed to boot the live agent was already
+	// consumed getting here) rather than net-booting the agent again.
 	// restartOnFailure carries the same meaning as in Inspect, scoped to
 	// this Provision step: the implementation discards this attempt's
 	// in-progress state - including any progress already recorded on run

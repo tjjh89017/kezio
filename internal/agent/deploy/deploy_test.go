@@ -267,6 +267,9 @@ func TestExecute_DataImagesOnlyPlanNoOSImage(t *testing.T) {
 	if launcher.launched {
 		t.Error("ezio was launched for a plan with no torrent slots")
 	}
+	if !slices.Contains(calls, "systemctl poweroff") {
+		t.Errorf("systemctl poweroff was not invoked for a dataImages-only plan; calls: %v", calls)
+	}
 	last := reporter.Reports[len(reporter.Reports)-1]
 	if last.State != agentapi.ProgressStateSucceeded {
 		t.Fatalf("last report state = %q, want succeeded", last.State)
@@ -319,6 +322,54 @@ func TestExecute_AfterDeployPowerOff(t *testing.T) {
 	}
 	if slices.Contains(calls, "systemctl reboot") {
 		t.Errorf("systemctl reboot was invoked despite AfterDeployPowerOff; calls: %v", calls)
+	}
+}
+
+// TestExecute_AfterDeployActionFailureOverridesTerminalReportToFailed
+// covers Execute's ordering contract: the terminal Succeeded report for
+// DeployRunPhaseSucceeded is sent before systemctl reboot/poweroff runs
+// (nothing sent after that call is guaranteed to land), so a run whose
+// after-deploy action itself fails must not have that already-sent
+// Succeeded report stand as the final word - the deferred failure
+// report, keyed to the same step, must supersede it.
+func TestExecute_AfterDeployActionFailureOverridesTerminalReportToFailed(t *testing.T) {
+	client := newFakeEzioClient(nil)
+	e, runner, _, reporter := newTestExecutor(client)
+	runner.errs["systemctl reboot"] = errors.New("systemctl: no such unit")
+
+	plan := basicPlan()
+	plan.Slots = []agentapi.DeploySlot{{Number: 1, Device: "/dev/sda1", Mkfs: &agentapi.DeployMkfs{Filesystem: "ext4"}}}
+
+	err := e.Execute(context.Background(), plan)
+	if err == nil {
+		t.Fatal("Execute: want an error when the after-deploy action itself fails")
+	}
+
+	var succeededReports, failedReports int
+	for _, r := range reporter.Reports {
+		if r.Step != keziov1alpha2.DeployRunPhaseSucceeded {
+			continue
+		}
+		switch r.State {
+		case agentapi.ProgressStateSucceeded:
+			succeededReports++
+		case agentapi.ProgressStateFailed:
+			failedReports++
+		}
+	}
+	if succeededReports != 1 {
+		t.Errorf("Succeeded-step Succeeded reports = %d, want 1 (sent before the after-deploy action runs)", succeededReports)
+	}
+	if failedReports != 1 {
+		t.Errorf("Succeeded-step Failed reports = %d, want 1 (the after-deploy action's own failure must supersede it)", failedReports)
+	}
+
+	last := reporter.Reports[len(reporter.Reports)-1]
+	if last.State != agentapi.ProgressStateFailed {
+		t.Fatalf("final report state = %q, want %q", last.State, agentapi.ProgressStateFailed)
+	}
+	if last.Step != keziov1alpha2.DeployRunPhaseSucceeded {
+		t.Errorf("final report step = %q, want %q so applyProgressToDeployRun overwrites the run's already-recorded Succeeded phase", last.Step, keziov1alpha2.DeployRunPhaseSucceeded)
 	}
 }
 
