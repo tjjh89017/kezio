@@ -49,8 +49,8 @@ func newMachine(namespace string, subnetRef keziov1alpha2.NameRef) *keziov1alpha
 	}
 }
 
-// newSubnet always names the Subnet "sub1"; namespace and seederNetworkRef
-// are the fields callers vary.
+// newSubnet always names the Subnet "sub1" and points spec.siteRef at "hq";
+// namespace and seederNetworkRef are the fields callers vary.
 func newSubnet(namespace string, seederNetworkRef *keziov1alpha2.NameRef) *keziov1alpha2.Subnet {
 	return &keziov1alpha2.Subnet{
 		ObjectMeta: metav1.ObjectMeta{Name: "sub1", Namespace: namespace},
@@ -66,17 +66,36 @@ func newSubnet(namespace string, seederNetworkRef *keziov1alpha2.NameRef) *kezio
 	}
 }
 
+// newSite always names the Site "hq" - the name every newSubnet's
+// spec.siteRef names - with namespace and seederSubnetRef the fields
+// callers vary.
+func newSite(namespace string, seederSubnetRef *keziov1alpha2.NameRef) *keziov1alpha2.Site {
+	return &keziov1alpha2.Site{
+		ObjectMeta: metav1.ObjectMeta{Name: "hq", Namespace: namespace},
+		Spec: keziov1alpha2.SiteSpec{
+			SeederSubnetRef: seederSubnetRef,
+		},
+	}
+}
+
 func TestResolveHappyPath(t *testing.T) {
 	subnetRef := keziov1alpha2.NameRef{Name: "sub1"}
 	seederRef := &keziov1alpha2.NameRef{Name: "seeder-nad"}
 	machine := newMachine("ns1", subnetRef)
 	subnet := newSubnet("ns1", seederRef)
+	site := newSite("ns1", &keziov1alpha2.NameRef{Name: "sub1"})
 
-	c := newTestClient(t, machine, subnet)
+	c := newTestClient(t, machine, subnet, site)
 
 	got, err := Resolve(context.Background(), c, machine)
 	if err != nil {
 		t.Fatalf("Resolve returned error: %v", err)
+	}
+	if !got.HasSeeder {
+		t.Errorf("HasSeeder = false, want true")
+	}
+	if got.SiteIdentity != "ns1/hq" {
+		t.Errorf("SiteIdentity = %q, want %q", got.SiteIdentity, "ns1/hq")
 	}
 	if got.Identity != "ns1/sub1" {
 		t.Errorf("Identity = %q, want %q", got.Identity, "ns1/sub1")
@@ -92,18 +111,130 @@ func TestResolveHappyPath(t *testing.T) {
 	}
 }
 
+// The core L3 capability: a machine sits on one Subnet, but its Site
+// designates a different Subnet to host the seeder. Resolve must return
+// the Site's seeding Subnet's facts, not the machine's own Subnet's.
+func TestResolveFollowsSiteToADifferentSeedingSubnet(t *testing.T) {
+	machineSubnetRef := keziov1alpha2.NameRef{Name: "machine-subnet"}
+	machine := newMachine("ns1", machineSubnetRef)
+
+	machineSubnet := &keziov1alpha2.Subnet{
+		ObjectMeta: metav1.ObjectMeta{Name: "machine-subnet", Namespace: "ns1"},
+		Spec: keziov1alpha2.SubnetSpec{
+			SiteRef:         keziov1alpha2.NameRef{Name: "hq"},
+			CIDR:            "192.0.2.0/24",
+			BootdServerIP:   "192.0.2.2",
+			BootdNetworkRef: &keziov1alpha2.NameRef{Name: "bootd-nad"},
+			DHCP:            &keziov1alpha2.SubnetDHCP{Mode: keziov1alpha2.SubnetDHCPModeProxy},
+		},
+	}
+	seederRef := &keziov1alpha2.NameRef{Name: "seeder-nad"}
+	seedingSubnet := &keziov1alpha2.Subnet{
+		ObjectMeta: metav1.ObjectMeta{Name: "seeding-subnet", Namespace: "ns1"},
+		Spec: keziov1alpha2.SubnetSpec{
+			SiteRef:          keziov1alpha2.NameRef{Name: "hq"},
+			CIDR:             "198.51.100.0/24",
+			SeederNetworkRef: seederRef,
+			NodeSelector:     map[string]string{"kubernetes.io/hostname": "node-2"},
+		},
+	}
+	site := newSite("ns1", &keziov1alpha2.NameRef{Name: "seeding-subnet"})
+
+	c := newTestClient(t, machine, machineSubnet, seedingSubnet, site)
+
+	got, err := Resolve(context.Background(), c, machine)
+	if err != nil {
+		t.Fatalf("Resolve returned error: %v", err)
+	}
+	if !got.HasSeeder {
+		t.Fatalf("HasSeeder = false, want true")
+	}
+	if got.Identity != "ns1/seeding-subnet" {
+		t.Errorf("Identity = %q, want the Site's seeding Subnet %q, not the machine's own Subnet", got.Identity, "ns1/seeding-subnet")
+	}
+	if got.SeederNetworkRef == nil || got.SeederNetworkRef.Name != "seeder-nad" {
+		t.Errorf("SeederNetworkRef = %+v, want name %q", got.SeederNetworkRef, "seeder-nad")
+	}
+	if got.NodeSelector["kubernetes.io/hostname"] != "node-2" {
+		t.Errorf("NodeSelector = %+v, want kubernetes.io/hostname=node-2 (the seeding Subnet's), not the machine Subnet's", got.NodeSelector)
+	}
+}
+
+// A dangling Subnet.spec.siteRef is a user-facing misconfiguration,
+// classified so a caller can surface it rather than retry forever.
+func TestResolveDanglingSiteRefIsClassified(t *testing.T) {
+	subnetRef := keziov1alpha2.NameRef{Name: "sub1"}
+	machine := newMachine("ns1", subnetRef)
+	subnet := newSubnet("ns1", nil)
+	c := newTestClient(t, machine, subnet)
+
+	got, err := Resolve(context.Background(), c, machine)
+	if !errors.Is(err, ErrSiteNotFound) {
+		t.Fatalf("err = %v, want wrapping ErrSiteNotFound", err)
+	}
+	if got.SiteIdentity != "" || got.Identity != "" || got.Subnet != nil {
+		t.Fatalf("Resolution = %+v, want zero value on error", got)
+	}
+}
+
+// A Site whose seederSubnetRef names a Subnet that does not exist is a
+// user-facing misconfiguration, classified rather than retried.
+func TestResolveDanglingSeederSubnetRefIsClassified(t *testing.T) {
+	subnetRef := keziov1alpha2.NameRef{Name: "sub1"}
+	machine := newMachine("ns1", subnetRef)
+	subnet := newSubnet("ns1", nil)
+	site := newSite("ns1", &keziov1alpha2.NameRef{Name: "ghost-subnet"})
+	c := newTestClient(t, machine, subnet, site)
+
+	got, err := Resolve(context.Background(), c, machine)
+	if !errors.Is(err, ErrSeederSubnetNotFound) {
+		t.Fatalf("err = %v, want wrapping ErrSeederSubnetNotFound", err)
+	}
+	if got.SiteIdentity != "" || got.Identity != "" || got.Subnet != nil {
+		t.Fatalf("Resolution = %+v, want zero value on error", got)
+	}
+}
+
+// A Site with no seederSubnetRef at all runs no seeder - a supported
+// topology, not an error - and Resolution must express it distinctly
+// (HasSeeder false) rather than looking like an ordinary successful
+// resolution.
+func TestResolveSiteWithNoSeederSubnetRefHasNoSeeder(t *testing.T) {
+	subnetRef := keziov1alpha2.NameRef{Name: "sub1"}
+	machine := newMachine("ns1", subnetRef)
+	subnet := newSubnet("ns1", nil)
+	site := newSite("ns1", nil)
+	c := newTestClient(t, machine, subnet, site)
+
+	got, err := Resolve(context.Background(), c, machine)
+	if err != nil {
+		t.Fatalf("Resolve returned error: %v", err)
+	}
+	if got.HasSeeder {
+		t.Fatalf("HasSeeder = true, want false: Site declares no seederSubnetRef")
+	}
+	if got.SiteIdentity != "ns1/hq" {
+		t.Errorf("SiteIdentity = %q, want %q", got.SiteIdentity, "ns1/hq")
+	}
+	if got.Identity != "" || got.Subnet != nil || got.SeederNetworkRef != nil {
+		t.Fatalf("Resolution = %+v, want Identity/Subnet/SeederNetworkRef all zero when HasSeeder is false", got)
+	}
+}
+
 // Subnet names aren't cluster-unique; a bare Subnet.Name would collapse two
 // unrelated segments' seeder demand into one Deployment.
 func TestResolveNamespaceQualifiesIdentity(t *testing.T) {
 	subnetRefA := keziov1alpha2.NameRef{Name: "sub1"}
 	machineA := newMachine("region-a", subnetRefA)
 	subnetA := newSubnet("region-a", nil)
+	siteA := newSite("region-a", &keziov1alpha2.NameRef{Name: "sub1"})
 
 	subnetRefB := keziov1alpha2.NameRef{Name: "sub1"}
 	machineB := newMachine("region-b", subnetRefB)
 	subnetB := newSubnet("region-b", nil)
+	siteB := newSite("region-b", &keziov1alpha2.NameRef{Name: "sub1"})
 
-	c := newTestClient(t, machineA, subnetA, machineB, subnetB)
+	c := newTestClient(t, machineA, subnetA, siteA, machineB, subnetB, siteB)
 
 	gotA, err := Resolve(context.Background(), c, machineA)
 	if err != nil {
@@ -143,8 +274,9 @@ func TestResolveCrossNamespace(t *testing.T) {
 	subnetRef := keziov1alpha2.NameRef{Namespace: "y", Name: "sub1"}
 	machine := newMachine("x", subnetRef)
 	subnet := newSubnet("y", nil)
+	site := newSite("y", &keziov1alpha2.NameRef{Name: "sub1"})
 
-	c := newTestClient(t, machine, subnet)
+	c := newTestClient(t, machine, subnet, site)
 
 	got, err := Resolve(context.Background(), c, machine)
 	if err != nil {
@@ -163,12 +295,16 @@ func TestResolveSubnetWithNoSeederNetworkRef(t *testing.T) {
 	subnetRef := keziov1alpha2.NameRef{Name: "sub1"}
 	machine := newMachine("ns1", subnetRef)
 	subnet := newSubnet("ns1", nil)
+	site := newSite("ns1", &keziov1alpha2.NameRef{Name: "sub1"})
 
-	c := newTestClient(t, machine, subnet)
+	c := newTestClient(t, machine, subnet, site)
 
 	got, err := Resolve(context.Background(), c, machine)
 	if err != nil {
 		t.Fatalf("Resolve returned error: %v", err)
+	}
+	if !got.HasSeeder {
+		t.Errorf("HasSeeder = false, want true: the seeding Subnet resolved, it just has no SeederNetworkRef")
 	}
 	if got.SeederNetworkRef != nil {
 		t.Errorf("SeederNetworkRef = %+v, want nil", got.SeederNetworkRef)
