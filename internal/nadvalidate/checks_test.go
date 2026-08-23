@@ -128,6 +128,13 @@ func TestCheckSeederOverlap(t *testing.T) {
 		wantReason    string
 	}{
 		{
+			name:          "a Subnet with no boot half has no bootdServerIP to check, so the result explains that rather than passing by omission or claiming a violation",
+			seederConfig:  `{"ipam":{"type":"static","addresses":[{"address":"192.0.2.9/32"}]}}`,
+			bootdServerIP: "",
+			want:          OK,
+			wantReason:    "NoBootdAddress",
+		},
+		{
 			name:          "bootdServerIP inside a whereabouts range is a violation",
 			seederConfig:  `{"ipam":{"type":"whereabouts","range":"192.0.2.0/24"}}`,
 			bootdServerIP: "192.0.2.2",
@@ -221,6 +228,124 @@ func TestCheckSeederOverlap(t *testing.T) {
 			got := CheckSeederOverlap(tt.seederConfig, tt.bootdServerIP)
 			if got.Verdict != tt.want {
 				t.Fatalf("Verdict = %v, want %v (message: %s)", got.Verdict, tt.want, got.Message)
+			}
+			if got.Reason == "" {
+				t.Fatalf("Reason is empty, want a CamelCase reason token")
+			}
+			if tt.wantReason != "" && got.Reason != tt.wantReason {
+				t.Fatalf("Reason = %v, want %v", got.Reason, tt.wantReason)
+			}
+		})
+	}
+}
+
+func TestCheckTrackerAddress(t *testing.T) {
+	tests := []struct {
+		name         string
+		subnetCIDR   string
+		seederConfig string
+		trackerIP    string
+		want         Verdict
+		wantReason   string
+	}{
+		{
+			name:         "tracker.ip inside the cidr and outside the pool passes",
+			subnetCIDR:   "192.0.2.0/24",
+			seederConfig: `{"ipam":{"type":"whereabouts","range":"192.0.2.128/25"}}`,
+			trackerIP:    "192.0.2.2",
+			want:         OK,
+			wantReason:   "TrackerAddressAvailable",
+		},
+		{
+			name:         "tracker.ip outside the seeding Subnet's cidr is a violation",
+			subnetCIDR:   "192.0.2.0/24",
+			seederConfig: `{"ipam":{"type":"whereabouts","range":"198.51.100.0/24"}}`,
+			trackerIP:    "198.51.100.2",
+			want:         Violation,
+			wantReason:   "TrackerAddressOutsideCIDR",
+		},
+		{
+			name:         "tracker.ip inside the static address set is a violation",
+			subnetCIDR:   "192.0.2.0/24",
+			seederConfig: `{"ipam":{"type":"static","addresses":[{"address":"192.0.2.2/32"}]}}`,
+			trackerIP:    "192.0.2.2",
+			want:         Violation,
+			wantReason:   "TrackerOverlapStatic",
+		},
+		{
+			name:         "tracker.ip inside a whereabouts range is a violation",
+			subnetCIDR:   "192.0.2.0/24",
+			seederConfig: `{"ipam":{"type":"whereabouts","range":"192.0.2.0/24"}}`,
+			trackerIP:    "192.0.2.2",
+			want:         Violation,
+			wantReason:   "TrackerOverlapWhereabouts",
+		},
+		{
+			name:         "tracker.ip inside a host-local pool is a violation",
+			subnetCIDR:   "192.0.2.0/24",
+			seederConfig: `{"ipam":{"type":"host-local","subnet":"192.0.2.0/24"}}`,
+			trackerIP:    "192.0.2.2",
+			want:         Violation,
+			wantReason:   "TrackerOverlapHostLocal",
+		},
+		{
+			name:         "tracker.ip is not a valid IPv4 address is cannot-determine, not a false violation",
+			subnetCIDR:   "192.0.2.0/24",
+			seederConfig: `{"ipam":{"type":"static","addresses":[{"address":"192.0.2.2/32"}]}}`,
+			trackerIP:    "999.1.1.1",
+			want:         Indeterminate,
+			wantReason:   "TrackerIPInvalid",
+		},
+		{
+			name:         "unparseable subnet cidr is cannot-determine",
+			subnetCIDR:   "not-a-cidr",
+			seederConfig: `{"ipam":{"type":"static","addresses":[{"address":"192.0.2.2/32"}]}}`,
+			trackerIP:    "192.0.2.2",
+			want:         Indeterminate,
+			wantReason:   "SubnetCIDRUnparseable",
+		},
+		{
+			name:         "unparseable seeder NAD config is cannot-determine",
+			subnetCIDR:   "192.0.2.0/24",
+			seederConfig: `{not json`,
+			trackerIP:    "192.0.2.2",
+			want:         Indeterminate,
+			wantReason:   "SeederNADConfigUnparseable",
+		},
+		{
+			name:         "unrecognised seeder ipam kind is cannot-determine, not a false violation",
+			subnetCIDR:   "192.0.2.0/24",
+			seederConfig: `{"ipam":{"type":"dhcp"}}`,
+			trackerIP:    "192.0.2.2",
+			want:         Indeterminate,
+			wantReason:   "SeederIPAMUnrecognised",
+		},
+		{
+			name:         "host-local pool narrowed by rangeStart/rangeEnd is cannot-determine rather than guessed",
+			subnetCIDR:   "192.0.2.0/24",
+			seederConfig: `{"ipam":{"type":"host-local","subnet":"192.0.2.0/24","rangeStart":"192.0.2.10","rangeEnd":"192.0.2.20"}}`,
+			trackerIP:    "192.0.2.2",
+			want:         Indeterminate,
+			wantReason:   "TrackerIPAMHostLocalBounded",
+		},
+		{
+			name:         "no seeder ipam configured cannot hand out tracker.ip",
+			subnetCIDR:   "192.0.2.0/24",
+			seederConfig: `{"ipam":{}}`,
+			trackerIP:    "192.0.2.2",
+			want:         OK,
+			wantReason:   "SeederIPAMEmpty",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CheckTrackerAddress(tt.subnetCIDR, tt.seederConfig, tt.trackerIP)
+			if got.Verdict != tt.want {
+				t.Fatalf("Verdict = %v, want %v (message: %s)", got.Verdict, tt.want, got.Message)
+			}
+			if got.Verdict == Violation && tt.want != Violation {
+				t.Fatalf("must never report Violation for an indeterminate or unrecognised input")
 			}
 			if got.Reason == "" {
 				t.Fatalf("Reason is empty, want a CamelCase reason token")

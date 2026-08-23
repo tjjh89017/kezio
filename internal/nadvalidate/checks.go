@@ -126,6 +126,20 @@ func CheckBootdAddress(bootdConfig, bootdServerIP string) CheckResult {
 // includes bootdServerIP could hand it to a seeder pod and collide with
 // the PXE next-server bootd itself is bound to.
 func CheckSeederOverlap(seederConfig, bootdServerIP string) CheckResult {
+	if bootdServerIP == "" {
+		// A Subnet with no boot half (Subnet.HasBootPlane false) has no
+		// bootdServerIP at all, so there is no address the pool could
+		// collide with - a definite conclusion, not an unparseable or
+		// unrecognised input, so OK (not Indeterminate) is the honest
+		// verdict; the Reason/Message still say why the check found
+		// nothing to flag, rather than the caller skipping the call.
+		return CheckResult{
+			Verdict: OK,
+			Reason:  "NoBootdAddress",
+			Message: "this Subnet has no boot half, so there is no bootdServerIP the seeder pool could collide with",
+		}
+	}
+
 	ip := parseIPv4(bootdServerIP)
 	if ip == nil {
 		return CheckResult{
@@ -188,6 +202,97 @@ func CheckSeederOverlap(seederConfig, bootdServerIP string) CheckResult {
 			Verdict: Indeterminate,
 			Reason:  "SeederIPAMUnrecognised",
 			Message: fmt.Sprintf("seeder NAD ipam type %q is not recognised; cannot confirm bootdServerIP %s is outside its pool", ipam.Kind, bootdServerIP),
+		}
+	}
+}
+
+// CheckTrackerAddress checks that trackerIP - a Site's tracker.ip -
+// falls inside subnetCIDR (the seeding Subnet's own CIDR) and outside
+// the pool seederConfig - that Subnet's seeder NAD's spec.config - can
+// hand to an attaching pod. Both halves matter: an address outside the
+// CIDR is not reachable on the seeding Subnet at all, and one inside the
+// seeder pool could be handed to a seeder pod and collide with the
+// tracker's own pinned address, the same failure CheckSeederOverlap
+// guards against for bootdServerIP.
+func CheckTrackerAddress(subnetCIDR, seederConfig, trackerIP string) CheckResult {
+	ip := parseIPv4(trackerIP)
+	if ip == nil {
+		return CheckResult{
+			Verdict: Indeterminate,
+			Reason:  "TrackerIPInvalid",
+			Message: fmt.Sprintf("tracker.ip %q is not a valid IPv4 address", trackerIP),
+		}
+	}
+
+	_, cidr, err := net.ParseCIDR(subnetCIDR)
+	if err != nil {
+		return CheckResult{
+			Verdict: Indeterminate,
+			Reason:  "SubnetCIDRUnparseable",
+			Message: fmt.Sprintf("seeding Subnet cidr %q: %v", subnetCIDR, err),
+		}
+	}
+	if !cidr.Contains(ip) {
+		return CheckResult{
+			Verdict: Violation,
+			Reason:  "TrackerAddressOutsideCIDR",
+			Message: fmt.Sprintf("tracker.ip %s falls outside the seeding Subnet's cidr %s, so it is not reachable on that Subnet", trackerIP, subnetCIDR),
+		}
+	}
+
+	ipam, err := ParseIPAM(seederConfig)
+	if err != nil {
+		return CheckResult{
+			Verdict: Indeterminate,
+			Reason:  "SeederNADConfigUnparseable",
+			Message: fmt.Sprintf("seeder NAD config: %v", err),
+		}
+	}
+
+	switch ipam.Kind {
+	case KindNone:
+		return CheckResult{Verdict: OK, Reason: "SeederIPAMEmpty", Message: "seeder NAD has no ipam configured, so it cannot hand out tracker.ip"}
+	case KindStatic:
+		for _, a := range ipam.Addresses {
+			if a.Equal(ip) {
+				return CheckResult{
+					Verdict: Violation,
+					Reason:  "TrackerOverlapStatic",
+					Message: fmt.Sprintf("seeder NAD static ipam includes tracker.ip %s: a seeder pod would be handed the tracker's own address", trackerIP),
+				}
+			}
+		}
+		return CheckResult{Verdict: OK, Reason: "TrackerAddressAvailable", Message: "seeder NAD static ipam does not include tracker.ip"}
+	case KindWhereabouts:
+		if ipam.Range.Contains(ip) {
+			return CheckResult{
+				Verdict: Violation,
+				Reason:  "TrackerOverlapWhereabouts",
+				Message: fmt.Sprintf("seeder NAD whereabouts range %s includes tracker.ip %s: whereabouts could allocate it to a seeder pod", ipam.Range.String(), trackerIP),
+			}
+		}
+		return CheckResult{Verdict: OK, Reason: "TrackerAddressAvailable", Message: "seeder NAD whereabouts range does not include tracker.ip"}
+	case KindHostLocal:
+		if ipam.RangeBounded || ipam.Subnet == nil {
+			return CheckResult{
+				Verdict: Indeterminate,
+				Reason:  "TrackerIPAMHostLocalBounded",
+				Message: "seeder NAD host-local ipam narrows its subnet with rangeStart/rangeEnd; cannot confirm tracker.ip is outside the pool",
+			}
+		}
+		if ipam.Subnet.Contains(ip) {
+			return CheckResult{
+				Verdict: Violation,
+				Reason:  "TrackerOverlapHostLocal",
+				Message: fmt.Sprintf("seeder NAD host-local subnet %s includes tracker.ip %s", ipam.Subnet.String(), trackerIP),
+			}
+		}
+		return CheckResult{Verdict: OK, Reason: "TrackerAddressAvailable", Message: "seeder NAD host-local subnet does not include tracker.ip"}
+	default:
+		return CheckResult{
+			Verdict: Indeterminate,
+			Reason:  "SeederIPAMUnrecognised",
+			Message: fmt.Sprintf("seeder NAD ipam type %q is not recognised; cannot confirm tracker.ip %s is outside its pool", ipam.Kind, trackerIP),
 		}
 	}
 }

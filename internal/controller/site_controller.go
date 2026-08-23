@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	"github.com/tjjh89017/kezio/internal/nadvalidate"
 )
 
 // trackerDeploymentOwnershipRequeueAfter bounds how long a Site with an
@@ -114,7 +115,7 @@ func (r *SiteReconciler) onChange(ctx context.Context, site *keziov1alpha2.Site)
 		// (SiteSpec.SeederSubnetRef's own doc comment).
 		site.Status.SeederReady = false
 		site.Status.TrackerURL = ""
-		return ctrl.Result{}, r.updateSiteConditions(ctx, site, nil, false, false, false, "", "")
+		return ctrl.Result{}, r.updateSiteConditions(ctx, site, nil, nil, false, false, false, "", "")
 	}
 
 	subnet, invalid, err := r.resolveSeedingSubnet(ctx, site)
@@ -124,7 +125,7 @@ func (r *SiteReconciler) onChange(ctx context.Context, site *keziov1alpha2.Site)
 	if invalid != nil {
 		site.Status.SeederReady = false
 		site.Status.TrackerURL = ""
-		return ctrl.Result{}, r.updateSiteConditions(ctx, site, invalid, false, false, false, "", "")
+		return ctrl.Result{}, r.updateSiteConditions(ctx, site, invalid, nil, false, false, false, "", "")
 	}
 
 	seederReady, err := r.seederPlacementReady(ctx, subnet)
@@ -137,7 +138,7 @@ func (r *SiteReconciler) onChange(ctx context.Context, site *keziov1alpha2.Site)
 		// The operator already runs this tracker: kezio creates nothing
 		// and checks nothing about its reachability.
 		site.Status.TrackerURL = site.Spec.Tracker.ExternalURL
-		return ctrl.Result{}, r.updateSiteConditions(ctx, site, nil, false, false, false, "", "")
+		return ctrl.Result{}, r.updateSiteConditions(ctx, site, nil, nil, false, false, false, "", "")
 	}
 
 	site.Status.TrackerURL = trackerAnnounceURL(site.Spec.Tracker.IP)
@@ -150,11 +151,16 @@ func (r *SiteReconciler) onChange(ctx context.Context, site *keziov1alpha2.Site)
 			reason:  "SeederNetworkRefMissing",
 			message: fmt.Sprintf("seeding Subnet %s/%s has no seederNetworkRef, so this Site's tracker cannot be single-homed on a pinned address", subnet.Namespace, subnet.Name),
 		}
-		return ctrl.Result{}, r.updateSiteConditions(ctx, site, invalid, false, false, false, "", "")
+		return ctrl.Result{}, r.updateSiteConditions(ctx, site, invalid, nil, false, false, false, "", "")
+	}
+
+	checks, err := r.runTrackerAddressCheck(ctx, site, subnet)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 
 	if !r.TrackerDeployment.enabled() {
-		return ctrl.Result{}, r.updateSiteConditions(ctx, site, nil, true, false, false,
+		return ctrl.Result{}, r.updateSiteConditions(ctx, site, nil, checks, true, false, false,
 			"SiteTrackerDeploymentImageUnconfigured",
 			"no tracker Deployment image is configured on the manager (TRACKER_DEPLOYMENT_IMAGE); the tracker is not reconciled for this Site")
 	}
@@ -178,10 +184,30 @@ func (r *SiteReconciler) onChange(ctx context.Context, site *keziov1alpha2.Site)
 		depReason, depMessage = trackerDeploymentUnavailableReason(dep)
 	}
 
-	if err := r.updateSiteConditions(ctx, site, nil, true, true, depAvailable, depReason, depMessage); err != nil {
+	if err := r.updateSiteConditions(ctx, site, nil, checks, true, true, depAvailable, depReason, depMessage); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// runTrackerAddressCheck fetches seedingSubnet's SeederNetworkRef config
+// and runs nadvalidate.CheckTrackerAddress against site's Tracker.IP, the
+// same shape SubnetReconciler.runNADChecks uses for CheckBootdAddress/
+// CheckSeederOverlap. Called only once seedingSubnet.Spec.SeederNetworkRef
+// is known non-nil.
+//
+// A NAD that cannot be fetched or parsed produces an Indeterminate result
+// rather than aborting the reconcile, mirroring runNADChecks; only a
+// non-NotFound API error is returned as an error.
+func (r *SiteReconciler) runTrackerAddressCheck(ctx context.Context, site *keziov1alpha2.Site, seedingSubnet *keziov1alpha2.Subnet) ([]nadvalidate.CheckResult, error) {
+	seederConfig, err := fetchNADConfig(ctx, r.Client, *seedingSubnet.Spec.SeederNetworkRef, seedingSubnet.Namespace)
+	if err != nil {
+		if !isIndeterminateNADErr(err) {
+			return nil, err
+		}
+		return []nadvalidate.CheckResult{indeterminateFromFetchErr("Seeder", "seeder NAD", err)}, nil
+	}
+	return []nadvalidate.CheckResult{nadvalidate.CheckTrackerAddress(seedingSubnet.Spec.CIDR, seederConfig, site.Spec.Tracker.IP)}, nil
 }
 
 // listSubnetRefs returns the sorted names of the Subnets in site's own
@@ -297,23 +323,46 @@ func (r *SiteReconciler) reconcileTrackerDeployment(ctx context.Context, site *k
 
 // updateSiteConditions writes SiteConditionValid and SiteConditionReady.
 //
-// Valid is False when invalid names an unresolved seederSubnetRef, True
-// otherwise - Site has no Advisory/Indeterminate tier of its own, unlike
-// Subnet's NAD checks.
+// Valid is False when invalid names an unresolved seederSubnetRef, or
+// when checks (nadvalidate.CheckTrackerAddress's result, when it ran)
+// holds a Violation; Unknown when checks holds an Indeterminate and no
+// Violation is present; True otherwise. invalid always outranks checks:
+// it names a cross-reference that must resolve before a tracker address
+// check can even run.
 //
-// Ready mirrors updateSubnetConditions' own precedence: an invalid
-// reference always wins (Ready can never be True on top of a broken
-// cross-reference); otherwise, when a tracker Deployment is wanted
-// (trackerWanted - site declares a seeding Subnet and Tracker.IP, not
-// ExternalURL), Ready additionally requires depConfigured and
-// depAvailable. A Site with no tracker Deployment of its own
+// Ready mirrors updateSubnetConditions' own precedence: invalid, then a
+// checks Violation, always win (Ready can never be True on top of either);
+// otherwise, when a tracker Deployment is wanted (trackerWanted - site
+// declares a seeding Subnet and Tracker.IP, not ExternalURL), Ready
+// additionally requires depConfigured and depAvailable; then a checks
+// Indeterminate goes Unknown. A Site with no tracker Deployment of its own
 // (trackerWanted false: no seederSubnetRef, or Tracker.ExternalURL) is
 // Ready once Valid, exactly as SiteConditionReady's own doc comment
 // states.
-func (r *SiteReconciler) updateSiteConditions(ctx context.Context, site *keziov1alpha2.Site, invalid *siteValidationFailure, trackerWanted, depConfigured, depAvailable bool, depReason, depMessage string) error {
+func (r *SiteReconciler) updateSiteConditions(ctx context.Context, site *keziov1alpha2.Site, invalid *siteValidationFailure, checks []nadvalidate.CheckResult, trackerWanted, depConfigured, depAvailable bool, depReason, depMessage string) error {
+	var violation, indeterminate *nadvalidate.CheckResult
+	for i := range checks {
+		c := &checks[i]
+		switch c.Verdict {
+		case nadvalidate.Violation:
+			if violation == nil {
+				violation = c
+			}
+		case nadvalidate.Indeterminate:
+			if indeterminate == nil {
+				indeterminate = c
+			}
+		}
+	}
+
 	validStatus, validReason, validMessage := metav1.ConditionTrue, "SiteValid", "no blocking validation issues found"
-	if invalid != nil {
+	switch {
+	case invalid != nil:
 		validStatus, validReason, validMessage = metav1.ConditionFalse, invalid.reason, invalid.message
+	case violation != nil:
+		validStatus, validReason, validMessage = metav1.ConditionFalse, violation.Reason, violation.Message
+	case indeterminate != nil:
+		validStatus, validReason, validMessage = metav1.ConditionUnknown, indeterminate.Reason, indeterminate.Message
 	}
 	apimeta.SetStatusCondition(&site.Status.Conditions, metav1.Condition{
 		Type:               keziov1alpha2.SiteConditionValid,
@@ -327,8 +376,12 @@ func (r *SiteReconciler) updateSiteConditions(ctx context.Context, site *keziov1
 	switch {
 	case invalid != nil:
 		readyStatus, readyReason, readyMessage = metav1.ConditionFalse, invalid.reason, invalid.message
+	case violation != nil:
+		readyStatus, readyReason, readyMessage = metav1.ConditionFalse, violation.Reason, violation.Message
 	case trackerWanted && (!depConfigured || !depAvailable):
 		readyStatus, readyReason, readyMessage = metav1.ConditionFalse, depReason, depMessage
+	case indeterminate != nil:
+		readyStatus, readyReason, readyMessage = metav1.ConditionUnknown, indeterminate.Reason, indeterminate.Message
 	case trackerWanted:
 		readyReason, readyMessage = "SiteTrackerReady", "tracker Deployment is available and validation found no issues"
 	}

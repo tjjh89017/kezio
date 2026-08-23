@@ -377,7 +377,7 @@ func (r *SubnetReconciler) runNADChecks(ctx context.Context, subnet *keziov1alph
 	var checks []subnetCheck
 
 	if subnet.Spec.HasBootPlane() {
-		bootdConfig, err := r.fetchNADConfig(ctx, *subnet.Spec.BootdNetworkRef, subnet.Namespace)
+		bootdConfig, err := fetchNADConfig(ctx, r.Client, *subnet.Spec.BootdNetworkRef, subnet.Namespace)
 		if err != nil {
 			if !isIndeterminateNADErr(err) {
 				return nil, err
@@ -392,7 +392,7 @@ func (r *SubnetReconciler) runNADChecks(ctx context.Context, subnet *keziov1alph
 		return checks, nil
 	}
 
-	seederConfig, err := r.fetchNADConfig(ctx, *subnet.Spec.SeederNetworkRef, subnet.Namespace)
+	seederConfig, err := fetchNADConfig(ctx, r.Client, *subnet.Spec.SeederNetworkRef, subnet.Namespace)
 	if err != nil {
 		if !isIndeterminateNADErr(err) {
 			return nil, err
@@ -401,12 +401,11 @@ func (r *SubnetReconciler) runNADChecks(ctx context.Context, subnet *keziov1alph
 		checks = append(checks, subnetCheck{result: fetchErr})
 		return checks, nil
 	}
-	// CheckSeederOverlap has nothing to compare against without a
-	// bootdServerIP; a Subnet with no boot half skips it rather than
-	// getting a spurious BootdServerIPInvalid Indeterminate.
-	if subnet.Spec.HasBootPlane() {
-		checks = append(checks, subnetCheck{result: nadvalidate.CheckSeederOverlap(seederConfig, subnet.Spec.BootdServerIP)})
-	}
+	// CheckSeederOverlap reports its own Indeterminate (reason
+	// NoBootdAddress) when subnet.Spec.BootdServerIP is empty, so a
+	// Subnet with no boot half still gets a result that explains why
+	// there is nothing to check rather than the call being skipped.
+	checks = append(checks, subnetCheck{result: nadvalidate.CheckSeederOverlap(seederConfig, subnet.Spec.BootdServerIP)})
 
 	concurrentImages, err := r.concurrentSeederDeployments(ctx, subnet)
 	if err != nil {
@@ -417,15 +416,17 @@ func (r *SubnetReconciler) runNADChecks(ctx context.Context, subnet *keziov1alph
 	return checks, nil
 }
 
-// fetchNADConfig fetches the NAD ref names (in subnet's own namespace)
-// and returns its spec.config. A failure to read spec.config out of an
-// otherwise-fetched NAD is wrapped in nadContentError so callers can
-// tell it apart from a Get failure.
-func (r *SubnetReconciler) fetchNADConfig(ctx context.Context, ref keziov1alpha2.NameRef, defaultNS string) (string, error) {
+// fetchNADConfig fetches the NAD ref names (in defaultNS when ref carries
+// no namespace of its own) through c and returns its spec.config. Shared
+// by SubnetReconciler and SiteReconciler, both of which resolve a NAD ref
+// to a config string before handing it to internal/nadvalidate. A failure
+// to read spec.config out of an otherwise-fetched NAD is wrapped in
+// nadContentError so callers can tell it apart from a Get failure.
+func fetchNADConfig(ctx context.Context, c client.Client, ref keziov1alpha2.NameRef, defaultNS string) (string, error) {
 	ns := resolveNamespace(ref, defaultNS)
 	nad := &unstructured.Unstructured{}
 	nad.SetGroupVersionKind(networkAttachmentDefinitionGVK)
-	if err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: ref.Name}, nad); err != nil {
+	if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: ref.Name}, nad); err != nil {
 		return "", err
 	}
 	config, err := nadvalidate.ConfigFromUnstructured(nad)

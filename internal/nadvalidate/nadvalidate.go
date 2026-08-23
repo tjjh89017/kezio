@@ -18,9 +18,11 @@ limitations under the License.
 // NetworkAttachmentDefinitions against invariants the rest of kezio
 // depends on but does not generate: that BootdServerIP is really the
 // static address the bootd NAD hands out, that it can never be handed
-// to a seeder pod from the seeder NAD's own pool, and that a seeder
-// NAD's static ipam choice is flagged once a Site's seeder concurrency
-// outgrows what a single fixed address can serve.
+// to a seeder pod from the seeder NAD's own pool, that a Site's
+// tracker.ip falls inside its seeding Subnet's CIDR and outside that
+// same pool, and that a seeder NAD's static ipam choice is flagged once
+// a Site's seeder concurrency outgrows what a single fixed address can
+// serve.
 //
 // Every check takes a NAD's spec.config JSON as a plain string, so the
 // ipam parsing at its core is table-testable without a fake client or

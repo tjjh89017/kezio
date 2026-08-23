@@ -86,6 +86,7 @@ var _ = Describe("Site Controller", func() {
 			s.Spec.SeederNetworkRef = &keziov1alpha2.NameRef{Name: "seeder-nad"}
 		})
 		Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
+		createTestNAD(ctx, ns, "seeder-nad", `{"ipam":{}}`)
 
 		setSeederSubnetRef(ctx, site, subnet.Name, keziov1alpha2.SiteTracker{IP: "192.0.2.60"})
 
@@ -278,6 +279,7 @@ var _ = Describe("Site Controller", func() {
 			s.Spec.SeederNetworkRef = &keziov1alpha2.NameRef{Name: "seeder-nad"}
 		})
 		Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
+		createTestNAD(ctx, ns, "seeder-nad", `{"ipam":{}}`)
 		setSeederSubnetRef(ctx, site, subnet.Name, keziov1alpha2.SiteTracker{IP: "192.0.2.60"})
 
 		r := &SiteReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()} // zero-value TrackerDeployment: not enabled()
@@ -299,5 +301,61 @@ var _ = Describe("Site Controller", func() {
 		Expect(readyCond).NotTo(BeNil())
 		Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(readyCond.Reason).To(Equal("SiteTrackerDeploymentImageUnconfigured"))
+	})
+
+	It("passes Valid when tracker.ip falls inside the seeding Subnet's cidr and outside the seeder NAD's pool", func() {
+		ns := createSubnetTestNamespace(ctx)
+		site := testSite(ctx, ns, "site-h")
+
+		subnet := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
+			s.Spec.SiteRef = keziov1alpha2.NameRef{Name: "site-h"}
+			s.Spec.SeederNetworkRef = &keziov1alpha2.NameRef{Name: "seeder-nad"}
+		})
+		Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
+		createTestNAD(ctx, ns, "seeder-nad", `{"ipam":{"type":"whereabouts","range":"192.0.2.128/25"}}`)
+		setSeederSubnetRef(ctx, site, subnet.Name, keziov1alpha2.SiteTracker{IP: "192.0.2.60"})
+
+		r := newSiteTestReconciler()
+		key := types.NamespacedName{Name: site.Name, Namespace: ns}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		var updated keziov1alpha2.Site
+		Expect(k8sClient.Get(ctx, key, &updated)).To(Succeed())
+		validCond := findCondition(updated.Status.Conditions, keziov1alpha2.SiteConditionValid)
+		Expect(validCond).NotTo(BeNil())
+		Expect(validCond.Status).To(Equal(metav1.ConditionTrue))
+	})
+
+	It("fails Valid when tracker.ip falls inside the seeder NAD's own pool", func() {
+		ns := createSubnetTestNamespace(ctx)
+		site := testSite(ctx, ns, "site-i")
+
+		subnet := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
+			s.Spec.SiteRef = keziov1alpha2.NameRef{Name: "site-i"}
+			s.Spec.SeederNetworkRef = &keziov1alpha2.NameRef{Name: "seeder-nad"}
+		})
+		Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
+		// tracker.ip falls inside this whereabouts range: the pool could
+		// hand a seeder pod the tracker's own address.
+		createTestNAD(ctx, ns, "seeder-nad", `{"ipam":{"type":"whereabouts","range":"192.0.2.0/24"}}`)
+		setSeederSubnetRef(ctx, site, subnet.Name, keziov1alpha2.SiteTracker{IP: "192.0.2.60"})
+
+		r := newSiteTestReconciler()
+		key := types.NamespacedName{Name: site.Name, Namespace: ns}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		var updated keziov1alpha2.Site
+		Expect(k8sClient.Get(ctx, key, &updated)).To(Succeed())
+		validCond := findCondition(updated.Status.Conditions, keziov1alpha2.SiteConditionValid)
+		Expect(validCond).NotTo(BeNil())
+		Expect(validCond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(validCond.Reason).To(Equal("TrackerOverlapWhereabouts"))
+
+		readyCond := findCondition(updated.Status.Conditions, keziov1alpha2.SiteConditionReady)
+		Expect(readyCond).NotTo(BeNil())
+		Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(readyCond.Reason).To(Equal("TrackerOverlapWhereabouts"))
 	})
 })
