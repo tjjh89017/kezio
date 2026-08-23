@@ -360,8 +360,9 @@ func main() {
 		}
 	}
 	if err := (&controller.SiteReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		TrackerDeployment: trackerDeploymentConfigFromEnv(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Site")
 		os.Exit(1)
@@ -603,5 +604,18 @@ func bootdDeploymentConfigFromEnv() controller.BootdDeploymentConfig {
 		AgentUpstreamURL:   os.Getenv("BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL"),
 		BootUpstreamURL:    os.Getenv("BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL"),
 		HTTPBootURL:        os.Getenv("BOOTD_DEPLOYMENT_HTTP_BOOT_URL"),
+	}
+}
+
+// trackerDeploymentConfigFromEnv builds the Site reconciler's
+// TrackerDeploymentConfig from the environment, mirroring
+// bootdDeploymentConfigFromEnv's shape. Leaving TRACKER_DEPLOYMENT_IMAGE
+// unset yields a config that is not enabled(): the reconciler still
+// computes and writes Valid/Ready for every Site, but a seeding Site's
+// Ready stays False with a reason naming that no image is configured, and
+// no tracker Deployment is created.
+func trackerDeploymentConfigFromEnv() controller.TrackerDeploymentConfig {
+	return controller.TrackerDeploymentConfig{
+		Image: os.Getenv("TRACKER_DEPLOYMENT_IMAGE"),
 	}
 }

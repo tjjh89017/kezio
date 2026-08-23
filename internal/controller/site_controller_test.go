@@ -18,67 +18,286 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 )
 
+// newSiteTestReconciler returns a SiteReconciler with TrackerDeployment
+// enabled against a fake image.
+func newSiteTestReconciler() *SiteReconciler {
+	return &SiteReconciler{
+		Client:            k8sClient,
+		Scheme:            k8sClient.Scheme(),
+		TrackerDeployment: TrackerDeploymentConfig{Image: "tracker:test"},
+	}
+}
+
+// testSite creates a bare Site named name in ns - the first step of the
+// Site/Subnet creation order this package's webhook tests also follow:
+// the Subnet's siteRef must resolve before the Subnet is admitted, and a
+// Site's own seederSubnetRef needs a Subnet that already points back at
+// it, so the Site is created first with no seederSubnetRef and updated
+// afterward.
+func testSite(ctx context.Context, ns, name string) *keziov1alpha2.Site {
+	site := &keziov1alpha2.Site{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
+	ExpectWithOffset(1, k8sClient.Create(ctx, site)).To(Succeed())
+	return site
+}
+
+// setSeederSubnetRef patches site.Spec.SeederSubnetRef and Tracker to the
+// given values - the second step of the creation order testSite documents.
+func setSeederSubnetRef(ctx context.Context, site *keziov1alpha2.Site, subnetName string, tracker keziov1alpha2.SiteTracker) {
+	site.Spec.SeederSubnetRef = &keziov1alpha2.NameRef{Name: subnetName}
+	site.Spec.Tracker = tracker
+	ExpectWithOffset(1, k8sClient.Update(ctx, site)).To(Succeed())
+}
+
+// findTrackerDeployment lists the Deployments in ns carrying
+// trackerDeploymentSiteLabel=siteName, failing the test unless there is
+// exactly one.
+func findTrackerDeployment(ctx context.Context, ns, siteName string) *appsv1.Deployment {
+	var deployments appsv1.DeploymentList
+	ExpectWithOffset(1, k8sClient.List(ctx, &deployments, client.InNamespace(ns), client.MatchingLabels{
+		trackerDeploymentSiteLabel: siteName,
+	})).To(Succeed())
+	ExpectWithOffset(1, deployments.Items).To(HaveLen(1), "expected exactly one tracker Deployment for the Site")
+	return &deployments.Items[0]
+}
+
 var _ = Describe("Site Controller", func() {
-	Context("When reconciling a resource", func() {
-		const resourceName = "test-resource"
+	ctx := context.Background()
 
-		ctx := context.Background()
+	It("creates a tracker Deployment single-homed on the seeding Subnet's NAD, bound to tracker.ip, with no Service", func() {
+		ns := createSubnetTestNamespace(ctx)
+		site := testSite(ctx, ns, "site-a")
 
-		typeNamespacedName := types.NamespacedName{
-			Name:      resourceName,
-			Namespace: "default", // TODO(user):Modify as needed
-		}
-		site := &keziov1alpha2.Site{}
-
-		BeforeEach(func() {
-			By("creating the custom resource for the Kind Site")
-			err := k8sClient.Get(ctx, typeNamespacedName, site)
-			if err != nil && errors.IsNotFound(err) {
-				resource := &keziov1alpha2.Site{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: "default",
-					},
-					// TODO(user): Specify other spec details if needed.
-				}
-				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-			}
+		subnet := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
+			s.Spec.SiteRef = keziov1alpha2.NameRef{Name: "site-a"}
+			s.Spec.SeederNetworkRef = &keziov1alpha2.NameRef{Name: "seeder-nad"}
 		})
+		Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
 
-		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &keziov1alpha2.Site{}
-			err := k8sClient.Get(ctx, typeNamespacedName, resource)
-			Expect(err).NotTo(HaveOccurred())
+		setSeederSubnetRef(ctx, site, subnet.Name, keziov1alpha2.SiteTracker{IP: "192.0.2.60"})
 
-			By("Cleanup the specific resource instance Site")
-			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+		r := newSiteTestReconciler()
+		key := types.NamespacedName{Name: site.Name, Namespace: ns}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		dep := findTrackerDeployment(ctx, ns, "site-a")
+		Expect(dep.Namespace).To(Equal(ns))
+
+		raw, ok := dep.Spec.Template.Annotations[multusDefaultNetworkAnnotation]
+		Expect(ok).To(BeTrue(), "tracker pod must carry the default-network-REPLACING annotation, not the additive one")
+		var elements []trackerNetworkSelectionElement
+		Expect(json.Unmarshal([]byte(raw), &elements)).To(Succeed())
+		Expect(elements).To(HaveLen(1))
+		Expect(elements[0].Name).To(Equal("seeder-nad"))
+		Expect(elements[0].Namespace).To(Equal(ns))
+		Expect(elements[0].IPs).To(Equal([]string{"192.0.2.60"}))
+
+		Expect(dep.Spec.Template.Annotations).NotTo(HaveKey(multusNetworksAnnotation), "the tracker must not carry the additive annotation alongside the default-network one")
+
+		var services corev1.ServiceList
+		Expect(k8sClient.List(ctx, &services, client.InNamespace(ns))).To(Succeed())
+		Expect(services.Items).To(BeEmpty(), "no Service must front the tracker - a ClusterIP would DNAT the address peers announce")
+
+		var updated keziov1alpha2.Site
+		Expect(k8sClient.Get(ctx, key, &updated)).To(Succeed())
+		Expect(updated.Status.TrackerURL).To(Equal("http://192.0.2.60:6969/announce"))
+	})
+
+	It("resolves a tracker URL and creates no Deployment for a Site using tracker.externalURL", func() {
+		ns := createSubnetTestNamespace(ctx)
+		site := testSite(ctx, ns, "site-b")
+
+		subnet := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
+			s.Spec.SiteRef = keziov1alpha2.NameRef{Name: "site-b"}
+			s.Spec.SeederNetworkRef = &keziov1alpha2.NameRef{Name: "seeder-nad"}
 		})
-		It("should successfully reconcile the resource", func() {
-			By("Reconciling the created resource")
-			controllerReconciler := &SiteReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
-			}
+		Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
 
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+		setSeederSubnetRef(ctx, site, subnet.Name, keziov1alpha2.SiteTracker{ExternalURL: "http://tracker.example.com:6969/announce"})
+
+		r := newSiteTestReconciler()
+		key := types.NamespacedName{Name: site.Name, Namespace: ns}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		var deployments appsv1.DeploymentList
+		Expect(k8sClient.List(ctx, &deployments, client.InNamespace(ns), client.MatchingLabels{trackerAppComponentLabel: trackerComponentValue})).To(Succeed())
+		Expect(deployments.Items).To(BeEmpty(), "a Site using tracker.externalURL must never get a tracker Deployment of its own")
+
+		var updated keziov1alpha2.Site
+		Expect(k8sClient.Get(ctx, key, &updated)).To(Succeed())
+		Expect(updated.Status.TrackerURL).To(Equal("http://tracker.example.com:6969/announce"))
+
+		readyCond := findCondition(updated.Status.Conditions, keziov1alpha2.SiteConditionReady)
+		Expect(readyCond).NotTo(BeNil())
+		Expect(readyCond.Status).To(Equal(metav1.ConditionTrue), "a Site with no tracker Deployment of its own is Ready once Valid")
+	})
+
+	It("creates no Deployment and reports no seeder for a Site with no seederSubnetRef", func() {
+		ns := createSubnetTestNamespace(ctx)
+		site := testSite(ctx, ns, "site-c")
+
+		r := newSiteTestReconciler()
+		key := types.NamespacedName{Name: site.Name, Namespace: ns}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		var deployments appsv1.DeploymentList
+		Expect(k8sClient.List(ctx, &deployments, client.InNamespace(ns), client.MatchingLabels{trackerAppComponentLabel: trackerComponentValue})).To(Succeed())
+		Expect(deployments.Items).To(BeEmpty())
+
+		var updated keziov1alpha2.Site
+		Expect(k8sClient.Get(ctx, key, &updated)).To(Succeed())
+		Expect(updated.Status.SeederReady).To(BeFalse())
+		Expect(updated.Status.TrackerURL).To(BeEmpty())
+
+		validCond := findCondition(updated.Status.Conditions, keziov1alpha2.SiteConditionValid)
+		Expect(validCond).NotTo(BeNil())
+		Expect(validCond.Status).To(Equal(metav1.ConditionTrue))
+		readyCond := findCondition(updated.Status.Conditions, keziov1alpha2.SiteConditionReady)
+		Expect(readyCond).NotTo(BeNil())
+		Expect(readyCond.Status).To(Equal(metav1.ConditionTrue), "a Site with no seederSubnetRef has no tracker Deployment of its own, so Ready follows Valid")
+	})
+
+	It("reports the Subnets that select this Site in status.subnetRefs", func() {
+		ns := createSubnetTestNamespace(ctx)
+		site := testSite(ctx, ns, "site-d")
+
+		first := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
+			s.Name = "rack-1"
+			s.Spec.SiteRef = keziov1alpha2.NameRef{Name: "site-d"}
 		})
+		Expect(k8sClient.Create(ctx, first)).To(Succeed())
+		second := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
+			s.Name = "rack-2"
+			s.Spec.CIDR = "192.0.3.0/24"
+			s.Spec.BootdServerIP = "192.0.3.2"
+			s.Spec.SiteRef = keziov1alpha2.NameRef{Name: "site-d"}
+		})
+		Expect(k8sClient.Create(ctx, second)).To(Succeed())
+		other := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
+			s.Name = "rack-3"
+			s.Spec.CIDR = "192.0.4.0/24"
+			s.Spec.BootdServerIP = "192.0.4.2"
+			s.Spec.SiteRef = keziov1alpha2.NameRef{Name: "site-other"}
+		})
+		Expect(k8sClient.Create(ctx, other)).To(Succeed())
+
+		r := newSiteTestReconciler()
+		key := types.NamespacedName{Name: site.Name, Namespace: ns}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		var updated keziov1alpha2.Site
+		Expect(k8sClient.Get(ctx, key, &updated)).To(Succeed())
+		Expect(updated.Status.SubnetRefs).To(Equal([]string{"rack-1", "rack-2"}))
+	})
+
+	It("fails Valid/Ready with SeederSubnetNotFound when the referenced Subnet no longer exists", func() {
+		ns := createSubnetTestNamespace(ctx)
+		site := testSite(ctx, ns, "site-e")
+
+		subnet := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
+			s.Spec.SiteRef = keziov1alpha2.NameRef{Name: "site-e"}
+			s.Spec.SeederNetworkRef = &keziov1alpha2.NameRef{Name: "seeder-nad"}
+		})
+		Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
+		setSeederSubnetRef(ctx, site, subnet.Name, keziov1alpha2.SiteTracker{IP: "192.0.2.60"})
+		Expect(k8sClient.Delete(ctx, subnet)).To(Succeed())
+
+		r := newSiteTestReconciler()
+		key := types.NamespacedName{Name: site.Name, Namespace: ns}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		var updated keziov1alpha2.Site
+		Expect(k8sClient.Get(ctx, key, &updated)).To(Succeed())
+		validCond := findCondition(updated.Status.Conditions, keziov1alpha2.SiteConditionValid)
+		Expect(validCond).NotTo(BeNil())
+		Expect(validCond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(validCond.Reason).To(Equal("SeederSubnetNotFound"))
+		readyCond := findCondition(updated.Status.Conditions, keziov1alpha2.SiteConditionReady)
+		Expect(readyCond).NotTo(BeNil())
+		Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(readyCond.Reason).To(Equal("SeederSubnetNotFound"))
+
+		var deployments appsv1.DeploymentList
+		Expect(k8sClient.List(ctx, &deployments, client.InNamespace(ns), client.MatchingLabels{trackerAppComponentLabel: trackerComponentValue})).To(Succeed())
+		Expect(deployments.Items).To(BeEmpty())
+	})
+
+	It("fails Valid/Ready with SeederSubnetNotOwned when the referenced Subnet's siteRef points elsewhere", func() {
+		ns := createSubnetTestNamespace(ctx)
+		site := testSite(ctx, ns, "site-f")
+
+		subnet := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
+			s.Spec.SiteRef = keziov1alpha2.NameRef{Name: "site-f"}
+			s.Spec.SeederNetworkRef = &keziov1alpha2.NameRef{Name: "seeder-nad"}
+		})
+		Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
+		setSeederSubnetRef(ctx, site, subnet.Name, keziov1alpha2.SiteTracker{IP: "192.0.2.60"})
+
+		// The Subnet's own siteRef drifts away after admission - the
+		// webhook only checked this at Site-create time.
+		subnet.Spec.SiteRef = keziov1alpha2.NameRef{Name: "some-other-site"}
+		Expect(k8sClient.Update(ctx, subnet)).To(Succeed())
+
+		r := newSiteTestReconciler()
+		key := types.NamespacedName{Name: site.Name, Namespace: ns}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		var updated keziov1alpha2.Site
+		Expect(k8sClient.Get(ctx, key, &updated)).To(Succeed())
+		validCond := findCondition(updated.Status.Conditions, keziov1alpha2.SiteConditionValid)
+		Expect(validCond).NotTo(BeNil())
+		Expect(validCond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(validCond.Reason).To(Equal("SeederSubnetNotOwned"))
+	})
+
+	It("reports Ready=False naming the missing image, but Valid=True, when no tracker Deployment image is configured", func() {
+		ns := createSubnetTestNamespace(ctx)
+		site := testSite(ctx, ns, "site-g")
+
+		subnet := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
+			s.Spec.SiteRef = keziov1alpha2.NameRef{Name: "site-g"}
+			s.Spec.SeederNetworkRef = &keziov1alpha2.NameRef{Name: "seeder-nad"}
+		})
+		Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
+		setSeederSubnetRef(ctx, site, subnet.Name, keziov1alpha2.SiteTracker{IP: "192.0.2.60"})
+
+		r := &SiteReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()} // zero-value TrackerDeployment: not enabled()
+		key := types.NamespacedName{Name: site.Name, Namespace: ns}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		var deployments appsv1.DeploymentList
+		Expect(k8sClient.List(ctx, &deployments, client.InNamespace(ns), client.MatchingLabels{trackerAppComponentLabel: trackerComponentValue})).To(Succeed())
+		Expect(deployments.Items).To(BeEmpty(), "no Deployment image configured must never create a half-configured Deployment")
+
+		var updated keziov1alpha2.Site
+		Expect(k8sClient.Get(ctx, key, &updated)).To(Succeed())
+		validCond := findCondition(updated.Status.Conditions, keziov1alpha2.SiteConditionValid)
+		Expect(validCond).NotTo(BeNil())
+		Expect(validCond.Status).To(Equal(metav1.ConditionTrue), "an unconfigured manager is not a Site misconfiguration")
+
+		readyCond := findCondition(updated.Status.Conditions, keziov1alpha2.SiteConditionReady)
+		Expect(readyCond).NotTo(BeNil())
+		Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(readyCond.Reason).To(Equal("SiteTrackerDeploymentImageUnconfigured"))
 	})
 })
