@@ -19,22 +19,22 @@ package controller
 import corev1 "k8s.io/api/core/v1"
 
 // PartitionContentPublishConfig configures the PartitionContent
-// reconciler's publish half: the container image the publish Job runs
-// and the tracker every .torrent it builds announces to. Both are
-// mandatory for publishing (see PartitionContentReconciler.reconcilePending):
-// leaving either unset - the zero PartitionContentPublishConfig, cmd/main.go's
-// default when the corresponding environment variable is absent - holds
-// every PartitionContent at Pending with a condition explaining why,
-// rather than either fabricating a fast path or failing.
+// reconciler's publish half: the container image the publish Job runs.
+// It carries no tracker or announce setting - publishing never has a
+// Site in scope, so it has no correct announce URL to bake into
+// anything (see internal/ingest.PublishConfig's doc comment); the
+// per-Site announce is applied later, at the seeder. Image is mandatory
+// for publishing (see PartitionContentReconciler.reconcilePending):
+// leaving it unset - the zero PartitionContentPublishConfig,
+// cmd/main.go's default when the corresponding environment variable is
+// absent - holds every PartitionContent at Pending with a condition
+// explaining why, rather than either fabricating a fast path or
+// failing.
 type PartitionContentPublishConfig struct {
 	// Image is the publish Job's container image (runs the ingest
 	// package's publish step against the content PVC and its scratch
 	// source). Read from PARTITIONCONTENT_PUBLISH_IMAGE.
 	Image string
-	// TrackerURL is the BitTorrent announce URL baked into every
-	// .torrent the publish step builds. Read from
-	// PARTITIONCONTENT_TRACKER_URL.
-	TrackerURL string
 	// ServiceAccountName is the publish Job pod's service account. Empty
 	// uses the namespace default. Read from
 	// PARTITIONCONTENT_PUBLISH_SERVICE_ACCOUNT.
@@ -66,8 +66,8 @@ func (cfg PartitionContentPublishConfig) accessModes() []corev1.PersistentVolume
 }
 
 // ready reports whether cfg carries enough configuration for the
-// reconciler to publish content: both the Job image and the tracker URL
-// are mandatory (see the type doc comment).
+// reconciler to publish content: the Job image is mandatory (see the
+// type doc comment).
 func (cfg PartitionContentPublishConfig) ready() bool {
-	return cfg.Image != "" && cfg.TrackerURL != ""
+	return cfg.Image != ""
 }

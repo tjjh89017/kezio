@@ -474,14 +474,14 @@ func imageIngestConfigFromEnv() controller.ImageIngestConfig {
 
 // partitionContentPublishConfigFromEnv builds the PartitionContent
 // reconciler's PartitionContentPublishConfig from the environment.
-// Leaving PARTITIONCONTENT_PUBLISH_IMAGE or PARTITIONCONTENT_TRACKER_URL
-// unset yields a config that is not ready() (see its doc comment): the
-// reconciler holds every PartitionContent at Pending rather than either
-// of them alone yielding half-configured behavior.
+// Leaving PARTITIONCONTENT_PUBLISH_IMAGE unset yields a config that is
+// not ready() (see its doc comment): the reconciler holds every
+// PartitionContent at Pending until it is set. There is no cluster-wide
+// tracker setting to read here - a PartitionContent needs none to reach
+// Ready (see PartitionContentPublishConfig's doc comment).
 func partitionContentPublishConfigFromEnv() controller.PartitionContentPublishConfig {
 	cfg := controller.PartitionContentPublishConfig{
 		Image:              os.Getenv("PARTITIONCONTENT_PUBLISH_IMAGE"),
-		TrackerURL:         os.Getenv("PARTITIONCONTENT_TRACKER_URL"),
 		ServiceAccountName: os.Getenv("PARTITIONCONTENT_PUBLISH_SERVICE_ACCOUNT"),
 		StorageClassName:   os.Getenv("PARTITIONCONTENT_STORAGE_CLASS"),
 	}

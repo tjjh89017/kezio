@@ -40,8 +40,7 @@ var _ = Describe("PartitionContent Controller seed demand from Machines and Depl
 
 	newDemandReconciler := func() (*PartitionContentReconciler, func()) {
 		return newIndexedReconciler(ctx, PartitionContentPublishConfig{
-			Image:      "example.test/kezio-ingest:test",
-			TrackerURL: "http://tracker.example.test/announce",
+			Image: "example.test/kezio-ingest:test",
 		})
 	}
 

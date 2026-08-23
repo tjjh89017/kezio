@@ -76,9 +76,9 @@ func seederPodAnnotations(res sitederive.Resolution) map[string]string {
 // gives every content volume), the address it reaches the ezio container
 // at over the pod's shared loopback (EZIO_TARGET, matching the ezio
 // container's own EZIO_GRPC_LISTEN port above), the resolved AddTorrent
-// tuning cfg carries, and res's Site's tracker URL - carried through now
-// so a later step can build a .torrent from it, even though nothing reads
-// TRACKER_URL yet.
+// tuning cfg carries, and res's Site's tracker URL (TRACKER_URL): the
+// announce cmd/seeder bakes into every .torrent it builds from a
+// content's torrent.info, registers with ezio, and serves over HTTP.
 func seederRegisterEnv(cfg ImageSeederConfig, res sitederive.Resolution) []corev1.EnvVar {
 	env := []corev1.EnvVar{
 		{Name: "CONTENT_ROOT", Value: ingest.ContentMountRoot},

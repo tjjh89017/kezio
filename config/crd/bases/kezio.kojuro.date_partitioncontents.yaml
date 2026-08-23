@@ -255,12 +255,6 @@ spec:
                 - Ready
                 - Failed
                 type: string
-              torrentPath:
-                description: |-
-                  TorrentPath is the path of the .torrent file within the PVC named
-                  by PVCRef. Only meaningful once State is Ready.
-                maxLength: 4096
-                type: string
             type: object
         type: object
     served: true

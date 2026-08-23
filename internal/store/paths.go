@@ -31,9 +31,6 @@ const (
 	// pvcContentSuffix is the fixed suffix on the PVC name a
 	// PartitionContent owns, appended to the object name.
 	pvcContentSuffix = "-content"
-	// ContentTorrentFileName is the generated .torrent file name inside a
-	// content's own PVC.
-	ContentTorrentFileName = "content.torrent"
 )
 
 // ObjectName returns the PartitionContent object name for hash:

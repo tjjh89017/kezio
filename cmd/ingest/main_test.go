@@ -73,7 +73,6 @@ func TestBuildFromEnv_MissingRequiredEnv(t *testing.T) {
 
 func TestPublishConfigFromEnv_Valid(t *testing.T) {
 	hash := store.InfoHash{0x01, 0x02, 0x03}
-	t.Setenv("TRACKER_URL", "http://tracker.example.com/announce")
 	t.Setenv("PARTITION_CONTENT_HASH", hash.String())
 	t.Setenv("SOURCE_CONTENT_DIR", "/work/partitions/1")
 
@@ -82,9 +81,6 @@ func TestPublishConfigFromEnv_Valid(t *testing.T) {
 		t.Fatalf("publishConfigFromEnv: %v", err)
 	}
 
-	if cfg.TrackerURL != "http://tracker.example.com/announce" {
-		t.Errorf("TrackerURL = %q, want the configured tracker", cfg.TrackerURL)
-	}
 	if len(cfg.Partitions) != 1 {
 		t.Fatalf("Partitions = %+v, want exactly one partition", cfg.Partitions)
 	}
@@ -98,7 +94,6 @@ func TestPublishConfigFromEnv_Valid(t *testing.T) {
 }
 
 func TestPublishConfigFromEnv_MissingRequiredEnv(t *testing.T) {
-	t.Setenv("TRACKER_URL", "")
 	t.Setenv("PARTITION_CONTENT_HASH", "")
 	t.Setenv("SOURCE_CONTENT_DIR", "")
 
@@ -108,7 +103,6 @@ func TestPublishConfigFromEnv_MissingRequiredEnv(t *testing.T) {
 }
 
 func TestPublishConfigFromEnv_BadHash(t *testing.T) {
-	t.Setenv("TRACKER_URL", "http://tracker.example.com/announce")
 	t.Setenv("PARTITION_CONTENT_HASH", "not-a-valid-hash")
 	t.Setenv("SOURCE_CONTENT_DIR", "/work/partitions/1")
 

@@ -173,8 +173,7 @@ var _ = Describe("PartitionContent Controller", func() {
 		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
 
 		publish := PartitionContentPublishConfig{
-			Image:      "example.test/kezio-ingest:test",
-			TrackerURL: "http://tracker.example.test/announce",
+			Image: "example.test/kezio-ingest:test",
 		}
 		// Indexed, not the local plain-client newReconciler: this test
 		// drives the content all the way to Ready, where reconcileSeeder
@@ -198,13 +197,11 @@ var _ = Describe("PartitionContent Controller", func() {
 
 		container := job.Spec.Template.Spec.Containers[0]
 		Expect(container.Image).To(Equal(publish.Image))
-		var trackerEnv string
+		// No Site is in scope at publish time, so no announce-bearing
+		// setting is ever handed to the publish Job.
 		for _, e := range container.Env {
-			if e.Name == "TRACKER_URL" {
-				trackerEnv = e.Value
-			}
+			Expect(e.Name).NotTo(Equal("TRACKER_URL"))
 		}
-		Expect(trackerEnv).To(Equal(publish.TrackerURL))
 		Expect(container.VolumeMounts).To(HaveLen(2))
 		Expect(container.VolumeMounts).To(ContainElement(corev1.VolumeMount{
 			Name:      "content",
@@ -245,10 +242,13 @@ var _ = Describe("PartitionContent Controller", func() {
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
+		// publish carries no tracker setting at all (there is none to
+		// carry - see PartitionContentPublishConfig's doc comment), and
+		// this reconciler still reaches Ready: content readiness never
+		// depended on a tracker being configured anywhere.
 		var ready keziov1alpha2.PartitionContent
 		Expect(k8sClient.Get(ctx, nn, &ready)).To(Succeed())
 		Expect(ready.Status.State).To(Equal(keziov1alpha2.PartitionContentStateReady))
-		Expect(ready.Status.TorrentPath).To(Equal(store.ContentTorrentFileName))
 		readyCond := meta.FindStatusCondition(ready.Status.Conditions, keziov1alpha2.PartitionContentConditionReady)
 		Expect(readyCond).NotTo(BeNil())
 		Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
@@ -285,8 +285,7 @@ var _ = Describe("PartitionContent Controller", func() {
 		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
 
 		publish := PartitionContentPublishConfig{
-			Image:      "example.test/kezio-ingest:test",
-			TrackerURL: "http://tracker.example.test/announce",
+			Image: "example.test/kezio-ingest:test",
 		}
 		r := newReconciler(publish)
 		nn := types.NamespacedName{Name: name, Namespace: "default"}

@@ -41,23 +41,18 @@ func writePublishedFixture(t *testing.T, dir string, content []byte) {
 	}
 }
 
-func TestRunPublish_CopiesValidatesAndBuildsTorrent(t *testing.T) {
+func TestRunPublish_CopiesAndValidatesContentPlusTorrentInfo(t *testing.T) {
 	sourceDir := t.TempDir()
 	writePublishedFixture(t, sourceDir, []byte("payload"))
 	destDir := filepath.Join(t.TempDir(), "content-dest")
 
 	result := RunPublish(PublishConfig{
-		TrackerURL: "http://tracker.example.com:6969/announce",
 		Partitions: []PublishPartition{{Number: 1, SourceDir: sourceDir, DestDir: destDir}},
 	})
 	if !result.Success {
 		t.Fatalf("RunPublish: Success=false, Error=%q", result.Error)
 	}
 
-	// ValidateContentDir is not re-checked here: it requires an exact
-	// directory listing, and destDir also holds the .torrent this run
-	// just wrote alongside torrent.info (see publishPartition, which
-	// validates before writing the .torrent).
 	extentPath := filepath.Join(store.ContentDataDir(destDir), store.ExtentFileName(0))
 	extentData, err := os.ReadFile(extentPath) //nolint:gosec // test-controlled path
 	if err != nil {
@@ -67,13 +62,11 @@ func TestRunPublish_CopiesValidatesAndBuildsTorrent(t *testing.T) {
 		t.Errorf("len(extentData) = %d, want %d", len(extentData), len("payload"))
 	}
 
-	torrentPath := store.ContentTorrentPath(destDir)
-	data, err := os.ReadFile(torrentPath) //nolint:gosec // test-controlled path
-	if err != nil {
-		t.Fatalf("read %s: %v", torrentPath, err)
-	}
-	if len(data) == 0 {
-		t.Error("written .torrent file is empty")
+	// torrent.info itself is what the publish path keeps writing into the
+	// PVC (section 4.2): no announce-bearing artifact is ever written
+	// alongside it.
+	if _, err := os.Stat(store.ContentDirTorrentInfoPath(destDir)); err != nil {
+		t.Errorf("missing torrent.info at %s: %v", destDir, err)
 	}
 }
 
@@ -87,7 +80,6 @@ func TestRunPublish_MultiplePartitions(t *testing.T) {
 	dest2 := filepath.Join(t.TempDir(), "p3")
 
 	result := RunPublish(PublishConfig{
-		TrackerURL: "http://tracker.example.com:6969/announce",
 		Partitions: []PublishPartition{
 			{Number: 1, SourceDir: source1, DestDir: dest1},
 			{Number: 3, SourceDir: source2, DestDir: dest2},
@@ -98,34 +90,14 @@ func TestRunPublish_MultiplePartitions(t *testing.T) {
 	}
 
 	for _, dest := range []string{dest1, dest2} {
-		if _, err := os.Stat(store.ContentTorrentPath(dest)); err != nil {
-			t.Errorf("missing .torrent at %s: %v", dest, err)
+		if _, err := os.Stat(store.ContentDirTorrentInfoPath(dest)); err != nil {
+			t.Errorf("missing torrent.info at %s: %v", dest, err)
 		}
-	}
-}
-
-func TestRunPublish_EmptyTrackerURLFails(t *testing.T) {
-	sourceDir := t.TempDir()
-	writeFixtureContentDir(t, sourceDir, []byte("payload"))
-	destDir := filepath.Join(t.TempDir(), "content-dest")
-
-	result := RunPublish(PublishConfig{
-		Partitions: []PublishPartition{{Number: 1, SourceDir: sourceDir, DestDir: destDir}},
-	})
-	if result.Success {
-		t.Fatal("RunPublish: expected failure when TrackerURL is empty")
-	}
-	if result.Error == "" {
-		t.Error("result.Error is empty, want a message naming the missing tracker URL")
-	}
-	if _, err := os.Stat(destDir); !os.IsNotExist(err) {
-		t.Errorf("expected no content to be copied when publish fails before writing anything, stat err = %v", err)
 	}
 }
 
 func TestRunPublish_MissingSourceContentIsAFailure(t *testing.T) {
 	result := RunPublish(PublishConfig{
-		TrackerURL: "http://tracker.example.com:6969/announce",
 		Partitions: []PublishPartition{{Number: 1, SourceDir: filepath.Join(t.TempDir(), "missing"), DestDir: t.TempDir()}},
 	})
 	if result.Success {

@@ -17,7 +17,6 @@ limitations under the License.
 package ingest
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -43,20 +42,19 @@ func ContentMountPath(hash store.InfoHash) string {
 // PublishConfig configures one run of the publish step: copying one
 // partition's already-validated content out of the ingest scratch work
 // directory Run filled (see processPartition) into that content's own
-// PVC - mounted at ContentMountPath for the production case - and
-// building the content's .torrent file there. This is a separate step
-// from Run because a content's own PVC does not exist until the
-// controller has created the PartitionContent object Run's Result named
-// (see Result's doc comment).
+// PVC - mounted at ContentMountPath for the production case. This is a
+// separate step from Run because a content's own PVC does not exist
+// until the controller has created the PartitionContent object Run's
+// Result named (see Result's doc comment).
+//
+// No announce URL is built or written here: at publish time no Site is
+// in scope, so there is no tracker this content could correctly
+// announce to. The seeder builds a .torrent from torrent.info (which
+// this step does copy into the PVC) at serve time, once its own Site's
+// tracker URL is known.
 type PublishConfig struct {
 	// Partitions lists which scratch content to publish where.
 	Partitions []PublishPartition
-	// TrackerURL is the announce URL baked into every .torrent this run
-	// builds. Publishing a content with no tracker configured would
-	// leave it with a PVC but nothing that can seed from it, so a run
-	// with no TrackerURL fails outright rather than silently skipping
-	// the .torrent.
-	TrackerURL string
 }
 
 // PublishPartition names one partition's scratch content directory (as
@@ -70,8 +68,8 @@ type PublishPartition struct {
 
 // RunPublish copies every partition in cfg.Partitions from its scratch
 // content directory into its own destination PVC, validating each copy
-// against its torrent.info and writing a .torrent there before
-// considering it done. It never panics and never returns an error value,
+// against its torrent.info before considering it done. It never panics
+// and never returns an error value,
 // for the same reason Run does not (see Run's doc comment): cmd/ingest
 // turns the outcome directly into a termination message and exit code.
 func RunPublish(cfg PublishConfig) Result {
@@ -82,11 +80,8 @@ func RunPublish(cfg PublishConfig) Result {
 }
 
 func runPublish(cfg PublishConfig) error {
-	if cfg.TrackerURL == "" {
-		return errors.New("publish requires a tracker URL")
-	}
 	for _, p := range cfg.Partitions {
-		if err := publishPartition(cfg.TrackerURL, p); err != nil {
+		if err := publishPartition(p); err != nil {
 			return fmt.Errorf("partition %d: %w", p.Number, err)
 		}
 	}
@@ -97,12 +92,8 @@ func runPublish(cfg PublishConfig) error {
 // source directory into destDir, then validates the copy against the
 // torrent.info it just copied alongside it - so a truncated or otherwise
 // corrupted copy is caught here rather than surfacing later as a
-// leecher's hash-check failure - and finally bencodes and writes the
-// content's .torrent file into destDir (store.ContentTorrentPath): the
-// content's own PVC, mounted read-only wherever it is later consumed,
-// needs a ready-made .torrent to hand ezio, with no scratch volume of
-// its own to build one from.
-func publishPartition(trackerURL string, p PublishPartition) error {
+// leecher's hash-check failure.
+func publishPartition(p PublishPartition) error {
 	info, err := store.LoadContentDirTorrentInfo(p.SourceDir)
 	if err != nil {
 		return fmt.Errorf("load source torrent.info: %w", err)
@@ -114,15 +105,6 @@ func publishPartition(trackerURL string, p PublishPartition) error {
 
 	if err := store.ValidateContentDir(p.DestDir, info); err != nil {
 		return fmt.Errorf("validate published content: %w", err)
-	}
-
-	torrentBytes, err := store.BuildTorrentFile(info, trackerURL)
-	if err != nil {
-		return fmt.Errorf("build torrent file: %w", err)
-	}
-	torrentPath := store.ContentTorrentPath(p.DestDir)
-	if err := os.WriteFile(torrentPath, torrentBytes, 0o644); err != nil { //nolint:gosec // .torrent is not sensitive; same-perm convention as the copied content
-		return fmt.Errorf("write torrent file: %w", err)
 	}
 	return nil
 }

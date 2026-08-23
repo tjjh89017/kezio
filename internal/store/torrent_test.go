@@ -265,6 +265,71 @@ func TestBuildTorrentFile(t *testing.T) {
 	}
 }
 
+// TestBuildTorrentFile_SameInfoDifferentTrackerSameHashDifferentAnnounce
+// is the property section 4.1 of the design rests on: the info hash
+// covers only the info dict, so two .torrent files built from the same
+// TorrentInfo with different announce URLs carry the same info hash and
+// a different announce - two Sites can serve the same content with
+// their own tracker and it stays the same content.
+func TestBuildTorrentFile_SameInfoDifferentTrackerSameHashDifferentAnnounce(t *testing.T) {
+	info := fixtureTorrentInfo()
+	const trackerA = "http://tracker-a.example.invalid:6969/announce"
+	const trackerB = "http://tracker-b.example.invalid:6969/announce"
+
+	rawA, err := BuildTorrentFile(info, trackerA)
+	if err != nil {
+		t.Fatalf("BuildTorrentFile(trackerA): %v", err)
+	}
+	rawB, err := BuildTorrentFile(info, trackerB)
+	if err != nil {
+		t.Fatalf("BuildTorrentFile(trackerB): %v", err)
+	}
+
+	if bytes.Equal(rawA, rawB) {
+		t.Fatal("BuildTorrentFile produced identical bytes for two different tracker URLs")
+	}
+
+	decodedA, _, err := decodeBencode(rawA)
+	if err != nil {
+		t.Fatalf("decodeBencode(rawA): %v", err)
+	}
+	decodedB, _, err := decodeBencode(rawB)
+	if err != nil {
+		t.Fatalf("decodeBencode(rawB): %v", err)
+	}
+	mA := decodedA.(map[string]any)
+	mB := decodedB.(map[string]any)
+
+	if got := string(mA["announce"].([]byte)); got != trackerA {
+		t.Errorf("announce(A) = %q, want %q", got, trackerA)
+	}
+	if got := string(mB["announce"].([]byte)); got != trackerB {
+		t.Errorf("announce(B) = %q, want %q", got, trackerB)
+	}
+
+	// The info dicts themselves - and therefore ComputeInfoHash - must be
+	// byte-identical: the announce URL sits outside the info dict, so it
+	// cannot move the content address.
+	infoBytesA, err := BuildInfoDict(info)
+	if err != nil {
+		t.Fatalf("BuildInfoDict: %v", err)
+	}
+	hashA, err := ComputeInfoHash(info)
+	if err != nil {
+		t.Fatalf("ComputeInfoHash: %v", err)
+	}
+	if !bytes.Contains(rawA, infoBytesA) || !bytes.Contains(rawB, infoBytesA) {
+		t.Fatal("built .torrent bytes do not contain the same info dict for both trackers")
+	}
+	hashB, err := ComputeInfoHash(info)
+	if err != nil {
+		t.Fatalf("ComputeInfoHash: %v", err)
+	}
+	if hashA != hashB {
+		t.Fatalf("info hash differs across trackers: %s != %s", hashA, hashB)
+	}
+}
+
 func TestBuildTorrentFile_EmptyTracker(t *testing.T) {
 	info := fixtureTorrentInfo()
 	if _, err := BuildTorrentFile(info, ""); err == nil {

@@ -109,21 +109,22 @@ func runPublish() int {
 	return 0
 }
 
-// publishConfigFromEnv reads TRACKER_URL, PARTITION_CONTENT_HASH, and
+// publishConfigFromEnv reads PARTITION_CONTENT_HASH and
 // SOURCE_CONTENT_DIR - what buildPublishJob sets - into a PublishConfig
-// naming exactly the one partition this publish Job runs for.
-// DestDir is derived from PARTITION_CONTENT_HASH via
+// naming exactly the one partition this publish Job runs for. No
+// announce URL is read here: at publish time no Site is in scope, so
+// there is no tracker to bake into anything (see ingest.PublishConfig's
+// doc comment). DestDir is derived from PARTITION_CONTENT_HASH via
 // ingest.ContentMountPath, the same convention buildPublishJob used to
 // mount the content PVC, so this needs no separate "where do I write"
 // input.
 func publishConfigFromEnv() (ingest.PublishConfig, error) {
-	trackerURL := os.Getenv("TRACKER_URL")
 	hashStr := os.Getenv("PARTITION_CONTENT_HASH")
 	sourceDir := os.Getenv("SOURCE_CONTENT_DIR")
-	if trackerURL == "" || hashStr == "" || sourceDir == "" {
+	if hashStr == "" || sourceDir == "" {
 		return ingest.PublishConfig{}, fmt.Errorf(
-			"missing required environment: TRACKER_URL=%q PARTITION_CONTENT_HASH=%q SOURCE_CONTENT_DIR=%q",
-			trackerURL, hashStr, sourceDir)
+			"missing required environment: PARTITION_CONTENT_HASH=%q SOURCE_CONTENT_DIR=%q",
+			hashStr, sourceDir)
 	}
 
 	hash, err := store.ParseInfoHash(hashStr)
@@ -136,7 +137,6 @@ func publishConfigFromEnv() (ingest.PublishConfig, error) {
 			SourceDir: sourceDir,
 			DestDir:   ingest.ContentMountPath(hash),
 		}},
-		TrackerURL: trackerURL,
 	}, nil
 }
 

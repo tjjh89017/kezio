@@ -249,10 +249,3 @@ func TestLoadContentDirTorrentInfo(t *testing.T) {
 		t.Fatalf("LoadContentDirTorrentInfo mismatch:\n got=%+v\nwant=%+v", got, info)
 	}
 }
-
-func TestContentTorrentPath(t *testing.T) {
-	dir := "/mnt/content"
-	if got, want := ContentTorrentPath(dir), filepath.Join(dir, ContentTorrentFileName); got != want {
-		t.Errorf("ContentTorrentPath = %q, want %q", got, want)
-	}
-}

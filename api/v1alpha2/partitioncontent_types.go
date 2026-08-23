@@ -153,11 +153,6 @@ type PartitionContentStatus struct {
 	// namespace as this object.
 	// +optional
 	PVCRef *NameRef `json:"pvcRef,omitempty"`
-	// TorrentPath is the path of the .torrent file within the PVC named
-	// by PVCRef. Only meaningful once State is Ready.
-	// +kubebuilder:validation:MaxLength=4096
-	// +optional
-	TorrentPath string `json:"torrentPath,omitempty"`
 	// Seeders is the per-site seeder count for this content. It never
 	// carries a seeder's network address - plan builders resolve the
 	// seeder Pod address at plan time.

@@ -82,7 +82,9 @@ func (r *PartitionContentReconciler) createPublishJob(ctx context.Context, pc *k
 // buildPublishJob constructs the (not yet created) Job that runs the
 // publish step for pc's content: it mounts the content PVC at
 // ingest.ContentMountPath(hash) - the same mount-path convention the
-// seeder and the e2e lane use - and announces to r.Publish.TrackerURL.
+// seeder and the e2e lane use. It builds no announce URL into anything:
+// no Site is in scope at publish time (see
+// internal/ingest.PublishConfig's doc comment).
 //
 // It also mounts, read-only, the ingest scratch PVC of the Image named
 // by pc.Spec.Source.ImageName (ingestScratchPVCName, image_ingest.go's
@@ -137,7 +139,6 @@ func (r *PartitionContentReconciler) buildPublishJob(pc *keziov1alpha2.Partition
 						Image: r.Publish.Image,
 						Env: []corev1.EnvVar{
 							{Name: "INGEST_MODE", Value: "publish"},
-							{Name: "TRACKER_URL", Value: r.Publish.TrackerURL},
 							{Name: "PARTITION_CONTENT_HASH", Value: hash.String()},
 							{Name: "SOURCE_CONTENT_DIR", Value: sourceContentDir},
 						},

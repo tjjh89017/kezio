@@ -25,26 +25,13 @@ func TestPartitionContentPublishConfigReady(t *testing.T) {
 		ready bool
 	}{
 		{
-			name:  "both unset is not ready",
+			name:  "unset is not ready",
 			cfg:   PartitionContentPublishConfig{},
 			ready: false,
 		},
 		{
-			name:  "image set alone is not ready - tracker is also mandatory",
+			name:  "image set is ready - no tracker setting exists to also require",
 			cfg:   PartitionContentPublishConfig{Image: "example.test/kezio-ingest:test"},
-			ready: false,
-		},
-		{
-			name:  "tracker set alone is not ready - image is also mandatory",
-			cfg:   PartitionContentPublishConfig{TrackerURL: "http://tracker.example.test/announce"},
-			ready: false,
-		},
-		{
-			name: "both set is ready",
-			cfg: PartitionContentPublishConfig{
-				Image:      "example.test/kezio-ingest:test",
-				TrackerURL: "http://tracker.example.test/announce",
-			},
 			ready: true,
 		},
 	}

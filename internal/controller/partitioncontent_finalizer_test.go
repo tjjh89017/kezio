@@ -313,8 +313,7 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
 
 		publish := PartitionContentPublishConfig{
-			Image:      "example.test/kezio-ingest:test",
-			TrackerURL: "http://tracker.example.test/announce",
+			Image: "example.test/kezio-ingest:test",
 		}
 		r, cancel := newIndexedReconciler(ctx, publish)
 		DeferCleanup(cancel)

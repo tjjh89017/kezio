@@ -17,10 +17,13 @@ limitations under the License.
 // Command kezio-seeder-register hands a per-content seeder's own content
 // to the ezio daemon running beside it in the same pod.
 //
-// It exists because the .torrent for a content lives inside that
-// content's own PVC (see internal/ingest.ContentMountPath), which only
-// this pod mounts. Registering from inside the pod is the only place
-// the bytes are reachable.
+// A content's own PVC (see internal/ingest.ContentMountPath) holds
+// torrent.info but no .torrent: publishing never has a Site in scope, so
+// it has no announce URL to bake into one. This process builds the
+// .torrent itself, from that torrent.info plus this pod's own Site's
+// tracker URL (TRACKER_URL) - the same bytes it then both registers with
+// ezio and serves over HTTP, so a leecher's info hash always matches
+// what ezio actually seeds.
 //
 // The loop reconciles rather than running once: the ezio container can
 // restart independently of this one, taking its torrent list with it.
@@ -113,6 +116,7 @@ func main() {
 type config struct {
 	ContentRoot    string
 	EzioTarget     string
+	TrackerURL     string
 	Interval       time.Duration
 	MaxUploads     int32
 	MaxConnections int32
@@ -122,9 +126,18 @@ func configFromEnv() (config, error) {
 	cfg := config{
 		ContentRoot:    envOr("CONTENT_ROOT", ingest.ContentMountRoot),
 		EzioTarget:     envOr("EZIO_TARGET", defaultEzioTarget),
+		TrackerURL:     os.Getenv("TRACKER_URL"),
 		Interval:       defaultInterval,
 		MaxUploads:     seeder.DefaultMaxUploads,
 		MaxConnections: seeder.DefaultMaxConnections,
+	}
+	if cfg.TrackerURL == "" {
+		// image_seeder_placement.go's seederRegisterEnv only sets this
+		// Deployment up at all once its Site has a tracker URL to carry
+		// (see Site's webhook rules); an empty value here means this
+		// process was started with no Site behind it, which it cannot
+		// build a correct .torrent for.
+		return config{}, errors.New("TRACKER_URL is required")
 	}
 
 	if v := os.Getenv("REGISTER_INTERVAL"); v != "" {
@@ -162,31 +175,28 @@ func envOr(key, fallback string) string {
 }
 
 // contentEntry is one mounted content directory's identity: the info
-// hash it registers under and the path to its already-built .torrent
-// file (store.ContentTorrentPath). Computed once per reconcile pass and
-// shared between AddTorrent registration and the torrentIndex the HTTP
-// server reads from.
+// hash it registers under and the exact .torrent bytes built for it
+// (store.BuildTorrentFile against this pod's own TrackerURL). Computed
+// once per reconcile pass and shared between AddTorrent registration and
+// the torrentIndex the HTTP server reads from - the same bytes go to
+// both, which is what keeps what ezio seeds and what a leecher fetches
+// in agreement.
 type contentEntry struct {
-	dir         string
-	hash        string
-	torrentPath string
+	dir          string
+	hash         string
+	torrentBytes []byte
 }
 
-// loadContentEntries reads dirs' torrent.info files and returns one
-// contentEntry per directory that parses cleanly; a directory that fails
-// to load is reported as an error alongside the entries that did
-// succeed, rather than aborting the whole pass - a single damaged
-// directory should not stop every other content from being registered
-// or served.
-func loadContentEntries(dirs []string) ([]contentEntry, []error) {
+// loadContentEntries reads dirs' torrent.info files and builds each
+// one's .torrent against trackerURL, returning one contentEntry per
+// directory that parses and builds cleanly; a directory that fails is
+// reported as an error alongside the entries that did succeed, rather
+// than aborting the whole pass - a single damaged directory should not
+// stop every other content from being registered or served.
+func loadContentEntries(dirs []string, trackerURL string) ([]contentEntry, []error) {
 	entries := make([]contentEntry, 0, len(dirs))
 	var errs []error
 	for _, dir := range dirs {
-		// The info hash comes from torrent.info rather than the .torrent
-		// so this agrees with the store's own content addressing by
-		// construction (see store.ComputeInfoHash) instead of
-		// re-deriving it from the bencoded file the publish step
-		// happened to write.
 		info, err := store.LoadContentDirTorrentInfo(dir)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: load torrent.info: %w", dir, err))
@@ -197,10 +207,19 @@ func loadContentEntries(dirs []string) ([]contentEntry, []error) {
 			errs = append(errs, fmt.Errorf("%s: compute info hash: %w", dir, err))
 			continue
 		}
+		// BuildTorrentFile bencodes {"announce": trackerURL, "info":
+		// BuildInfoDict(info)} - the same info dict ComputeInfoHash just
+		// hashed, so this .torrent's info hash equals hash above
+		// regardless of which tracker built it.
+		torrentBytes, err := store.BuildTorrentFile(info, trackerURL)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: build torrent file: %w", dir, err))
+			continue
+		}
 		entries = append(entries, contentEntry{
-			dir:         dir,
-			hash:        hash.String(),
-			torrentPath: store.ContentTorrentPath(dir),
+			dir:          dir,
+			hash:         hash.String(),
+			torrentBytes: torrentBytes,
 		})
 	}
 	return entries, errs
@@ -228,7 +247,7 @@ func reconcile(ctx context.Context, cfg config, idx *torrentIndex) error {
 		return nil
 	}
 
-	entries, errs := loadContentEntries(dirs)
+	entries, errs := loadContentEntries(dirs, cfg.TrackerURL)
 
 	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
@@ -272,52 +291,48 @@ func addContentDir(
 		return false, nil
 	}
 
-	torrentBytes, err := os.ReadFile(entry.torrentPath) //nolint:gosec // mount path this pod owns, not user input
-	if err != nil {
-		return false, fmt.Errorf("read %s: %w", store.ContentTorrentFileName, err)
-	}
-
 	// seedMode: the content was hash-verified when the publish step copied
 	// it into this PVC (see internal/ingest.publishPartition), so ezio
 	// re-hashing every piece on start would only repeat that work.
-	if err := c.AddTorrent(ctx, torrentBytes, entry.dir, true, cfg.MaxUploads, cfg.MaxConnections); err != nil {
+	if err := c.AddTorrent(ctx, entry.torrentBytes, entry.dir, true, cfg.MaxUploads, cfg.MaxConnections); err != nil {
 		return false, fmt.Errorf("add torrent %s: %w", entry.hash, err)
 	}
 	return true, nil
 }
 
-// torrentIndex maps a content's info hash to its .torrent file path, kept
-// current by reconcile on every pass and read by the HTTP handler below.
-// A separate type (rather than a bare map behind a mutex) so the
+// torrentIndex maps a content's info hash to its exact .torrent bytes,
+// kept current by reconcile on every pass and read by the HTTP handler
+// below. A separate type (rather than a bare map behind a mutex) so the
 // zero-downtime swap-the-whole-map-on-each-pass pattern - never mutating
 // the map a concurrent request might be reading - is enforced in one
 // place.
 type torrentIndex struct {
 	mu     sync.RWMutex
-	byHash map[string]string
+	byHash map[string][]byte
 }
 
 func newTorrentIndex() *torrentIndex {
-	return &torrentIndex{byHash: map[string]string{}}
+	return &torrentIndex{byHash: map[string][]byte{}}
 }
 
 // set replaces the whole index from entries, keyed by hash.
 func (idx *torrentIndex) set(entries []contentEntry) {
-	byHash := make(map[string]string, len(entries))
+	byHash := make(map[string][]byte, len(entries))
 	for _, e := range entries {
-		byHash[e.hash] = e.torrentPath
+		byHash[e.hash] = e.torrentBytes
 	}
 	idx.mu.Lock()
 	idx.byHash = byHash
 	idx.mu.Unlock()
 }
 
-// path returns the .torrent file path registered for hash, if any.
-func (idx *torrentIndex) path(hash string) (string, bool) {
+// bytes returns the .torrent bytes registered for hash, if any - the
+// same bytes addContentDir handed to AddTorrent for that hash.
+func (idx *torrentIndex) bytes(hash string) ([]byte, bool) {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
-	path, ok := idx.byHash[hash]
-	return path, ok
+	b, ok := idx.byHash[hash]
+	return b, ok
 }
 
 // torrentsPathPrefix is the URL path prefix the HTTP handler below
@@ -325,10 +340,11 @@ func (idx *torrentIndex) path(hash string) (string, bool) {
 const torrentsPathPrefix = "/torrents/"
 
 // torrentMux builds the HTTP handler serving each indexed content's
-// .torrent file by info hash. It never joins request input into a
-// filesystem path or lists a directory: the only paths ever served are
-// ones idx itself already resolved from scanning cfg.ContentRoot, keyed
-// by an exact map lookup on the hash the request names.
+// .torrent bytes by info hash. It never touches the filesystem to answer
+// a request: the only bytes ever served are ones idx itself already
+// built and holds in memory, keyed by an exact map lookup on the hash
+// the request names - the same bytes reconcile registered with ezio for
+// that hash.
 func torrentMux(idx *torrentIndex) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(seederdeploy.TorrentHealthzPath, func(w http.ResponseWriter, r *http.Request) {
@@ -336,23 +352,24 @@ func torrentMux(idx *torrentIndex) http.Handler {
 	})
 	mux.HandleFunc(torrentsPathPrefix, func(w http.ResponseWriter, r *http.Request) {
 		hash := r.URL.Path[len(torrentsPathPrefix):]
-		path, ok := idx.path(hash)
+		torrentBytes, ok := idx.bytes(hash)
 		if !ok {
 			http.NotFound(w, r)
 			return
 		}
-		http.ServeFile(w, r, path)
+		w.Header().Set("Content-Type", "application/x-bittorrent")
+		_, _ = w.Write(torrentBytes)
 	})
 	return mux
 }
 
 // contentDirs lists the mounted content directories under root that
-// carry a built .torrent. A directory without one is skipped rather than
-// reported: the publish step writes the .torrent only when a tracker is
-// configured, so its absence is a valid state, not a fault here. One
-// seeder Deployment mounts exactly one content's PVC today, but this
-// scans root rather than assuming a single fixed subdirectory name, so
-// it keeps working unchanged if that ever loosens.
+// carry a torrent.info. A directory without one is skipped rather than
+// reported: it means the publish step has not finished copying that
+// content into its PVC yet, which is a valid transient state, not a
+// fault here. One seeder Deployment mounts exactly one content's PVC
+// today, but this scans root rather than assuming a single fixed
+// subdirectory name, so it keeps working unchanged if that ever loosens.
 func contentDirs(root string) ([]string, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -368,7 +385,7 @@ func contentDirs(root string) ([]string, error) {
 			continue
 		}
 		dir := filepath.Join(root, e.Name())
-		if _, err := os.Stat(store.ContentTorrentPath(dir)); err != nil {
+		if _, err := os.Stat(store.ContentDirTorrentInfoPath(dir)); err != nil {
 			continue
 		}
 		dirs = append(dirs, dir)

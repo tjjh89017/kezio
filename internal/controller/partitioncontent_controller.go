@@ -57,10 +57,10 @@ var publishPollInterval = 30 * time.Second
 // (ImageReconciler). It also carries PartitionContentFinalizer, blocking
 // actual removal while an Image slot or an active DeployRun still
 // references this content (see onDelete). It never mounts the content
-// PVC's filesystem itself: the publish Job is the sole witness to whether
-// publishing succeeded (see outcomeOf), and status.torrentPath is set
-// from the store package's naming convention, not from anything this
-// reconciler read off disk.
+// PVC's filesystem itself: the publish Job is the sole witness to
+// whether publishing succeeded (see outcomeOf). Reaching Ready needs no
+// tracker configured anywhere - content readiness is independent of the
+// network-plane setting a Site's tracker is.
 type PartitionContentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -159,16 +159,16 @@ func (r *PartitionContentReconciler) onChange(ctx context.Context, pc *keziov1al
 }
 
 // recordPending records Pending with a condition explaining that the
-// manager has no publish image/tracker configured. This is a visible,
-// non-error hold, not a failure: it clears on its own, with no operator
-// action on this object, once the manager is configured and restarted
-// (Publish is read once from the environment at startup - see
+// manager has no publish image configured. This is a visible, non-error
+// hold, not a failure: it clears on its own, with no operator action on
+// this object, once the manager is configured and restarted (Publish is
+// read once from the environment at startup - see
 // PartitionContentPublishConfig).
 func (r *PartitionContentReconciler) recordPending(ctx context.Context, pc *keziov1alpha2.PartitionContent, pvc *corev1.PersistentVolumeClaim) (ctrl.Result, error) {
 	pc.Status.State = keziov1alpha2.PartitionContentStatePending
 	pc.Status.PVCRef = &keziov1alpha2.NameRef{Name: pvc.Name}
 	setPartitionContentReadyCondition(pc, metav1.ConditionFalse,
-		"PublishConfigMissing", "no publish Job image or tracker URL is configured on the manager; content stays Pending until it is")
+		"PublishConfigMissing", "no publish Job image is configured on the manager; content stays Pending until it is")
 	if err := r.applyPartitionContentStatus(ctx, pc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("partitioncontent %q: recording Pending: %w", pc.Name, err)
 	}
@@ -188,17 +188,14 @@ func (r *PartitionContentReconciler) recordPublishing(ctx context.Context, pc *k
 	return ctrl.Result{RequeueAfter: publishPollInterval}, nil
 }
 
-// recordReady records Ready: the publish Job succeeded, so status.torrentPath
-// is set to the store package's fixed .torrent file name - a path
-// relative to the content PVC's root (see PartitionContentStatus.TorrentPath's
-// doc comment: "within the PVC"), the same frame of reference a seeder
-// resolves against once it mounts that PVC.
+// recordReady records Ready: the publish Job succeeded, so the content
+// PVC holds a validated torrent.info a seeder at any Site can build a
+// .torrent from.
 func (r *PartitionContentReconciler) recordReady(ctx context.Context, pc *keziov1alpha2.PartitionContent, pvc *corev1.PersistentVolumeClaim) (ctrl.Result, error) {
 	pc.Status.State = keziov1alpha2.PartitionContentStateReady
 	pc.Status.PVCRef = &keziov1alpha2.NameRef{Name: pvc.Name}
-	pc.Status.TorrentPath = store.ContentTorrentFileName
 	setPartitionContentReadyCondition(pc, metav1.ConditionTrue,
-		"PublishJobSucceeded", "publish job succeeded; the .torrent is present in the content PVC")
+		"PublishJobSucceeded", "publish job succeeded; torrent.info is present in the content PVC")
 	onSuccess := func() {
 		r.Recorder.Event(pc, corev1.EventTypeNormal, "PartitionContentReady", "publish job succeeded")
 	}

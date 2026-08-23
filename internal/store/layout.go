@@ -28,8 +28,10 @@ const TorrentInfoFileName = "torrent.info"
 
 // This file defines the layout inside one content's own PVC (mounted at
 // dir below): torrent.info and a content/ data subdirectory sit directly
-// at the PVC root, plus the generated content.torrent once publishing
-// finishes.
+// at the PVC root. No .torrent file is ever written into the PVC - a
+// content has no tracker of its own to announce (see
+// internal/ingest.PublishConfig's doc comment); the seeder builds one
+// in memory, per its own Site, from torrent.info at serve time.
 //
 // The extent files sit inside a content/ subdirectory, not directly inside
 // dir, because BuildInfoDict's info dict is a BitTorrent v1 multi-file
@@ -155,12 +157,6 @@ func NestExtentFiles(dir string, info *TorrentInfo) error {
 // directory.
 func ContentDirTorrentInfoPath(dir string) string {
 	return filepath.Join(dir, TorrentInfoFileName)
-}
-
-// ContentTorrentPath returns the generated .torrent file path inside a
-// content directory.
-func ContentTorrentPath(dir string) string {
-	return filepath.Join(dir, ContentTorrentFileName)
 }
 
 // LoadContentDirTorrentInfo reads and parses the torrent.info file inside a
