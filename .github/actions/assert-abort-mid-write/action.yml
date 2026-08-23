@@ -8,33 +8,35 @@ description: >-
   this action's own comments) starts a genuinely fresh DeployRun that goes
   on to complete normally.
 
-  Runs immediately after assert-bad-checksum-backoff and strictly before
-  the pre-deploy timestamp capture and deploy-machine: assert-bad-checksum-backoff
-  already sets the Machine's real deploy intent (the full-deploy OS image)
-  and, as its own last step, restores the content it corrupted and waits
-  for that same DeployRun's own status.phase to move off "Failed" - an
-  agent-reported Failed run retries in place (provisionResultFromPhase
-  classifies it MachineErrorTypeRestart; AgentDeployer.Provision's
-  resetProvisionAttempt/startProvision discard its state and re-arm PXE on
-  the same run object, never a different one - see that action's own
-  description), so the boot-and-registration cycle this action used to
-  need to drive itself has already happened by the time this action
-  starts: what it rides is the SAME run, already past its restart, not a
-  freshly created one. This action never patches the Machine's spec
-  itself; it only watches that run, catches it mid-write, and deletes it.
+  Starts from an Available Machine with no deploy intent and no run in
+  flight (assert-two-axis-status, which runs immediately before this
+  action, only ever touches plan-build - no DeployRun is created for its
+  own failing attempt, and its last step leaves spec.imageRef/
+  postHookRefs pointed at its own broken PostHook, not this action's own
+  target image). This action therefore sets the Machine's real deploy
+  intent itself, the same shape deploy-machine's own happy-path patch
+  uses (spec.imageRef.name plus spec.postHookRefs, --type=merge, same
+  posthook-names default and the same kezio-default-finalize footgun
+  guard - see this action's own doc comment below), waits for that patch
+  to produce a real DeployRun, and only then starts watching for
+  WritingContent. Runs strictly before the pre-deploy timestamp capture
+  and deploy-machine: deploy-machine's own merge patch right after this
+  action re-applies the identical spec.imageRef/postHookRefs values onto
+  whatever Machine this action leaves behind, so it is a harmless no-op
+  re-patch regardless of which DeployRun (the aborted one's retry) is
+  currently in flight when it runs.
 
   Design choice: aborting here (before the OS deploy's own patch+wait)
   rather than after it lets deploy-machine's own unmodified patch+wait
-  (next step, a no-op merge patch re-applying the same imageRef/
-  postHookRefs) and verify-deploy be the proof that the controller's
-  automatic retry actually lands - no separate Provisioned wait is
-  duplicated here. It also must run strictly before
-  assert-poweroff-after-deploy, which deliberately destroys the OS disk's
-  content and clears the deploy intent as the lane's last disk-touching
-  step.
+  (next step, the no-op re-patch described above) and verify-deploy be
+  the proof that the controller's automatic retry actually lands - no
+  separate Provisioned wait is duplicated here. It also must run strictly
+  before assert-poweroff-after-deploy, which deliberately destroys the OS
+  disk's content and clears the deploy intent as the lane's last
+  disk-touching step.
 
   Detecting "mid-write" without flaking: this action polls the DeployRun
-  already in flight for status.phase == "WritingContent"
+  its own patch started for status.phase == "WritingContent"
   (DeployRunPhaseWritingContent) and deletes it the moment that phase is
   observed - it does not additionally wait for a nonzero
   status.partitions[].percent, since the full-deploy image's OS content
@@ -70,11 +72,11 @@ description: >-
         into a fresh kezio-agent process (internal/deployer/agent.go's
         startProvision has no marker left armed for this Machine at this
         point, so it always re-arms PXE and power-cycles for this fresh
-        run - see this action's own first paragraph).
+        run).
     - status.agentSession.tokenHash (MachineAgentSessionStatus.TokenHash)
       on the Machine differs, once the fresh run reaches WritingContent,
-      from the value captured before this action deleted the aborted
-      run: internal/agentserver's ingestRegistration unconditionally
+      from the value captured once this action's own patch first started
+      a run: internal/agentserver's ingestRegistration unconditionally
       overwrites this field on every POST /agent/register, so a changed
       hash is direct proof a brand new kezio-agent process registered in
       between - the old agent's process is not the one now writing this
@@ -104,27 +106,44 @@ description: >-
 
 inputs:
   machine-name:
-    description: >-
-      Name of the Machine already mid-deploy with a real DeployRun in
-      flight (see assert-bad-checksum-backoff, which must run
-      immediately before this action). Must have status.currentRunRef
-      set and status.state == "Provisioning" when this action starts.
+    description: Name of the Machine to set a deploy intent on and abort mid-write. Must already be Available (see wait-agent-registered) with no deploy intent set yet.
     required: true
   namespace:
     description: Namespace the Machine and its DeployRuns live in.
     required: false
     default: "scaffold-system"
+  image-name:
+    description: Name of the Image to deploy as this machine's OS - written to spec.imageRef.name, same as deploy-machine's own image-name input.
+    required: true
+  posthook-names:
+    description: >-
+      Newline-separated PostHook names, written in order to
+      spec.postHookRefs - same contract and default pairing as
+      deploy-machine's own posthook-names input (naming any hook at all
+      opts out of the kezio-default-finalize substitution, so a
+      chrootScript hook here must be paired with it). Kept identical to
+      deploy-machine's own default so the aborted attempt's plan is the
+      same shape deploy-machine's own happy-path attempt builds right
+      after.
+    required: false
+    default: |
+      kezio-e2e-deploy-marker
+      kezio-default-finalize
+  provisioning-timeout:
+    description: >-
+      Timeout to wait for status.currentRunRef to be set (the deploy
+      intent patch below reaching a started DeployRun) after this action
+      patches the deploy intent, in seconds as an integer, optionally
+      suffixed with s.
+    required: false
+    default: "120s"
   write-phase-timeout:
     description: >-
-      Timeout to wait for the in-flight DeployRun to reach
-      status.phase == "WritingContent", in seconds as an integer,
-      optionally suffixed with s. Generous: assert-bad-checksum-backoff's
-      own recovery wait only guarantees the run has moved off "Failed"
-      by the time this action starts (see this action's own description),
-      which can be as early as its restart just committing back to
-      Pending - boot and registration have already happened by then, but
-      this must still absorb partitioning ahead of the content write
-      itself, plus normal CI scheduling jitter.
+      Timeout to wait for the DeployRun this action's own patch started
+      to reach status.phase == "WritingContent", in seconds as an
+      integer, optionally suffixed with s. Generous: this must absorb PXE
+      boot, agent registration, and partitioning ahead of the content
+      write itself, plus normal CI scheduling jitter.
     required: false
     default: "900s"
   retry-timeout:
@@ -148,32 +167,77 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Capture the in-flight run and the current agent session baseline
+    - name: Guard the default-finalize footgun
+      shell: bash
+      env:
+        POSTHOOK_NAMES: ${{ inputs.posthook-names }}
+      run: |
+        set -euo pipefail
+        if [ -n "${POSTHOOK_NAMES}" ] && ! grep -qxF "kezio-default-finalize" <<<"${POSTHOOK_NAMES}"; then
+          echo "::error::posthook-names names one or more hooks but omits kezio-default-finalize - see deploy-machine's own doc comment for why" >&2
+          exit 1
+        fi
+
+    - name: Set the deploy intent to abort mid-write
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+        POSTHOOK_NAMES: ${{ inputs.posthook-names }}
+      run: |
+        set -euo pipefail
+        posthook_refs="$(jq -nR '[inputs | select(length > 0) | {name: .}]' <<<"${POSTHOOK_NAMES}")"
+        patch="$(jq -n --arg image "${IMAGE_NAME}" --argjson postHookRefs "${posthook_refs}" \
+          '{spec: {imageRef: {name: $image}, postHookRefs: $postHookRefs}}')"
+        kubectl patch machine "${MACHINE_NAME}" -n "${NAMESPACE}" --type=merge -p "${patch}"
+
+    - name: Wait for a real DeployRun to start, and capture the pre-abort agent session baseline
       id: before
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
         MACHINE_NAME: ${{ inputs.machine-name }}
+        TIMEOUT: ${{ inputs.provisioning-timeout }}
       run: |
         set -euo pipefail
-
-        machine_json="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o json)"
-        state="$(jq -r '.status.state // ""' <<<"${machine_json}")"
-        run_name="$(jq -r '.status.currentRunRef.name // ""' <<<"${machine_json}")"
-        session_hash="$(jq -r '.status.agentSession.tokenHash // ""' <<<"${machine_json}")"
-
-        if [ "${state}" != "Provisioning" ]; then
-          echo "::error::Machine ${MACHINE_NAME} status.state=${state:-<empty>}, want Provisioning - this action must run immediately after assert-bad-checksum-backoff with a real deploy already in flight" >&2
+        if [[ ! "${TIMEOUT}" =~ ^[0-9]+s?$ ]]; then
+          echo "::error::invalid provisioning-timeout '${TIMEOUT}': want seconds like 120 or 120s" >&2
           exit 1
         fi
-        if [ -z "${run_name}" ]; then
-          echo "::error::Machine ${MACHINE_NAME} has no status.currentRunRef set despite status.state=Provisioning" >&2
-          exit 1
-        fi
+        deadline=$(( $(date +%s) + ${TIMEOUT%s} ))
 
-        echo "run-name=${run_name}" >>"${GITHUB_OUTPUT}"
-        echo "session-hash-baseline=${session_hash}" >>"${GITHUB_OUTPUT}"
-        echo "watching DeployRun ${run_name} for mid-write evidence, agentSession.tokenHash baseline=${session_hash:-<none>}"
+        while true; do
+          machine_json="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o json)"
+          state="$(jq -r '.status.state // ""' <<<"${machine_json}")"
+          run_name="$(jq -r '.status.currentRunRef.name // ""' <<<"${machine_json}")"
+          echo "$(date -Is) Machine status.state=${state:-<empty>} currentRunRef=${run_name:-<none>}"
+
+          if [ -n "${run_name}" ]; then
+            if [ "${state}" != "Provisioning" ]; then
+              echo "::error::status.currentRunRef=${run_name} is set but status.state=${state:-<empty>}, want Provisioning" >&2
+              kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o yaml || true
+              exit 1
+            fi
+            session_hash="$(jq -r '.status.agentSession.tokenHash // ""' <<<"${machine_json}")"
+            echo "run-name=${run_name}" >>"${GITHUB_OUTPUT}"
+            echo "session-hash-baseline=${session_hash}" >>"${GITHUB_OUTPUT}"
+            echo "watching DeployRun ${run_name} for mid-write evidence, agentSession.tokenHash baseline=${session_hash:-<none>}"
+            break
+          fi
+          if [ "${state}" != "" ] && [ "${state}" != "Available" ] && [ "${state}" != "Provisioning" ]; then
+            echo "::error::status.state=${state} before a DeployRun even started - want Available or Provisioning" >&2
+            kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o yaml || true
+            exit 1
+          fi
+
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::status.currentRunRef was never set within ${TIMEOUT} - no DeployRun started for this action's own deploy intent" >&2
+            kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o yaml || true
+            exit 1
+          fi
+          sleep 5
+        done
 
     - name: Wait for the in-flight run to reach WritingContent, then delete it mid-write
       id: aborted
