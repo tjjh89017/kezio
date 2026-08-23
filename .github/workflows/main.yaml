@@ -452,7 +452,7 @@ jobs:
   # MachineHardware holds the inventory, and the Machine reaches
   # Available - this is the register phase, carried over unchanged from
   # the retired netboot lane, including its matrix (both of Subnet's DHCP
-  # modes: no-relay, where an existing DHCP server stays lease authority
+  # modes: proxydhcp, where an existing DHCP server stays lease authority
   # and bootd answers proxyDHCP only, and lease, where bootd's own
   # dnsmasq issues leases) and its MAC-gate assertion (fail-secure
   # against an unenrolled MAC). The lane then continues past
@@ -471,7 +471,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dhcp-scenario: [no-relay, lease]
+        dhcp-scenario: [proxydhcp, lease]
     env:
       PROVISIONING_BRIDGE: kezio-prov0
       PROVISIONING_HOST_IP: 192.0.2.1/24
@@ -637,7 +637,7 @@ jobs:
         run: kubectl apply -k config/bootd
 
       - name: Deploy the existing-dhcp pod on the provisioning bridge
-        if: matrix.dhcp-scenario == 'no-relay'
+        if: matrix.dhcp-scenario == 'proxydhcp'
         uses: ./.github/actions/deploy-existing-dhcp
         with:
           name: kezio-existing-dhcp

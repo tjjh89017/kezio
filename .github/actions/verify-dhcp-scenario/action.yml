@@ -2,7 +2,7 @@ name: Verify the DHCP scenario behaved as configured
 
 description: >-
   Asserts the DHCP-handling a Subnet's dhcp.mode matrix leg is actually
-  meant to exercise: no-relay checks that kezio-existing-dhcp's own
+  meant to exercise: proxydhcp checks that kezio-existing-dhcp's own
   proxyDHCP answered the DISCOVER/ACK exchange directly; lease checks
   that kezio-existing-dhcp was never deployed and bootd's dnsmasq issued
   the lease itself under BOOTD_LEASE_MODE. Any other scenario value is a
@@ -10,7 +10,7 @@ description: >-
 
 inputs:
   scenario:
-    description: DHCP scenario under test. One of no-relay, lease.
+    description: DHCP scenario under test. One of proxydhcp, lease.
     required: true
   namespace:
     description: Namespace kezio-existing-dhcp and the bootd Deployment are deployed in.
@@ -20,7 +20,7 @@ inputs:
     description: 'Name of the Subnet''s bootd Deployment, e.g. "kezio-bootd-<subnet-name>" (see deploy-bootd).'
     required: true
   existing-dhcp-deployment-name:
-    description: Name of the deploy-existing-dhcp Deployment (its "name" input) checked in the no-relay scenario, and confirmed absent in the lease scenario.
+    description: Name of the deploy-existing-dhcp Deployment (its "name" input) checked in the proxydhcp scenario, and confirmed absent in the lease scenario.
     required: false
     default: "kezio-existing-dhcp"
 
@@ -37,7 +37,7 @@ runs:
       run: |
         set -euo pipefail
         case "${SCENARIO}" in
-          no-relay)
+          proxydhcp)
             existing_dhcp_log="$(kubectl -n "${NAMESPACE}" logs deployment/"${EXISTING_DHCP_DEPLOYMENT_NAME}" --all-containers --tail=-1)"
             if ! grep -qF "DHCPDISCOVER" <<<"${existing_dhcp_log}" || ! grep -qF "DHCPACK" <<<"${existing_dhcp_log}"; then
               echo "::error::existing-dhcp's own log shows no DHCPDISCOVER/DHCPACK exchange" >&2

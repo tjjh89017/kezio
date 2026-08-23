@@ -36,9 +36,9 @@ inputs:
     required: false
     default: "default"
   dhcp-scenario:
-    description: 'DHCP scenario, mapped onto Subnet.spec.dhcp.mode: "no-relay" -> proxy (an existing DHCP server stays lease authority), "lease" -> lease (bootd''s own dnsmasq becomes lease authority).'
+    description: 'DHCP scenario, mapped onto Subnet.spec.dhcp.mode: "proxydhcp" -> proxy (an existing DHCP server stays lease authority), "lease" -> lease (bootd''s own dnsmasq becomes lease authority).'
     required: false
-    default: "no-relay"
+    default: "proxydhcp"
   lease-range-start:
     description: Subnet.spec.dhcp.leaseRangeStart. Required when dhcp-scenario is "lease".
     required: false
@@ -73,10 +73,10 @@ runs:
       run: |
         set -euo pipefail
         case "${DHCP_SCENARIO}" in
-          no-relay) dhcp_mode=proxy ;;
+          proxydhcp) dhcp_mode=proxy ;;
           lease) dhcp_mode=lease ;;
           *)
-            echo "::error::unknown dhcp-scenario '${DHCP_SCENARIO}' (expected no-relay or lease)" >&2
+            echo "::error::unknown dhcp-scenario '${DHCP_SCENARIO}' (expected proxydhcp or lease)" >&2
             exit 1
             ;;
         esac
