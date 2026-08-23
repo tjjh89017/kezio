@@ -130,7 +130,9 @@ func ResolveSubnet(subnet *keziov1alpha2.Subnet) Resolution {
 // supported topology.
 //
 // c is expected to be a cached informer client, as Resolve documents.
-func ResolveNamespaceSeeder(ctx context.Context, c client.Client, namespace string) (Resolution, bool, error) {
+// c only ever reads, so it is a client.Reader: planbuild's Builder holds
+// one of those rather than a full client.Client.
+func ResolveNamespaceSeeder(ctx context.Context, c client.Reader, namespace string) (Resolution, bool, error) {
 	var subnets keziov1alpha2.SubnetList
 	if err := c.List(ctx, &subnets, client.InNamespace(namespace)); err != nil {
 		return Resolution{}, false, fmt.Errorf("list subnets in namespace %s: %w", namespace, err)

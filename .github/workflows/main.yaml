@@ -657,6 +657,11 @@ jobs:
           cidr: ${{ env.PROVISIONING_CIDR }}
           bootd-server-ip: ${{ env.BOOTD_SERVER_IP }}
           bootd-network-name: kezio-boot-network
+          # Without this the seeder pod only ever gets a cluster pod IP,
+          # which is the one address a machine on the provisioning
+          # segment cannot reach - so every leecher fails to fetch its
+          # torrent and the deploy retries forever.
+          seeder-network-name: kezio-seeder-network
           dhcp-scenario: ${{ matrix.dhcp-scenario }}
           lease-range-start: ${{ env.LEASE_RANGE_START }}
           lease-range-end: ${{ env.LEASE_RANGE_END }}
