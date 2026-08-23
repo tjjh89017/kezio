@@ -25,10 +25,9 @@ import (
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 )
 
-// Subnet's validator is a deliberate no-op (see subnet_webhook.go), so this
-// suite only proves the webhook is registered and serves admission
-// requests; CRD schema/CEL rules are covered in subnet_schema_test.go
-// instead.
+// CIDR/IP patterns and the boot-half grouping rules are CEL rules on the
+// CRD schema and are covered in subnet_schema_test.go instead. This suite
+// covers the one rule that needs a cross-object read: spec.siteRef.
 var _ = Describe("Subnet Webhook", func() {
 	Context("admission round-trip through the webhook server", func() {
 		It("admits a valid Subnet", func() {
@@ -49,6 +48,64 @@ var _ = Describe("Subnet Webhook", func() {
 			}
 			Expect(k8sClient.Create(ctx, created)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, created)).To(Succeed())
+		})
+	})
+
+	Context("spec.siteRef", func() {
+		var validator SubnetCustomValidator
+
+		BeforeEach(func() {
+			validator = SubnetCustomValidator{Client: k8sClient}
+		})
+
+		It("denies a siteRef naming a Site that does not exist", func() {
+			subnet := &keziov1alpha2.Subnet{
+				ObjectMeta: metav1.ObjectMeta{Name: "subnet-dangling-siteref", Namespace: "default"},
+				Spec: keziov1alpha2.SubnetSpec{
+					SiteRef:         keziov1alpha2.NameRef{Name: "no-such-site"},
+					CIDR:            "192.0.2.0/24",
+					BootdServerIP:   "192.0.2.2",
+					BootdNetworkRef: &keziov1alpha2.NameRef{Name: "bootd-net"},
+					DHCP: &keziov1alpha2.SubnetDHCP{
+						Mode: keziov1alpha2.SubnetDHCPModeProxy,
+					},
+				},
+			}
+			_, err := validator.ValidateCreate(ctx, subnet)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("no-such-site"))
+		})
+
+		It("admits a siteRef naming a Site that exists", func() {
+			subnet := &keziov1alpha2.Subnet{
+				ObjectMeta: metav1.ObjectMeta{Name: "subnet-resolving-siteref", Namespace: "default"},
+				Spec: keziov1alpha2.SubnetSpec{
+					SiteRef:         keziov1alpha2.NameRef{Name: "site-a"},
+					CIDR:            "192.0.2.0/24",
+					BootdServerIP:   "192.0.2.2",
+					BootdNetworkRef: &keziov1alpha2.NameRef{Name: "bootd-net"},
+					DHCP: &keziov1alpha2.SubnetDHCP{
+						Mode: keziov1alpha2.SubnetDHCPModeProxy,
+					},
+				},
+			}
+			Expect(validator.ValidateCreate(ctx, subnet)).Error().NotTo(HaveOccurred())
+		})
+
+		It("checks the siteRef again on update", func() {
+			subnet := &keziov1alpha2.Subnet{
+				ObjectMeta: metav1.ObjectMeta{Name: "subnet-siteref-update-check", Namespace: "default"},
+				Spec: keziov1alpha2.SubnetSpec{
+					SiteRef:         keziov1alpha2.NameRef{Name: "no-such-site"},
+					CIDR:            "192.0.2.0/24",
+					BootdServerIP:   "192.0.2.2",
+					BootdNetworkRef: &keziov1alpha2.NameRef{Name: "bootd-net"},
+					DHCP: &keziov1alpha2.SubnetDHCP{
+						Mode: keziov1alpha2.SubnetDHCPModeProxy,
+					},
+				},
+			}
+			Expect(validator.ValidateUpdate(ctx, subnet, subnet)).Error().To(HaveOccurred())
 		})
 	})
 })

@@ -22,6 +22,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
@@ -44,10 +45,26 @@ var _ = Describe("Site Webhook", func() {
 		Expect(obj).NotTo(BeNil(), "Expected obj to be initialized")
 	})
 
+	// ensureSite creates a placeholder Site named name, ignoring
+	// AlreadyExists: the Subnet webhook now requires spec.siteRef to
+	// resolve, and this suite's Site fixtures under test are never
+	// themselves persisted (only passed to the validator directly), so a
+	// real backing object is created here purely to satisfy that check.
+	ensureSite := func(name string) {
+		site := &keziov1alpha2.Site{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		}
+		err := k8sClient.Create(ctx, site)
+		if err != nil && !apierrors.IsAlreadyExists(err) {
+			Expect(err).NotTo(HaveOccurred())
+		}
+	}
+
 	// newSubnet creates a Subnet whose spec.siteRef names siteRefName, so
 	// tests can control whether it points back at the Site under test.
 	newSubnet := func(siteRefName string) *keziov1alpha2.Subnet {
 		subnetSeq++
+		ensureSite(siteRefName)
 		subnet := &keziov1alpha2.Subnet{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      fmt.Sprintf("site-webhook-subnet-%d", subnetSeq),

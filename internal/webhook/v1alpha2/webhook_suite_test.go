@@ -29,6 +29,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -157,6 +158,28 @@ var _ = BeforeSuite(func() {
 
 		return conn.Close()
 	}).Should(Succeed())
+
+	// Shared fixtures other specs' Subnet/Machine objects reference by
+	// name: the Subnet webhook now requires spec.siteRef to resolve, and
+	// the Machine webhook now requires spec.subnetRef to resolve to a
+	// Subnet with a boot half, so every suite that admits a Subnet or
+	// Machine through the real webhook chain needs these to already
+	// exist.
+	Expect(k8sClient.Create(ctx, &keziov1alpha2.Site{
+		ObjectMeta: metav1.ObjectMeta{Name: "site-a", Namespace: "default"},
+	})).To(Succeed())
+	Expect(k8sClient.Create(ctx, &keziov1alpha2.Subnet{
+		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
+		Spec: keziov1alpha2.SubnetSpec{
+			SiteRef:         keziov1alpha2.NameRef{Name: "site-a"},
+			CIDR:            "192.0.2.0/24",
+			BootdServerIP:   "192.0.2.2",
+			BootdNetworkRef: &keziov1alpha2.NameRef{Name: "bootd-net"},
+			DHCP: &keziov1alpha2.SubnetDHCP{
+				Mode: keziov1alpha2.SubnetDHCPModeProxy,
+			},
+		},
+	})).To(Succeed())
 })
 
 var _ = AfterSuite(func() {

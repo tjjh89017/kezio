@@ -47,17 +47,18 @@ var _ = Describe("Machine Webhook", func() {
 
 	BeforeEach(func() {
 		obj = &keziov1alpha2.Machine{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
 			Spec: keziov1alpha2.MachineSpec{
 				BMC: keziov1alpha2.MachineBMC{
 					Address:              "webhooktest://10.0.0.1",
 					CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
 				},
 				BootMACAddress: "aa:bb:cc:dd:ee:01",
-				SubnetRef:      keziov1alpha2.NameRef{Name: "subnet"},
+				SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
 			},
 		}
 		oldObj = obj.DeepCopy()
-		validator = MachineCustomValidator{}
+		validator = MachineCustomValidator{Client: k8sClient}
 		Expect(validator).NotTo(BeNil(), "Expected validator to be initialized")
 		Expect(oldObj).NotTo(BeNil(), "Expected oldObj to be initialized")
 		Expect(obj).NotTo(BeNil(), "Expected obj to be initialized")
@@ -127,6 +128,44 @@ var _ = Describe("Machine Webhook", func() {
 		It("admits a missing boot MAC address when the annotation is absent", func() {
 			obj.Spec.BootMACAddress = ""
 			Expect(validator.ValidateCreate(ctx, obj)).Error().NotTo(HaveOccurred())
+		})
+	})
+
+	Context("spec.subnetRef", func() {
+		It("admits a subnetRef naming a Subnet with a boot half", func() {
+			// obj.Spec.SubnetRef already names "default", the suite-wide
+			// boot-half Subnet fixture created in webhook_suite_test.go.
+			Expect(validator.ValidateCreate(ctx, obj)).Error().NotTo(HaveOccurred())
+		})
+
+		It("denies a subnetRef naming a Subnet that does not exist", func() {
+			obj.Spec.SubnetRef = keziov1alpha2.NameRef{Name: "no-such-subnet"}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("no-such-subnet"))
+		})
+
+		It("denies a subnetRef naming a Subnet with no boot half", func() {
+			dataPlaneSubnet := &keziov1alpha2.Subnet{
+				ObjectMeta: metav1.ObjectMeta{Name: "machine-webhook-data-plane-subnet", Namespace: "default"},
+				Spec: keziov1alpha2.SubnetSpec{
+					SiteRef:          keziov1alpha2.NameRef{Name: "site-a"},
+					CIDR:             "192.0.3.0/24",
+					SeederNetworkRef: &keziov1alpha2.NameRef{Name: "seeder-net"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, dataPlaneSubnet)).To(Succeed())
+
+			obj.Spec.SubnetRef = keziov1alpha2.NameRef{Name: dataPlaneSubnet.Name}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring(dataPlaneSubnet.Name))
+			Expect(err.Error()).To(ContainSubstring("boot half"))
+		})
+
+		It("checks the subnetRef again on update", func() {
+			obj.Spec.SubnetRef = keziov1alpha2.NameRef{Name: "no-such-subnet"}
+			Expect(validator.ValidateUpdate(ctx, oldObj, obj)).Error().To(HaveOccurred())
 		})
 	})
 })

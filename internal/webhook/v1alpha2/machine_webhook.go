@@ -22,8 +22,10 @@ import (
 	"net/url"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -39,41 +41,44 @@ var machinelog = logf.Log.WithName("machine-resource")
 // SetupMachineWebhookWithManager registers the webhook for Machine in the manager.
 func SetupMachineWebhookWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr).For(&keziov1alpha2.Machine{}).
-		WithValidator(&MachineCustomValidator{}).
+		WithValidator(&MachineCustomValidator{Client: mgr.GetClient()}).
 		Complete()
 }
 
-// TODO(user): EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-
-// TODO(user): change verbs to "verbs=create;update;delete" if you want to enable deletion validation.
 // NOTE: The 'path' attribute must follow a specific pattern and should not be modified directly here.
 // Modifying the path for an invalid path can cause API server errors; failing to locate the webhook.
 // +kubebuilder:webhook:path=/validate-kezio-kojuro-date-v1alpha2-machine,mutating=false,failurePolicy=fail,sideEffects=None,groups=kezio.kojuro.date,resources=machines,verbs=create;update,versions=v1alpha2,name=vmachine-v1alpha2.kb.io,admissionReviewVersions=v1
 
 // MachineCustomValidator struct is responsible for validating the Machine resource
-// when it is created, updated, or deleted.
+// when it is created or updated.
 //
 // NOTE: The +kubebuilder:object:generate=false marker prevents controller-gen from generating DeepCopy methods,
 // as this struct is used only for temporary operations and does not need to be deeply copied.
 type MachineCustomValidator struct {
-	// TODO(user): Add more fields as needed for validation
+	// Client reads the Subnet named by spec.subnetRef, from the manager's
+	// informer cache. SetupMachineWebhookWithManager always wires this to
+	// mgr.GetClient(), so a nil Client is a programming error, not a
+	// supported mode: it makes validateMachineSubnetRef call a nil
+	// interface, which panics and, under this webhook's
+	// failurePolicy=fail, fails closed (denies) rather than admitting.
+	Client client.Client
 }
 
 var _ webhook.CustomValidator = &MachineCustomValidator{}
 
 // ValidateCreate implements webhook.CustomValidator so a webhook will be registered for the type Machine.
-func (v *MachineCustomValidator) ValidateCreate(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (v *MachineCustomValidator) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	machine, ok := obj.(*keziov1alpha2.Machine)
 	if !ok {
 		return nil, fmt.Errorf("expected a Machine object but got %T", obj)
 	}
 	machinelog.Info("Validation for Machine upon creation", "name", machine.GetName())
 
-	return nil, validateMachine(machine)
+	return nil, v.validateMachine(ctx, machine)
 }
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type Machine.
-func (v *MachineCustomValidator) ValidateUpdate(_ context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+func (v *MachineCustomValidator) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
 	machine, ok := newObj.(*keziov1alpha2.Machine)
 	if !ok {
 		return nil, fmt.Errorf("expected a Machine object for the newObj but got %T", newObj)
@@ -86,7 +91,7 @@ func (v *MachineCustomValidator) ValidateUpdate(_ context.Context, oldObj, newOb
 	if !machine.GetDeletionTimestamp().IsZero() {
 		return nil, nil
 	}
-	return nil, validateMachine(machine)
+	return nil, v.validateMachine(ctx, machine)
 }
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type Machine.
@@ -103,11 +108,46 @@ func (v *MachineCustomValidator) ValidateDelete(ctx context.Context, obj runtime
 // validateMachine runs every admission-time check for a Machine spec that
 // this codebase can decide without reaching into the controller's
 // hardware-inventory matching.
-func validateMachine(machine *keziov1alpha2.Machine) error {
+func (v *MachineCustomValidator) validateMachine(ctx context.Context, machine *keziov1alpha2.Machine) error {
 	if err := validateMachineBMC(machine); err != nil {
 		return err
 	}
-	return validateInspectDisable(machine)
+	if err := validateInspectDisable(machine); err != nil {
+		return err
+	}
+	return v.validateSubnetRef(ctx, machine)
+}
+
+// validateSubnetRef denies a spec.subnetRef that names a Subnet which does
+// not exist, or that names a Subnet with no boot half. A Machine PXE-boots
+// from its Subnet; a Subnet with no bootd runs no DHCP/TFTP for it, so a
+// Machine attached to a data-plane-only segment can never boot. Rejecting
+// this at admission surfaces the mistake immediately, rather than as a
+// Machine that silently never registers at deploy time.
+func (v *MachineCustomValidator) validateSubnetRef(ctx context.Context, machine *keziov1alpha2.Machine) error {
+	ref := machine.Spec.SubnetRef
+
+	namespace := ref.Namespace
+	if namespace == "" {
+		namespace = machine.GetNamespace()
+	}
+
+	subnet := &keziov1alpha2.Subnet{}
+	key := client.ObjectKey{Namespace: namespace, Name: ref.Name}
+	if err := v.Client.Get(ctx, key, subnet); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("spec.subnetRef names Subnet %q, which does not exist", ref.Name)
+		}
+		return fmt.Errorf("looking up Subnet %q referenced by spec.subnetRef: %w", ref.Name, err)
+	}
+
+	if !subnet.Spec.HasBootPlane() {
+		return fmt.Errorf(
+			"spec.subnetRef names Subnet %q, which has no boot half (bootdServerIP/bootdNetworkRef/dhcp): a Machine cannot PXE-boot from a data-plane-only Subnet",
+			ref.Name)
+	}
+
+	return nil
 }
 
 // validateMachineBMC rejects a spec.bmc.address whose scheme has no
