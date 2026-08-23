@@ -21,6 +21,16 @@ inputs:
     description: 'Kustomize overlay directory to apply.'
     required: false
     default: "config/opentracker"
+  network-name:
+    description: >-
+      NetworkAttachmentDefinition to attach opentracker through, in the
+      same namespace. Empty leaves opentracker cluster-internal only.
+      Required whenever real machines announce to it: a peer connects to
+      the address the tracker hands back, so the tracker must live on the
+      segment those peers are on (docs/physical-lab-deployment.md's
+      no-NAT rule).
+    required: false
+    default: ""
   timeout:
     description: 'Timeout for the opentracker rollout wait, e.g. "180s".'
     required: false
@@ -35,6 +45,7 @@ runs:
         OPENTRACKER_IMG: ${{ inputs.opentracker-image }}
         NAMESPACE: ${{ inputs.namespace }}
         KUSTOMIZE_DIR: ${{ inputs.kustomize-dir }}
+        NETWORK_NAME: ${{ inputs.network-name }}
         TIMEOUT: ${{ inputs.timeout }}
       run: |
         set -euo pipefail
@@ -43,4 +54,11 @@ runs:
         bin/kustomize build "${KUSTOMIZE_DIR}" | kubectl apply -f -
         deployment="$(kubectl get deployment -n "${NAMESPACE}" -l app.kubernetes.io/component=opentracker \
           -o jsonpath='{.items[0].metadata.name}')"
+        # config/opentracker ships the annotation commented out because the
+        # network name is site-specific - the same patch the lab guide walks
+        # an operator through by hand.
+        if [ -n "${NETWORK_NAME}" ]; then
+          kubectl -n "${NAMESPACE}" patch deployment/"${deployment}" --type=strategic \
+            -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"k8s.v1.cni.cncf.io/networks\":\"${NETWORK_NAME}\"}}}}}"
+        fi
         kubectl rollout status deployment/"${deployment}" -n "${NAMESPACE}" --timeout="${TIMEOUT}"

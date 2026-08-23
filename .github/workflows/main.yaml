@@ -478,7 +478,12 @@ jobs:
       PROVISIONING_CIDR: 192.0.2.0/24
       BOOTD_SERVER_IP: 192.0.2.2
       EXISTING_DHCP_NET1_IP: 192.0.2.3/24
-      TRACKER_NET1_IP: 192.0.2.4/24
+      # Bare, like BOOTD_SERVER_IP, because the announce URL baked into
+      # every torrent must be the tracker's own address on this segment -
+      # a peer connects to whatever the tracker hands back, and nothing
+      # on that path may rewrite it. The NAD's CIDR is derived at its use
+      # site so the two can never drift apart.
+      TRACKER_SERVER_IP: 192.0.2.4
       SEEDER_NET1_IP: 192.0.2.5/24
       LEASE_RANGE_START: 192.0.2.10
       LEASE_RANGE_END: 192.0.2.100
@@ -619,7 +624,10 @@ jobs:
             IMAGE_INGEST_IMAGE=example.com/kezio-ingest:e2e
             IMAGE_INGEST_SOURCE_FORMAT=raw
             PARTITIONCONTENT_PUBLISH_IMAGE=example.com/kezio-ingest:e2e
-            PARTITIONCONTENT_TRACKER_URL=http://opentracker.scaffold-system.svc.cluster.local:6969/announce
+            # Not the ClusterIP Service the image-path lane uses: a
+            # ClusterIP DNATs, and this lane's leecher runs on a real
+            # machine that has no route to it either way.
+            PARTITIONCONTENT_TRACKER_URL=http://${{ env.TRACKER_SERVER_IP }}:6969/announce
             PARTITIONCONTENT_SEEDER_IMAGE=example.com/kezio-seeder:e2e
             PARTITIONCONTENT_SEEDER_GRACE_PERIOD=30s
 
@@ -628,7 +636,7 @@ jobs:
         with:
           bridge-name: ${{ env.PROVISIONING_BRIDGE }}
           bootd-net1-ip: "${{ env.BOOTD_SERVER_IP }}/24"
-          tracker-net1-ip: ${{ env.TRACKER_NET1_IP }}
+          tracker-net1-ip: "${{ env.TRACKER_SERVER_IP }}/24"
           seeder-net1-ip: ${{ env.SEEDER_NET1_IP }}
 
       # SubnetReconciler's Valid condition checks the kezio-bootd
@@ -739,6 +747,11 @@ jobs:
 
       - name: Deploy opentracker
         uses: ./.github/actions/deploy-opentracker
+        with:
+          # Unlike the image-path lane, this lane's peers are real
+          # machines on the provisioning segment: the tracker has to be
+          # on it too, or the address it hands back is unreachable.
+          network-name: kezio-tracker-network
 
       - name: Create the image-service bearer token Secret
         uses: ./.github/actions/create-image-service-token-secret
