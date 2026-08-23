@@ -226,7 +226,15 @@ runs:
 
         slots="[]"
         for i in $(seq 0 $((n - 1))); do
-          num=$((i + 1))
+          # Number partitions the way internal/ingest's partitionNumber
+          # does - trailing digits of the sfdisk node path, falling back
+          # to 1-based list position - because the Image's slot numbers
+          # must line up with the numbers ingest reports. A cloud image's
+          # table is not contiguous (Ubuntu ships 1, 14, 15, 16), so
+          # list position would declare slots ingest never produces.
+          node="$(jq -r ".partitiontable.partitions[$i].node // \"\"" "${RUNNER_TEMP}/sfdisk.json")"
+          num="${node##*[!0-9]}"
+          [ -n "${num}" ] || num=$((i + 1))
           start_sectors="$(jq -r ".partitiontable.partitions[$i].start" "${RUNNER_TEMP}/sfdisk.json")"
           size_sectors="$(jq -r ".partitiontable.partitions[$i].size" "${RUNNER_TEMP}/sfdisk.json")"
           type_guid="$(jq -r ".partitiontable.partitions[$i].type" "${RUNNER_TEMP}/sfdisk.json")"
