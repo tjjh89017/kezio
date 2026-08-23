@@ -43,8 +43,11 @@ type PartitionContentSource struct {
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
 type PartitionContentSpec struct {
 	// FSType is the filesystem type of the partition, for example "ext4"
-	// or "ntfs".
-	// +kubebuilder:validation:MinLength=1
+	// or "ntfs". It is empty when the partition carries no recognizable
+	// file system - a BIOS boot partition, for example - which ingest
+	// captures with partclone.dd rather than a file-system-aware
+	// partclone binary. Recorded for audit only: the deploy path restores
+	// content from the torrent, which carries its own format.
 	// +kubebuilder:validation:MaxLength=64
 	FSType string `json:"fsType"`
 	// UsedBytes is the number of bytes of real data in the partition, as

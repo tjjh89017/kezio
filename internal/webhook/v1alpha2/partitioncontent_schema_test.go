@@ -59,10 +59,14 @@ var _ = Describe("PartitionContent CRD schema", func() {
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
 	})
 
-	It("rejects a PartitionContent with no fsType", func() {
+	// A partition with no recognizable file system - a BIOS boot
+	// partition is the common one - still has content, captured with
+	// partclone.dd. Rejecting its empty fsType would make that content
+	// impossible to record.
+	It("admits a PartitionContent with an empty fsType", func() {
 		pc := newPartitionContent()
 		pc.Spec.FSType = ""
-		Expect(k8sClient.Create(ctx, pc)).To(HaveOccurred())
+		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
 	})
 
 	It("rejects a PartitionContent with no source", func() {

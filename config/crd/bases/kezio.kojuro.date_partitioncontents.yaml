@@ -60,9 +60,12 @@ spec:
               fsType:
                 description: |-
                   FSType is the filesystem type of the partition, for example "ext4"
-                  or "ntfs".
+                  or "ntfs". It is empty when the partition carries no recognizable
+                  file system - a BIOS boot partition, for example - which ingest
+                  captures with partclone.dd rather than a file-system-aware
+                  partclone binary. Recorded for audit only: the deploy path restores
+                  content from the torrent, which carries its own format.
                 maxLength: 64
-                minLength: 1
                 type: string
               lastExtentEnd:
                 description: |-
