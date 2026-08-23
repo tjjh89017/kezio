@@ -59,9 +59,21 @@ runs:
           # which "<<<" turns into a trailing empty mapfile element -
           # kubectl then reads that empty string as a second (invalid)
           # resource argument instead of an env change.
+          #
+          # Drop "#" lines for the same reason: the block scalar reads like
+          # a config file, so callers comment it, and kubectl would take
+          # each comment word as another resource argument and fail with
+          # "all resources must be specified before environment changes".
           env_pairs=()
           while IFS= read -r pair; do
-            [ -n "${pair}" ] && env_pairs+=("${pair}")
+            # Leading whitespace survives when a caller indents a comment
+            # past the block scalar's own indentation, so trim before
+            # testing rather than only matching a bare "#".
+            trimmed="${pair#"${pair%%[![:space:]]*}"}"
+            case "${trimmed}" in
+              "" | "#"*) continue ;;
+            esac
+            env_pairs+=("${trimmed}")
           done <<< "${EXTRA_ENV}"
           kubectl -n "${NAMESPACE}" set env deployment/"${deployment}" "${env_pairs[@]}"
           kubectl rollout status deployment/"${deployment}" -n "${NAMESPACE}" --timeout="${TIMEOUT}"
