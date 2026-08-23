@@ -243,6 +243,13 @@ const (
 	// validation passed (for example, that every slot's referenced
 	// content resolves and its lastExtentEnd fits the slot).
 	ImageConditionValid = "Valid"
+	// ImageConditionSeederDegraded reports a problem with this image's
+	// per-Site seeder Deployment placement that would otherwise surface
+	// nowhere: a Site with demand but no seederSubnetRef, a seeder
+	// Deployment name occupied by an object this Image does not control,
+	// or a demanded seeder Deployment whose pod never became Ready.
+	// Absent entirely (never set False) when nothing is wrong.
+	ImageConditionSeederDegraded = "SeederDegraded"
 )
 
 // ImageStatus defines the observed state of Image.

@@ -25,6 +25,7 @@ import (
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -549,5 +550,286 @@ var _ = Describe("Image Controller seeder demand grouping", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: depName, Namespace: "default"}, &dep)).To(Succeed())
 		Expect(dep.Spec.Replicas).NotTo(BeNil())
 		Expect(*dep.Spec.Replicas).To(Equal(int32(1)))
+	})
+})
+
+var _ = Describe("Image Controller seeder degradation reporting", func() {
+	var ctx context.Context
+
+	BeforeEach(func() {
+		ctx = context.Background()
+	})
+
+	newSeederImageReconciler := func(seeder ImageSeederConfig) *ImageReconciler {
+		return &ImageReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Seeder: seeder}
+	}
+
+	mustGetImage := func(name string) *keziov1alpha2.Image {
+		var img keziov1alpha2.Image
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &img)).To(Succeed())
+		return &img
+	}
+
+	It("surfaces a demanded seeder Deployment whose pod never becomes Ready, and stops surfacing once it does", func() {
+		siteIdentity := mustCreateSeedingSite(ctx, "seed-subnet-710", "site-710")
+		mustCreateMachineSubnet(ctx, "machine-subnet-710", "site-710")
+
+		contentName := "pc-" + imageSeederTestHash(710)
+		createReadyContent(ctx, contentName)
+
+		img := newTestImageWithSlots("image-710", []keziov1alpha2.ImageSlot{
+			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		}, nil)
+		Expect(k8sClient.Create(ctx, img)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
+
+		machine := newTestMachineOnSubnet("machine-710", img.Name, "machine-subnet-710")
+		Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+
+		r := newSeederImageReconciler(ImageSeederConfig{Image: "example.test/kezio-seeder:test"})
+		nn := types.NamespacedName{Name: img.Name, Namespace: "default"}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		depName := seederdeploy.Name(img.Name, siteIdentity)
+		depKey := types.NamespacedName{Name: depName, Namespace: "default"}
+		var dep appsv1.Deployment
+		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
+
+		// The pod never becomes Ready: AvailableReplicas stays at its
+		// envtest default of 0. Reconciling again must record the
+		// unready-since annotation and surface it on the Image.
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
+		Expect(dep.Annotations).To(HaveKey(imageSeederUnreadySinceAnnotation))
+
+		img = mustGetImage(img.Name)
+		cond := meta.FindStatusCondition(img.Status.Conditions, keziov1alpha2.ImageConditionSeederDegraded)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+		Expect(cond.Reason).To(Equal("SeederPodUnready"))
+		Expect(cond.Message).To(ContainSubstring(siteIdentity))
+
+		// The pod becomes Ready: the annotation and the condition must
+		// both clear.
+		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
+		dep.Status.Replicas = 1
+		dep.Status.ReadyReplicas = 1
+		dep.Status.AvailableReplicas = 1
+		Expect(k8sClient.Status().Update(ctx, &dep)).To(Succeed())
+
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
+		Expect(dep.Annotations).NotTo(HaveKey(imageSeederUnreadySinceAnnotation))
+
+		img = mustGetImage(img.Name)
+		Expect(meta.FindStatusCondition(img.Status.Conditions, keziov1alpha2.ImageConditionSeederDegraded)).To(BeNil())
+	})
+
+	It("leaves a foreign Deployment under the expected name untouched and reports it, never adopting it", func() {
+		siteIdentity := mustCreateSeedingSite(ctx, "seed-subnet-711", "site-711")
+		mustCreateMachineSubnet(ctx, "machine-subnet-711", "site-711")
+
+		contentName := "pc-" + imageSeederTestHash(711)
+		createReadyContent(ctx, contentName)
+
+		img := newTestImageWithSlots("image-711", []keziov1alpha2.ImageSlot{
+			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		}, nil)
+		Expect(k8sClient.Create(ctx, img)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
+
+		depName := seederdeploy.Name(img.Name, siteIdentity)
+		foreignLabels := map[string]string{"app": "not-kezio"}
+		foreign := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: depName, Namespace: "default"},
+			Spec: appsv1.DeploymentSpec{
+				Selector: &metav1.LabelSelector{MatchLabels: foreignLabels},
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: foreignLabels},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "not-a-seeder", Image: "example.test/not-a-seeder:test"}},
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, foreign) })
+		foreignResourceVersionBefore := foreign.ResourceVersion
+
+		machine := newTestMachineOnSubnet("machine-711", img.Name, "machine-subnet-711")
+		Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+
+		r := newSeederImageReconciler(ImageSeederConfig{Image: "example.test/kezio-seeder:test"})
+		nn := types.NamespacedName{Name: img.Name, Namespace: "default"}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		// Never adopted, never mutated: same ResourceVersion, still not
+		// controller-owned by img, and its foreign spec is untouched.
+		var got appsv1.Deployment
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: depName, Namespace: "default"}, &got)).To(Succeed())
+		Expect(got.ResourceVersion).To(Equal(foreignResourceVersionBefore), "the foreign Deployment must never be written to")
+		Expect(metav1.IsControlledBy(&got, img)).To(BeFalse())
+		Expect(got.Spec.Template.Spec.Containers).To(HaveLen(1))
+		Expect(got.Spec.Template.Spec.Containers[0].Name).To(Equal("not-a-seeder"))
+
+		gotImg := mustGetImage(img.Name)
+		cond := meta.FindStatusCondition(gotImg.Status.Conditions, keziov1alpha2.ImageConditionSeederDegraded)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+		Expect(cond.Reason).To(Equal("SeederDeploymentForeignOwner"))
+		Expect(cond.Message).To(ContainSubstring(siteIdentity))
+	})
+
+	It("still creates a seeder Deployment, with no Multus annotation, for a Site whose seeding Subnet has no seederNetworkRef, and does not report it as degraded", func() {
+		siteName := "site-712"
+		subnetName := "seed-subnet-712"
+		subnet := &keziov1alpha2.Subnet{
+			ObjectMeta: metav1.ObjectMeta{Name: subnetName, Namespace: "default"},
+			Spec: keziov1alpha2.SubnetSpec{
+				SiteRef: keziov1alpha2.NameRef{Name: siteName},
+				CIDR:    "198.51.100.0/24",
+				// A Subnet must declare at least one plane; this one keeps
+				// its boot half (shared with the machines it seeds) but
+				// deliberately carries no SeederNetworkRef, so the seeder
+				// still runs, just on the ordinary cluster network.
+				BootdServerIP:   "198.51.100.2",
+				BootdNetworkRef: &keziov1alpha2.NameRef{Name: subnetName + "-bootd-nad"},
+				DHCP:            &keziov1alpha2.SubnetDHCP{Mode: keziov1alpha2.SubnetDHCPModeProxy},
+			},
+		}
+		Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
+		site := &keziov1alpha2.Site{
+			ObjectMeta: metav1.ObjectMeta{Name: siteName, Namespace: "default"},
+			Spec:       keziov1alpha2.SiteSpec{SeederSubnetRef: &keziov1alpha2.NameRef{Name: subnetName}},
+		}
+		Expect(k8sClient.Create(ctx, site)).To(Succeed())
+		siteIdentity := "default/" + siteName
+		mustCreateMachineSubnet(ctx, "machine-subnet-712", siteName)
+
+		contentName := "pc-" + imageSeederTestHash(712)
+		createReadyContent(ctx, contentName)
+
+		img := newTestImageWithSlots("image-712", []keziov1alpha2.ImageSlot{
+			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		}, nil)
+		Expect(k8sClient.Create(ctx, img)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
+
+		machine := newTestMachineOnSubnet("machine-712", img.Name, "machine-subnet-712")
+		Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+
+		r := newSeederImageReconciler(ImageSeederConfig{Image: "example.test/kezio-seeder:test"})
+		nn := types.NamespacedName{Name: img.Name, Namespace: "default"}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		depName := seederdeploy.Name(img.Name, siteIdentity)
+		var dep appsv1.Deployment
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: depName, Namespace: "default"}, &dep)).To(Succeed())
+		Expect(dep.Spec.Template.Annotations).NotTo(HaveKey(multusDefaultNetworkAnnotation))
+
+		gotImg := mustGetImage(img.Name)
+		Expect(meta.FindStatusCondition(gotImg.Status.Conditions, keziov1alpha2.ImageConditionSeederDegraded)).To(BeNil(),
+			"a seeding Subnet with no seederNetworkRef is a supported topology, not a degraded one")
+	})
+
+	It("creates no seeder Deployment for a Site with no seederSubnetRef at all, and names the unset reference on the Image", func() {
+		siteName := "site-713"
+		site := &keziov1alpha2.Site{
+			ObjectMeta: metav1.ObjectMeta{Name: siteName, Namespace: "default"},
+			// No SeederSubnetRef: this Site runs no seeder at all.
+		}
+		Expect(k8sClient.Create(ctx, site)).To(Succeed())
+		siteIdentity := "default/" + siteName
+		mustCreateMachineSubnet(ctx, "machine-subnet-713", siteName)
+
+		contentName := "pc-" + imageSeederTestHash(713)
+		createReadyContent(ctx, contentName)
+
+		img := newTestImageWithSlots("image-713", []keziov1alpha2.ImageSlot{
+			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		}, nil)
+		Expect(k8sClient.Create(ctx, img)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
+
+		machine := newTestMachineOnSubnet("machine-713", img.Name, "machine-subnet-713")
+		Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+
+		r := newSeederImageReconciler(ImageSeederConfig{Image: "example.test/kezio-seeder:test"})
+		nn := types.NamespacedName{Name: img.Name, Namespace: "default"}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		var deployments appsv1.DeploymentList
+		Expect(k8sClient.List(ctx, &deployments, client.InNamespace("default"), client.MatchingLabels{
+			partitionContentAppComponentLabel: partitionContentSeederComponentValue,
+		})).To(Succeed())
+		for i := range deployments.Items {
+			Expect(metav1.IsControlledBy(&deployments.Items[i], img)).To(BeFalse(), "no seeder Deployment must be created for a Site with no seederSubnetRef")
+		}
+
+		gotImg := mustGetImage(img.Name)
+		cond := meta.FindStatusCondition(gotImg.Status.Conditions, keziov1alpha2.ImageConditionSeederDegraded)
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+		Expect(cond.Reason).To(Equal("SeederSubnetRefUnset"))
+		Expect(cond.Message).To(ContainSubstring(siteIdentity))
+	})
+
+	It("qualifies a bare seederNetworkRef with the seeding Subnet's own namespace, not the Image's", func() {
+		imageNamespace := "default"
+		subnetNamespace := "seeder-ns-714"
+		Expect(k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: subnetNamespace}})).To(Succeed())
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: subnetNamespace}})
+		})
+
+		siteName := "site-714"
+		subnetName := "seed-subnet-714"
+		subnet := &keziov1alpha2.Subnet{
+			ObjectMeta: metav1.ObjectMeta{Name: subnetName, Namespace: subnetNamespace},
+			Spec: keziov1alpha2.SubnetSpec{
+				SiteRef:          keziov1alpha2.NameRef{Name: siteName, Namespace: imageNamespace},
+				CIDR:             "198.51.100.0/24",
+				SeederNetworkRef: &keziov1alpha2.NameRef{Name: subnetName + "-nad"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
+		site := &keziov1alpha2.Site{
+			ObjectMeta: metav1.ObjectMeta{Name: siteName, Namespace: imageNamespace},
+			Spec:       keziov1alpha2.SiteSpec{SeederSubnetRef: &keziov1alpha2.NameRef{Name: subnetName, Namespace: subnetNamespace}},
+		}
+		Expect(k8sClient.Create(ctx, site)).To(Succeed())
+		siteIdentity := imageNamespace + "/" + siteName
+		mustCreateMachineSubnet(ctx, "machine-subnet-714", siteName)
+
+		contentName := "pc-" + imageSeederTestHash(714)
+		createReadyContent(ctx, contentName)
+
+		img := newTestImageWithSlots("image-714", []keziov1alpha2.ImageSlot{
+			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		}, nil)
+		Expect(k8sClient.Create(ctx, img)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
+
+		machine := newTestMachineOnSubnet("machine-714", img.Name, "machine-subnet-714")
+		Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+
+		r := newSeederImageReconciler(ImageSeederConfig{Image: "example.test/kezio-seeder:test"})
+		nn := types.NamespacedName{Name: img.Name, Namespace: imageNamespace}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		depName := seederdeploy.Name(img.Name, siteIdentity)
+		var dep appsv1.Deployment
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: depName, Namespace: imageNamespace}, &dep)).To(Succeed())
+		Expect(dep.Spec.Template.Annotations[multusDefaultNetworkAnnotation]).To(Equal(subnetNamespace+"/"+subnetName+"-nad"),
+			"the bare NAD name must qualify against the seeding Subnet's own namespace, not the Image's")
 	})
 })

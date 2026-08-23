@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"sort"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -70,11 +71,18 @@ func machinesReferencingImage(ctx context.Context, c client.Client, image client
 // demand counts. A Machine whose Site cannot be resolved (a dangling
 // siteRef or seederSubnetRef - a user-facing misconfiguration, see
 // sitederive.Resolve's own error classification) is logged and skipped,
-// never allowed to block another Site's count; likewise a Machine whose
-// Site resolves but declares no seeder at all (HasSeeder false) is
-// skipped, since there is nothing to count demand toward.
-func seederDemandBySite(ctx context.Context, c client.Client, machines map[client.ObjectKey]*keziov1alpha2.Machine) map[string]*seederSiteDemand {
+// never allowed to block another Site's count.
+//
+// A Machine whose Site resolves but declares no seeder at all (HasSeeder
+// false) contributes no demand count either, but its Site's identity is
+// still collected into the second return value: unlike a dangling
+// reference, "no seederSubnetRef" is not itself an error, yet a Machine
+// there would otherwise wait forever with nothing pointing at the cause,
+// so callers surface it distinctly (see ImageConditionSeederDegraded).
+// The returned slice is sorted and deduplicated.
+func seederDemandBySite(ctx context.Context, c client.Client, machines map[client.ObjectKey]*keziov1alpha2.Machine) (map[string]*seederSiteDemand, []string) {
 	demand := make(map[string]*seederSiteDemand)
+	noSeeder := make(map[string]bool)
 	log := logf.FromContext(ctx)
 	for key, machine := range machines {
 		res, err := sitederive.Resolve(ctx, c, machine)
@@ -84,6 +92,7 @@ func seederDemandBySite(ctx context.Context, c client.Client, machines map[clien
 			continue
 		}
 		if !res.HasSeeder {
+			noSeeder[res.SiteIdentity] = true
 			continue
 		}
 		d, ok := demand[res.SiteIdentity]
@@ -93,5 +102,10 @@ func seederDemandBySite(ctx context.Context, c client.Client, machines map[clien
 		}
 		d.count++
 	}
-	return demand
+	noSeederSites := make([]string, 0, len(noSeeder))
+	for site := range noSeeder {
+		noSeederSites = append(noSeederSites, site)
+	}
+	sort.Strings(noSeederSites)
+	return demand, noSeederSites
 }

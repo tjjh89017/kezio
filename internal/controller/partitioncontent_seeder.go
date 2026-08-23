@@ -69,7 +69,7 @@ func (r *PartitionContentReconciler) collectSeederSites(ctx context.Context, pc 
 	if err != nil {
 		return nil, err
 	}
-	demand := seederDemandBySite(ctx, r.Client, machines)
+	demand, _ := seederDemandBySite(ctx, r.Client, machines)
 
 	available := make(map[string]bool)
 	for i := range images {

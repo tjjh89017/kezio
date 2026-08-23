@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -153,6 +155,97 @@ func (r *ImageReconciler) recordFailed(ctx context.Context, image *keziov1alpha2
 		return ctrl.Result{}, fmt.Errorf("image %q: recording Failed: %w", image.Name, err)
 	}
 	return ctrl.Result{}, nil
+}
+
+// imageSeederDegradedCause is one reason updateImageSeederCondition can
+// report: a Reason plus the ready-to-render message for the site(s) it
+// applies to.
+type imageSeederDegradedCause struct {
+	reason  string
+	message string
+}
+
+// updateImageSeederCondition aggregates reconcileImageSeeder's per-Site
+// findings - unsetSeederSubnetSites (from imageSeedDemandBySite), and
+// problems (foreign-owner, unready) collected while reconciling each
+// Site's Deployment - into ImageConditionSeederDegraded, then writes
+// image.Status only when the condition actually changed. Each cause gets
+// its own Reason when it is the only one present, so a human goes
+// straight to the specific remediation; multiple causes share Reason
+// "SeederDegraded" instead, since the condition has room for only one.
+// The condition is removed entirely (never set False) when nothing is
+// wrong - "degraded" does not apply to a healthy seeder plane.
+func (r *ImageReconciler) updateImageSeederCondition(ctx context.Context, image *keziov1alpha2.Image, problems []seederSiteProblem, unsetSeederSubnetSites []string) error {
+	var foreignOwner, unready []string
+	for _, p := range problems {
+		switch p.kind {
+		case seederProblemForeignOwner:
+			foreignOwner = append(foreignOwner, p.site)
+		case seederProblemUnready:
+			unready = append(unready, p.site)
+		}
+	}
+
+	var causes []imageSeederDegradedCause
+	if len(unsetSeederSubnetSites) > 0 {
+		sites := append([]string(nil), unsetSeederSubnetSites...)
+		sort.Strings(sites)
+		causes = append(causes, imageSeederDegradedCause{
+			reason: "SeederSubnetRefUnset",
+			message: fmt.Sprintf("Site.spec.seederSubnetRef is unset for site(s) %s; no seeder Deployment is created there, so machines there cannot build a deploy plan for this Image until it is set",
+				strings.Join(sites, ", ")),
+		})
+	}
+	if len(foreignOwner) > 0 {
+		sort.Strings(foreignOwner)
+		causes = append(causes, imageSeederDegradedCause{
+			reason: "SeederDeploymentForeignOwner",
+			message: fmt.Sprintf("seeder deployment name is already controlled by a different object for site(s) %s; left untouched and not counted as served",
+				strings.Join(foreignOwner, ", ")),
+		})
+	}
+	if len(unready) > 0 {
+		sort.Strings(unready)
+		causes = append(causes, imageSeederDegradedCause{
+			reason: "SeederPodUnready",
+			message: fmt.Sprintf("seeder deployment has reported no available replica for site(s) %s; check its pod status (crash loop, bad image, or an unsatisfiable nodeSelector)",
+				strings.Join(unready, ", ")),
+		})
+	}
+
+	var changed bool
+	switch len(causes) {
+	case 0:
+		changed = meta.RemoveStatusCondition(&image.Status.Conditions, keziov1alpha2.ImageConditionSeederDegraded)
+	case 1:
+		changed = meta.SetStatusCondition(&image.Status.Conditions, metav1.Condition{
+			Type:               keziov1alpha2.ImageConditionSeederDegraded,
+			Status:             metav1.ConditionTrue,
+			Reason:             causes[0].reason,
+			Message:            causes[0].message,
+			ObservedGeneration: image.Generation,
+		})
+	default:
+		messages := make([]string, len(causes))
+		for i, c := range causes {
+			messages[i] = c.message
+		}
+		changed = meta.SetStatusCondition(&image.Status.Conditions, metav1.Condition{
+			Type:               keziov1alpha2.ImageConditionSeederDegraded,
+			Status:             metav1.ConditionTrue,
+			Reason:             "SeederDegraded",
+			Message:            strings.Join(messages, "; "),
+			ObservedGeneration: image.Generation,
+		})
+	}
+
+	if !changed {
+		return nil
+	}
+	if err := r.applyImageStatus(ctx, image); err != nil {
+		return fmt.Errorf("image %q: recording seeder degraded condition: %w", image.Name, err)
+	}
+	return nil
 }
 
 // reconcileIngestPending holds an Image that has spec.source and whose

@@ -29,13 +29,17 @@ import (
 // their derived Site (seederDemandBySite). The demand source is unchanged
 // from the per-content design - a live Machine naming image, or an active
 // DeployRun whose resolved snapshot names it - only the grouping changes:
-// by Site instead of collapsed into one namespace-wide boolean.
-func (r *ImageReconciler) imageSeedDemandBySite(ctx context.Context, image *keziov1alpha2.Image) (map[string]*seederSiteDemand, error) {
+// by Site instead of collapsed into one namespace-wide boolean. The
+// second return value names every Site among those Machines that
+// declares no seederSubnetRef at all - see seederDemandBySite's doc
+// comment.
+func (r *ImageReconciler) imageSeedDemandBySite(ctx context.Context, image *keziov1alpha2.Image) (map[string]*seederSiteDemand, []string, error) {
 	machines, err := r.demandMachinesForImage(ctx, image)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return seederDemandBySite(ctx, r.Client, machines), nil
+	demand, noSeederSites := seederDemandBySite(ctx, r.Client, machines)
+	return demand, noSeederSites, nil
 }
 
 // demandMachinesForImage returns the deduplicated set of Machines that

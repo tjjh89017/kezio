@@ -25,6 +25,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -45,6 +46,45 @@ import (
 // with the object it describes.
 const imageSeederEmptySinceAnnotation = "kezio.kojuro.date/seeder-empty-since"
 
+// imageSeederUnreadySinceAnnotation records (RFC3339, UTC) on a seeder
+// Deployment the moment it is observed with active demand
+// (wantsSeeder) but zero AvailableReplicas: a crash loop, a bad image,
+// or an unsatisfiable nodeSelector all look identical from here. Without
+// this, such a Deployment surfaces nowhere - an agent building a deploy
+// plan against this Image just finds no served content and has no way
+// to tell why. Cleared the moment the Deployment reports an available
+// replica again, following the same discipline as
+// imageSeederEmptySinceAnnotation. Unlike that annotation, this drives
+// no grace-period countdown of its own: it is surfaced (via
+// ImageConditionSeederDegraded) as soon as it is set, since the whole
+// point is to stop an operator from waiting on a silently stuck
+// Deployment.
+const imageSeederUnreadySinceAnnotation = "kezio.kojuro.date/seeder-unready-since"
+
+// seederSiteProblemKind classifies why a Site's seeder Deployment is not
+// serving its demand, for reconcileImageSeeder to aggregate into
+// ImageConditionSeederDegraded.
+type seederSiteProblemKind int
+
+const (
+	// seederProblemNone is the zero value: nothing wrong at this Site.
+	seederProblemNone seederSiteProblemKind = iota
+	// seederProblemForeignOwner: the Deployment name this Site's seeder
+	// would use is occupied by an object this Image does not control.
+	seederProblemForeignOwner
+	// seederProblemUnready: the Site's seeder Deployment has active
+	// demand but has never reported an available replica.
+	seederProblemUnready
+)
+
+// seederSiteProblem is one Site's contribution to
+// reconcileImageSeeder's aggregated ImageConditionSeederDegraded. The
+// zero value (kind == seederProblemNone) means nothing to report.
+type seederSiteProblem struct {
+	kind seederSiteProblemKind
+	site string
+}
+
 // reconcileImageSeeder drives every Site's seeder Deployment lifecycle for
 // an already-Ready image: create-on-demand, grace-period shutdown on
 // demand loss, and terminating-Deployment handling - all per (Image,
@@ -58,7 +98,7 @@ const imageSeederEmptySinceAnnotation = "kezio.kojuro.date/seeder-empty-since"
 // Site's own processing here, nor does an error reconciling one Site
 // block another's.
 func (r *ImageReconciler) reconcileImageSeeder(ctx context.Context, image *keziov1alpha2.Image) (ctrl.Result, error) {
-	demand, err := r.imageSeedDemandBySite(ctx, image)
+	demand, noSeederSites, err := r.imageSeedDemandBySite(ctx, image)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -86,16 +126,24 @@ func (r *ImageReconciler) reconcileImageSeeder(ctx context.Context, image *kezio
 
 	var result ctrl.Result
 	var errs []error
+	var problems []seederSiteProblem
 	for site := range sites {
-		siteResult, err := r.reconcileImageSeederSite(ctx, image, site, demand[site], existing[site], hashes)
+		siteResult, problem, err := r.reconcileImageSeederSite(ctx, image, site, demand[site], existing[site], hashes)
 		if err != nil {
 			errs = append(errs, err)
 			continue
+		}
+		if problem.kind != seederProblemNone {
+			problems = append(problems, problem)
 		}
 		result = minRequeue(result, siteResult)
 	}
 	if len(errs) > 0 {
 		return ctrl.Result{}, errors.Join(errs...)
+	}
+
+	if err := r.updateImageSeederCondition(ctx, image, problems, noSeederSites); err != nil {
+		return ctrl.Result{}, err
 	}
 	return result, nil
 }
@@ -104,7 +152,7 @@ func (r *ImageReconciler) reconcileImageSeeder(ctx context.Context, image *kezio
 // mirroring the per-content reconcileSeeder's state machine one level up:
 // create on demand, patch placement drift, cancel or run a grace-period
 // shutdown, and leave a terminating Deployment alone.
-func (r *ImageReconciler) reconcileImageSeederSite(ctx context.Context, image *keziov1alpha2.Image, site string, demand *seederSiteDemand, dep *appsv1.Deployment, hashes []store.InfoHash) (ctrl.Result, error) {
+func (r *ImageReconciler) reconcileImageSeederSite(ctx context.Context, image *keziov1alpha2.Image, site string, demand *seederSiteDemand, dep *appsv1.Deployment, hashes []store.InfoHash) (ctrl.Result, seederSiteProblem, error) {
 	wantsSeeder := demand != nil && demand.count > 0
 
 	switch {
@@ -113,7 +161,7 @@ func (r *ImageReconciler) reconcileImageSeederSite(ctx context.Context, image *k
 		// under the same name while GC is still cleaning up (Create would
 		// just fail AlreadyExists). The Deployment watch (Owns, unfiltered)
 		// retriggers a reconcile once it is actually gone.
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, seederSiteProblem{}, nil
 
 	case dep == nil && wantsSeeder:
 		if !r.Seeder.ready() {
@@ -121,42 +169,68 @@ func (r *ImageReconciler) reconcileImageSeederSite(ctx context.Context, image *k
 			// this Site. PartitionContentReconciler's own status derivation
 			// (no available Deployment at this Site) is what surfaces this
 			// to a user, not anything written here.
-			return ctrl.Result{}, nil
+			return ctrl.Result{}, seederSiteProblem{}, nil
 		}
-		if err := r.createImageSeederDeployment(ctx, image, site, hashes, demand.resolution); err != nil {
-			return ctrl.Result{}, err
+		foreign, err := r.createImageSeederDeployment(ctx, image, site, hashes, demand.resolution)
+		if err != nil {
+			return ctrl.Result{}, seederSiteProblem{}, err
 		}
-		return ctrl.Result{}, nil
+		if foreign {
+			return ctrl.Result{}, seederSiteProblem{kind: seederProblemForeignOwner, site: site}, nil
+		}
+		return ctrl.Result{}, seederSiteProblem{}, nil
 
 	case dep != nil && wantsSeeder:
 		dep, err := r.ensureImageSeederPlacement(ctx, image, site, dep, hashes, demand.resolution)
 		if err != nil {
-			return ctrl.Result{}, err
+			return ctrl.Result{}, seederSiteProblem{}, err
 		}
 		if err := r.cancelSeederShutdown(ctx, dep); err != nil {
-			return ctrl.Result{}, err
+			return ctrl.Result{}, seederSiteProblem{}, err
 		}
-		return ctrl.Result{}, nil
+		unready, err := r.checkSeederUnready(ctx, dep)
+		if err != nil {
+			return ctrl.Result{}, seederSiteProblem{}, err
+		}
+		if unready {
+			return ctrl.Result{}, seederSiteProblem{kind: seederProblemUnready, site: site}, nil
+		}
+		return ctrl.Result{}, seederSiteProblem{}, nil
 
 	case dep != nil && !wantsSeeder:
-		return r.shutdownImageSeederDeployment(ctx, dep)
+		result, err := r.shutdownImageSeederDeployment(ctx, dep)
+		return result, seederSiteProblem{}, err
 
 	default: // dep == nil && !wantsSeeder
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, seederSiteProblem{}, nil
 	}
 }
 
 // createImageSeederDeployment creates image's seeder Deployment at site.
 // r.Seeder must be ready() - the caller gates on that before calling this.
-func (r *ImageReconciler) createImageSeederDeployment(ctx context.Context, image *keziov1alpha2.Image, site string, hashes []store.InfoHash, res sitederive.Resolution) error {
+//
+// foreign reports whether the Deployment name is already occupied by an
+// object image does not control (metav1.IsControlledBy): a stale
+// survivor of a deleted-and-recreated same-named Image, or a hand-applied
+// object. That object is read only to check ownership, never patched,
+// updated, or deleted - a foreign Deployment must never be adopted or
+// overwritten, and the caller must not count this Site as served.
+func (r *ImageReconciler) createImageSeederDeployment(ctx context.Context, image *keziov1alpha2.Image, site string, hashes []store.InfoHash, res sitederive.Resolution) (foreign bool, err error) {
 	dep := r.buildImageSeederDeployment(image, site, hashes, res)
 	if err := controllerutil.SetControllerReference(image, dep, r.Scheme); err != nil {
-		return fmt.Errorf("image %q: setting seeder deployment owner reference: %w", image.Name, err)
+		return false, fmt.Errorf("image %q: setting seeder deployment owner reference: %w", image.Name, err)
 	}
-	if err := r.Create(ctx, dep); err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("image %q: creating seeder deployment %q: %w", image.Name, dep.Name, err)
+	if err := r.Create(ctx, dep); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return false, fmt.Errorf("image %q: creating seeder deployment %q: %w", image.Name, dep.Name, err)
+		}
+		existing := &appsv1.Deployment{}
+		if getErr := r.Get(ctx, client.ObjectKeyFromObject(dep), existing); getErr != nil {
+			return false, fmt.Errorf("image %q: getting seeder deployment %q after AlreadyExists: %w", image.Name, dep.Name, getErr)
+		}
+		return !metav1.IsControlledBy(existing, image), nil
 	}
-	return nil
+	return false, nil
 }
 
 // ensureImageSeederPlacement patches dep's placement (the Multus
@@ -231,6 +305,58 @@ func (r *ImageReconciler) cancelSeederShutdown(ctx context.Context, dep *appsv1.
 	delete(dep.Annotations, imageSeederEmptySinceAnnotation)
 	if err := r.Patch(ctx, dep, patch); err != nil {
 		return fmt.Errorf("seeder deployment %q: clearing empty-since: %w", dep.Name, err)
+	}
+	return nil
+}
+
+// checkSeederUnready stamps or clears dep's unready-since annotation
+// against its current AvailableReplicas, reporting whether dep should be
+// surfaced as unready this reconcile. Callers only reach this for a
+// Deployment with active demand (wantsSeeder) - readiness is meaningless
+// to report otherwise.
+func (r *ImageReconciler) checkSeederUnready(ctx context.Context, dep *appsv1.Deployment) (bool, error) {
+	if dep.Status.AvailableReplicas > 0 {
+		if _, marked := dep.Annotations[imageSeederUnreadySinceAnnotation]; marked {
+			if err := r.cancelSeederUnready(ctx, dep); err != nil {
+				return false, err
+			}
+		}
+		return false, nil
+	}
+
+	if _, marked := dep.Annotations[imageSeederUnreadySinceAnnotation]; !marked {
+		if err := r.stampSeederUnreadySince(ctx, dep, r.Seeder.now()); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// stampSeederUnreadySince records at (UTC, RFC3339) on dep, marking when
+// its pod was first observed with active demand but zero available
+// replicas.
+func (r *ImageReconciler) stampSeederUnreadySince(ctx context.Context, dep *appsv1.Deployment, at time.Time) error {
+	patch := client.MergeFrom(dep.DeepCopy())
+	if dep.Annotations == nil {
+		dep.Annotations = map[string]string{}
+	}
+	dep.Annotations[imageSeederUnreadySinceAnnotation] = at.UTC().Format(time.RFC3339)
+	if err := r.Patch(ctx, dep, patch); err != nil {
+		return fmt.Errorf("seeder deployment %q: stamping unready-since: %w", dep.Name, err)
+	}
+	return nil
+}
+
+// cancelSeederUnready clears dep's unready-since annotation, called once
+// dep reports an available replica again.
+func (r *ImageReconciler) cancelSeederUnready(ctx context.Context, dep *appsv1.Deployment) error {
+	if _, marked := dep.Annotations[imageSeederUnreadySinceAnnotation]; !marked {
+		return nil
+	}
+	patch := client.MergeFrom(dep.DeepCopy())
+	delete(dep.Annotations, imageSeederUnreadySinceAnnotation)
+	if err := r.Patch(ctx, dep, patch); err != nil {
+		return fmt.Errorf("seeder deployment %q: clearing unready-since: %w", dep.Name, err)
 	}
 	return nil
 }
