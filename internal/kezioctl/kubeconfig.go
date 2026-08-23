@@ -20,7 +20,10 @@ limitations under the License.
 package kezioctl
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"os"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
@@ -29,6 +32,30 @@ import (
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 )
+
+// apiWarningCode is the only HTTP Warning code Kubernetes sends
+// (RFC 7234's "miscellaneous persistent warning").
+const apiWarningCode = 299
+
+// apiWarningHandler prints an API server warning to stderr, the way
+// kubectl does, keeping it out of a command's own stdout.
+//
+// Installing any handler at all is what keeps controller-runtime from
+// falling back to its logger-backed one: that fallback needs a logger
+// this CLI never sets, so it discards the warning and dumps a goroutine
+// stack complaining about the missing logger in its place - losing the
+// message the server actually sent.
+type apiWarningHandler struct{ w io.Writer }
+
+var _ rest.WarningHandlerWithContext = apiWarningHandler{}
+
+func (h apiWarningHandler) HandleWarningHeaderWithContext(_ context.Context, code int, _ string, text string) {
+	if code != apiWarningCode || text == "" {
+		return
+	}
+	// A warning nobody can print is not worth failing a command over.
+	_, _ = fmt.Fprintln(h.w, "Warning:", text)
+}
 
 // Scheme is the runtime.Scheme kezioctl builds its Kubernetes client with.
 // It only needs the kezio API group (plus the client-go default types
@@ -64,6 +91,7 @@ func LoadRESTConfig(kubeconfigPath string) (*rest.Config, string, error) {
 	if err != nil {
 		namespace = "default"
 	}
+	restConfig.WarningHandlerWithContext = apiWarningHandler{w: os.Stderr}
 	return restConfig, namespace, nil
 }
 

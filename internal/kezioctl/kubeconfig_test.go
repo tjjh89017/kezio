@@ -17,6 +17,8 @@ limitations under the License.
 package kezioctl
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -79,5 +81,46 @@ func TestLoadRESTConfig_FallsBackToKUBECONFIGEnv(t *testing.T) {
 	}
 	if ns != "env-namespace" {
 		t.Errorf("namespace = %q, want %q", ns, "env-namespace")
+	}
+}
+
+func TestLoadRESTConfig_InstallsAWarningHandler(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("KUBECONFIG", writeKubeconfig(t, dir, "config", "ns"))
+
+	cfg, _, err := LoadRESTConfig("")
+	if err != nil {
+		t.Fatalf("LoadRESTConfig() error = %v", err)
+	}
+	// Leaving this nil is what makes controller-runtime install its own
+	// logger-backed handler, which drops the warning and dumps a stack.
+	if cfg.WarningHandlerWithContext == nil {
+		t.Fatal("LoadRESTConfig() left WarningHandlerWithContext nil")
+	}
+}
+
+func TestAPIWarningHandlerPrintsOnlyServerWarnings(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		code int
+		text string
+		want string
+	}{
+		{
+			name: "server warning is printed",
+			code: 299,
+			text: `slot 1 references PartitionContent "pc-x", which does not exist yet`,
+			want: "Warning: slot 1 references PartitionContent \"pc-x\", which does not exist yet\n",
+		},
+		{name: "another code is ignored", code: 199, text: "stale response", want: ""},
+		{name: "empty text is ignored", code: 299, text: "", want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			apiWarningHandler{w: &buf}.HandleWarningHeaderWithContext(context.Background(), tc.code, "", tc.text)
+			if got := buf.String(); got != tc.want {
+				t.Fatalf("handler wrote %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
