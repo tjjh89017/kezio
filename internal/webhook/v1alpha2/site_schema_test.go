@@ -43,6 +43,30 @@ var _ = Describe("Site CRD schema", func() {
 		}
 	}
 
+	// newBackRefSubnet creates a Subnet whose spec.siteRef names siteName,
+	// satisfying the webhook's cross-object back-reference rule so these
+	// schema-focused specs can exercise a seeding Site without that rule
+	// getting in the way.
+	newBackRefSubnet := func(siteName string) *keziov1alpha2.Subnet {
+		subnet := &keziov1alpha2.Subnet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      siteName + "-subnet",
+				Namespace: "default",
+			},
+			Spec: keziov1alpha2.SubnetSpec{
+				SiteRef:         keziov1alpha2.NameRef{Name: siteName},
+				CIDR:            "192.0.2.0/24",
+				BootdServerIP:   "192.0.2.2",
+				BootdNetworkRef: &keziov1alpha2.NameRef{Name: "bootd-net"},
+				DHCP: &keziov1alpha2.SubnetDHCP{
+					Mode: keziov1alpha2.SubnetDHCPModeProxy,
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
+		return subnet
+	}
+
 	It("admits a Site with no seederSubnetRef and no tracker", func() {
 		s := newSite()
 		Expect(k8sClient.Create(ctx, s)).To(Succeed())
@@ -50,14 +74,16 @@ var _ = Describe("Site CRD schema", func() {
 
 	It("admits a Site with a pinned tracker.ip", func() {
 		s := newSite()
-		s.Spec.SeederSubnetRef = &keziov1alpha2.NameRef{Name: "subnet-a"}
+		subnet := newBackRefSubnet(s.Name)
+		s.Spec.SeederSubnetRef = &keziov1alpha2.NameRef{Name: subnet.Name}
 		s.Spec.Tracker.IP = "192.0.2.3"
 		Expect(k8sClient.Create(ctx, s)).To(Succeed())
 	})
 
 	It("admits a Site with a tracker.externalURL", func() {
 		s := newSite()
-		s.Spec.SeederSubnetRef = &keziov1alpha2.NameRef{Name: "subnet-a"}
+		subnet := newBackRefSubnet(s.Name)
+		s.Spec.SeederSubnetRef = &keziov1alpha2.NameRef{Name: subnet.Name}
 		s.Spec.Tracker.ExternalURL = "http://tracker.example.com:6969/announce"
 		Expect(k8sClient.Create(ctx, s)).To(Succeed())
 	})

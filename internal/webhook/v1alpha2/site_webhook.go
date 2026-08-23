@@ -20,8 +20,10 @@ import (
 	"context"
 	"fmt"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -36,63 +38,142 @@ var sitelog = logf.Log.WithName("site-resource")
 // SetupSiteWebhookWithManager registers the webhook for Site in the manager.
 func SetupSiteWebhookWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr).For(&keziov1alpha2.Site{}).
-		WithValidator(&SiteCustomValidator{}).
+		WithValidator(&SiteCustomValidator{Client: mgr.GetClient()}).
 		Complete()
 }
 
-// TODO(user): EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-
-// TODO(user): change verbs to "verbs=create;update;delete" if you want to enable deletion validation.
 // NOTE: The 'path' attribute must follow a specific pattern and should not be modified directly here.
 // Modifying the path for an invalid path can cause API server errors; failing to locate the webhook.
 // +kubebuilder:webhook:path=/validate-kezio-kojuro-date-v1alpha2-site,mutating=false,failurePolicy=fail,sideEffects=None,groups=kezio.kojuro.date,resources=sites,verbs=create;update,versions=v1alpha2,name=vsite-v1alpha2.kb.io,admissionReviewVersions=v1
 
 // SiteCustomValidator struct is responsible for validating the Site resource
-// when it is created, updated, or deleted.
+// when it is created or updated.
+//
+// The tracker.ip/tracker.externalURL mutual-exclusivity rule is a CEL rule
+// on SiteTracker and needs no cross-object read, so it is not repeated
+// here. Everything below needs one because it depends on another object's
+// spec.
 //
 // NOTE: The +kubebuilder:object:generate=false marker prevents controller-gen from generating DeepCopy methods,
 // as this struct is used only for temporary operations and does not need to be deeply copied.
 type SiteCustomValidator struct {
-	// TODO(user): Add more fields as needed for validation
+	// Client reads the Subnet named by spec.seederSubnetRef, from the
+	// manager's informer cache. SetupSiteWebhookWithManager always wires
+	// this to mgr.GetClient(), so a nil Client is a programming error, not
+	// a supported mode: a Site with SeederSubnetRef set makes
+	// validateSeederSubnetRef call a nil interface, which panics and,
+	// under this webhook's failurePolicy=fail, fails closed (denies)
+	// rather than admitting. A Site with no SeederSubnetRef is unaffected.
+	// Tests that construct SiteCustomValidator directly with a nil Client
+	// must therefore avoid the seederSubnetRef checks.
+	Client client.Client
 }
 
 var _ webhook.CustomValidator = &SiteCustomValidator{}
 
 // ValidateCreate implements webhook.CustomValidator so a webhook will be registered for the type Site.
-func (v *SiteCustomValidator) ValidateCreate(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (v *SiteCustomValidator) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	site, ok := obj.(*keziov1alpha2.Site)
 	if !ok {
 		return nil, fmt.Errorf("expected a Site object but got %T", obj)
 	}
 	sitelog.Info("Validation for Site upon creation", "name", site.GetName())
 
-	// TODO(user): fill in your validation logic upon object creation.
-
-	return nil, nil
+	return nil, v.validateSite(ctx, site)
 }
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type Site.
-func (v *SiteCustomValidator) ValidateUpdate(_ context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+func (v *SiteCustomValidator) ValidateUpdate(ctx context.Context, _, newObj runtime.Object) (admission.Warnings, error) {
 	site, ok := newObj.(*keziov1alpha2.Site)
 	if !ok {
 		return nil, fmt.Errorf("expected a Site object for the newObj but got %T", newObj)
 	}
 	sitelog.Info("Validation for Site upon update", "name", site.GetName())
 
-	// TODO(user): fill in your validation logic upon object update.
-
-	return nil, nil
+	return nil, v.validateSite(ctx, site)
 }
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type Site.
-func (v *SiteCustomValidator) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+//
+// Deletion needs no cross-object read: every rule below constrains a
+// Site's own spec against another object's spec, and there is no such
+// combination left to check once the Site is going away.
+func (v *SiteCustomValidator) ValidateDelete(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
 	site, ok := obj.(*keziov1alpha2.Site)
 	if !ok {
 		return nil, fmt.Errorf("expected a Site object but got %T", obj)
 	}
 	sitelog.Info("Validation for Site upon deletion", "name", site.GetName())
 
-	// TODO(user): fill in your validation logic upon object deletion.
-
 	return nil, nil
+}
+
+// validateSite runs every cross-object Site check: the seederSubnetRef
+// back-reference rule, then the tracker-versus-seeding rule.
+func (v *SiteCustomValidator) validateSite(ctx context.Context, site *keziov1alpha2.Site) error {
+	if err := v.validateSeederSubnetRef(ctx, site); err != nil {
+		return err
+	}
+	return validateTrackerMatchesSeeding(site)
+}
+
+// validateSeederSubnetRef denies a spec.seederSubnetRef that names a
+// Subnet which does not exist, or whose own spec.siteRef does not point
+// back at this Site. Either case would produce a seeder no machine at
+// this Site is guaranteed to be able to reach, since routability is
+// promised only within one Site.
+func (v *SiteCustomValidator) validateSeederSubnetRef(ctx context.Context, site *keziov1alpha2.Site) error {
+	ref := site.Spec.SeederSubnetRef
+	if ref == nil {
+		return nil
+	}
+
+	namespace := ref.Namespace
+	if namespace == "" {
+		namespace = site.GetNamespace()
+	}
+
+	subnet := &keziov1alpha2.Subnet{}
+	key := client.ObjectKey{Namespace: namespace, Name: ref.Name}
+	if err := v.Client.Get(ctx, key, subnet); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf(
+				"spec.seederSubnetRef names Subnet %q, which does not exist",
+				ref.Name)
+		}
+		return fmt.Errorf("looking up Subnet %q referenced by spec.seederSubnetRef: %w", ref.Name, err)
+	}
+
+	if subnet.Spec.SiteRef.Name != site.GetName() {
+		return fmt.Errorf(
+			"spec.seederSubnetRef names Subnet %q, but that Subnet's spec.siteRef names %q, not %q: a Site cannot designate a Subnet belonging to another Site as its seeding Subnet, because routability is not guaranteed across that line",
+			ref.Name, subnet.Spec.SiteRef.Name, site.GetName())
+	}
+
+	return nil
+}
+
+// validateTrackerMatchesSeeding enforces the "at least one" half of the
+// tracker rule: a seeding Site (SeederSubnetRef set) must carry exactly
+// one of Tracker.IP or Tracker.ExternalURL, and a non-seeding Site must
+// carry neither. The "not both" half is already a CEL rule on
+// SiteTracker and is not repeated here.
+func validateTrackerMatchesSeeding(site *keziov1alpha2.Site) error {
+	hasTracker := site.Spec.Tracker.IP != "" || site.Spec.Tracker.ExternalURL != ""
+
+	if site.Spec.SeederSubnetRef != nil {
+		if !hasTracker {
+			return fmt.Errorf(
+				"spec.seederSubnetRef names Subnet %q, but neither tracker.ip nor tracker.externalURL is set: a seeding Site with no reachable tracker cannot converge",
+				site.Spec.SeederSubnetRef.Name)
+		}
+		return nil
+	}
+
+	if hasTracker {
+		return fmt.Errorf(
+			"spec.seederSubnetRef is unset, but a tracker is configured: a tracker with no seeder to announce for is a configuration mistake")
+	}
+
+	return nil
 }

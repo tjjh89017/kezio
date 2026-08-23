@@ -17,11 +17,14 @@ limitations under the License.
 package v1alpha2
 
 import (
+	"fmt"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
-	// TODO (user): Add any additional imports if needed
 )
 
 var _ = Describe("Site Webhook", func() {
@@ -29,43 +32,100 @@ var _ = Describe("Site Webhook", func() {
 		obj       *keziov1alpha2.Site
 		oldObj    *keziov1alpha2.Site
 		validator SiteCustomValidator
+		subnetSeq int
 	)
 
 	BeforeEach(func() {
 		obj = &keziov1alpha2.Site{}
 		oldObj = &keziov1alpha2.Site{}
-		validator = SiteCustomValidator{}
+		validator = SiteCustomValidator{Client: k8sClient}
 		Expect(validator).NotTo(BeNil(), "Expected validator to be initialized")
 		Expect(oldObj).NotTo(BeNil(), "Expected oldObj to be initialized")
 		Expect(obj).NotTo(BeNil(), "Expected obj to be initialized")
-		// TODO (user): Add any setup logic common to all tests
 	})
 
-	AfterEach(func() {
-		// TODO (user): Add any teardown logic common to all tests
-	})
+	// newSubnet creates a Subnet whose spec.siteRef names siteRefName, so
+	// tests can control whether it points back at the Site under test.
+	newSubnet := func(siteRefName string) *keziov1alpha2.Subnet {
+		subnetSeq++
+		subnet := &keziov1alpha2.Subnet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("site-webhook-subnet-%d", subnetSeq),
+				Namespace: "default",
+			},
+			Spec: keziov1alpha2.SubnetSpec{
+				SiteRef:         keziov1alpha2.NameRef{Name: siteRefName},
+				CIDR:            "192.0.2.0/24",
+				BootdServerIP:   "192.0.2.2",
+				BootdNetworkRef: &keziov1alpha2.NameRef{Name: "bootd-net"},
+				DHCP: &keziov1alpha2.SubnetDHCP{
+					Mode: keziov1alpha2.SubnetDHCPModeProxy,
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
+		return subnet
+	}
 
 	Context("When creating or updating Site under Validating Webhook", func() {
-		// TODO (user): Add logic for validating webhooks
-		// Example:
-		// It("Should deny creation if a required field is missing", func() {
-		//     By("simulating an invalid creation scenario")
-		//     obj.SomeRequiredField = ""
-		//     Expect(validator.ValidateCreate(ctx, obj)).Error().To(HaveOccurred())
-		// })
-		//
-		// It("Should admit creation if all required fields are present", func() {
-		//     By("simulating an invalid creation scenario")
-		//     obj.SomeRequiredField = "valid_value"
-		//     Expect(validator.ValidateCreate(ctx, obj)).To(BeNil())
-		// })
-		//
-		// It("Should validate updates correctly", func() {
-		//     By("simulating a valid update scenario")
-		//     oldObj.SomeRequiredField = "updated_value"
-		//     obj.SomeRequiredField = "updated_value"
-		//     Expect(validator.ValidateUpdate(ctx, oldObj, obj)).To(BeNil())
-		// })
-	})
+		It("admits a non-seeding Site with no tracker", func() {
+			obj.ObjectMeta = metav1.ObjectMeta{Name: "site-no-seeding-no-tracker", Namespace: "default"}
+			Expect(validator.ValidateCreate(ctx, obj)).Error().NotTo(HaveOccurred())
+		})
 
+		It("denies a non-seeding Site carrying a tracker", func() {
+			obj.ObjectMeta = metav1.ObjectMeta{Name: "site-no-seeding-with-tracker", Namespace: "default"}
+			obj.Spec.Tracker = keziov1alpha2.SiteTracker{IP: "192.0.2.9"}
+			Expect(validator.ValidateCreate(ctx, obj)).Error().To(HaveOccurred())
+		})
+
+		It("denies a Site whose seederSubnetRef names a Subnet that does not exist", func() {
+			obj.ObjectMeta = metav1.ObjectMeta{Name: "site-missing-subnet", Namespace: "default"}
+			obj.Spec.SeederSubnetRef = &keziov1alpha2.NameRef{Name: "no-such-subnet"}
+			obj.Spec.Tracker = keziov1alpha2.SiteTracker{IP: "192.0.2.9"}
+			Expect(validator.ValidateCreate(ctx, obj)).Error().To(HaveOccurred())
+		})
+
+		It("denies a Site whose seederSubnetRef names a Subnet belonging to another Site", func() {
+			obj.ObjectMeta = metav1.ObjectMeta{Name: "site-foreign-subnet", Namespace: "default"}
+			subnet := newSubnet("some-other-site")
+			obj.Spec.SeederSubnetRef = &keziov1alpha2.NameRef{Name: subnet.Name}
+			obj.Spec.Tracker = keziov1alpha2.SiteTracker{IP: "192.0.2.9"}
+			err := func() error { _, err := validator.ValidateCreate(ctx, obj); return err }()
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring(subnet.Name))
+		})
+
+		It("denies a seeding Site with no tracker at all", func() {
+			obj.ObjectMeta = metav1.ObjectMeta{Name: "site-seeding-no-tracker", Namespace: "default"}
+			subnet := newSubnet("site-seeding-no-tracker")
+			obj.Spec.SeederSubnetRef = &keziov1alpha2.NameRef{Name: subnet.Name}
+			Expect(validator.ValidateCreate(ctx, obj)).Error().To(HaveOccurred())
+		})
+
+		It("admits a valid seeding Site with tracker.ip", func() {
+			obj.ObjectMeta = metav1.ObjectMeta{Name: "site-seeding-tracker-ip", Namespace: "default"}
+			subnet := newSubnet("site-seeding-tracker-ip")
+			obj.Spec.SeederSubnetRef = &keziov1alpha2.NameRef{Name: subnet.Name}
+			obj.Spec.Tracker = keziov1alpha2.SiteTracker{IP: "192.0.2.9"}
+			Expect(validator.ValidateCreate(ctx, obj)).Error().NotTo(HaveOccurred())
+		})
+
+		It("admits a valid seeding Site with tracker.externalURL", func() {
+			obj.ObjectMeta = metav1.ObjectMeta{Name: "site-seeding-tracker-url", Namespace: "default"}
+			subnet := newSubnet("site-seeding-tracker-url")
+			obj.Spec.SeederSubnetRef = &keziov1alpha2.NameRef{Name: subnet.Name}
+			obj.Spec.Tracker = keziov1alpha2.SiteTracker{ExternalURL: "http://tracker.example.com:6969/announce"}
+			Expect(validator.ValidateCreate(ctx, obj)).Error().NotTo(HaveOccurred())
+		})
+
+		It("applies the same rules on update", func() {
+			oldObj.ObjectMeta = metav1.ObjectMeta{Name: "site-update-check", Namespace: "default"}
+			subnet := newSubnet("some-other-site")
+			obj.ObjectMeta = oldObj.ObjectMeta
+			obj.Spec.SeederSubnetRef = &keziov1alpha2.NameRef{Name: subnet.Name}
+			obj.Spec.Tracker = keziov1alpha2.SiteTracker{IP: "192.0.2.9"}
+			Expect(validator.ValidateUpdate(ctx, oldObj, obj)).Error().To(HaveOccurred())
+		})
+	})
 })
