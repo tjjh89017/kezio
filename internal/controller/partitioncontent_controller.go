@@ -49,13 +49,15 @@ var publishPollInterval = 30 * time.Second
 // PartitionContentReconciler reconciles a PartitionContent object.
 //
 // This reconciler owns the content PVC, the publish Job's lifecycle
-// (create, observe, reflect into status), and - once Ready - the seeder
-// Deployment's lifecycle (create-on-demand, grace-period shutdown, status
-// reflection; see reconcileSeeder). It also carries
-// PartitionContentFinalizer, blocking actual removal while an Image slot
-// or an active DeployRun still references this content (see onDelete). It
-// never mounts the content PVC's
-// filesystem itself: the publish Job is the sole witness to whether
+// (create, observe, reflect into status), and - once Ready - reflects the
+// real per-Site seeder placement Images referencing this content maintain
+// into status.seeders[]/SeederDegraded (see reconcileSeeder). It never
+// creates or owns a seeder Deployment itself: that lives per (Image,
+// Site), owned by whichever Image references this content
+// (ImageReconciler). It also carries PartitionContentFinalizer, blocking
+// actual removal while an Image slot or an active DeployRun still
+// references this content (see onDelete). It never mounts the content
+// PVC's filesystem itself: the publish Job is the sole witness to whether
 // publishing succeeded (see outcomeOf), and status.torrentPath is set
 // from the store package's naming convention, not from anything this
 // reconciler read off disk.
@@ -69,11 +71,6 @@ type PartitionContentReconciler struct {
 	// value holds every PartitionContent at Pending - see
 	// PartitionContentPublishConfig's doc comment.
 	Publish PartitionContentPublishConfig
-	// Seeder configures the seeder Deployment's image and grace period.
-	// The zero value holds every seed-demanded content at
-	// SeederDegraded=True instead of creating a half-configured
-	// Deployment - see PartitionContentSeederConfig's doc comment.
-	Seeder PartitionContentSeederConfig
 }
 
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=partitioncontents,verbs=get;list;watch;create;update;patch;delete
@@ -81,12 +78,11 @@ type PartitionContentReconciler struct {
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=partitioncontents/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=images,verbs=get;list;watch
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines,verbs=get;list;watch
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=deployruns,verbs=get;list;watch
-// +kubebuilder:rbac:groups=kezio.kojuro.date,resources=subnets,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -134,7 +130,7 @@ func (r *PartitionContentReconciler) onChange(ctx context.Context, pc *keziov1al
 	setPartitionContentValidCondition(pc)
 
 	if pc.Status.State == keziov1alpha2.PartitionContentStateReady {
-		return r.reconcileSeeder(ctx, pc, hash)
+		return r.reconcileSeeder(ctx, pc)
 	}
 
 	job, err := r.publishJobFor(ctx, pc, hash)
@@ -308,11 +304,10 @@ func (r *PartitionContentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&keziov1alpha2.PartitionContent{}, builder.WithPredicates(partitionContentUpdatePredicate)).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&batchv1.Job{}).
-		Owns(&appsv1.Deployment{}).
 		Watches(&keziov1alpha2.Image{}, handler.EnqueueRequestsFromMapFunc(r.mapImageToPartitionContents), builder.WithPredicates(imageCreateOrDeleteOnly)).
 		Watches(&keziov1alpha2.Machine{}, handler.EnqueueRequestsFromMapFunc(r.mapMachineToPartitionContents), builder.WithPredicates(machineDemandPredicate)).
 		Watches(&keziov1alpha2.DeployRun{}, handler.EnqueueRequestsFromMapFunc(r.mapDeployRunToPartitionContents), builder.WithPredicates(deployRunDemandPredicate)).
-		Watches(&keziov1alpha2.Subnet{}, handler.EnqueueRequestsFromMapFunc(r.mapSubnetToPartitionContents), builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(r.mapSeederDeploymentToPartitionContents)).
 		Named("partitioncontent").
 		Complete(r)
 }

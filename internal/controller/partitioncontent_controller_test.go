@@ -180,7 +180,7 @@ var _ = Describe("PartitionContent Controller", func() {
 		// drives the content all the way to Ready, where reconcileSeeder
 		// (via resolveSeedDemand) lists Images through imageContentRefIndex
 		// - a field selector a plain envtest client cannot serve.
-		r, cancel := newIndexedReconciler(ctx, publish, PartitionContentSeederConfig{})
+		r, cancel := newIndexedReconciler(ctx, publish)
 		DeferCleanup(cancel)
 		nn := types.NamespacedName{Name: name, Namespace: "default"}
 		reconcileAddsFinalizer(ctx, r, nn)

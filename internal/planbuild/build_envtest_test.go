@@ -499,11 +499,12 @@ func testSeederDeploymentMissingIsNotReady(t *testing.T, fx *fixtures) {
 		},
 	}
 	image := fx.mustCreateImage(ns, layout)
+	subnetRef, _ := fx.mustCreateSite(ns)
 
 	b := &Builder{Client: fx.client}
 	machine := &keziov1alpha2.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: image.Name}},
+		Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: image.Name}, SubnetRef: subnetRef},
 	}
 	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
@@ -523,7 +524,6 @@ func testSeederPodNoIPIsNotReady(t *testing.T, fx *fixtures) {
 
 	hash := fixtureInfoHash("seeder-no-podip")
 	fx.mustCreatePartitionContentReady(ns, hash)
-	fx.mustCreateSeederPodNoIP(ns, hash)
 
 	layout := keziov1alpha2.ImageDiskLayout{
 		PartitionTable: keziov1alpha2.PartitionTableGPT,
@@ -533,11 +533,13 @@ func testSeederPodNoIPIsNotReady(t *testing.T, fx *fixtures) {
 		},
 	}
 	image := fx.mustCreateImage(ns, layout)
+	subnetRef, siteIdentity := fx.mustCreateSite(ns)
+	fx.mustCreateSeederPodNoIP(ns, image.Name, siteIdentity)
 
 	b := &Builder{Client: fx.client}
 	machine := &keziov1alpha2.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: image.Name}},
+		Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: image.Name}, SubnetRef: subnetRef},
 	}
 	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
@@ -1031,7 +1033,6 @@ func testSlotClassification(t *testing.T, fx *fixtures) {
 
 	hash := fixtureInfoHash("slot-classification")
 	fx.mustCreatePartitionContentReady(ns, hash)
-	fx.mustCreateSeederPod(ns, hash, "10.0.0.5")
 
 	layout := keziov1alpha2.ImageDiskLayout{
 		PartitionTable: keziov1alpha2.PartitionTableGPT,
@@ -1043,12 +1044,14 @@ func testSlotClassification(t *testing.T, fx *fixtures) {
 		},
 	}
 	image := fx.mustCreateImage(ns, layout)
+	subnetRef, siteIdentity := fx.mustCreateSite(ns)
+	fx.mustCreateSeederPod(ns, image.Name, siteIdentity, "10.0.0.5")
 	fx.mustCreatePostHook(ns, posthookdefaults.DefaultFinalizeHookName, posthookdefaults.Spec())
 
 	b := &Builder{Client: fx.client, ManagerNamespace: ns}
 	machine := &keziov1alpha2.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: image.Name}},
+		Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: image.Name}, SubnetRef: subnetRef},
 	}
 	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
@@ -1303,14 +1306,45 @@ func (fx *fixtures) mustCreatePartitionContent(ns string, hash store.InfoHash, r
 	}
 }
 
-// mustCreateSeederPod creates the per-content seeder Deployment (matching
-// seederdeploy.Name's naming, the identity Builder.resolveTorrentURL
-// looks up by) plus one matching Pod already carrying podIP, standing in
-// for a scheduled, running seeder pod - envtest runs no kubelet to ever
-// assign one itself.
-func (fx *fixtures) mustCreateSeederPod(ns string, hash store.InfoHash, podIP string) {
+// mustCreateSite creates a Subnet (declaring a seederNetworkRef so the
+// CRD schema's "declares a plane" rule is satisfied, though no real NAD
+// backs it in this suite) and a Site whose seederSubnetRef names it, and
+// returns the NameRef a Machine's spec.subnetRef needs to resolve through
+// this chain (sitederive.Resolve), plus the resulting Site identity
+// string (sitederive.SiteIdentity's format) seederdeploy.Name needs.
+func (fx *fixtures) mustCreateSite(ns string) (keziov1alpha2.NameRef, string) {
 	fx.t.Helper()
-	pod := fx.mustCreateSeederDeploymentAndPod(ns, hash)
+	subnet := &keziov1alpha2.Subnet{
+		ObjectMeta: metav1.ObjectMeta{Name: "seeding-subnet", Namespace: ns},
+		Spec: keziov1alpha2.SubnetSpec{
+			SiteRef:          keziov1alpha2.NameRef{Name: "site1"},
+			CIDR:             "198.51.100.0/24",
+			SeederNetworkRef: &keziov1alpha2.NameRef{Name: "seeder-nad"},
+		},
+	}
+	if err := fx.client.Create(context.Background(), subnet); err != nil {
+		fx.t.Fatalf("create subnet %s/%s: %v", ns, subnet.Name, err)
+	}
+	site := &keziov1alpha2.Site{
+		ObjectMeta: metav1.ObjectMeta{Name: "site1", Namespace: ns},
+		Spec: keziov1alpha2.SiteSpec{
+			SeederSubnetRef: &keziov1alpha2.NameRef{Name: subnet.Name},
+		},
+	}
+	if err := fx.client.Create(context.Background(), site); err != nil {
+		fx.t.Fatalf("create site %s/%s: %v", ns, site.Name, err)
+	}
+	return keziov1alpha2.NameRef{Name: subnet.Name}, ns + "/" + site.Name
+}
+
+// mustCreateSeederPod creates the per-(Image, Site) seeder Deployment
+// (matching seederdeploy.Name's naming, the identity
+// Builder.resolveTorrentURL looks up by) plus one matching Pod already
+// carrying podIP, standing in for a scheduled, running seeder pod -
+// envtest runs no kubelet to ever assign one itself.
+func (fx *fixtures) mustCreateSeederPod(ns, imageName, siteIdentity, podIP string) {
+	fx.t.Helper()
+	pod := fx.mustCreateSeederDeploymentAndPod(ns, imageName, siteIdentity)
 	pod.Status.PodIP = podIP
 	if err := fx.client.Status().Update(context.Background(), pod); err != nil {
 		fx.t.Fatalf("update seeder pod %s/%s status: %v", ns, pod.Name, err)
@@ -1320,22 +1354,23 @@ func (fx *fixtures) mustCreateSeederPod(ns string, hash store.InfoHash, podIP st
 // mustCreateSeederPodNoIP creates the seeder Deployment plus a matching
 // Pod that has not reported a PodIP yet, standing in for a pod still
 // pending scheduling.
-func (fx *fixtures) mustCreateSeederPodNoIP(ns string, hash store.InfoHash) {
+func (fx *fixtures) mustCreateSeederPodNoIP(ns, imageName, siteIdentity string) {
 	fx.t.Helper()
-	fx.mustCreateSeederDeploymentAndPod(ns, hash)
+	fx.mustCreateSeederDeploymentAndPod(ns, imageName, siteIdentity)
 }
 
-// mustCreateSeederDeploymentAndPod creates the per-content seeder
+// mustCreateSeederDeploymentAndPod creates the per-(Image, Site) seeder
 // Deployment (matching seederdeploy.Name's naming, the identity
 // Builder.resolveTorrentURL looks up by) plus one matching Pod, with no
 // PodIP set - envtest runs no kubelet to ever assign one itself. Callers
 // set Status.PodIP themselves when a ready pod is wanted.
-func (fx *fixtures) mustCreateSeederDeploymentAndPod(ns string, hash store.InfoHash) *corev1.Pod {
+func (fx *fixtures) mustCreateSeederDeploymentAndPod(ns, imageName, siteIdentity string) *corev1.Pod {
 	fx.t.Helper()
-	labels := map[string]string{"app": "kezio-seeder", "content": hash.String()}
+	name := seederdeploy.Name(imageName, siteIdentity)
+	labels := map[string]string{"app": "kezio-seeder", "instance": name}
 	replicas := int32(1)
 	dep := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: seederdeploy.Name(hash), Namespace: ns},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
@@ -1352,7 +1387,7 @@ func (fx *fixtures) mustCreateSeederDeploymentAndPod(ns string, hash store.InfoH
 	}
 
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: seederdeploy.Name(hash) + "-pod", Namespace: ns, Labels: labels},
+		ObjectMeta: metav1.ObjectMeta{Name: name + "-pod", Namespace: ns, Labels: labels},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{Name: "ezio", Image: "example/ezio:test"}},
 		},

@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -47,16 +48,18 @@ var imageStaleContentRequeueInterval = 5 * time.Second
 // ImageReconciler reconciles a Image object.
 //
 // This reconciler aggregates the readiness of an Image's referenced
-// PartitionContent objects into Ready/Valid conditions and status.state.
-// It owns no seeders (those belong to PartitionContent). A composed Image
-// (no spec.source) is create-only metadata over existing content:
-// reconciling it is pure aggregation, triggering no ingest. A
-// source-bearing Image additionally owns one ingest Job and its scratch
-// PVC (see image_ingest.go): reconcileIngesting creates or observes that
-// Job and, once it succeeds, creates the PartitionContent objects its
-// declared contentRef slots name (or reuses them, content-addressed, if
-// they already exist) - it never creates a PartitionContent's own
-// content PVC or publish Job itself, those stay PartitionContent's own.
+// PartitionContent objects into Ready/Valid conditions and status.state,
+// and - once Ready - owns the per-(Image, Site) seeder Deployment
+// lifecycle (create-on-demand, grace-period shutdown, placement; see
+// image_seeder.go). A composed Image (no spec.source) is create-only
+// metadata over existing content: reconciling it is pure aggregation
+// (plus seeder reconciliation), triggering no ingest. A source-bearing
+// Image additionally owns one ingest Job and its scratch PVC (see
+// image_ingest.go): reconcileIngesting creates or observes that Job and,
+// once it succeeds, creates the PartitionContent objects its declared
+// contentRef slots name (or reuses them, content-addressed, if they
+// already exist) - it never creates a PartitionContent's own content PVC
+// or publish Job itself, those stay PartitionContent's own.
 type ImageReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -64,15 +67,22 @@ type ImageReconciler struct {
 	// The zero value holds every such Image at Pending with a condition
 	// explaining why - see ImageIngestConfig's doc comment.
 	Ingest ImageIngestConfig
+	// Seeder configures the per-(Image, Site) seeder Deployment's image
+	// and grace period. The zero value means demand at any Site is simply
+	// not acted on - see ImageSeederConfig's doc comment.
+	Seeder ImageSeederConfig
 }
 
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=images,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=images/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=images/finalizers,verbs=update
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=partitioncontents,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines,verbs=get;list;watch
+// +kubebuilder:rbac:groups=kezio.kojuro.date,resources=deployruns,verbs=get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -86,8 +96,17 @@ func (r *ImageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 }
 
 // onChange aggregates image's referenced PartitionContent readiness into
-// its Ready/Valid conditions and status.state.
+// its Ready/Valid conditions and status.state. An already-Ready image
+// never re-enters that aggregation walk - the same dedupe guarantee
+// PartitionContentReconciler.onChange gives its own publish walk -
+// reconcileImageSeeder takes over instead, since seed-demand keeps
+// changing (Machines coming and going) long after an Image itself
+// reaches Ready.
 func (r *ImageReconciler) onChange(ctx context.Context, image *keziov1alpha2.Image) (ctrl.Result, error) {
+	if image.Status.State == keziov1alpha2.ImageStateReady {
+		return r.reconcileImageSeeder(ctx, image)
+	}
+
 	agg, err := r.aggregateSlotContents(ctx, image)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -112,7 +131,10 @@ func (r *ImageReconciler) onChange(ctx context.Context, image *keziov1alpha2.Ima
 	case len(agg.failed) > 0:
 		return r.recordFailed(ctx, image, agg.failed)
 	case len(agg.notReady) == 0 && validOK:
-		return r.recordReady(ctx, image)
+		if result, err := r.recordReady(ctx, image); err != nil {
+			return result, err
+		}
+		return r.reconcileImageSeeder(ctx, image)
 	case len(agg.notReady) == 0:
 		return r.recordInvalid(ctx, image, agg.invalidSizes)
 	case image.Spec.Source != nil:
@@ -186,6 +208,38 @@ func (r *ImageReconciler) mapPartitionContentToImages(ctx context.Context, obj c
 	return requests
 }
 
+// mapMachineToImages maps a Machine event to a reconcile request per
+// Image it (or, for a Delete event, it used to) demand-source, directly
+// via its own spec.imageRef/dataImages - no PartitionContent indirection
+// needed, since seeder demand is now grouped at the Image level.
+func (r *ImageReconciler) mapMachineToImages(_ context.Context, obj client.Object) []reconcile.Request {
+	machine, ok := obj.(*keziov1alpha2.Machine)
+	if !ok {
+		return nil
+	}
+	refs := machineImageRefs(machine)
+	requests := make([]reconcile.Request, 0, len(refs))
+	for _, ref := range refs {
+		requests = append(requests, reconcile.Request{NamespacedName: ref})
+	}
+	return requests
+}
+
+// mapDeployRunToImages maps a DeployRun event to a reconcile request per
+// Image its resolved snapshot names.
+func (r *ImageReconciler) mapDeployRunToImages(_ context.Context, obj client.Object) []reconcile.Request {
+	run, ok := obj.(*keziov1alpha2.DeployRun)
+	if !ok {
+		return nil
+	}
+	keys := deployRunImageNames(run)
+	requests := make([]reconcile.Request, 0, len(keys))
+	for _, key := range keys {
+		requests = append(requests, reconcile.Request{NamespacedName: key})
+	}
+	return requests
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *ImageReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := ensureImageContentRefIndex(mgr); err != nil {
@@ -195,7 +249,10 @@ func (r *ImageReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&keziov1alpha2.Image{}, builder.WithPredicates(imageUpdatePredicate)).
 		Owns(&batchv1.Job{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
+		Owns(&appsv1.Deployment{}).
 		Watches(&keziov1alpha2.PartitionContent{}, handler.EnqueueRequestsFromMapFunc(r.mapPartitionContentToImages), builder.WithPredicates(partitionContentStatusChangedPredicate)).
+		Watches(&keziov1alpha2.Machine{}, handler.EnqueueRequestsFromMapFunc(r.mapMachineToImages), builder.WithPredicates(machineDemandPredicate)).
+		Watches(&keziov1alpha2.DeployRun{}, handler.EnqueueRequestsFromMapFunc(r.mapDeployRunToImages), builder.WithPredicates(deployRunDemandPredicate)).
 		Named("image").
 		Complete(r)
 }

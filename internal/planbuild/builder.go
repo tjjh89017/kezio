@@ -78,6 +78,8 @@ func (b *Builder) Build(ctx context.Context, machine *keziov1alpha2.Machine, run
 		return nil, Snapshot{}, &ValidationError{Reason: "machine has neither an OS image nor data images to deploy"}
 	}
 
+	site := &lazySiteResolution{client: b.Client, machine: machine}
+
 	hardware, err := b.getMachineHardware(ctx, machine)
 	if err != nil {
 		return nil, Snapshot{}, err
@@ -86,7 +88,7 @@ func (b *Builder) Build(ctx context.Context, machine *keziov1alpha2.Machine, run
 	selections := make([]diskmatch.Selection, 0, 1+len(machine.Spec.DataImages))
 	var osImage *resolvedImage
 	if machine.Spec.ImageRef != nil {
-		osImage, err = b.resolveImage(ctx, machine.Namespace, *machine.Spec.ImageRef, machine.Spec.TargetDisk, hardware.Spec.Disks, "OS image")
+		osImage, err = b.resolveImage(ctx, machine.Namespace, *machine.Spec.ImageRef, machine.Spec.TargetDisk, hardware.Spec.Disks, "OS image", site)
 		if err != nil {
 			return nil, Snapshot{}, err
 		}
@@ -96,7 +98,7 @@ func (b *Builder) Build(ctx context.Context, machine *keziov1alpha2.Machine, run
 	dataImages := make([]*resolvedImage, len(machine.Spec.DataImages))
 	for i, di := range machine.Spec.DataImages {
 		label := fmt.Sprintf("dataImages[%d]", i)
-		resolved, err := b.resolveImage(ctx, machine.Namespace, di.ImageRef, di.TargetDisk, hardware.Spec.Disks, label)
+		resolved, err := b.resolveImage(ctx, machine.Namespace, di.ImageRef, di.TargetDisk, hardware.Spec.Disks, label, site)
 		if err != nil {
 			return nil, Snapshot{}, err
 		}
@@ -162,8 +164,10 @@ func (b *Builder) getMachineHardware(ctx context.Context, machine *keziov1alpha2
 }
 
 // resolveImage fetches ref's Image, resolves its target disk from hints
-// against disks, and builds its DeploySlot list.
-func (b *Builder) resolveImage(ctx context.Context, defaultNS string, ref keziov1alpha2.NameRef, hints *keziov1alpha2.TargetDiskHints, disks []keziov1alpha2.MachineHardwareDisk, label string) (*resolvedImage, error) {
+// against disks, and builds its DeploySlot list. site lazily resolves the
+// deploying Machine's own seeder placement, threaded through to every
+// content slot this Image builds.
+func (b *Builder) resolveImage(ctx context.Context, defaultNS string, ref keziov1alpha2.NameRef, hints *keziov1alpha2.TargetDiskHints, disks []keziov1alpha2.MachineHardwareDisk, label string, site *lazySiteResolution) (*resolvedImage, error) {
 	ns := resolveNamespace(ref, defaultNS)
 
 	image := &keziov1alpha2.Image{}
@@ -182,7 +186,7 @@ func (b *Builder) resolveImage(ctx context.Context, defaultNS string, ref keziov
 		return nil, err
 	}
 
-	slots, err := b.buildSlots(ctx, image, disk.DeviceName)
+	slots, err := b.buildSlots(ctx, image, disk.DeviceName, site)
 	if err != nil {
 		return nil, err
 	}

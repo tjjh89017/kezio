@@ -18,26 +18,23 @@ package controller
 
 import "time"
 
-// defaultSeederGracePeriod is how long a per-content seeder Deployment is
-// kept running after its seed-demand marker (PartitionContentAnnotationSeedDemand)
-// is last observed absent, before it is actually deleted. The grace
-// period exists so a leeching swarm mid-download is never stranded by a
-// marker that clears and reappears across a short window - see
-// reconcileSeeder and the legacy defaultSeederGracePeriod this mirrors
+// defaultSeederGracePeriod is how long a per-(Image, Site) seeder
+// Deployment is kept running after its Site's seed-demand drops to zero,
+// before it is actually deleted. The grace period exists so a leeching
+// swarm mid-download is never stranded by demand that clears and
+// reappears across a short window - see reconcileImageSeeder and the
+// legacy defaultSeederGracePeriod this mirrors
 // (internal/controller/seeder_deployment.go on the legacy branch).
 const defaultSeederGracePeriod = 5 * time.Minute
 
-// PartitionContentSeederConfig configures the PartitionContent
-// reconciler's seeder half: one seeder Deployment per content on the
-// default, site-unaware network (see defaultSeederSite), gated by the
-// seed-demand annotation and content readiness. The zero value (Image ==
-// "") is not ready(): demand with no seeder image configured holds
-// PartitionContentConditionSeederDegraded true with a visible reason
-// rather than creating a half-configured Deployment, and - unlike
-// PartitionContentPublishConfig - never blocks
-// PartitionContentConditionReady, since a content with no seeder is
-// still valid, already-published content (see reconcileSeeder).
-type PartitionContentSeederConfig struct {
+// ImageSeederConfig configures the Image reconciler's seeder half: one
+// seeder Deployment per (Image, Site) mounting every content PVC the
+// Image's slots reference, gated by per-Site seed-demand and the Image's
+// own readiness. The zero value (Image == "") is not ready(): demand at a
+// Site with no seeder image configured is simply not acted on - no
+// Deployment is created there - rather than creating a half-configured
+// one.
+type ImageSeederConfig struct {
 	// Image is the seeder Deployment's container image: it ships both
 	// ezio and kezio-seeder-register (see docker/seeder), run as separate
 	// containers in the same pod. Read from PARTITIONCONTENT_SEEDER_IMAGE.
@@ -53,13 +50,13 @@ type PartitionContentSeederConfig struct {
 
 // ready reports whether cfg carries enough configuration to create a
 // seeder Deployment - see the type doc comment.
-func (cfg PartitionContentSeederConfig) ready() bool {
+func (cfg ImageSeederConfig) ready() bool {
 	return cfg.Image != ""
 }
 
 // gracePeriod returns cfg.GracePeriod, falling back to
 // defaultSeederGracePeriod when unset.
-func (cfg PartitionContentSeederConfig) gracePeriod() time.Duration {
+func (cfg ImageSeederConfig) gracePeriod() time.Duration {
 	if cfg.GracePeriod > 0 {
 		return cfg.GracePeriod
 	}
@@ -67,7 +64,7 @@ func (cfg PartitionContentSeederConfig) gracePeriod() time.Duration {
 }
 
 // now returns cfg.Now(), falling back to time.Now.
-func (cfg PartitionContentSeederConfig) now() time.Time {
+func (cfg ImageSeederConfig) now() time.Time {
 	if cfg.Now != nil {
 		return cfg.Now()
 	}

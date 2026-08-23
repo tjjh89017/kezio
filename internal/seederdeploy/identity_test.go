@@ -17,50 +17,42 @@ limitations under the License.
 package seederdeploy
 
 import (
+	"strings"
 	"testing"
-
-	"github.com/tjjh89017/kezio/internal/store"
 )
 
-// maxNameLength is the Kubernetes Deployment name limit this test
-// guards Name against, independent of Name's own implementation.
-const maxNameLength = 63
-
-// TestName checks that Name is deterministic, distinguishes two
-// different contents, and stays within the Deployment name limit.
+// TestName checks that Name is deterministic, distinguishes two Sites of
+// the same Image, distinguishes two Images at the same Site, and stays
+// within the Deployment name limit even for a long Image name.
 func TestName(t *testing.T) {
-	first := hashOf(t, 0x1000)
-	second := hashOf(t, 0x2000)
+	sameImageDifferentSite := Name("os-image", "ns/site-a")
+	sameImageOtherSite := Name("os-image", "ns/site-b")
+	otherImageSameSite := Name("other-image", "ns/site-a")
+	repeat := Name("os-image", "ns/site-a")
 
-	firstName := Name(first)
-	secondName := Name(second)
-	repeat := Name(hashOf(t, 0x1000))
-
-	if firstName == secondName {
-		t.Fatalf("Name() collided across different contents: %q", firstName)
+	if sameImageDifferentSite == sameImageOtherSite {
+		t.Fatalf("Name() collided across two Sites of the same Image: %q", sameImageDifferentSite)
 	}
-	if firstName != repeat {
-		t.Fatalf("Name() not deterministic: %q != %q", firstName, repeat)
+	if sameImageDifferentSite == otherImageSameSite {
+		t.Fatalf("Name() collided across two Images at the same Site: %q", sameImageDifferentSite)
 	}
-	if len(firstName) > maxNameLength || len(secondName) > maxNameLength {
-		t.Fatalf("Name() exceeded %d chars: %q, %q", maxNameLength, firstName, secondName)
+	if sameImageDifferentSite != repeat {
+		t.Fatalf("Name() not deterministic: %q != %q", sameImageDifferentSite, repeat)
+	}
+	if len(sameImageDifferentSite) > maxNameLength {
+		t.Fatalf("Name() exceeded %d chars: %q", maxNameLength, sameImageDifferentSite)
 	}
 }
 
-// hashOf builds a distinct store.InfoHash for offset: offset positions
-// the single extent, which changes the bencoded info dict and therefore
-// the computed hash.
-func hashOf(t *testing.T, offset uint64) store.InfoHash {
-	t.Helper()
-	info := &store.TorrentInfo{
-		BlockSize:   4096,
-		BlocksTotal: 1,
-		Extents:     []store.Extent{{Offset: offset, Length: 4096}},
-		PieceHashes: []store.PieceHash{{}},
+// TestNameTruncatesLongImageName checks that an Image name long enough to
+// overflow the limit on its own still produces a name within it.
+func TestNameTruncatesLongImageName(t *testing.T) {
+	longImageName := strings.Repeat("a", 200)
+	name := Name(longImageName, "ns/site-a")
+	if len(name) > maxNameLength {
+		t.Fatalf("Name() exceeded %d chars: %q", maxNameLength, name)
 	}
-	hash, err := store.ComputeInfoHash(info)
-	if err != nil {
-		t.Fatalf("ComputeInfoHash: %v", err)
+	if !strings.HasPrefix(name, namePrefix) {
+		t.Fatalf("Name() lost its prefix: %q", name)
 	}
-	return hash
 }

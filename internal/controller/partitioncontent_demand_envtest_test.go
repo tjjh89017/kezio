@@ -21,14 +21,13 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
-	"github.com/tjjh89017/kezio/internal/seederdeploy"
 	"github.com/tjjh89017/kezio/internal/store"
 )
 
@@ -43,7 +42,7 @@ var _ = Describe("PartitionContent Controller seed demand from Machines and Depl
 		return newIndexedReconciler(ctx, PartitionContentPublishConfig{
 			Image:      "example.test/kezio-ingest:test",
 			TrackerURL: "http://tracker.example.test/announce",
-		}, PartitionContentSeederConfig{Image: "example.test/kezio-seeder:test"})
+		})
 	}
 
 	advanceToReady := func(r *PartitionContentReconciler, nn types.NamespacedName, hashHex string) {
@@ -64,7 +63,7 @@ var _ = Describe("PartitionContent Controller seed demand from Machines and Depl
 		Expect(err).NotTo(HaveOccurred())
 	}
 
-	It("creates a seeder Deployment for a Machine's referenced Image and removes it once the Machine is deleted", func() {
+	It("holds SeederDegraded=True for a Machine's referenced Image while no seeder is available, and clears it once the Machine is deleted", func() {
 		hashHex := partitionContentTestHash(500)
 		name := "pc-" + hashHex
 		nn := types.NamespacedName{Name: name, Namespace: "default"}
@@ -86,14 +85,15 @@ var _ = Describe("PartitionContent Controller seed demand from Machines and Depl
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		hash, err := store.ParseInfoHash(hashHex)
-		Expect(err).NotTo(HaveOccurred())
-		depKey := types.NamespacedName{Name: seederdeploy.Name(hash), Namespace: "default"}
-
-		var dep appsv1.Deployment
-		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
-		Expect(dep.Spec.Replicas).NotTo(BeNil())
-		Expect(*dep.Spec.Replicas).To(Equal(int32(1)))
+		// No ImageReconciler runs in this suite, so no Image ever owns a
+		// seeder Deployment for image-demand-500: demand is real, but
+		// nothing is available yet.
+		var got keziov1alpha2.PartitionContent
+		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
+		degraded := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.PartitionContentConditionSeederDegraded)
+		Expect(degraded).NotTo(BeNil())
+		Expect(degraded.Status).To(Equal(metav1.ConditionTrue))
+		Expect(got.Status.Seeders).To(BeEmpty())
 
 		Expect(k8sClient.Delete(ctx, machine)).To(Succeed())
 
@@ -107,7 +107,7 @@ var _ = Describe("PartitionContent Controller seed demand from Machines and Depl
 		}).Should(Succeed())
 	})
 
-	It("creates a seeder Deployment for a non-terminal DeployRun's resolved Image and stops demanding once the run reaches a terminal phase", func() {
+	It("holds SeederDegraded=True for a non-terminal DeployRun's resolved Image and clears it once the run reaches a terminal phase", func() {
 		hashHex := partitionContentTestHash(501)
 		name := "pc-" + hashHex
 		nn := types.NamespacedName{Name: name, Namespace: "default"}
@@ -130,14 +130,11 @@ var _ = Describe("PartitionContent Controller seed demand from Machines and Depl
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		hash, err := store.ParseInfoHash(hashHex)
-		Expect(err).NotTo(HaveOccurred())
-		depKey := types.NamespacedName{Name: seederdeploy.Name(hash), Namespace: "default"}
-
-		var dep appsv1.Deployment
-		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
-		Expect(dep.Spec.Replicas).NotTo(BeNil())
-		Expect(*dep.Spec.Replicas).To(Equal(int32(1)))
+		var got keziov1alpha2.PartitionContent
+		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
+		degraded := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.PartitionContentConditionSeederDegraded)
+		Expect(degraded).NotTo(BeNil())
+		Expect(degraded.Status).To(Equal(metav1.ConditionTrue))
 
 		run.Status.Phase = keziov1alpha2.DeployRunPhaseSucceeded
 		Expect(k8sClient.Status().Update(ctx, run)).To(Succeed())
@@ -145,14 +142,9 @@ var _ = Describe("PartitionContent Controller seed demand from Machines and Depl
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		var got keziov1alpha2.PartitionContent
 		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
-		degraded := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.PartitionContentConditionSeederDegraded)
+		degraded = meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.PartitionContentConditionSeederDegraded)
 		Expect(degraded).To(BeNil(), "no demand must clear SeederDegraded rather than leave it True")
-		// The Deployment itself survives the (zero-length here)
-		// grace-period countdown - see partitioncontent_seeder_test.go's
-		// own grace-period coverage for that lifecycle.
-		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
 	})
 
 	It("maps a Machine event to every PartitionContent its referenced Image's slots name", func() {

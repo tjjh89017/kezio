@@ -255,6 +255,7 @@ func main() {
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 		Ingest: imageIngestConfigFromEnv(),
+		Seeder: imageSeederConfigFromEnv(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Image")
 		os.Exit(1)
@@ -264,7 +265,6 @@ func main() {
 		Scheme:   mgr.GetScheme(),
 		Recorder: mgr.GetEventRecorderFor("partitioncontent-controller"),
 		Publish:  partitionContentPublishConfigFromEnv(),
-		Seeder:   partitionContentSeederConfigFromEnv(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PartitionContent")
 		os.Exit(1)
@@ -493,13 +493,13 @@ func partitionContentPublishConfigFromEnv() controller.PartitionContentPublishCo
 	return cfg
 }
 
-// partitionContentSeederConfigFromEnv builds the PartitionContent
-// reconciler's PartitionContentSeederConfig from the environment. Leaving
-// PARTITIONCONTENT_SEEDER_IMAGE unset yields a config that is not
-// ready(): a content whose seed-demand marker is set then holds
-// SeederDegraded=True (never Ready=False) until it is.
-func partitionContentSeederConfigFromEnv() controller.PartitionContentSeederConfig {
-	cfg := controller.PartitionContentSeederConfig{
+// imageSeederConfigFromEnv builds the Image reconciler's ImageSeederConfig
+// from the environment. Leaving PARTITIONCONTENT_SEEDER_IMAGE unset yields
+// a config that is not ready(): seed-demand at any Site is simply not
+// acted on until it is set, and PartitionContentReconciler's own status
+// derivation is what surfaces that on the affected content.
+func imageSeederConfigFromEnv() controller.ImageSeederConfig {
+	cfg := controller.ImageSeederConfig{
 		Image: os.Getenv("PARTITIONCONTENT_SEEDER_IMAGE"),
 	}
 	if v := os.Getenv("PARTITIONCONTENT_SEEDER_GRACE_PERIOD"); v != "" {

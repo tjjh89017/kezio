@@ -17,12 +17,26 @@ limitations under the License.
 package controller
 
 // Labels shared by every object the PartitionContent reconciler builds
-// (the content PVC, the publish Job, and the seeder Deployment).
+// (the content PVC and the publish Job), plus the two labels every
+// per-(Image, Site) seeder Deployment ImageReconciler builds also carries
+// (partitionContentSeederComponentValue, partitionContentSeederSubnetLabel)
+// - kept here rather than duplicated so SubnetReconciler.concurrentSeederDeployments
+// and SiteReconciler.seederPlacementReady, which count seeder Deployments
+// by these exact labels, share one definition with the code that sets
+// them.
 const (
 	partitionContentAppNameLabel         = "app.kubernetes.io/name"
 	partitionContentAppNameValue         = "kezio"
 	partitionContentAppComponentLabel    = "app.kubernetes.io/component"
 	partitionContentPVCComponentValue    = "partition-content"
 	partitionContentJobComponentValue    = "partition-content-publish"
-	partitionContentSeederComponentValue = "partition-content-seeder"
+	partitionContentSeederComponentValue = "image-seeder"
+	// partitionContentSeederSubnetLabel names the Subnet a seeder
+	// Deployment was placed on, when sitederive resolved one -
+	// SubnetReconciler.concurrentSeederDeployments and
+	// SiteReconciler.seederPlacementReady filter on it to scope their
+	// count to one Subnet's own seeder network. Absent (not set to "")
+	// when no Subnet resolved placement, so a bare-label list still finds
+	// only placed seeders.
+	partitionContentSeederSubnetLabel = "kezio.kojuro.date/seeder-subnet"
 )

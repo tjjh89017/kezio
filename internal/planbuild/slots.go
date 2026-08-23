@@ -33,12 +33,15 @@ import (
 // buildSlots resolves image's ordered layout slots into their wire
 // DeploySlot form, each written to targetDisk. A slot with ContentRef
 // resolves to Torrent (the referenced PartitionContent must be Ready
-// with a reachable seeder, or this reports NotReadyError); a blank swap
-// slot resolves to Swap; any other blank slot resolves to Mkfs.
-func (b *Builder) buildSlots(ctx context.Context, image *keziov1alpha2.Image, targetDisk string) ([]agentapi.DeploySlot, error) {
+// with a reachable seeder at site's Site, or this reports
+// NotReadyError); a blank swap slot resolves to Swap; any other blank
+// slot resolves to Mkfs. site lazily resolves the deploying Machine's own
+// seeder placement, shared across every slot of every image this
+// Machine's plan builds so it is resolved at most once.
+func (b *Builder) buildSlots(ctx context.Context, image *keziov1alpha2.Image, targetDisk string, site *lazySiteResolution) ([]agentapi.DeploySlot, error) {
 	slots := make([]agentapi.DeploySlot, 0, len(image.Spec.Layout.Slots))
 	for _, s := range image.Spec.Layout.Slots {
-		slot, err := b.buildSlot(ctx, image, s, targetDisk)
+		slot, err := b.buildSlot(ctx, image, s, targetDisk, site)
 		if err != nil {
 			return nil, fmt.Errorf("image %s/%s slot %d: %w", image.Namespace, image.Name, s.Number, err)
 		}
@@ -47,7 +50,7 @@ func (b *Builder) buildSlots(ctx context.Context, image *keziov1alpha2.Image, ta
 	return slots, nil
 }
 
-func (b *Builder) buildSlot(ctx context.Context, image *keziov1alpha2.Image, s keziov1alpha2.ImageSlot, targetDisk string) (agentapi.DeploySlot, error) {
+func (b *Builder) buildSlot(ctx context.Context, image *keziov1alpha2.Image, s keziov1alpha2.ImageSlot, targetDisk string, site *lazySiteResolution) (agentapi.DeploySlot, error) {
 	slot := agentapi.DeploySlot{
 		Number: s.Number,
 		Device: partitionDevicePath(targetDisk, s.Number),
@@ -55,7 +58,7 @@ func (b *Builder) buildSlot(ctx context.Context, image *keziov1alpha2.Image, s k
 
 	switch {
 	case s.ContentRef != nil:
-		torrent, err := b.buildTorrent(ctx, image, *s.ContentRef)
+		torrent, err := b.buildTorrent(ctx, image, *s.ContentRef, site)
 		if err != nil {
 			return agentapi.DeploySlot{}, err
 		}
@@ -73,10 +76,13 @@ func (b *Builder) buildSlot(ctx context.Context, image *keziov1alpha2.Image, s k
 
 // buildTorrent resolves ref's PartitionContent - in image's own
 // namespace, the only namespace ImageSlot.ContentRef's doc comment
-// allows - into a DeployTorrent: the content must be Ready, and its
-// seeder must have a reachable pod (resolveTorrentURL), or this reports
-// NotReadyError.
-func (b *Builder) buildTorrent(ctx context.Context, image *keziov1alpha2.Image, ref keziov1alpha2.NameRef) (*agentapi.DeployTorrent, error) {
+// allows - into a DeployTorrent: the content must be Ready, the
+// Machine's Site must resolve and actually run a seeder (HasSeeder), and
+// that seeder must have a reachable pod (resolveTorrentURL), or this
+// reports NotReadyError (or, for a Site resolution failure, ValidationError
+// - see sitederive.Resolve's own error classification for why that is a
+// misconfiguration rather than something to wait out).
+func (b *Builder) buildTorrent(ctx context.Context, image *keziov1alpha2.Image, ref keziov1alpha2.NameRef, site *lazySiteResolution) (*agentapi.DeployTorrent, error) {
 	ns := resolveNamespace(ref, image.Namespace)
 
 	pc := &keziov1alpha2.PartitionContent{}
@@ -90,6 +96,14 @@ func (b *Builder) buildTorrent(ctx context.Context, image *keziov1alpha2.Image, 
 		return nil, &NotReadyError{Reason: fmt.Sprintf("partitioncontent %s/%s is not Ready yet", ns, ref.Name)}
 	}
 
+	siteRes, err := site.resolve(ctx)
+	if err != nil {
+		return nil, &ValidationError{Reason: fmt.Sprintf("resolving machine's seeder placement: %v", err)}
+	}
+	if !siteRes.HasSeeder {
+		return nil, &NotReadyError{Reason: fmt.Sprintf("machine's Site %s has no seeding subnet configured, but image %s/%s needs one for partitioncontent %s", siteRes.SiteIdentity, image.Namespace, image.Name, ref.Name)}
+	}
+
 	const namePrefix = "pc-"
 	if !strings.HasPrefix(ref.Name, namePrefix) {
 		return nil, fmt.Errorf("partitioncontent %s/%s: name does not carry the %q prefix", ns, ref.Name, namePrefix)
@@ -99,7 +113,12 @@ func (b *Builder) buildTorrent(ctx context.Context, image *keziov1alpha2.Image, 
 		return nil, fmt.Errorf("partitioncontent %s/%s: name is not a valid content hash: %w", ns, ref.Name, err)
 	}
 
-	url, err := b.resolveTorrentURL(ctx, ns, hash)
+	// The seeder Deployment lives in the Image's own namespace (see
+	// seederdeploy.Name's doc comment), not necessarily pc's - both are
+	// the same namespace under the current ContentRef.Namespace
+	// restriction, but resolveTorrentURL is keyed by the Image, so this
+	// passes image.Namespace explicitly rather than ns.
+	url, err := b.resolveTorrentURL(ctx, image.Namespace, image.Name, siteRes.SiteIdentity, hash)
 	if err != nil {
 		return nil, err
 	}

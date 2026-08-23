@@ -35,7 +35,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
-	"github.com/tjjh89017/kezio/internal/seederdeploy"
 	"github.com/tjjh89017/kezio/internal/store"
 )
 
@@ -99,7 +98,7 @@ func newTestDeployRun(name, imageName string) *keziov1alpha2.DeployRun {
 // read directly (client.CacheOptions.DisableFor): those stay on the plain
 // envtest client so a status write this test just made is visible on the
 // very next Get, with no cache-sync lag to race against.
-func newIndexedReconciler(ctx context.Context, publish PartitionContentPublishConfig, seeder PartitionContentSeederConfig) (*PartitionContentReconciler, func()) {
+func newIndexedReconciler(ctx context.Context, publish PartitionContentPublishConfig) (*PartitionContentReconciler, func()) {
 	c, err := cache.New(cfg, cache.Options{Scheme: k8sClient.Scheme()})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(c.IndexField(ctx, &keziov1alpha2.Image{}, imageContentRefIndex, indexImageContentRefs)).To(Succeed())
@@ -129,7 +128,6 @@ func newIndexedReconciler(ctx context.Context, publish PartitionContentPublishCo
 		Scheme:   k8sClient.Scheme(),
 		Recorder: record.NewFakeRecorder(16),
 		Publish:  publish,
-		Seeder:   seeder,
 	}
 	return r, cancel
 }
@@ -148,7 +146,7 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 		pc := newTestPartitionContent(name)
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
 
-		r, cancel := newIndexedReconciler(ctx, PartitionContentPublishConfig{}, PartitionContentSeederConfig{})
+		r, cancel := newIndexedReconciler(ctx, PartitionContentPublishConfig{})
 		DeferCleanup(cancel)
 		reconcileAddsFinalizer(ctx, r, nn)
 
@@ -181,7 +179,7 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 		pc := newTestPartitionContent(name)
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
 
-		r, cancel := newIndexedReconciler(ctx, PartitionContentPublishConfig{}, PartitionContentSeederConfig{})
+		r, cancel := newIndexedReconciler(ctx, PartitionContentPublishConfig{})
 		DeferCleanup(cancel)
 		reconcileAddsFinalizer(ctx, r, nn)
 
@@ -213,7 +211,7 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 		pc := newTestPartitionContent(name)
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
 
-		r, cancel := newIndexedReconciler(ctx, PartitionContentPublishConfig{}, PartitionContentSeederConfig{})
+		r, cancel := newIndexedReconciler(ctx, PartitionContentPublishConfig{})
 		DeferCleanup(cancel)
 		reconcileAddsFinalizer(ctx, r, nn)
 
@@ -239,7 +237,7 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 		pc := newTestPartitionContent(name)
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
 
-		r, cancel := newIndexedReconciler(ctx, PartitionContentPublishConfig{}, PartitionContentSeederConfig{})
+		r, cancel := newIndexedReconciler(ctx, PartitionContentPublishConfig{})
 		DeferCleanup(cancel)
 		reconcileAddsFinalizer(ctx, r, nn)
 
@@ -274,7 +272,7 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 		pc := newTestPartitionContent(name)
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
 
-		r, cancel := newIndexedReconciler(ctx, PartitionContentPublishConfig{}, PartitionContentSeederConfig{})
+		r, cancel := newIndexedReconciler(ctx, PartitionContentPublishConfig{})
 		DeferCleanup(cancel)
 		reconcileAddsFinalizer(ctx, r, nn)
 
@@ -307,7 +305,7 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 		}).Should(MatchError(apierrors.IsNotFound, "IsNotFound"))
 	})
 
-	It("keeps a demanded seeder running while deletion is blocked", func() {
+	It("keeps reporting seed demand status while deletion is blocked", func() {
 		hashHex := partitionContentTestHash(205)
 		name := "pc-" + hashHex
 		nn := types.NamespacedName{Name: name, Namespace: "default"}
@@ -318,8 +316,7 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 			Image:      "example.test/kezio-ingest:test",
 			TrackerURL: "http://tracker.example.test/announce",
 		}
-		seeder := PartitionContentSeederConfig{Image: "example.test/kezio-seeder:test"}
-		r, cancel := newIndexedReconciler(ctx, publish, seeder)
+		r, cancel := newIndexedReconciler(ctx, publish)
 		DeferCleanup(cancel)
 		reconcileAddsFinalizer(ctx, r, nn)
 
@@ -344,23 +341,22 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 		Expect(k8sClient.Status().Update(ctx, &job)).To(Succeed())
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn}) // -> Ready
 		Expect(err).NotTo(HaveOccurred())
-		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn}) // -> seeder created
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn}) // -> reflects seed demand
 		Expect(err).NotTo(HaveOccurred())
 
-		depKey := types.NamespacedName{Name: seederdeploy.Name(hash), Namespace: "default"}
-		var dep appsv1.Deployment
-		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
+		var readyGot keziov1alpha2.PartitionContent
+		Expect(k8sClient.Get(ctx, nn, &readyGot)).To(Succeed())
+		degraded := meta.FindStatusCondition(readyGot.Status.Conditions, keziov1alpha2.PartitionContentConditionSeederDegraded)
+		Expect(degraded).NotTo(BeNil())
+		Expect(degraded.Status).To(Equal(metav1.ConditionTrue), "demand exists but ImageReconciler owns no seeder Deployment in this suite")
 
 		Expect(k8sClient.Delete(ctx, pc)).To(Succeed())
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
 		// onDelete returns before ever reaching onChange/reconcileSeeder:
-		// the seeder Deployment is untouched by a blocked deletion, and
-		// Kubernetes GC only reaps an owned object once the owner is
-		// actually removed - which a blocked finalizer prevents.
-		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
-
+		// a blocked deletion must not itself change the seed-demand status
+		// reconcileSeeder would otherwise still be reflecting.
 		var got keziov1alpha2.PartitionContent
 		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
 		Expect(got.Finalizers).To(ContainElement(keziov1alpha2.PartitionContentFinalizer))
@@ -373,7 +369,7 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 		pc := newTestPartitionContent(name)
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
 
-		r, cancel := newIndexedReconciler(ctx, PartitionContentPublishConfig{}, PartitionContentSeederConfig{})
+		r, cancel := newIndexedReconciler(ctx, PartitionContentPublishConfig{})
 		DeferCleanup(cancel)
 		reconcileAddsFinalizer(ctx, r, nn)
 

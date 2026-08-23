@@ -14,17 +14,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package seederdeploy is the identity contract for a per-content seeder
-// Deployment: the deterministic name internal/controller derives it
+// Package seederdeploy is the identity contract for a per-(Image, Site)
+// seeder Deployment: the deterministic name internal/controller derives it
 // under (see Name), and the fixed port its pods serve .torrent files on
 // (see TorrentHTTPPort).
 package seederdeploy
 
-import "github.com/tjjh89017/kezio/internal/store"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+)
 
 // TorrentHTTPPort is the fixed port cmd/seeder's HTTP server listens on
-// inside the seeder-register container, serving the mounted content's
-// .torrent file - see cmd/seeder/main.go.
+// inside the seeder-register container, serving every mounted content's
+// .torrent file by info hash - see cmd/seeder/main.go.
 const TorrentHTTPPort int32 = 8080
 
 // TorrentHealthzPath is the path on TorrentHTTPPort that only proves the
@@ -34,18 +37,34 @@ const TorrentHTTPPort int32 = 8080
 // hits it.
 const TorrentHealthzPath = "/healthz"
 
-// namePrefix identifies a Deployment as a per-content seeder this
+// namePrefix identifies a Deployment as a per-(Image, Site) seeder this
 // operator manages, at a glance in `kubectl get deployments`.
 const namePrefix = "kezio-seeder-"
 
-// Name returns the deterministic Deployment name for the content
-// identified by hash: namePrefix plus hash's lowercase hex string.
-// Deterministic so a reconciler stays idempotent, and one Deployment
-// per content (no site or network qualifier) since seeding is not yet
-// site-aware. hash.String() is a fixed 40 hex characters, so the result
-// always fits well within the 63-character DNS-1035 label limit a
-// generated ReplicaSet/Pod name must also satisfy - no truncation logic
-// is needed here.
-func Name(hash store.InfoHash) string {
-	return namePrefix + hash.String()
+// maxNameLength is the Kubernetes Deployment name limit, kept well inside
+// the 63-character DNS-1035 limit the ReplicaSet/Pod names generated from
+// it must also satisfy.
+const maxNameLength = 63
+
+// Name returns the deterministic Deployment name for imageName's seeder at
+// the Site identified by siteIdentity (the "namespace/name" string
+// sitederive.SiteIdentity returns): namePrefix, then imageName (truncated
+// as needed to fit), then an 8-hex-character suffix derived from
+// siteIdentity.
+//
+// Deterministic so a reconciler stays idempotent across reconciles. The
+// suffix is always present, not just on overflow: imageName alone is
+// shared by every Site that Image seeds, so it cannot disambiguate them on
+// its own, and the suffix is what keeps two Sites of the same Image from
+// ever colliding on one Deployment name.
+func Name(imageName, siteIdentity string) string {
+	sum := sha256.Sum256([]byte(siteIdentity))
+	suffix := "-" + hex.EncodeToString(sum[:])[:8]
+
+	maxBaseLen := maxNameLength - len(namePrefix) - len(suffix)
+	base := imageName
+	if len(base) > maxBaseLen {
+		base = base[:maxBaseLen]
+	}
+	return namePrefix + base + suffix
 }

@@ -15,11 +15,10 @@ limitations under the License.
 */
 
 // Package sitederive is the single choke point that resolves seeder
-// placement facts, either by following Machine.spec.subnetRef -> Subnet
-// -> Subnet.spec.siteRef -> Site and returning that Site's designated
-// seeding Subnet (Resolve), or by picking a seeder-hosting Subnet within
-// a namespace directly (ResolveNamespaceSeeder). All callers must share
-// this resolution rather than recomputing it.
+// placement facts, by following Machine.spec.subnetRef -> Subnet ->
+// Subnet.spec.siteRef -> Site and returning that Site's designated seeding
+// Subnet (Resolve). All callers must share this resolution rather than
+// recomputing it.
 package sitederive
 
 import (
@@ -128,8 +127,10 @@ func SiteIdentity(site *keziov1alpha2.Site) string {
 //
 // c is expected to be a cached informer client: Resolve does at most
 // three reads per call (Subnet, Site, seeding Subnet) and relies on
-// that cache rather than adding its own.
-func Resolve(ctx context.Context, c client.Client, machine *keziov1alpha2.Machine) (Resolution, error) {
+// that cache rather than adding its own. Only Get is used, so a
+// read-only client.Reader (for example planbuild.Builder's own Client)
+// is sufficient.
+func Resolve(ctx context.Context, c client.Reader, machine *keziov1alpha2.Machine) (Resolution, error) {
 	subnetRef := machine.Spec.SubnetRef
 	subnetNS := subnetRef.Namespace
 	if subnetNS == "" {
@@ -188,10 +189,9 @@ func Resolve(ctx context.Context, c client.Client, machine *keziov1alpha2.Machin
 
 // ResolveSubnet derives subnet's own seeder placement facts directly, with
 // no Machine or Site indirection: Resolve calls this once it has followed
-// the full Machine -> Subnet -> Site chain to a seeding Subnet, and
-// ResolveNamespaceSeeder calls it once it has picked a Subnet by namespace
-// instead. HasSeeder is always true: a Subnet reached here is, by
-// definition, one that hosts a seeder.
+// the full Machine -> Subnet -> Site chain to a seeding Subnet. HasSeeder
+// is always true: a Subnet reached here is, by definition, one that hosts
+// a seeder.
 func ResolveSubnet(subnet *keziov1alpha2.Subnet) Resolution {
 	return Resolution{
 		HasSeeder:        true,
@@ -200,40 +200,4 @@ func ResolveSubnet(subnet *keziov1alpha2.Subnet) Resolution {
 		NodeSelector:     subnet.Spec.NodeSelector,
 		Subnet:           subnet,
 	}
-}
-
-// ResolveNamespaceSeeder picks the Subnet in namespace that hosts seeders
-// and resolves its placement facts, for a caller with no Machine to
-// follow (for example a PartitionContent's seeder Deployment, placed once
-// per namespace rather than once per Machine).
-//
-// Selection rule: among the Subnets in namespace whose SeederNetworkRef is
-// set, the one with the lexicographically lowest Name wins - deterministic
-// across reconciles without needing a Site kind to arbitrate between
-// several seeder-hosting Subnets. Zero matching Subnets reports ok = false
-// with a zero Resolution, not an error: an environment with no
-// seeder-hosting Subnet (for example a Subnet-less CI lane) is a
-// supported topology.
-//
-// c is expected to be a cached informer client, as Resolve documents.
-func ResolveNamespaceSeeder(ctx context.Context, c client.Client, namespace string) (Resolution, bool, error) {
-	var subnets keziov1alpha2.SubnetList
-	if err := c.List(ctx, &subnets, client.InNamespace(namespace)); err != nil {
-		return Resolution{}, false, fmt.Errorf("list subnets in namespace %s: %w", namespace, err)
-	}
-
-	var chosen *keziov1alpha2.Subnet
-	for i := range subnets.Items {
-		candidate := &subnets.Items[i]
-		if candidate.Spec.SeederNetworkRef == nil {
-			continue
-		}
-		if chosen == nil || candidate.Name < chosen.Name {
-			chosen = candidate
-		}
-	}
-	if chosen == nil {
-		return Resolution{}, false, nil
-	}
-	return ResolveSubnet(chosen), true, nil
 }

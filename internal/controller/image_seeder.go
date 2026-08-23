@@ -1,0 +1,280 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	appsv1 "k8s.io/api/apps/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
+	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	"github.com/tjjh89017/kezio/internal/sitederive"
+	"github.com/tjjh89017/kezio/internal/store"
+)
+
+// imageSeederEmptySinceAnnotation records (RFC3339, UTC) on a seeder
+// Deployment when its Site's seed-demand was last observed absent.
+// reconcileImageSeederSite starts a grace-period countdown from this
+// timestamp instead of deleting the Deployment the moment demand drops,
+// so a leeching swarm mid-download is never stranded by demand that
+// clears and reappears (for example, across a short deploy queue). It is
+// cleared the moment demand reappears (cancelSeederShutdown). Stored on
+// the Deployment itself, not any status, so the countdown lives and dies
+// with the object it describes.
+const imageSeederEmptySinceAnnotation = "kezio.kojuro.date/seeder-empty-since"
+
+// reconcileImageSeeder drives every Site's seeder Deployment lifecycle for
+// an already-Ready image: create-on-demand, grace-period shutdown on
+// demand loss, and terminating-Deployment handling - all per (Image,
+// Site), the unit section 3.1 replaces the old per-content one with. It
+// only ever runs once image is Ready (see onChange): a Deployment is
+// never created for an Image whose referenced content is not all Ready
+// yet.
+//
+// Demand is grouped by Site (imageSeedDemandBySite); a Site whose
+// resolution failed is already excluded there and never blocks another
+// Site's own processing here, nor does an error reconciling one Site
+// block another's.
+func (r *ImageReconciler) reconcileImageSeeder(ctx context.Context, image *keziov1alpha2.Image) (ctrl.Result, error) {
+	demand, err := r.imageSeedDemandBySite(ctx, image)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	existing, err := listImageSeederDeployments(ctx, r.Client, image)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	sites := make(map[string]bool, len(demand)+len(existing))
+	for site := range demand {
+		sites[site] = true
+	}
+	for site := range existing {
+		sites[site] = true
+	}
+
+	var hashes []store.InfoHash
+	if len(demand) > 0 {
+		hashes, err = r.imageSeededContents(ctx, image)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	var result ctrl.Result
+	var errs []error
+	for site := range sites {
+		siteResult, err := r.reconcileImageSeederSite(ctx, image, site, demand[site], existing[site], hashes)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		result = minRequeue(result, siteResult)
+	}
+	if len(errs) > 0 {
+		return ctrl.Result{}, errors.Join(errs...)
+	}
+	return result, nil
+}
+
+// reconcileImageSeederSite runs one Site's own seeder Deployment step,
+// mirroring the per-content reconcileSeeder's state machine one level up:
+// create on demand, patch placement drift, cancel or run a grace-period
+// shutdown, and leave a terminating Deployment alone.
+func (r *ImageReconciler) reconcileImageSeederSite(ctx context.Context, image *keziov1alpha2.Image, site string, demand *seederSiteDemand, dep *appsv1.Deployment, hashes []store.InfoHash) (ctrl.Result, error) {
+	wantsSeeder := demand != nil && demand.count > 0
+
+	switch {
+	case dep != nil && !dep.DeletionTimestamp.IsZero():
+		// Terminating: never force-delete, and never attempt to recreate
+		// under the same name while GC is still cleaning up (Create would
+		// just fail AlreadyExists). The Deployment watch (Owns, unfiltered)
+		// retriggers a reconcile once it is actually gone.
+		return ctrl.Result{}, nil
+
+	case dep == nil && wantsSeeder:
+		if !r.Seeder.ready() {
+			// No seeder image configured: demand is simply not acted on at
+			// this Site. PartitionContentReconciler's own status derivation
+			// (no available Deployment at this Site) is what surfaces this
+			// to a user, not anything written here.
+			return ctrl.Result{}, nil
+		}
+		if err := r.createImageSeederDeployment(ctx, image, site, hashes, demand.resolution); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+
+	case dep != nil && wantsSeeder:
+		dep, err := r.ensureImageSeederPlacement(ctx, image, site, dep, hashes, demand.resolution)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.cancelSeederShutdown(ctx, dep); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+
+	case dep != nil && !wantsSeeder:
+		return r.shutdownImageSeederDeployment(ctx, dep)
+
+	default: // dep == nil && !wantsSeeder
+		return ctrl.Result{}, nil
+	}
+}
+
+// createImageSeederDeployment creates image's seeder Deployment at site.
+// r.Seeder must be ready() - the caller gates on that before calling this.
+func (r *ImageReconciler) createImageSeederDeployment(ctx context.Context, image *keziov1alpha2.Image, site string, hashes []store.InfoHash, res sitederive.Resolution) error {
+	dep := r.buildImageSeederDeployment(image, site, hashes, res)
+	if err := controllerutil.SetControllerReference(image, dep, r.Scheme); err != nil {
+		return fmt.Errorf("image %q: setting seeder deployment owner reference: %w", image.Name, err)
+	}
+	if err := r.Create(ctx, dep); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("image %q: creating seeder deployment %q: %w", image.Name, dep.Name, err)
+	}
+	return nil
+}
+
+// ensureImageSeederPlacement patches dep's placement (the Multus
+// annotation, nodeSelector, and labels) in place when it differs from the
+// freshly-built desired shape, and leaves dep untouched otherwise - so a
+// reconcile with no placement drift never issues a write. Volumes/mounts
+// are never patched: image only reaches this once Ready, at which point
+// its referenced content set is fixed (PartitionContentSpec/ImageSpec are
+// both immutable), so the mounted set can never legitimately change after
+// creation. Selector is never touched either - it is immutable on an
+// existing Deployment, and this Deployment's own name already makes it
+// exact per (Image, Site).
+func (r *ImageReconciler) ensureImageSeederPlacement(ctx context.Context, image *keziov1alpha2.Image, site string, dep *appsv1.Deployment, hashes []store.InfoHash, res sitederive.Resolution) (*appsv1.Deployment, error) {
+	desired := r.buildImageSeederDeployment(image, site, hashes, res)
+
+	wantAnnotations := desired.Spec.Template.Annotations
+	wantNodeSelector := desired.Spec.Template.Spec.NodeSelector
+	wantLabels := desired.Labels
+
+	if equality.Semantic.DeepEqual(dep.Spec.Template.Annotations, wantAnnotations) &&
+		equality.Semantic.DeepEqual(dep.Spec.Template.Spec.NodeSelector, wantNodeSelector) &&
+		equality.Semantic.DeepEqual(dep.Labels, wantLabels) {
+		return dep, nil
+	}
+
+	patch := client.MergeFrom(dep.DeepCopy())
+	dep.Spec.Template.Annotations = wantAnnotations
+	dep.Spec.Template.Spec.NodeSelector = wantNodeSelector
+	dep.Labels = wantLabels
+	if err := r.Patch(ctx, dep, patch); err != nil {
+		return nil, fmt.Errorf("image %q: updating seeder deployment placement %q: %w", image.Name, dep.Name, err)
+	}
+	return dep, nil
+}
+
+// parseSeederEmptySince reads dep's grace-period countdown start time,
+// reporting ok = false when it is absent or unparsable (treated as
+// "countdown not started yet" by callers).
+func parseSeederEmptySince(dep *appsv1.Deployment) (time.Time, bool) {
+	raw, ok := dep.Annotations[imageSeederEmptySinceAnnotation]
+	if !ok {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+// stampSeederEmptySince records at (UTC, RFC3339) on dep, starting the
+// grace-period countdown.
+func (r *ImageReconciler) stampSeederEmptySince(ctx context.Context, dep *appsv1.Deployment, at time.Time) error {
+	patch := client.MergeFrom(dep.DeepCopy())
+	if dep.Annotations == nil {
+		dep.Annotations = map[string]string{}
+	}
+	dep.Annotations[imageSeederEmptySinceAnnotation] = at.UTC().Format(time.RFC3339)
+	if err := r.Patch(ctx, dep, patch); err != nil {
+		return fmt.Errorf("seeder deployment %q: stamping empty-since: %w", dep.Name, err)
+	}
+	return nil
+}
+
+// cancelSeederShutdown clears dep's grace-period countdown, called when
+// demand reappears before the countdown expired.
+func (r *ImageReconciler) cancelSeederShutdown(ctx context.Context, dep *appsv1.Deployment) error {
+	if _, marked := dep.Annotations[imageSeederEmptySinceAnnotation]; !marked {
+		return nil
+	}
+	patch := client.MergeFrom(dep.DeepCopy())
+	delete(dep.Annotations, imageSeederEmptySinceAnnotation)
+	if err := r.Patch(ctx, dep, patch); err != nil {
+		return fmt.Errorf("seeder deployment %q: clearing empty-since: %w", dep.Name, err)
+	}
+	return nil
+}
+
+// shutdownImageSeederDeployment runs one grace-period step for dep, whose
+// Site no longer has an active seed-demand: it starts the countdown on
+// first observation, waits it out on later ones, and only deletes dep
+// once the countdown has actually elapsed. See
+// imageSeederEmptySinceAnnotation's doc comment for why this is a
+// countdown rather than an immediate delete.
+func (r *ImageReconciler) shutdownImageSeederDeployment(ctx context.Context, dep *appsv1.Deployment) (ctrl.Result, error) {
+	now := r.Seeder.now()
+
+	since, marked := parseSeederEmptySince(dep)
+	if !marked {
+		if err := r.stampSeederEmptySince(ctx, dep, now); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: r.Seeder.gracePeriod()}, nil
+	}
+
+	if remaining := r.Seeder.gracePeriod() - now.Sub(since); remaining > 0 {
+		return ctrl.Result{RequeueAfter: remaining}, nil
+	}
+
+	if err := r.Delete(ctx, dep); err != nil && !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, fmt.Errorf("deleting seeder deployment %q: %w", dep.Name, err)
+	}
+	return ctrl.Result{}, nil
+}
+
+// minRequeue returns whichever of a/b has the smaller positive
+// RequeueAfter, or whichever is non-zero when only one is - the merge
+// rule reconcileImageSeeder needs to combine every Site's own
+// ctrl.Result into one for the single Reconcile call they all share.
+func minRequeue(a, b ctrl.Result) ctrl.Result {
+	switch {
+	case a.RequeueAfter == 0:
+		return b
+	case b.RequeueAfter == 0:
+		return a
+	case a.RequeueAfter < b.RequeueAfter:
+		return a
+	default:
+		return b
+	}
+}
