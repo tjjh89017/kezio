@@ -173,6 +173,7 @@ runs:
           exit 1
         fi
         deadline=$(( $(date +%s) + ${TIMEOUT%s} ))
+        saw_delayed=0
 
         dump_and_fail() {
           echo "::error::$1" >&2
@@ -198,11 +199,22 @@ runs:
           if [ "${operational_status}" = "error" ]; then
             break
           fi
+          # "delayed" is a legitimate transient on the way to "error":
+          # the reconcile right after the intent patch can still read the
+          # PostHook's Valid condition at a stale observedGeneration and
+          # report NotReadyError before a later pass gets far enough to
+          # render the template and fail. Only a delay that outlasts the
+          # whole timeout means the injected hook is being treated as
+          # not-ready rather than as a render failure, so remember it and
+          # let the deadline below decide.
           if [ "${operational_status}" = "delayed" ]; then
-            dump_and_fail "status.operationalStatus=delayed, not error - the injected PostHook must have been treated as not-ready (NotReadyError) rather than failing to render (ValidationError); check that it reached Valid=True with an unresolvable template placeholder"
+            saw_delayed=1
           fi
 
           if [ "$(date +%s)" -ge "${deadline}" ]; then
+            if [ "${saw_delayed}" = 1 ] && [ "${operational_status}" = "delayed" ]; then
+              dump_and_fail "status.operationalStatus stayed 'delayed' for the whole ${TIMEOUT}, never reaching 'error' - the injected PostHook is being treated as not-ready (NotReadyError) rather than failing to render (ValidationError); check that it reached Valid=True with an unresolvable template placeholder"
+            fi
             dump_and_fail "status.operationalStatus did not reach 'error' within ${TIMEOUT}"
           fi
           sleep 5

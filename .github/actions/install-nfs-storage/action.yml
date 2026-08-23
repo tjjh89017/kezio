@@ -36,9 +36,15 @@ inputs:
     required: false
     default: "itsthenetwork/nfs-server-alpine:12"
   timeout:
-    description: 'Timeout for the csi-nfs-controller/csi-nfs-node/nfs-server rollout waits, e.g. "180s".'
+    description: >-
+      Timeout for the csi-nfs-controller/csi-nfs-node/nfs-server rollout
+      waits, e.g. "300s". Generous on purpose: these rollouts pull their
+      images from an external registry on a runner that is already
+      pulling the lane's own images, and a controller that is merely slow
+      to become available is not a failure worth ending a 120-minute lane
+      over.
     required: false
-    default: "180s"
+    default: "300s"
 
 runs:
   using: composite
