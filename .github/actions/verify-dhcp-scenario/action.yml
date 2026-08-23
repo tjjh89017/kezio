@@ -3,14 +3,14 @@ name: Verify the DHCP scenario behaved as configured
 description: >-
   Asserts the DHCP-handling a Subnet's dhcp.mode matrix leg is actually
   meant to exercise: proxydhcp checks that kezio-existing-dhcp's own
-  proxyDHCP answered the DISCOVER/ACK exchange directly; lease checks
+  proxyDHCP answered the DISCOVER/ACK exchange directly; dhcp checks
   that kezio-existing-dhcp was never deployed and bootd's dnsmasq issued
   the lease itself under BOOTD_LEASE_MODE. Any other scenario value is a
   no-op success.
 
 inputs:
   scenario:
-    description: DHCP scenario under test. One of proxydhcp, lease.
+    description: DHCP scenario under test. One of proxydhcp, dhcp.
     required: true
   namespace:
     description: Namespace kezio-existing-dhcp and the bootd Deployment are deployed in.
@@ -20,7 +20,7 @@ inputs:
     description: 'Name of the Subnet''s bootd Deployment, e.g. "kezio-bootd-<subnet-name>" (see deploy-bootd).'
     required: true
   existing-dhcp-deployment-name:
-    description: Name of the deploy-existing-dhcp Deployment (its "name" input) checked in the proxydhcp scenario, and confirmed absent in the lease scenario.
+    description: Name of the deploy-existing-dhcp Deployment (its "name" input) checked in the proxydhcp scenario, and confirmed absent in the dhcp scenario.
     required: false
     default: "kezio-existing-dhcp"
 
@@ -45,9 +45,9 @@ runs:
               exit 1
             fi
             ;;
-          lease)
+          dhcp)
             if kubectl -n "${NAMESPACE}" get deployment/"${EXISTING_DHCP_DEPLOYMENT_NAME}" >/dev/null 2>&1; then
-              echo "::error::${EXISTING_DHCP_DEPLOYMENT_NAME} exists in the lease scenario" >&2
+              echo "::error::${EXISTING_DHCP_DEPLOYMENT_NAME} exists in the dhcp scenario" >&2
               exit 1
             fi
 

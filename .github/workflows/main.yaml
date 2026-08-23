@@ -453,7 +453,7 @@ jobs:
   # Available - this is the register phase, carried over unchanged from
   # the retired netboot lane, including its matrix (both of Subnet's DHCP
   # modes: proxydhcp, where an existing DHCP server stays lease authority
-  # and bootd answers proxyDHCP only, and lease, where bootd's own
+  # and bootd answers proxyDHCP only, and dhcp, where bootd's own
   # dnsmasq issues leases) and its MAC-gate assertion (fail-secure
   # against an unenrolled MAC). The lane then continues past
   # registration: a real OS test image is built and ingested, a marker
@@ -471,7 +471,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dhcp-scenario: [proxydhcp, lease]
+        dhcp-scenario: [proxydhcp, dhcp]
     env:
       PROVISIONING_BRIDGE: kezio-prov0
       PROVISIONING_HOST_IP: 192.0.2.1/24

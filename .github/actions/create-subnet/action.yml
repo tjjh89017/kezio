@@ -36,15 +36,15 @@ inputs:
     required: false
     default: "default"
   dhcp-scenario:
-    description: 'DHCP scenario, mapped onto Subnet.spec.dhcp.mode: "proxydhcp" -> proxy (an existing DHCP server stays lease authority), "lease" -> lease (bootd''s own dnsmasq becomes lease authority).'
+    description: 'DHCP scenario, mapped onto Subnet.spec.dhcp.mode: "proxydhcp" -> proxy (an existing DHCP server stays lease authority), "dhcp" -> lease (bootd''s own dnsmasq becomes lease authority).'
     required: false
     default: "proxydhcp"
   lease-range-start:
-    description: Subnet.spec.dhcp.leaseRangeStart. Required when dhcp-scenario is "lease".
+    description: Subnet.spec.dhcp.leaseRangeStart. Required when dhcp-scenario is "dhcp".
     required: false
     default: ""
   lease-range-end:
-    description: Subnet.spec.dhcp.leaseRangeEnd. Required when dhcp-scenario is "lease".
+    description: Subnet.spec.dhcp.leaseRangeEnd. Required when dhcp-scenario is "dhcp".
     required: false
     default: ""
   timeout:
@@ -74,14 +74,14 @@ runs:
         set -euo pipefail
         case "${DHCP_SCENARIO}" in
           proxydhcp) dhcp_mode=proxy ;;
-          lease) dhcp_mode=lease ;;
+          dhcp) dhcp_mode=lease ;;
           *)
-            echo "::error::unknown dhcp-scenario '${DHCP_SCENARIO}' (expected proxydhcp or lease)" >&2
+            echo "::error::unknown dhcp-scenario '${DHCP_SCENARIO}' (expected proxydhcp or dhcp)" >&2
             exit 1
             ;;
         esac
         if [ "${dhcp_mode}" = lease ] && { [ -z "${LEASE_RANGE_START}" ] || [ -z "${LEASE_RANGE_END}" ]; }; then
-          echo "::error::dhcp-scenario 'lease' requires both lease-range-start and lease-range-end" >&2
+          echo "::error::dhcp-scenario 'dhcp' requires both lease-range-start and lease-range-end" >&2
           exit 1
         fi
 
