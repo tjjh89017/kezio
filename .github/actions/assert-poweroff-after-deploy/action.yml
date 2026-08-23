@@ -57,6 +57,16 @@ inputs:
   image-name:
     description: Name of an already-Ready, non-bootable Image (e.g. ingest-test-image's own fixture) to deploy as this Machine's sole data image.
     required: true
+  target-disk-serial:
+    description: >-
+      Serial number of the disk the data image deploys to, written to
+      each dataImages entry's own targetDisk.serialNumber. Required:
+      spec.targetDisk covers the OS image only and is ignored once
+      imageRef is gone, so without this the run's disk resolution is
+      ambiguous on any machine reporting more than one disk - which
+      this lane's VM does, since it carries a cloud-init disk beside
+      its data disk.
+    required: true
   run-timeout:
     description: >-
       Timeout to wait for status.state to return to "Provisioned" with a
@@ -109,13 +119,14 @@ runs:
         NAMESPACE: ${{ inputs.namespace }}
         MACHINE_NAME: ${{ inputs.machine-name }}
         IMAGE_NAME: ${{ inputs.image-name }}
+        TARGET_DISK_SERIAL: ${{ inputs.target-disk-serial }}
       run: |
         set -euo pipefail
-        patch="$(jq -n --arg image "${IMAGE_NAME}" '{
+        patch="$(jq -n --arg image "${IMAGE_NAME}" --arg serial "${TARGET_DISK_SERIAL}" '{
           spec: {
             imageRef: null,
             postHookRefs: null,
-            dataImages: [{imageRef: {name: $image}}],
+            dataImages: [{imageRef: {name: $image}, targetDisk: {serialNumber: $serial}}],
             afterDeploy: "PowerOff"
           }
         }')"

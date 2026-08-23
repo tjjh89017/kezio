@@ -485,6 +485,10 @@ jobs:
       SUBNET_NAME: netboot-${{ matrix.dhcp-scenario }}
       TARGET_VM_NAME: netboot-vm
       TARGET_VM_MAC: "52:54:00:be:ef:03"
+      # Stamped on the target VM's data disk and carried into the
+      # Machine's targetDisk hint: the VM reports a cloud-init disk
+      # beside it, so a deploy with no hint resolves as ambiguous.
+      TARGET_DISK_SERIAL: KEZIONETBOOTDISK01
       UNKNOWN_VM_NAME: netboot-vm-unknown
       UNKNOWN_VM_MAC: "52:54:00:be:ef:99"
       BOOT_ARTIFACTS_IMG: "example.com/kezio-boot-artifacts:e2e"
@@ -668,7 +672,7 @@ jobs:
         with:
           vm-name: ${{ env.TARGET_VM_NAME }}
           vm-mac: ${{ env.TARGET_VM_MAC }}
-          disk-serial: "KEZIONETBOOTDISK01"
+          disk-serial: "${{ env.TARGET_DISK_SERIAL }}"
 
       # Must precede provisioning through the BMC: it creates the
       # basic-auth Secret VirtualMachineBMC.spec.authSecretRef reads,
@@ -681,6 +685,7 @@ jobs:
           bmc-address: "redfish+http://${{ env.TARGET_VM_NAME }}-virtbmc.scaffold-system.svc.cluster.local/redfish/v1/Systems/1"
           boot-mac: ${{ env.TARGET_VM_MAC }}
           subnet-name: ${{ env.SUBNET_NAME }}
+          target-disk-serial: "${{ env.TARGET_DISK_SERIAL }}"
 
       - name: Provision the target VM through a real KubeVirtBMC/Redfish endpoint
         uses: ./.github/actions/provision-target-vm-via-bmc
@@ -881,6 +886,7 @@ jobs:
         with:
           machine-name: ${{ env.TARGET_VM_NAME }}
           image-name: ${{ steps.build-data-image.outputs.image-name }}
+          target-disk-serial: "${{ env.TARGET_DISK_SERIAL }}"
 
       - name: Dump all kezio v1alpha2 resources
         if: always()
