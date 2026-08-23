@@ -19,6 +19,7 @@ package v1alpha2
 import (
 	"context"
 	"fmt"
+	"net/url"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -29,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	"github.com/tjjh89017/kezio/internal/sitederive"
 )
 
 // nolint:unused
@@ -109,12 +111,16 @@ func (v *SiteCustomValidator) ValidateDelete(_ context.Context, obj runtime.Obje
 }
 
 // validateSite runs every cross-object Site check: the seederSubnetRef
-// back-reference rule, then the tracker-versus-seeding rule.
+// back-reference rule, then the tracker-versus-seeding rule, then the
+// externalURL shape rule.
 func (v *SiteCustomValidator) validateSite(ctx context.Context, site *keziov1alpha2.Site) error {
 	if err := v.validateSeederSubnetRef(ctx, site); err != nil {
 		return err
 	}
-	return validateTrackerMatchesSeeding(site)
+	if err := validateTrackerMatchesSeeding(site); err != nil {
+		return err
+	}
+	return validateTrackerExternalURL(site)
 }
 
 // validateSeederSubnetRef denies a spec.seederSubnetRef that names a
@@ -144,10 +150,57 @@ func (v *SiteCustomValidator) validateSeederSubnetRef(ctx context.Context, site 
 		return fmt.Errorf("looking up Subnet %q referenced by spec.seederSubnetRef: %w", ref.Name, err)
 	}
 
-	if subnet.Spec.SiteRef.Name != site.GetName() {
+	// Site is namespace-scoped and its name carries no cluster-wide
+	// uniqueness, so the back-reference must resolve to this Site's full
+	// namespace-qualified identity, not just its name - otherwise a
+	// same-named Site in another namespace would satisfy this check.
+	gotIdentity := sitederive.SiteRefIdentity(subnet)
+	wantIdentity := sitederive.SiteIdentity(site)
+	if gotIdentity != wantIdentity {
 		return fmt.Errorf(
-			"spec.seederSubnetRef names Subnet %q, but that Subnet's spec.siteRef names %q, not %q: a Site cannot designate a Subnet belonging to another Site as its seeding Subnet, because routability is not guaranteed across that line",
-			ref.Name, subnet.Spec.SiteRef.Name, site.GetName())
+			"spec.seederSubnetRef names Subnet %q, but that Subnet's spec.siteRef names %q, not this Site (%q): a Site cannot designate a Subnet belonging to another Site as its seeding Subnet, because routability is not guaranteed across that line",
+			ref.Name, gotIdentity, wantIdentity)
+	}
+
+	return nil
+}
+
+// validateTrackerExternalURL denies a tracker.externalURL that cannot
+// possibly work as a BitTorrent announce URL: without this check, a
+// typo surfaces much later as a leecher timing out with nothing to
+// point at, exactly the failure the other tracker rules exist to avoid.
+// It must parse as an absolute URL with a scheme BitTorrent announce
+// supports (http and https, which is what this repo's own tracker
+// Deployment serves and what ezio/libtorrent announce over, plus udp,
+// the other scheme libtorrent's tracker client and opentracker - this
+// repo's tracker image - both speak) and a host. Reachability is
+// deliberately not checked here: admission is not the place for a
+// network probe.
+func validateTrackerExternalURL(site *keziov1alpha2.Site) error {
+	raw := site.Spec.Tracker.ExternalURL
+	if raw == "" {
+		return nil
+	}
+
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("spec.tracker.externalURL %q does not parse as a URL: %w", raw, err)
+	}
+
+	switch u.Scheme {
+	case "http", "https", "udp":
+	case "":
+		return fmt.Errorf(
+			"spec.tracker.externalURL %q has no scheme: a BitTorrent announce URL must be absolute (http, https, or udp)",
+			raw)
+	default:
+		return fmt.Errorf(
+			"spec.tracker.externalURL %q has scheme %q, but BitTorrent announce only supports http, https, or udp",
+			raw, u.Scheme)
+	}
+
+	if u.Host == "" {
+		return fmt.Errorf("spec.tracker.externalURL %q has no host", raw)
 	}
 
 	return nil

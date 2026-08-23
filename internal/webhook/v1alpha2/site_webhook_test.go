@@ -22,6 +22,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -135,6 +136,71 @@ var _ = Describe("Site Webhook", func() {
 			obj.Spec.Tracker = keziov1alpha2.SiteTracker{ExternalURL: "http://tracker.example.com:6969/announce"}
 			Expect(validator.ValidateCreate(ctx, obj)).Error().NotTo(HaveOccurred())
 		})
+
+		It("denies a Site whose seederSubnetRef names a Subnet whose siteRef names a same-named Site in another namespace", func() {
+			// The Subnet's siteRef names "hq" resolved in the Subnet's own
+			// namespace ("other-ns"), not the "hq" under test here (in
+			// "default"). Comparing names alone would wrongly treat these
+			// as the same Site.
+			otherNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "site-webhook-other-ns"}}
+			Expect(k8sClient.Create(ctx, otherNS)).To(Or(Succeed(), WithTransform(apierrors.IsAlreadyExists, BeTrue())))
+
+			foreignSiteName := "hq"
+			foreignSite := &keziov1alpha2.Site{
+				ObjectMeta: metav1.ObjectMeta{Name: foreignSiteName, Namespace: otherNS.Name},
+			}
+			Expect(k8sClient.Create(ctx, foreignSite)).To(Or(Succeed(), WithTransform(apierrors.IsAlreadyExists, BeTrue())))
+
+			subnet := &keziov1alpha2.Subnet{
+				ObjectMeta: metav1.ObjectMeta{Name: "site-webhook-cross-ns-subnet", Namespace: otherNS.Name},
+				Spec: keziov1alpha2.SubnetSpec{
+					SiteRef:         keziov1alpha2.NameRef{Name: foreignSiteName},
+					CIDR:            "192.0.2.0/24",
+					BootdServerIP:   "192.0.2.2",
+					BootdNetworkRef: &keziov1alpha2.NameRef{Name: "bootd-net"},
+					DHCP: &keziov1alpha2.SubnetDHCP{
+						Mode: keziov1alpha2.SubnetDHCPModeProxy,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
+
+			obj.ObjectMeta = metav1.ObjectMeta{Name: foreignSiteName, Namespace: "default"}
+			obj.Spec.SeederSubnetRef = &keziov1alpha2.NameRef{Name: subnet.Name, Namespace: otherNS.Name}
+			obj.Spec.Tracker = keziov1alpha2.SiteTracker{IP: "192.0.2.9"}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring(subnet.Name))
+		})
+
+		It("admits a Site whose seederSubnetRef correctly names a Subnet in the same namespace", func() {
+			obj.ObjectMeta = metav1.ObjectMeta{Name: "site-correct-back-ref", Namespace: "default"}
+			subnet := newSubnet("site-correct-back-ref")
+			obj.Spec.SeederSubnetRef = &keziov1alpha2.NameRef{Name: subnet.Name}
+			obj.Spec.Tracker = keziov1alpha2.SiteTracker{IP: "192.0.2.9"}
+			Expect(validator.ValidateCreate(ctx, obj)).Error().NotTo(HaveOccurred())
+		})
+
+		DescribeTable("tracker.externalURL validation",
+			func(externalURL string, shouldSucceed bool) {
+				obj.ObjectMeta = metav1.ObjectMeta{Name: "site-external-url-test", Namespace: "default"}
+				subnet := newSubnet(obj.Name)
+				obj.Spec.SeederSubnetRef = &keziov1alpha2.NameRef{Name: subnet.Name}
+				obj.Spec.Tracker = keziov1alpha2.SiteTracker{ExternalURL: externalURL}
+				_, err := validator.ValidateCreate(ctx, obj)
+				if shouldSucceed {
+					Expect(err).NotTo(HaveOccurred())
+				} else {
+					Expect(err).To(HaveOccurred())
+				}
+			},
+			Entry("no scheme", "tracker.example.com/announce", false),
+			Entry("unsupported scheme", "ftp://tracker.example.com/announce", false),
+			Entry("no host", "http:///announce", false),
+			Entry("valid http", "http://tracker.example.com:6969/announce", true),
+			Entry("valid https", "https://tracker.example.com/announce", true),
+			Entry("valid udp", "udp://tracker.example.com:6969", true),
+		)
 
 		It("applies the same rules on update", func() {
 			oldObj.ObjectMeta = metav1.ObjectMeta{Name: "site-update-check", Namespace: "default"}

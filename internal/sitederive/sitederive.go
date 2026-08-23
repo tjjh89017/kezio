@@ -105,6 +105,23 @@ func SiteIdentity(site *keziov1alpha2.Site) string {
 	return site.Namespace + "/" + site.Name
 }
 
+// SiteRefIdentity returns the namespace-qualified identity, in the same
+// format SiteIdentity returns, of the Site that subnet.Spec.SiteRef
+// names - applying the same bare-NameRef defaulting Resolve does: an
+// empty Namespace defaults to subnet's own namespace. Callers that need
+// to check a siteRef against a specific Site (for example, that it
+// points back at the Site declaring it as a seeding Subnet) must compare
+// this against SiteIdentity rather than comparing names alone, since
+// Site is namespace-scoped and its name carries no cluster-wide
+// uniqueness.
+func SiteRefIdentity(subnet *keziov1alpha2.Subnet) string {
+	ns := subnet.Spec.SiteRef.Namespace
+	if ns == "" {
+		ns = subnet.Namespace
+	}
+	return ns + "/" + subnet.Spec.SiteRef.Name
+}
+
 // Resolve derives machine's seeder placement facts by following
 // Machine.spec.subnetRef -> Subnet -> Subnet.spec.siteRef -> Site, and
 // returns the Site's designated seeding Subnet's facts - not the
