@@ -1,0 +1,12 @@
+apiVersion: kezio.kojuro.date/v1alpha2
+kind: Site
+metadata:
+  labels:
+    app.kubernetes.io/name: scaffold
+    app.kubernetes.io/managed-by: kustomize
+  name: site-sample
+spec:
+  seederSubnetRef:
+    name: subnet-sample
+  tracker:
+    ip: 192.0.2.3

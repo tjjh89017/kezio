@@ -9,6 +9,7 @@ resources:
 - bases/kezio.kojuro.date_partitioncontents.yaml
 - bases/kezio.kojuro.date_subnets.yaml
 - bases/kezio.kojuro.date_posthooks.yaml
+- bases/kezio.kojuro.date_sites.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

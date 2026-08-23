@@ -7,4 +7,5 @@ resources:
 - kezio_v1alpha2_partitioncontent.yaml
 - kezio_v1alpha2_subnet.yaml
 - kezio_v1alpha2_posthook.yaml
+- kezio_v1alpha2_site.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples
