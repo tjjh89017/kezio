@@ -113,7 +113,7 @@ var _ = Describe("PartitionContent Controller seeder Subnet placement", func() {
 
 		var dep appsv1.Deployment
 		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
-		Expect(dep.Spec.Template.Annotations).NotTo(HaveKey(multusNetworksAnnotation))
+		Expect(dep.Spec.Template.Annotations).NotTo(HaveKey(multusDefaultNetworkAnnotation))
 		Expect(dep.Spec.Template.Spec.NodeSelector).To(BeEmpty())
 		Expect(dep.Labels).NotTo(HaveKey(partitionContentSeederSubnetLabel))
 
@@ -128,7 +128,7 @@ var _ = Describe("PartitionContent Controller seeder Subnet placement", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
-		Expect(dep.Spec.Template.Annotations[multusNetworksAnnotation]).To(Equal(ns + "/seeder-nad"))
+		Expect(dep.Spec.Template.Annotations[multusDefaultNetworkAnnotation]).To(Equal(ns + "/seeder-nad"))
 		Expect(dep.Spec.Template.Spec.NodeSelector).To(Equal(map[string]string{"kubernetes.io/hostname": "node-1"}))
 		Expect(dep.Labels[partitionContentSeederSubnetLabel]).To(Equal(testSubnetName))
 		Expect(dep.Spec.Selector.MatchLabels).NotTo(HaveKey(partitionContentSeederSubnetLabel))

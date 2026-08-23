@@ -92,8 +92,16 @@ func TestBuildSeederDeploymentWithSeederNetworkRefAddsPlacement(t *testing.T) {
 	dep := r.buildSeederDeployment(pc, hash, res)
 
 	wantAnnotation := pc.Namespace + "/seeder-nad"
-	if got := dep.Spec.Template.Annotations[multusNetworksAnnotation]; got != wantAnnotation {
+	if got := dep.Spec.Template.Annotations[multusDefaultNetworkAnnotation]; got != wantAnnotation {
 		t.Errorf("Multus annotation = %q, want %q", got, wantAnnotation)
+	}
+	// The additive annotation would leave the pod dual-homed and
+	// Status.PodIP reporting the cluster CNI's address, which
+	// planbuild's resolveTorrentURL hands to leechers that cannot
+	// route to it.
+	if got, ok := dep.Spec.Template.Annotations[multusNetworksAnnotation]; ok {
+		t.Errorf("seeder carries the additive Multus annotation %s = %q, want only %s",
+			multusNetworksAnnotation, got, multusDefaultNetworkAnnotation)
 	}
 	if got := dep.Spec.Template.Spec.NodeSelector["kubernetes.io/hostname"]; got != "node-1" {
 		t.Errorf("NodeSelector[kubernetes.io/hostname] = %q, want %q", got, "node-1")
@@ -126,13 +134,13 @@ func TestBuildSeederDeploymentSeederNetworkRefNamespaceDefaulting(t *testing.T) 
 		Spec:       keziov1alpha2.SubnetSpec{SeederNetworkRef: &keziov1alpha2.NameRef{Name: "seeder-nad"}},
 	}
 	dep := r.buildSeederDeployment(pc, hash, sitederive.ResolveSubnet(subnet))
-	if got, want := dep.Spec.Template.Annotations[multusNetworksAnnotation], "seeder-subnet-ns/seeder-nad"; got != want {
+	if got, want := dep.Spec.Template.Annotations[multusDefaultNetworkAnnotation], "seeder-subnet-ns/seeder-nad"; got != want {
 		t.Errorf("Multus annotation = %q, want %q (defaulted against Subnet's own namespace)", got, want)
 	}
 
 	subnet.Spec.SeederNetworkRef = &keziov1alpha2.NameRef{Namespace: "explicit-ns", Name: "seeder-nad"}
 	dep = r.buildSeederDeployment(pc, hash, sitederive.ResolveSubnet(subnet))
-	if got, want := dep.Spec.Template.Annotations[multusNetworksAnnotation], "explicit-ns/seeder-nad"; got != want {
+	if got, want := dep.Spec.Template.Annotations[multusDefaultNetworkAnnotation], "explicit-ns/seeder-nad"; got != want {
 		t.Errorf("Multus annotation = %q, want %q (explicit namespace kept)", got, want)
 	}
 }

@@ -55,17 +55,34 @@ func (r *PartitionContentReconciler) resolveSeederPlacement(ctx context.Context,
 	return res, nil
 }
 
-// seederPodAnnotations returns the pod template annotations attaching
-// res.SeederNetworkRef as a secondary Multus network, or nil when res
-// carries no SeederNetworkRef - mirrors bootdPodAnnotations, defaulting a
-// bare NAD name against the resolved Subnet's own namespace rather than
-// pc's.
+// multusDefaultNetworkAnnotation is the Multus CNI pod annotation that
+// REPLACES a pod's default network attachment, unlike
+// multusNetworksAnnotation, which only adds a second one alongside it.
+//
+// A seeder must be single-homed on its Subnet's network, not dual-homed:
+// leechers reach it at Status.PodIP, and a pod that keeps the cluster CNI
+// as its default reports that cluster address there - the one address a
+// machine on the provisioning segment cannot route to. Single-homing also
+// keeps BitTorrent's own peer discovery honest, since the address a peer
+// announces is then the address it actually listens on, with no NAT in
+// between.
+const multusDefaultNetworkAnnotation = "v1.multus-cni.io/default-network"
+
+// seederPodAnnotations returns the pod template annotations placing
+// res.SeederNetworkRef as the pod's default (and only) network, or nil
+// when res carries no SeederNetworkRef. A bare NAD name defaults against
+// the resolved Subnet's own namespace rather than pc's.
+//
+// Unlike bootdPodAnnotations, this replaces the default network rather
+// than adding to it - see multusDefaultNetworkAnnotation. Both seeder
+// containers talk to each other over the pod-local loopback, so nothing
+// in the pod needs the cluster network it gives up.
 func seederPodAnnotations(res sitederive.Resolution) map[string]string {
 	if res.SeederNetworkRef == nil {
 		return nil
 	}
 	ns := resolveNamespace(*res.SeederNetworkRef, res.Subnet.Namespace)
-	return map[string]string{multusNetworksAnnotation: ns + "/" + res.SeederNetworkRef.Name}
+	return map[string]string{multusDefaultNetworkAnnotation: ns + "/" + res.SeederNetworkRef.Name}
 }
 
 // ensureSeederPlacement patches dep's placement (the Multus annotation,
