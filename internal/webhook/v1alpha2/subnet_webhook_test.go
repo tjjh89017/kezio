@@ -41,8 +41,8 @@ var _ = Describe("Subnet Webhook", func() {
 					SiteRef:         keziov1alpha2.NameRef{Name: "site-a"},
 					CIDR:            "192.0.2.0/24",
 					BootdServerIP:   "192.0.2.2",
-					BootdNetworkRef: keziov1alpha2.NameRef{Name: "bootd-net"},
-					DHCP: keziov1alpha2.SubnetDHCP{
+					BootdNetworkRef: &keziov1alpha2.NameRef{Name: "bootd-net"},
+					DHCP: &keziov1alpha2.SubnetDHCP{
 						Mode: keziov1alpha2.SubnetDHCPModeProxy,
 					},
 				},

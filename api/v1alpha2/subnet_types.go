@@ -54,17 +54,23 @@ type SubnetDHCP struct {
 
 // SubnetSpec defines the desired state of Subnet.
 //
-// A Subnet denotes one broadcast domain on the boot/provisioning plane:
-// bootd binds to it directly (BootdNetworkRef), and BootdServerIP is the
-// address firmware caches mid-boot as its PXE next-server/TFTP target on
-// that segment. The data plane - the routed, cross-subnet network
-// BitTorrent seeding needs - is a distinct concern expressed through
-// SeederNetworkRef.
+// A Subnet denotes one broadcast domain. Its boot half (BootdServerIP,
+// BootdNetworkRef, DHCP) is optional as a group: either all three are set,
+// giving this Subnet a bootd Deployment - bootd binds to it directly
+// (BootdNetworkRef), and BootdServerIP is the address firmware caches
+// mid-boot as its PXE next-server/TFTP target on that segment - or none of
+// them are, and this Subnet carries no machines at all. The data plane -
+// the routed, cross-subnet network BitTorrent seeding needs - is a
+// distinct concern expressed through SeederNetworkRef, and is what a
+// boot-half-less Subnet must carry instead: a Subnet declaring neither
+// half hosts nothing and is rejected at admission.
 //
 // BootdServerIP is explicit and pinned, never allocated by an IPAM plugin:
 // it must stay stable for the pod's whole lifetime, unlike a seeder pod's
 // address, which BitTorrent's tracker-based peer discovery tolerates
 // changing between seeder Deployments.
+// +kubebuilder:validation:XValidation:rule="has(self.bootdServerIP) == has(self.bootdNetworkRef) && has(self.bootdNetworkRef) == has(self.dhcp)",message="bootdServerIP, bootdNetworkRef and dhcp must be set together or all left unset"
+// +kubebuilder:validation:XValidation:rule="has(self.bootdServerIP) || has(self.seederNetworkRef)",message="a Subnet must declare a boot half (bootdServerIP/bootdNetworkRef/dhcp) or seederNetworkRef; one with neither hosts nothing"
 type SubnetSpec struct {
 	// SiteRef names the Site this Subnet belongs to. The referenced Site
 	// must in fact be able to route to this Subnet for the reference to
@@ -78,19 +84,25 @@ type SubnetSpec struct {
 	// BootdServerIP is bootd's own IPv4 address on this Subnet - the
 	// address firmware reads back as the PXE boot server and (absent an
 	// override) the TFTP next-server. Explicit and pinned, never
-	// IPAM-allocated.
+	// IPAM-allocated. Part of the boot half: set together with
+	// BootdNetworkRef and DHCP, or left unset with both of them - a
+	// Subnet with none of the three hosts no machines and gets no bootd
+	// Deployment.
 	// +kubebuilder:validation:Pattern=`^(\d{1,3}\.){3}\d{1,3}$`
-	BootdServerIP string `json:"bootdServerIP"`
+	// +optional
+	BootdServerIP string `json:"bootdServerIP,omitempty"`
 	// BootdNetworkRef names the NetworkAttachmentDefinition the bootd
 	// Deployment for this Subnet attaches through. Its namespace must
 	// carry pod-security.kubernetes.io/enforce=privileged, since bootd
-	// needs NET_ADMIN.
-	BootdNetworkRef NameRef `json:"bootdNetworkRef"`
+	// needs NET_ADMIN. Part of the boot half; see BootdServerIP.
+	// +optional
+	BootdNetworkRef *NameRef `json:"bootdNetworkRef,omitempty"`
 	// SeederNetworkRef names the NetworkAttachmentDefinition seeder pods
 	// attach through when this Subnet is a Site's designated seeder
 	// Subnet. Optional: absent means this Subnet does not host seeders.
 	// It may name the same NAD as BootdNetworkRef, but BootdServerIP must
-	// never fall inside that NAD's IPAM range.
+	// never fall inside that NAD's IPAM range. A Subnet with no boot half
+	// must set this field - it is the only thing such a Subnet can host.
 	// +optional
 	SeederNetworkRef *NameRef `json:"seederNetworkRef,omitempty"`
 	// NodeSelector constrains bootd (and, when this Subnet hosts seeders,
@@ -99,8 +111,18 @@ type SubnetSpec struct {
 	// every node is on every segment.
 	// +optional
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
-	// DHCP configures bootd's DHCP behavior on this Subnet.
-	DHCP SubnetDHCP `json:"dhcp"`
+	// DHCP configures bootd's DHCP behavior on this Subnet. Part of the
+	// boot half; see BootdServerIP.
+	// +optional
+	DHCP *SubnetDHCP `json:"dhcp,omitempty"`
+}
+
+// HasBootPlane reports whether this Subnet declares the boot half
+// (BootdServerIP/BootdNetworkRef/DHCP). The CRD schema's XValidation rule
+// guarantees the group is all-or-nothing, so checking DHCP alone is
+// sufficient once the object is admitted.
+func (s SubnetSpec) HasBootPlane() bool {
+	return s.DHCP != nil
 }
 
 // Condition types set on SubnetStatus.Conditions.

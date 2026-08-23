@@ -53,8 +53,8 @@ func testSubnet(namespace string, mutate ...func(*keziov1alpha2.Subnet)) *keziov
 			SiteRef:         keziov1alpha2.NameRef{Name: "hq"},
 			CIDR:            "192.0.2.0/24",
 			BootdServerIP:   "192.0.2.2",
-			BootdNetworkRef: keziov1alpha2.NameRef{Name: "boot-nad"},
-			DHCP:            keziov1alpha2.SubnetDHCP{Mode: keziov1alpha2.SubnetDHCPModeProxy},
+			BootdNetworkRef: &keziov1alpha2.NameRef{Name: "boot-nad"},
+			DHCP:            &keziov1alpha2.SubnetDHCP{Mode: keziov1alpha2.SubnetDHCPModeProxy},
 		},
 	}
 	for _, m := range mutate {
@@ -239,7 +239,7 @@ func TestBuildBootdDeploymentEnv(t *testing.T) {
 
 	t.Run("lease mode carries the range bounds", func(t *testing.T) {
 		leaseSubnet := testSubnet("site-hq", func(s *keziov1alpha2.Subnet) {
-			s.Spec.DHCP = keziov1alpha2.SubnetDHCP{
+			s.Spec.DHCP = &keziov1alpha2.SubnetDHCP{
 				Mode:            keziov1alpha2.SubnetDHCPModeLease,
 				LeaseRangeStart: testLeaseRangeStart,
 				LeaseRangeEnd:   testLeaseRangeEnd,
@@ -261,7 +261,7 @@ func TestBuildBootdDeploymentEnv(t *testing.T) {
 
 	t.Run("proxy mode omits range bounds even if the Subnet somehow carries them", func(t *testing.T) {
 		proxySubnet := testSubnet("site-hq", func(s *keziov1alpha2.Subnet) {
-			s.Spec.DHCP = keziov1alpha2.SubnetDHCP{
+			s.Spec.DHCP = &keziov1alpha2.SubnetDHCP{
 				Mode:            keziov1alpha2.SubnetDHCPModeProxy,
 				LeaseRangeStart: testLeaseRangeStart,
 				LeaseRangeEnd:   testLeaseRangeEnd,
@@ -287,7 +287,7 @@ func TestBuildBootdDeploymentEnv(t *testing.T) {
 // entry.
 func TestBuildBootdDeploymentEnvFullSet(t *testing.T) {
 	subnet := testSubnet("site-hq", func(s *keziov1alpha2.Subnet) {
-		s.Spec.DHCP = keziov1alpha2.SubnetDHCP{
+		s.Spec.DHCP = &keziov1alpha2.SubnetDHCP{
 			Mode:            keziov1alpha2.SubnetDHCPModeLease,
 			LeaseRangeStart: testLeaseRangeStart,
 			LeaseRangeEnd:   testLeaseRangeEnd,
@@ -324,7 +324,7 @@ func TestBuildBootdDeploymentEnvFullSet(t *testing.T) {
 // qualified with the Subnet's namespace.
 func TestBuildBootdDeploymentNADAnnotation(t *testing.T) {
 	subnet := testSubnet("site-hq", func(s *keziov1alpha2.Subnet) {
-		s.Spec.BootdNetworkRef = keziov1alpha2.NameRef{Name: "boot-nad"}
+		s.Spec.BootdNetworkRef = &keziov1alpha2.NameRef{Name: "boot-nad"}
 	})
 	cfg := BootdDeploymentConfig{Image: "bootd:test", BootArtifactsImage: "boot-artifacts:test"}
 

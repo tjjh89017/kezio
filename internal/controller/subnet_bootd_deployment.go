@@ -111,7 +111,7 @@ func bootdDeploymentName(subnetName string) string {
 // name is qualified with subnet's own namespace rather than relying on a
 // resolution default.
 func bootdPodAnnotations(subnet *keziov1alpha2.Subnet) map[string]string {
-	ref := subnet.Spec.BootdNetworkRef
+	ref := *subnet.Spec.BootdNetworkRef
 	ns := resolveNamespace(ref, subnet.Namespace)
 	return map[string]string{multusNetworksAnnotation: ns + "/" + ref.Name}
 }

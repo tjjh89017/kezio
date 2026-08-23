@@ -59,12 +59,16 @@ spec:
             description: |-
               SubnetSpec defines the desired state of Subnet.
 
-              A Subnet denotes one broadcast domain on the boot/provisioning plane:
-              bootd binds to it directly (BootdNetworkRef), and BootdServerIP is the
-              address firmware caches mid-boot as its PXE next-server/TFTP target on
-              that segment. The data plane - the routed, cross-subnet network
-              BitTorrent seeding needs - is a distinct concern expressed through
-              SeederNetworkRef.
+              A Subnet denotes one broadcast domain. Its boot half (BootdServerIP,
+              BootdNetworkRef, DHCP) is optional as a group: either all three are set,
+              giving this Subnet a bootd Deployment - bootd binds to it directly
+              (BootdNetworkRef), and BootdServerIP is the address firmware caches
+              mid-boot as its PXE next-server/TFTP target on that segment - or none of
+              them are, and this Subnet carries no machines at all. The data plane -
+              the routed, cross-subnet network BitTorrent seeding needs - is a
+              distinct concern expressed through SeederNetworkRef, and is what a
+              boot-half-less Subnet must carry instead: a Subnet declaring neither
+              half hosts nothing and is rejected at admission.
 
               BootdServerIP is explicit and pinned, never allocated by an IPAM plugin:
               it must stay stable for the pod's whole lifetime, unlike a seeder pod's
@@ -76,7 +80,7 @@ spec:
                   BootdNetworkRef names the NetworkAttachmentDefinition the bootd
                   Deployment for this Subnet attaches through. Its namespace must
                   carry pod-security.kubernetes.io/enforce=privileged, since bootd
-                  needs NET_ADMIN.
+                  needs NET_ADMIN. Part of the boot half; see BootdServerIP.
                 properties:
                   name:
                     description: |-
@@ -98,7 +102,10 @@ spec:
                   BootdServerIP is bootd's own IPv4 address on this Subnet - the
                   address firmware reads back as the PXE boot server and (absent an
                   override) the TFTP next-server. Explicit and pinned, never
-                  IPAM-allocated.
+                  IPAM-allocated. Part of the boot half: set together with
+                  BootdNetworkRef and DHCP, or left unset with both of them - a
+                  Subnet with none of the three hosts no machines and gets no bootd
+                  Deployment.
                 pattern: ^(\d{1,3}\.){3}\d{1,3}$
                 type: string
               cidr:
@@ -106,7 +113,9 @@ spec:
                 pattern: ^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$
                 type: string
               dhcp:
-                description: DHCP configures bootd's DHCP behavior on this Subnet.
+                description: |-
+                  DHCP configures bootd's DHCP behavior on this Subnet. Part of the
+                  boot half; see BootdServerIP.
                 properties:
                   leaseRangeEnd:
                     pattern: ^(\d{1,3}\.){3}\d{1,3}$
@@ -149,7 +158,8 @@ spec:
                   attach through when this Subnet is a Site's designated seeder
                   Subnet. Optional: absent means this Subnet does not host seeders.
                   It may name the same NAD as BootdNetworkRef, but BootdServerIP must
-                  never fall inside that NAD's IPAM range.
+                  never fall inside that NAD's IPAM range. A Subnet with no boot half
+                  must set this field - it is the only thing such a Subnet can host.
                 properties:
                   name:
                     description: |-
@@ -190,12 +200,17 @@ spec:
                 - name
                 type: object
             required:
-            - bootdNetworkRef
-            - bootdServerIP
             - cidr
-            - dhcp
             - siteRef
             type: object
+            x-kubernetes-validations:
+            - message: bootdServerIP, bootdNetworkRef and dhcp must be set together
+                or all left unset
+              rule: has(self.bootdServerIP) == has(self.bootdNetworkRef) && has(self.bootdNetworkRef)
+                == has(self.dhcp)
+            - message: a Subnet must declare a boot half (bootdServerIP/bootdNetworkRef/dhcp)
+                or seederNetworkRef; one with neither hosts nothing
+              rule: has(self.bootdServerIP) || has(self.seederNetworkRef)
           status:
             description: SubnetStatus defines the observed state of Subnet.
             properties:

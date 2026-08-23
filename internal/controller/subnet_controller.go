@@ -133,6 +133,16 @@ func (r *SubnetReconciler) onChange(ctx context.Context, subnet *keziov1alpha2.S
 		return ctrl.Result{}, err
 	}
 
+	// A Subnet with no boot half carries no bootd Deployment at all: none
+	// of the bootd-specific checks below apply, and hasBootPlane is the
+	// only branch updateSubnetConditions needs to compute Ready for it.
+	if !subnet.Spec.HasBootPlane() {
+		if err := r.updateSubnetConditions(ctx, subnet, checks, false, false, false, "", ""); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
 	bootdServerIPResult := subnetvalidate.CheckBootdServerIPInCIDR(subnet.Spec.CIDR, subnet.Spec.BootdServerIP)
 	bootdServerIPViolation := bootdServerIPResult.Verdict == nadvalidate.Violation
 	checks = append(checks, subnetCheck{result: bootdServerIPResult, blocks: true})
@@ -154,7 +164,7 @@ func (r *SubnetReconciler) onChange(ctx context.Context, subnet *keziov1alpha2.S
 			Reason:  "BootdNetworkCollision",
 			// Named as resolved, not as declared, since BootdNetworkRef.Namespace
 			// can cross namespaces (findBootdNetworkCollision).
-			Message: fmt.Sprintf("Subnet %s/%s also targets bootdNetworkRef %s/%s - two Subnets on the same broadcast domain would each run their own bootd, both answering every DHCPDISCOVER with no way for firmware to prefer one", collidingSubnet.Namespace, collidingSubnet.Name, resolveNamespace(subnet.Spec.BootdNetworkRef, subnet.Namespace), subnet.Spec.BootdNetworkRef.Name),
+			Message: fmt.Sprintf("Subnet %s/%s also targets bootdNetworkRef %s/%s - two Subnets on the same broadcast domain would each run their own bootd, both answering every DHCPDISCOVER with no way for firmware to prefer one", collidingSubnet.Namespace, collidingSubnet.Name, resolveNamespace(*subnet.Spec.BootdNetworkRef, subnet.Namespace), subnet.Spec.BootdNetworkRef.Name),
 		}})
 	}
 
@@ -210,7 +220,7 @@ func (r *SubnetReconciler) onChange(ctx context.Context, subnet *keziov1alpha2.S
 		depReason, depMessage = "BootdDeploymentImageUnconfigured", "no bootd Deployment image is configured on the manager (BOOTD_DEPLOYMENT_IMAGE); bootd is not reconciled for this Subnet"
 	}
 
-	if err := r.updateSubnetConditions(ctx, subnet, checks, depConfigured, depAvailable, depReason, depMessage); err != nil {
+	if err := r.updateSubnetConditions(ctx, subnet, checks, true, depConfigured, depAvailable, depReason, depMessage); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
@@ -323,7 +333,7 @@ func (r *SubnetReconciler) findBootdNetworkCollision(ctx context.Context, subnet
 		return nil, fmt.Errorf("list subnets: %w", err)
 	}
 
-	ns := resolveNamespace(subnet.Spec.BootdNetworkRef, subnet.Namespace)
+	ns := resolveNamespace(*subnet.Spec.BootdNetworkRef, subnet.Namespace)
 	name := subnet.Spec.BootdNetworkRef.Name
 
 	var other *keziov1alpha2.Subnet
@@ -332,7 +342,11 @@ func (r *SubnetReconciler) findBootdNetworkCollision(ctx context.Context, subnet
 		if candidate.UID == subnet.UID {
 			continue
 		}
-		candidateNS := resolveNamespace(candidate.Spec.BootdNetworkRef, candidate.Namespace)
+		if candidate.Spec.BootdNetworkRef == nil {
+			// No boot half, no bootdNetworkRef to collide on.
+			continue
+		}
+		candidateNS := resolveNamespace(*candidate.Spec.BootdNetworkRef, candidate.Namespace)
 		if candidateNS != ns || candidate.Spec.BootdNetworkRef.Name != name {
 			continue
 		}
@@ -362,14 +376,16 @@ func (r *SubnetReconciler) findBootdNetworkCollision(ctx context.Context, subnet
 func (r *SubnetReconciler) runNADChecks(ctx context.Context, subnet *keziov1alpha2.Subnet) ([]subnetCheck, error) {
 	var checks []subnetCheck
 
-	bootdConfig, err := r.fetchNADConfig(ctx, subnet.Spec.BootdNetworkRef, subnet.Namespace)
-	if err != nil {
-		if !isIndeterminateNADErr(err) {
-			return nil, err
+	if subnet.Spec.HasBootPlane() {
+		bootdConfig, err := r.fetchNADConfig(ctx, *subnet.Spec.BootdNetworkRef, subnet.Namespace)
+		if err != nil {
+			if !isIndeterminateNADErr(err) {
+				return nil, err
+			}
+			checks = append(checks, subnetCheck{result: indeterminateFromFetchErr("Bootd", "bootd NAD", err)})
+		} else {
+			checks = append(checks, subnetCheck{result: nadvalidate.CheckBootdAddress(bootdConfig, subnet.Spec.BootdServerIP)})
 		}
-		checks = append(checks, subnetCheck{result: indeterminateFromFetchErr("Bootd", "bootd NAD", err)})
-	} else {
-		checks = append(checks, subnetCheck{result: nadvalidate.CheckBootdAddress(bootdConfig, subnet.Spec.BootdServerIP)})
 	}
 
 	if subnet.Spec.SeederNetworkRef == nil {
@@ -385,7 +401,12 @@ func (r *SubnetReconciler) runNADChecks(ctx context.Context, subnet *keziov1alph
 		checks = append(checks, subnetCheck{result: fetchErr})
 		return checks, nil
 	}
-	checks = append(checks, subnetCheck{result: nadvalidate.CheckSeederOverlap(seederConfig, subnet.Spec.BootdServerIP)})
+	// CheckSeederOverlap has nothing to compare against without a
+	// bootdServerIP; a Subnet with no boot half skips it rather than
+	// getting a spurious BootdServerIPInvalid Indeterminate.
+	if subnet.Spec.HasBootPlane() {
+		checks = append(checks, subnetCheck{result: nadvalidate.CheckSeederOverlap(seederConfig, subnet.Spec.BootdServerIP)})
+	}
 
 	concurrentImages, err := r.concurrentSeederDeployments(ctx, subnet)
 	if err != nil {
@@ -481,8 +502,11 @@ func (r *SubnetReconciler) concurrentSeederDeployments(ctx context.Context, subn
 // Valid is False on any check's Violation (an unfixed misconfiguration,
 // blocking or not), Unknown on an Indeterminate with no Violation
 // present, and True otherwise. Ready mirrors the same Violation/
-// Indeterminate precedence, but additionally goes False when no bootd
-// Deployment is configured or it has not become Available.
+// Indeterminate precedence. When hasBootPlane is true, Ready additionally
+// goes False when no bootd Deployment is configured or it has not become
+// Available; a Subnet with no boot half hosts no bootd Deployment to wait
+// on, so Ready reflects validation alone once hasBootPlane is false -
+// depConfigured/depAvailable/depReason/depMessage are then unused.
 //
 // Within the Violation tier, a blocking check (subnetCheck.blocks) always
 // outranks a non-blocking one when choosing which Reason/Message to
@@ -491,7 +515,7 @@ func (r *SubnetReconciler) concurrentSeederDeployments(ctx context.Context, subn
 // reported: each independently keeps Ready False, so any pick is a
 // truthful explanation, and fixing them one at a time still converges on
 // Ready=True.
-func (r *SubnetReconciler) updateSubnetConditions(ctx context.Context, subnet *keziov1alpha2.Subnet, checks []subnetCheck, depConfigured, depAvailable bool, depReason, depMessage string) error {
+func (r *SubnetReconciler) updateSubnetConditions(ctx context.Context, subnet *keziov1alpha2.Subnet, checks []subnetCheck, hasBootPlane, depConfigured, depAvailable bool, depReason, depMessage string) error {
 	var violation, indeterminate *subnetCheck
 	for i := range checks {
 		c := &checks[i]
@@ -522,11 +546,15 @@ func (r *SubnetReconciler) updateSubnetConditions(ctx context.Context, subnet *k
 		ObservedGeneration: subnet.Generation,
 	})
 
-	readyStatus, readyReason, readyMessage := metav1.ConditionTrue, "BootdReady", "bootd Deployment is available and validation found no issues"
+	readyReason, readyMessage := "BootdReady", "bootd Deployment is available and validation found no issues"
+	if !hasBootPlane {
+		readyReason, readyMessage = "SubnetReady", "this Subnet carries no boot half; validation found no issues"
+	}
+	readyStatus := metav1.ConditionTrue
 	switch {
 	case violation != nil:
 		readyStatus, readyReason, readyMessage = metav1.ConditionFalse, violation.result.Reason, violation.result.Message
-	case !depConfigured || !depAvailable:
+	case hasBootPlane && (!depConfigured || !depAvailable):
 		readyStatus, readyReason, readyMessage = metav1.ConditionFalse, depReason, depMessage
 	case indeterminate != nil:
 		readyStatus, readyReason, readyMessage = metav1.ConditionUnknown, indeterminate.result.Reason, indeterminate.result.Message

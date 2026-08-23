@@ -50,15 +50,15 @@ var _ = Describe("Subnet CRD schema", func() {
 				SiteRef:         keziov1alpha2.NameRef{Name: "site-a"},
 				CIDR:            "192.0.2.0/24",
 				BootdServerIP:   "192.0.2.2",
-				BootdNetworkRef: keziov1alpha2.NameRef{Name: "bootd-net"},
-				DHCP: keziov1alpha2.SubnetDHCP{
+				BootdNetworkRef: &keziov1alpha2.NameRef{Name: "bootd-net"},
+				DHCP: &keziov1alpha2.SubnetDHCP{
 					Mode: keziov1alpha2.SubnetDHCPModeProxy,
 				},
 			},
 		}
 	}
 
-	It("admits a minimal valid Subnet", func() {
+	It("admits a minimal valid Subnet with a full boot half", func() {
 		s := newSubnet()
 		Expect(k8sClient.Create(ctx, s)).To(Succeed())
 	})
@@ -109,21 +109,21 @@ var _ = Describe("Subnet CRD schema", func() {
 		Expect(k8sClient.Create(ctx, s)).To(HaveOccurred())
 	})
 
-	It("rejects a missing bootdServerIP", func() {
+	It("rejects bootdServerIP left unset while bootdNetworkRef and dhcp are set (half-declared boot half)", func() {
 		s := newSubnet()
 		s.Spec.BootdServerIP = ""
 		Expect(k8sClient.Create(ctx, s)).To(HaveOccurred())
 	})
 
-	It("rejects a missing bootdNetworkRef", func() {
+	It("rejects bootdNetworkRef left unset while bootdServerIP and dhcp are set (half-declared boot half)", func() {
 		s := newSubnet()
-		s.Spec.BootdNetworkRef = keziov1alpha2.NameRef{}
+		s.Spec.BootdNetworkRef = nil
 		Expect(k8sClient.Create(ctx, s)).To(HaveOccurred())
 	})
 
-	It("rejects a missing dhcp block", func() {
+	It("rejects dhcp left unset while bootdServerIP and bootdNetworkRef are set (half-declared boot half)", func() {
 		s := newSubnet()
-		s.Spec.DHCP = keziov1alpha2.SubnetDHCP{}
+		s.Spec.DHCP = nil
 		Expect(k8sClient.Create(ctx, s)).To(HaveOccurred())
 	})
 
@@ -147,5 +147,22 @@ var _ = Describe("Subnet CRD schema", func() {
 		s.Spec.DHCP.LeaseRangeStart = subnetSchemaTestLeaseStart
 		s.Spec.DHCP.LeaseRangeEnd = subnetSchemaTestLeaseEnd
 		Expect(k8sClient.Create(ctx, s)).To(Succeed())
+	})
+
+	It("admits a Subnet with no boot half at all, given a seederNetworkRef", func() {
+		s := newSubnet()
+		s.Spec.BootdServerIP = ""
+		s.Spec.BootdNetworkRef = nil
+		s.Spec.DHCP = nil
+		s.Spec.SeederNetworkRef = &keziov1alpha2.NameRef{Name: "seeder-nad"}
+		Expect(k8sClient.Create(ctx, s)).To(Succeed())
+	})
+
+	It("rejects a Subnet with neither a boot half nor a seederNetworkRef", func() {
+		s := newSubnet()
+		s.Spec.BootdServerIP = ""
+		s.Spec.BootdNetworkRef = nil
+		s.Spec.DHCP = nil
+		Expect(k8sClient.Create(ctx, s)).To(HaveOccurred())
 	})
 })

@@ -242,7 +242,7 @@ var _ = Describe("Subnet bootd Deployment reconciliation", func() {
 			s.Spec.BootdServerIP = "192.0.3.2"
 			// Same bootdNetworkRef as first - the collision this check
 			// exists to catch.
-			s.Spec.BootdNetworkRef = keziov1alpha2.NameRef{Name: "boot-nad"}
+			s.Spec.BootdNetworkRef = &keziov1alpha2.NameRef{Name: "boot-nad"}
 		})
 		Expect(k8sClient.Create(ctx, second)).To(Succeed())
 
@@ -349,5 +349,38 @@ var _ = Describe("Subnet bootd Deployment reconciliation", func() {
 		validCond := findCondition(updated.Status.Conditions, keziov1alpha2.SubnetConditionValid)
 		Expect(validCond).NotTo(BeNil())
 		Expect(validCond.Status).To(Equal(metav1.ConditionTrue), "an Advisory verdict must never fail Valid")
+	})
+
+	It("creates no bootd Deployment and reaches Ready for a Subnet with no boot half", func() {
+		ns := createSubnetTestNamespace(ctx)
+		createTestNAD(ctx, ns, "seeder-nad", bootdStaticNADConfig("192.0.2.50"))
+
+		subnet := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
+			s.Spec.BootdServerIP = ""
+			s.Spec.BootdNetworkRef = nil
+			s.Spec.DHCP = nil
+			s.Spec.SeederNetworkRef = &keziov1alpha2.NameRef{Name: "seeder-nad"}
+		})
+		Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
+
+		r := newSubnetTestReconciler()
+		key := types.NamespacedName{Name: subnet.Name, Namespace: ns}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		var deployments appsv1.DeploymentList
+		Expect(k8sClient.List(ctx, &deployments, client.InNamespace(ns), client.MatchingLabels{bootdAppComponentLabel: bootdComponentValue})).To(Succeed())
+		Expect(deployments.Items).To(BeEmpty(), "a Subnet with no boot half must never get a bootd Deployment")
+
+		var updated keziov1alpha2.Subnet
+		Expect(k8sClient.Get(ctx, key, &updated)).To(Succeed())
+		validCond := findCondition(updated.Status.Conditions, keziov1alpha2.SubnetConditionValid)
+		Expect(validCond).NotTo(BeNil())
+		Expect(validCond.Status).To(Equal(metav1.ConditionTrue))
+
+		readyCond := findCondition(updated.Status.Conditions, keziov1alpha2.SubnetConditionReady)
+		Expect(readyCond).NotTo(BeNil())
+		Expect(readyCond.Status).To(Equal(metav1.ConditionTrue), "a data-plane-only Subnet has no Deployment to wait on, so it is Ready once Valid")
+		Expect(readyCond.Reason).To(Equal("SubnetReady"))
 	})
 })

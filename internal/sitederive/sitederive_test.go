@@ -58,10 +58,10 @@ func newSubnet(namespace string, seederNetworkRef *keziov1alpha2.NameRef) *kezio
 			SiteRef:          keziov1alpha2.NameRef{Name: "hq"},
 			CIDR:             "192.0.2.0/24",
 			BootdServerIP:    "192.0.2.2",
-			BootdNetworkRef:  keziov1alpha2.NameRef{Name: "bootd-nad"},
+			BootdNetworkRef:  &keziov1alpha2.NameRef{Name: "bootd-nad"},
 			SeederNetworkRef: seederNetworkRef,
 			NodeSelector:     map[string]string{"kubernetes.io/hostname": "node-1"},
-			DHCP:             keziov1alpha2.SubnetDHCP{Mode: keziov1alpha2.SubnetDHCPModeProxy},
+			DHCP:             &keziov1alpha2.SubnetDHCP{Mode: keziov1alpha2.SubnetDHCPModeProxy},
 		},
 	}
 }
