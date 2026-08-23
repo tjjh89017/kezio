@@ -59,11 +59,15 @@
   value:
     name: boot-artifacts
     emptyDir: {}
+# Appends to env rather than setting it: a JSON Patch "add" on the array
+# itself replaces every entry the base already declares, which silently
+# dropped the manager's POD_NAMESPACE - and with it the default
+# PostHook every Machine's postHookRefs names.
 - op: add
-  path: /spec/template/spec/containers/0/env
+  path: /spec/template/spec/containers/0/env/-
   value:
-    - name: BOOT_ARTIFACTS_DIR
-      value: /boot-artifacts
+    name: BOOT_ARTIFACTS_DIR
+    value: /boot-artifacts
 - op: add
   path: /spec/template/spec/containers/0/volumeMounts/-
   value:

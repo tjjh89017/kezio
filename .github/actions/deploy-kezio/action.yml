@@ -66,3 +66,23 @@ runs:
           kubectl -n "${NAMESPACE}" set env deployment/"${deployment}" "${env_pairs[@]}"
           kubectl rollout status deployment/"${deployment}" -n "${NAMESPACE}" --timeout="${TIMEOUT}"
         fi
+
+    - name: Confirm the manager shipped its default PostHook
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+      # A rolled-out manager is not the same as a usable one: the default
+      # PostHook is created at startup from POD_NAMESPACE, and every
+      # Machine whose postHookRefs name it plans nothing at all until it
+      # exists. Losing it fails no rollout and logs nothing above INFO -
+      # the Machine just sits delayed forever - so assert it here, where
+      # the message can still name the cause.
+      run: |
+        set -euo pipefail
+        if ! kubectl wait --for=create posthook/kezio-default-finalize \
+          -n "${NAMESPACE}" --timeout=60s; then
+          echo "::error::PostHook kezio-default-finalize was never created - check that the controller-manager container still has POD_NAMESPACE (a kustomize patch that sets, rather than appends to, its env array drops it)" >&2
+          kubectl -n "${NAMESPACE}" get deployment -l control-plane=controller-manager \
+            -o jsonpath='{.items[0].spec.template.spec.containers[0].env}' >&2 || true
+          exit 1
+        fi

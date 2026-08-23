@@ -676,7 +676,7 @@ func (r *MachineReconciler) reconcileIdle(ctx context.Context, machine *keziov1a
 		return ctrl.Result{}, err
 	}
 	if !ready {
-		return r.markDelayedForImage(ctx, machine, reason, message)
+		return r.markDelayedNotReady(ctx, machine, reason, message)
 	}
 
 	hooksHash, ok, result, err := r.currentHooksHash(ctx, machine)
@@ -774,7 +774,7 @@ func (r *MachineReconciler) currentHooksHash(ctx context.Context, machine *kezio
 	notReady, failed := classifyPlanBuildError(buildErr)
 	switch {
 	case notReady:
-		result, err = r.markDelayed(ctx, machine, delayedRequeueInterval)
+		result, err = r.markDelayedNotReady(ctx, machine, "PlanNotReady", buildErr.Error())
 	case failed:
 		result, err = r.recordFailure(ctx, machine, deployer.Result{
 			Outcome:      deployer.Failed,
@@ -787,13 +787,17 @@ func (r *MachineReconciler) currentHooksHash(ctx context.Context, machine *kezio
 	return "", false, result, err
 }
 
-// markDelayedForImage records why the Machine is waiting on its imageRef's
-// Image as MachineConditionProgressing=False, then delegates to
-// markDelayed for the actual delayed-axis write. The condition uses
-// machine.Generation, not the Image's, per the same
-// observedGeneration-per-writer convention every other condition in this
-// codebase follows.
-func (r *MachineReconciler) markDelayedForImage(ctx context.Context, machine *keziov1alpha2.Machine, reason, message string) (ctrl.Result, error) {
+// markDelayedNotReady records why the Machine is waiting - an imageRef
+// whose Image is not usable yet, or a plan that cannot build yet - as
+// MachineConditionProgressing=False, then delegates to markDelayed for the
+// actual delayed-axis write. Without this the reason is lost entirely:
+// markDelayed leaves errorMessage alone, so a delayed Machine otherwise
+// shows only whatever unrelated error was recorded last, if any.
+//
+// The condition uses machine.Generation, not the referenced object's, per
+// the same observedGeneration-per-writer convention every other condition
+// in this codebase follows.
+func (r *MachineReconciler) markDelayedNotReady(ctx context.Context, machine *keziov1alpha2.Machine, reason, message string) (ctrl.Result, error) {
 	meta.SetStatusCondition(&machine.Status.Conditions, metav1.Condition{
 		Type:               keziov1alpha2.MachineConditionProgressing,
 		Status:             metav1.ConditionFalse,
@@ -822,7 +826,7 @@ func (r *MachineReconciler) startProvisioningRun(ctx context.Context, machine *k
 		notReady, failed := classifyPlanBuildError(err)
 		switch {
 		case notReady:
-			return r.markDelayed(ctx, machine, delayedRequeueInterval)
+			return r.markDelayedNotReady(ctx, machine, "PlanNotReady", err.Error())
 		case failed:
 			return r.recordFailure(ctx, machine, deployer.Result{
 				Outcome:      deployer.Failed,
