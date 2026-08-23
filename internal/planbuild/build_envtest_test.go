@@ -41,6 +41,7 @@ import (
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 	"github.com/tjjh89017/kezio/internal/posthookdefaults"
+	"github.com/tjjh89017/kezio/internal/seeder"
 	"github.com/tjjh89017/kezio/internal/seederdeploy"
 	"github.com/tjjh89017/kezio/internal/store"
 )
@@ -182,6 +183,9 @@ func TestBuilder_Build_Envtest(t *testing.T) {
 	})
 	t.Run("the OS image and a dataImages entry resolving to the same disk is a disk-selection error", func(t *testing.T) {
 		testOSAndDataImageSameDiskIsDiskSelectionError(t, fx)
+	})
+	t.Run("the plan's ezio tuning resolves through built-in default, operator cluster default, and per-Machine override", func(t *testing.T) {
+		testEzioTuningChain(t, fx)
 	})
 }
 
@@ -684,6 +688,77 @@ func testOSAndDataImageSameDiskIsDiskSelectionError(t *testing.T, fx *fixtures) 
 	var diskErr *DiskSelectionError
 	if !errors.As(err, &diskErr) {
 		t.Fatalf("Build err = %v, want a *DiskSelectionError", err)
+	}
+}
+
+// testEzioTuningChain proves Builder.Build resolves plan.MaxUploads and
+// plan.MaxConnections through the full three-layer precedence: the
+// built-in default when nothing else is set, the Builder's own
+// cluster-wide LeecherEzio default overriding it, and a per-Machine
+// spec.ezio override winning over that - and that a partial override
+// (only MaxUploads set) leaves MaxConnections falling back to the layer
+// above rather than the merge dragging it along. Uses a dataImages-only
+// Machine so no hook resolution is in play.
+func testEzioTuningChain(t *testing.T, fx *fixtures) {
+	ns := fx.mustCreateNamespace()
+	image := fx.mustCreateImage(ns, blankDataLayout())
+
+	newMachine := func(name string, ezio *keziov1alpha2.MachineEzioTuning) *keziov1alpha2.Machine {
+		fx.mustCreateMachineHardwareNamed(ns, name, oneDisk("/dev/vda"))
+		return &keziov1alpha2.Machine{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec: keziov1alpha2.MachineSpec{
+				DataImages: []keziov1alpha2.MachineDataImage{{ImageRef: keziov1alpha2.NameRef{Name: image.Name}}},
+				Ezio:       ezio,
+			},
+		}
+	}
+	build := func(b *Builder, m *keziov1alpha2.Machine) *agentapi.DeployPlan {
+		t.Helper()
+		run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run-" + m.Name, UID: types.UID("uid-" + m.Name)}}
+		plan, _, err := b.Build(context.Background(), m, run)
+		if err != nil {
+			t.Fatalf("Build(%s): %v", m.Name, err)
+		}
+		return plan
+	}
+
+	uploadsOverride := int32(5)
+
+	// Built-in default alone: no LeecherEzio configured, no per-Machine
+	// override.
+	plain := build(&Builder{Client: fx.client}, newMachine("ezio-plain", nil))
+	if plain.MaxUploads != seeder.DefaultMaxUploads || plain.MaxConnections != seeder.DefaultMaxConnections {
+		t.Fatalf("plain plan tuning = %d/%d, want built-in defaults %d/%d",
+			plain.MaxUploads, plain.MaxConnections, seeder.DefaultMaxUploads, seeder.DefaultMaxConnections)
+	}
+
+	// Operator cluster-wide default overrides the built-in default.
+	clusterCfg := LeecherEzioConfig{MaxUploads: 7, MaxConnections: 70}
+	clustered := build(&Builder{Client: fx.client, LeecherEzio: clusterCfg}, newMachine("ezio-cluster", nil))
+	if clustered.MaxUploads != 7 || clustered.MaxConnections != 70 {
+		t.Fatalf("clustered plan tuning = %d/%d, want 7/70", clustered.MaxUploads, clustered.MaxConnections)
+	}
+
+	// Per-Machine override wins over the cluster default, fully set.
+	full := build(&Builder{Client: fx.client, LeecherEzio: clusterCfg}, newMachine("ezio-full-override", &keziov1alpha2.MachineEzioTuning{
+		MaxUploads:     &uploadsOverride,
+		MaxConnections: int32ptr(90),
+	}))
+	if full.MaxUploads != 5 || full.MaxConnections != 90 {
+		t.Fatalf("fully overridden plan tuning = %d/%d, want 5/90", full.MaxUploads, full.MaxConnections)
+	}
+
+	// Partial per-Machine override: only MaxUploads is set, so
+	// MaxConnections must still fall back to the cluster default.
+	partial := build(&Builder{Client: fx.client, LeecherEzio: clusterCfg}, newMachine("ezio-partial-override", &keziov1alpha2.MachineEzioTuning{
+		MaxUploads: &uploadsOverride,
+	}))
+	if partial.MaxUploads != 5 {
+		t.Fatalf("partially overridden plan MaxUploads = %d, want 5", partial.MaxUploads)
+	}
+	if partial.MaxConnections != 70 {
+		t.Fatalf("partially overridden plan MaxConnections = %d, want the cluster default 70 (must still fall back)", partial.MaxConnections)
 	}
 }
 

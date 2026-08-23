@@ -441,7 +441,7 @@ func deployerFromEnv(c client.Client) (deployer.Deployer, error) {
 // produces.
 func planBuilder(c client.Client) *planbuild.Builder {
 	ns, _ := posthookdefaults.Namespace()
-	return &planbuild.Builder{Client: c, ManagerNamespace: ns}
+	return &planbuild.Builder{Client: c, ManagerNamespace: ns, LeecherEzio: leecherEzioConfigFromEnv()}
 }
 
 // imageIngestConfigFromEnv builds the Image reconciler's
@@ -498,6 +498,12 @@ func partitionContentPublishConfigFromEnv() controller.PartitionContentPublishCo
 // a config that is not ready(): seed-demand at any Site is simply not
 // acted on until it is set, and PartitionContentReconciler's own status
 // derivation is what surfaces that on the affected content.
+// PARTITIONCONTENT_SEEDER_MAX_UPLOADS and
+// PARTITIONCONTENT_SEEDER_MAX_CONNECTIONS are the cluster-wide default
+// every seeder pod registers its content with; left unset each falls back
+// to its own seeder.Default* constant. These are deliberately separate
+// settings from LEECHER_MAX_UPLOADS/LEECHER_MAX_CONNECTIONS below (see
+// ImageSeederConfig's doc comment for why).
 func imageSeederConfigFromEnv() controller.ImageSeederConfig {
 	cfg := controller.ImageSeederConfig{
 		Image: os.Getenv("PARTITIONCONTENT_SEEDER_IMAGE"),
@@ -508,6 +514,50 @@ func imageSeederConfigFromEnv() controller.ImageSeederConfig {
 			setupLog.Error(err, "invalid PARTITIONCONTENT_SEEDER_GRACE_PERIOD, using default", "value", v)
 		} else {
 			cfg.GracePeriod = d
+		}
+	}
+	if v := os.Getenv("PARTITIONCONTENT_SEEDER_MAX_UPLOADS"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 32)
+		if err != nil || n <= 0 {
+			setupLog.Error(err, "invalid PARTITIONCONTENT_SEEDER_MAX_UPLOADS, using default", "value", v)
+		} else {
+			cfg.MaxUploads = int32(n)
+		}
+	}
+	if v := os.Getenv("PARTITIONCONTENT_SEEDER_MAX_CONNECTIONS"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 32)
+		if err != nil || n <= 0 {
+			setupLog.Error(err, "invalid PARTITIONCONTENT_SEEDER_MAX_CONNECTIONS, using default", "value", v)
+		} else {
+			cfg.MaxConnections = int32(n)
+		}
+	}
+	return cfg
+}
+
+// leecherEzioConfigFromEnv builds the plan builder's cluster-wide leecher
+// ezio tuning default from LEECHER_MAX_UPLOADS/LEECHER_MAX_CONNECTIONS,
+// mirroring imageSeederConfigFromEnv's parsing. This is the layer-2
+// default a DeployRun's leecher plan carries before any per-Machine
+// override (Machine.spec.ezio) is applied - kept separate from the
+// seeder's own cluster-wide default because a seeder serves every leecher
+// at its Site at once, while a leecher serves only itself.
+func leecherEzioConfigFromEnv() planbuild.LeecherEzioConfig {
+	var cfg planbuild.LeecherEzioConfig
+	if v := os.Getenv("LEECHER_MAX_UPLOADS"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 32)
+		if err != nil || n <= 0 {
+			setupLog.Error(err, "invalid LEECHER_MAX_UPLOADS, using default", "value", v)
+		} else {
+			cfg.MaxUploads = int32(n)
+		}
+	}
+	if v := os.Getenv("LEECHER_MAX_CONNECTIONS"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 32)
+		if err != nil || n <= 0 {
+			setupLog.Error(err, "invalid LEECHER_MAX_CONNECTIONS, using default", "value", v)
+		} else {
+			cfg.MaxConnections = int32(n)
 		}
 	}
 	return cfg

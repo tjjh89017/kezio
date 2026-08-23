@@ -19,6 +19,8 @@ package controller
 import (
 	"testing"
 	"time"
+
+	"github.com/tjjh89017/kezio/internal/seeder"
 )
 
 func TestImageSeederConfigReady(t *testing.T) {
@@ -48,5 +50,22 @@ func TestImageSeederConfigNow(t *testing.T) {
 	}
 	if got := (ImageSeederConfig{}).now(); got.IsZero() {
 		t.Errorf("now() = zero value, want time.Now()")
+	}
+}
+
+func TestImageSeederConfigMaxUploadsAndMaxConnections(t *testing.T) {
+	if got := (ImageSeederConfig{}).maxUploads(); got != seeder.DefaultMaxUploads {
+		t.Errorf("maxUploads() = %d, want built-in default %d", got, seeder.DefaultMaxUploads)
+	}
+	if got := (ImageSeederConfig{}).maxConnections(); got != seeder.DefaultMaxConnections {
+		t.Errorf("maxConnections() = %d, want built-in default %d", got, seeder.DefaultMaxConnections)
+	}
+
+	cfg := ImageSeederConfig{MaxUploads: 12, MaxConnections: 40}
+	if got := cfg.maxUploads(); got != 12 {
+		t.Errorf("maxUploads() = %d, want cluster-wide default 12", got)
+	}
+	if got := cfg.maxConnections(); got != 40 {
+		t.Errorf("maxConnections() = %d, want cluster-wide default 40", got)
 	}
 }

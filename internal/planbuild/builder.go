@@ -41,6 +41,7 @@ import (
 	"github.com/tjjh89017/kezio/internal/agentapi"
 	"github.com/tjjh89017/kezio/internal/diskmatch"
 	"github.com/tjjh89017/kezio/internal/posthookdefaults"
+	"github.com/tjjh89017/kezio/internal/seeder"
 )
 
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=images;partitioncontents;posthooks;machinehardwares,verbs=get;list;watch
@@ -57,6 +58,22 @@ type Builder struct {
 	// (posthookdefaults.DefaultFinalizeHookName) lives, read when
 	// machine.spec.postHookRefs is empty.
 	ManagerNamespace string
+	// LeecherEzio is the cluster-wide operator default for the ezio
+	// AddTorrent tuning every DeployPlan this Builder produces carries,
+	// before machine.spec.ezio's per-Machine override is applied. Kept
+	// separate from ImageSeederConfig's own MaxUploads/MaxConnections
+	// (internal/controller): a seeder serves every leecher at its Site at
+	// once, a leecher serves only itself, so the two defaults must never
+	// collapse into one setting.
+	LeecherEzio LeecherEzioConfig
+}
+
+// LeecherEzioConfig is the cluster-wide operator default layer for a
+// leecher's ezio AddTorrent tuning (see Builder.LeecherEzio). A zero
+// field falls back to its own seeder.Default* constant.
+type LeecherEzioConfig struct {
+	MaxUploads     int32
+	MaxConnections int32
 }
 
 // resolvedImage carries one image's build inputs and outputs together
@@ -116,12 +133,14 @@ func (b *Builder) Build(ctx context.Context, machine *keziov1alpha2.Machine, run
 	}
 
 	plan := &agentapi.DeployPlan{
-		SchemaVersion: agentapi.AgentSchemaVersion,
-		RunName:       run.Name,
-		RunUID:        string(run.UID),
-		MachineName:   machine.Name,
-		Hooks:         hooks,
-		AfterDeploy:   effectiveAfterDeploy(machine),
+		SchemaVersion:  agentapi.AgentSchemaVersion,
+		RunName:        run.Name,
+		RunUID:         string(run.UID),
+		MachineName:    machine.Name,
+		Hooks:          hooks,
+		AfterDeploy:    effectiveAfterDeploy(machine),
+		MaxUploads:     seeder.ResolveMaxUploads(b.LeecherEzio.MaxUploads, machineEzioMaxUploads(machine)),
+		MaxConnections: seeder.ResolveMaxConnections(b.LeecherEzio.MaxConnections, machineEzioMaxConnections(machine)),
 	}
 	if osImage != nil {
 		plan.TargetDisk = osImage.targetDisk
@@ -303,6 +322,27 @@ func imageParamsOf(osImage *resolvedImage) *apiextensionsv1.JSON {
 		return nil
 	}
 	return osImage.image.Spec.Params
+}
+
+// machineEzioMaxUploads returns machine's per-Machine max_uploads
+// override (machine.spec.ezio.maxUploads), or nil when either
+// machine.spec.ezio or that field itself is unset - the "only the fields
+// actually set override the layer above" contract seeder.ResolveMaxUploads
+// implements.
+func machineEzioMaxUploads(machine *keziov1alpha2.Machine) *int32 {
+	if machine.Spec.Ezio == nil {
+		return nil
+	}
+	return machine.Spec.Ezio.MaxUploads
+}
+
+// machineEzioMaxConnections is machineEzioMaxUploads's max_connections
+// counterpart.
+func machineEzioMaxConnections(machine *keziov1alpha2.Machine) *int32 {
+	if machine.Spec.Ezio == nil {
+		return nil
+	}
+	return machine.Spec.Ezio.MaxConnections
 }
 
 // effectiveAfterDeploy returns machine's AfterDeploy, treating an unset

@@ -30,6 +30,19 @@ import (
 // .torrent file by info hash - see cmd/seeder/main.go.
 const TorrentHTTPPort int32 = 8080
 
+// EzioGRPCPort is the fixed port the ezio container's gRPC control plane
+// listens on. Both containers share one pod network namespace, so
+// seeder-register always reaches it over loopback at this port.
+const EzioGRPCPort int32 = 50051
+
+// EzioBTPort is the seeder's fixed BitTorrent listen port, passed to ezio
+// as --port. Every seeder pod has its own network namespace, so nothing
+// here needs it to avoid colliding with another pod - it is pinned so the
+// data network can be firewalled to exactly the ports that must be open;
+// an ephemeral port would work per pod but make that firewall rule
+// impossible to write.
+const EzioBTPort int32 = 16881
+
 // TorrentHealthzPath is the path on TorrentHTTPPort that only proves the
 // HTTP server itself is bound and answering, independent of whether any
 // content has been registered yet. cmd/seeder's torrentMux serves it,

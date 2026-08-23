@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	"github.com/tjjh89017/kezio/internal/ingest"
 	"github.com/tjjh89017/kezio/internal/seederdeploy"
 )
 
@@ -63,6 +64,17 @@ func mustCreateSeedingSite(ctx context.Context, subnetName, siteName string) str
 	Expect(k8sClient.Create(ctx, site)).To(Succeed())
 
 	return "default/" + siteName
+}
+
+// mustSetSiteTrackerURL sets siteName's status.trackerURL directly - the
+// Site reconciler is not running in these tests, so this stands in for
+// it, the same way mustCreatePodForDeployment stands in for a scheduled
+// pod.
+func mustSetSiteTrackerURL(ctx context.Context, siteName, trackerURL string) {
+	var site keziov1alpha2.Site
+	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: siteName, Namespace: "default"}, &site)).To(Succeed())
+	site.Status.TrackerURL = trackerURL
+	Expect(k8sClient.Status().Update(ctx, &site)).To(Succeed())
 }
 
 // mustCreateMachineSubnet creates a boot-plane Subnet a Machine can name
@@ -261,7 +273,107 @@ var _ = Describe("Image Controller seeder placement", func() {
 		// selectors are themselves mutually exclusive at the source.
 		Expect(depA.Spec.Selector.MatchLabels).NotTo(Equal(depB.Spec.Selector.MatchLabels))
 	})
+
+	It("gives each container the environment its contract requires, pins the BitTorrent port, and carries the Site's tracker URL", func() {
+		siteIdentity := mustCreateSeedingSite(ctx, "seed-subnet-708", "site-708")
+		mustSetSiteTrackerURL(ctx, "site-708", "http://198.51.100.9:6969/announce")
+		mustCreateMachineSubnet(ctx, "machine-subnet-708", "site-708")
+
+		contentName := "pc-" + imageSeederTestHash(708)
+		createReadyContent(ctx, contentName)
+
+		img := newTestImageWithSlots("image-708", []keziov1alpha2.ImageSlot{
+			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		}, nil)
+		Expect(k8sClient.Create(ctx, img)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
+
+		machine := newTestMachineOnSubnet("machine-708", img.Name, "machine-subnet-708")
+		Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+
+		r := newSeederImageReconciler(ImageSeederConfig{Image: "example.test/kezio-seeder:test", MaxUploads: 11, MaxConnections: 33})
+		nn := types.NamespacedName{Name: img.Name, Namespace: "default"}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		depName := seederdeploy.Name(img.Name, siteIdentity)
+		var dep appsv1.Deployment
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: depName, Namespace: "default"}, &dep)).To(Succeed())
+
+		ezioContainer := mustFindContainer(&dep, "ezio")
+		Expect(mustEnvValue(ezioContainer.Env, "EZIO_GRPC_LISTEN")).To(Equal("0.0.0.0:50051"))
+		Expect(mustEnvValue(ezioContainer.Env, "EZIO_BT_PORT")).To(Equal("16881"))
+		Expect(ezioContainer.Ports).To(ContainElement(corev1.ContainerPort{
+			Name: "bt", ContainerPort: seederdeploy.EzioBTPort, Protocol: corev1.ProtocolTCP,
+		}), "the declared container port must match the pinned EZIO_BT_PORT")
+
+		registerContainer := mustFindContainer(&dep, "seeder-register")
+		Expect(mustEnvValue(registerContainer.Env, "CONTENT_ROOT")).To(Equal(ingest.ContentMountRoot))
+		Expect(mustEnvValue(registerContainer.Env, "EZIO_TARGET")).To(Equal("127.0.0.1:50051"))
+		Expect(mustEnvValue(registerContainer.Env, "EZIO_MAX_UPLOADS")).To(Equal("11"))
+		Expect(mustEnvValue(registerContainer.Env, "EZIO_MAX_CONNECTIONS")).To(Equal("33"))
+		Expect(mustEnvValue(registerContainer.Env, "TRACKER_URL")).To(Equal("http://198.51.100.9:6969/announce"))
+	})
+
+	It("carries two different Sites' distinct tracker URLs on their own seeder Deployments", func() {
+		siteIdentityA := mustCreateSeedingSite(ctx, "seed-subnet-709a", "site-709a")
+		siteIdentityB := mustCreateSeedingSite(ctx, "seed-subnet-709b", "site-709b")
+		mustSetSiteTrackerURL(ctx, "site-709a", "http://198.51.100.1:6969/announce")
+		mustSetSiteTrackerURL(ctx, "site-709b", "http://198.51.100.2:6969/announce")
+		mustCreateMachineSubnet(ctx, "machine-subnet-709a", "site-709a")
+		mustCreateMachineSubnet(ctx, "machine-subnet-709b", "site-709b")
+
+		contentName := "pc-" + imageSeederTestHash(709)
+		createReadyContent(ctx, contentName)
+
+		img := newTestImageWithSlots("image-709", []keziov1alpha2.ImageSlot{
+			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		}, nil)
+		Expect(k8sClient.Create(ctx, img)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
+
+		machineA := newTestMachineOnSubnet("machine-709a", img.Name, "machine-subnet-709a")
+		Expect(k8sClient.Create(ctx, machineA)).To(Succeed())
+		machineB := newTestMachineOnSubnet("machine-709b", img.Name, "machine-subnet-709b")
+		Expect(k8sClient.Create(ctx, machineB)).To(Succeed())
+
+		r := newSeederImageReconciler(ImageSeederConfig{Image: "example.test/kezio-seeder:test"})
+		nn := types.NamespacedName{Name: img.Name, Namespace: "default"}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		var depA, depB appsv1.Deployment
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: seederdeploy.Name(img.Name, siteIdentityA), Namespace: "default"}, &depA)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: seederdeploy.Name(img.Name, siteIdentityB), Namespace: "default"}, &depB)).To(Succeed())
+
+		trackerURLA := mustEnvValue(mustFindContainer(&depA, "seeder-register").Env, "TRACKER_URL")
+		trackerURLB := mustEnvValue(mustFindContainer(&depB, "seeder-register").Env, "TRACKER_URL")
+		Expect(trackerURLA).To(Equal("http://198.51.100.1:6969/announce"))
+		Expect(trackerURLB).To(Equal("http://198.51.100.2:6969/announce"))
+		Expect(trackerURLA).NotTo(Equal(trackerURLB))
+	})
 })
+
+// mustFindContainer returns the container named name from dep's pod
+// template, failing the test immediately if it is not found.
+func mustFindContainer(dep *appsv1.Deployment, name string) *corev1.Container {
+	for i := range dep.Spec.Template.Spec.Containers {
+		if dep.Spec.Template.Spec.Containers[i].Name == name {
+			return &dep.Spec.Template.Spec.Containers[i]
+		}
+	}
+	Fail(fmt.Sprintf("container %q not found in Deployment %s", name, dep.Name))
+	return nil
+}
+
+// mustEnvValue returns env's value for name, failing the test via Gomega
+// if it is absent - the Ginkgo-style counterpart to
+// subnet_bootd_deployment_test.go's plain-testing.T envMust.
+func mustEnvValue(env []corev1.EnvVar, name string) string {
+	got, ok := envValue(env, name)
+	Expect(ok).To(BeTrue(), fmt.Sprintf("env %s is not set", name))
+	return got
+}
 
 // mustCreatePodForDeployment creates a Pod carrying dep's pod template
 // labels plus podIP already set, standing in for a scheduled pod - the

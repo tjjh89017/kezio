@@ -207,7 +207,7 @@ func (e *Executor) Execute(ctx context.Context, plan *agentapi.DeployPlan) (err 
 	}
 
 	for _, dp := range plans {
-		if err := e.writeSlots(ctx, dp, handle); err != nil {
+		if err := e.writeSlots(ctx, dp, handle, plan); err != nil {
 			return err
 		}
 	}
@@ -360,17 +360,19 @@ func (e *Executor) writePartitionTable(ctx context.Context, dp diskPlan) error {
 // writeSlots makes/restores every slot in dp: mkswap for a Swap slot,
 // mkfs for a Mkfs slot, or AddTorrent (against handle.Client) for a
 // Torrent slot. handle is the zero EzioHandle when dp has no torrent
-// slots - writeSlots never dereferences handle.Client in that case.
-func (e *Executor) writeSlots(ctx context.Context, dp diskPlan, handle EzioHandle) error {
+// slots - writeSlots never dereferences handle.Client in that case. plan
+// carries the resolved AddTorrent tuning (plan.MaxUploads/MaxConnections)
+// every torrent slot uses.
+func (e *Executor) writeSlots(ctx context.Context, dp diskPlan, handle EzioHandle, plan *agentapi.DeployPlan) error {
 	for _, s := range dp.slots {
-		if err := e.writeSlot(ctx, dp, s, handle); err != nil {
+		if err := e.writeSlot(ctx, dp, s, handle, plan); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (e *Executor) writeSlot(ctx context.Context, dp diskPlan, s agentapi.DeploySlot, handle EzioHandle) error {
+func (e *Executor) writeSlot(ctx context.Context, dp diskPlan, s agentapi.DeploySlot, handle EzioHandle, plan *agentapi.DeployPlan) error {
 	switch {
 	case s.Swap != nil:
 		return e.runMkswap(ctx, dp, s)
@@ -385,7 +387,19 @@ func (e *Executor) writeSlot(ctx context.Context, dp diskPlan, s agentapi.Deploy
 			return fmt.Errorf("%s slot %d: fetching torrent from %s: %w", dp.label, s.Number, s.Torrent.URL, err)
 		}
 		e.log("adding torrent for %s (info hash %s)", s.Device, s.Torrent.InfoHash)
-		if err := handle.Client.AddTorrent(ctx, torrentBytes, s.Device, false, seeder.DefaultMaxUploads, seeder.DefaultMaxConnections); err != nil {
+		// plan.MaxUploads/MaxConnections are 0 only on a plan built before
+		// these fields existed (a manager predating this change); falling
+		// back here keeps such a plan working rather than passing ezio a
+		// literal 0.
+		maxUploads := plan.MaxUploads
+		if maxUploads <= 0 {
+			maxUploads = seeder.DefaultMaxUploads
+		}
+		maxConnections := plan.MaxConnections
+		if maxConnections <= 0 {
+			maxConnections = seeder.DefaultMaxConnections
+		}
+		if err := handle.Client.AddTorrent(ctx, torrentBytes, s.Device, false, maxUploads, maxConnections); err != nil {
 			return fmt.Errorf("%s slot %d: AddTorrent %s: %w", dp.label, s.Number, s.Device, err)
 		}
 		return nil

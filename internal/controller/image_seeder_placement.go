@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"maps"
 	"sort"
+	"strconv"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -67,6 +68,28 @@ func seederPodAnnotations(res sitederive.Resolution) map[string]string {
 	}
 	ns := resolveNamespace(*res.SeederNetworkRef, res.Subnet.Namespace)
 	return map[string]string{multusDefaultNetworkAnnotation: ns + "/" + res.SeederNetworkRef.Name}
+}
+
+// seederRegisterEnv returns the seeder-register container's environment:
+// the content root it scans (cmd/seeder/main.go's CONTENT_ROOT, matching
+// ingest.ContentMountRoot - the same mount path buildImageSeederDeployment
+// gives every content volume), the address it reaches the ezio container
+// at over the pod's shared loopback (EZIO_TARGET, matching the ezio
+// container's own EZIO_GRPC_LISTEN port above), the resolved AddTorrent
+// tuning cfg carries, and res's Site's tracker URL - carried through now
+// so a later step can build a .torrent from it, even though nothing reads
+// TRACKER_URL yet.
+func seederRegisterEnv(cfg ImageSeederConfig, res sitederive.Resolution) []corev1.EnvVar {
+	env := []corev1.EnvVar{
+		{Name: "CONTENT_ROOT", Value: ingest.ContentMountRoot},
+		{Name: "EZIO_TARGET", Value: fmt.Sprintf("127.0.0.1:%d", seederdeploy.EzioGRPCPort)},
+		{Name: "EZIO_MAX_UPLOADS", Value: strconv.Itoa(int(cfg.maxUploads()))},
+		{Name: "EZIO_MAX_CONNECTIONS", Value: strconv.Itoa(int(cfg.maxConnections()))},
+	}
+	if res.TrackerURL != "" {
+		env = append(env, corev1.EnvVar{Name: "TRACKER_URL", Value: res.TrackerURL})
+	}
+	return env
 }
 
 // imageSeededContents returns the info hash of every Ready
@@ -188,8 +211,23 @@ func (r *ImageReconciler) buildImageSeederDeployment(image *keziov1alpha2.Image,
 						{
 							Name:  "ezio",
 							Image: r.Seeder.Image,
+							Env: []corev1.EnvVar{
+								// Explicit rather than relying on
+								// entrypoint.sh's own matching default, so
+								// the contract with the seeder-register
+								// container's EZIO_TARGET below is stated
+								// once rather than implied by two defaults
+								// happening to agree.
+								{Name: "EZIO_GRPC_LISTEN", Value: fmt.Sprintf("0.0.0.0:%d", seederdeploy.EzioGRPCPort)},
+								// Pinned rather than left to ezio's own
+								// ephemeral choice - see
+								// seederdeploy.EzioBTPort's doc comment for
+								// why.
+								{Name: "EZIO_BT_PORT", Value: strconv.Itoa(int(seederdeploy.EzioBTPort))},
+							},
 							Ports: []corev1.ContainerPort{
-								{Name: "grpc", ContainerPort: 50051, Protocol: corev1.ProtocolTCP},
+								{Name: "grpc", ContainerPort: seederdeploy.EzioGRPCPort, Protocol: corev1.ProtocolTCP},
+								{Name: "bt", ContainerPort: seederdeploy.EzioBTPort, Protocol: corev1.ProtocolTCP},
 							},
 							SecurityContext: containerSecurityContext,
 							VolumeMounts:    mounts,
@@ -204,6 +242,7 @@ func (r *ImageReconciler) buildImageSeederDeployment(image *keziov1alpha2.Image,
 							Name:    "seeder-register",
 							Image:   r.Seeder.Image,
 							Command: []string{"/usr/local/bin/kezio-seeder-register"},
+							Env:     seederRegisterEnv(r.Seeder, res),
 							Ports: []corev1.ContainerPort{
 								{Name: "torrent", ContainerPort: seederdeploy.TorrentHTTPPort, Protocol: corev1.ProtocolTCP},
 							},

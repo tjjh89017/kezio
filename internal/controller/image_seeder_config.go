@@ -16,7 +16,11 @@ limitations under the License.
 
 package controller
 
-import "time"
+import (
+	"time"
+
+	"github.com/tjjh89017/kezio/internal/seeder"
+)
 
 // defaultSeederGracePeriod is how long a per-(Image, Site) seeder
 // Deployment is kept running after its Site's seed-demand drops to zero,
@@ -46,6 +50,17 @@ type ImageSeederConfig struct {
 	// Now returns the current time. Defaults to time.Now; tests override
 	// it to drive the grace-period countdown without sleeping real time.
 	Now func() time.Time
+	// MaxUploads is the cluster-wide operator default for the ezio
+	// AddTorrent max_uploads value every seeder pod registers its
+	// content with. Read from PARTITIONCONTENT_SEEDER_MAX_UPLOADS. This
+	// is deliberately a separate setting from the leecher plan's own
+	// default (see planbuild's LeecherEzioConfig): a seeder serves every
+	// leecher at its Site at once, a leecher serves only itself.
+	MaxUploads int32
+	// MaxConnections is the cluster-wide operator default for the ezio
+	// AddTorrent max_connections value every seeder pod registers its
+	// content with. Read from PARTITIONCONTENT_SEEDER_MAX_CONNECTIONS.
+	MaxConnections int32
 }
 
 // ready reports whether cfg carries enough configuration to create a
@@ -69,4 +84,19 @@ func (cfg ImageSeederConfig) now() time.Time {
 		return cfg.Now()
 	}
 	return time.Now()
+}
+
+// maxUploads resolves cfg's effective ezio max_uploads value: cfg's own
+// cluster-wide default when set, falling back to seeder.DefaultMaxUploads
+// otherwise. No per-Machine override applies here - that layer only
+// exists on the leecher plan side (Machine.spec.ezio has no bearing on a
+// Site's shared seeder).
+func (cfg ImageSeederConfig) maxUploads() int32 {
+	return seeder.ResolveMaxUploads(cfg.MaxUploads, nil)
+}
+
+// maxConnections resolves cfg's effective ezio max_connections value, the
+// same way maxUploads does.
+func (cfg ImageSeederConfig) maxConnections() int32 {
+	return seeder.ResolveMaxConnections(cfg.MaxConnections, nil)
 }

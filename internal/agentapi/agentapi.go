@@ -283,6 +283,15 @@ type DeployPlan struct {
 	// written and every hook has run: keziov1alpha2.AfterDeployReboot or
 	// AfterDeployPowerOff.
 	AfterDeploy string `json:"afterDeploy"`
+	// MaxUploads is the ezio AddTorrent max_uploads value every torrent
+	// slot in this plan uses, already resolved by the manager (built-in
+	// default, then the operator's cluster-wide leecher default, then
+	// machine.spec.ezio's override - see internal/seeder.ResolveMaxUploads).
+	// Zero on a plan built before this field existed; the agent falls back
+	// to seeder.DefaultMaxUploads in that case.
+	MaxUploads int32 `json:"maxUploads,omitempty"`
+	// MaxConnections is MaxUploads's max_connections counterpart.
+	MaxConnections int32 `json:"maxConnections,omitempty"`
 }
 
 // Validate checks p's structural invariants: it never reaches into the
