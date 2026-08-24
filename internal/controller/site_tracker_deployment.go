@@ -169,6 +169,12 @@ func buildTrackerDeployment(site *keziov1alpha2.Site, seedingSubnet *keziov1alph
 			// One replica: a second tracker pod would need its own pinned
 			// address, and Site carries only one.
 			Replicas: &replicas,
+			// Recreate, not the default RollingUpdate: that one surges a
+			// second pod before it deletes the outgoing one, and the pinned
+			// address both pods request cannot be held by two pods at once -
+			// the replacement pod's sandbox fails until the outgoing pod's
+			// CNI DEL frees the address.
+			Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
