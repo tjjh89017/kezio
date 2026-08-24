@@ -114,6 +114,7 @@ type SiteStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:shortName={ezs,site}
 // +kubebuilder:printcolumn:name="SeederSubnet",type=string,JSONPath=`.spec.seederSubnetRef.name`
 // +kubebuilder:printcolumn:name="TrackerURL",type=string,JSONPath=`.status.trackerURL`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`

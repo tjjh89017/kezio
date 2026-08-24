@@ -11,6 +11,9 @@ spec:
     kind: Site
     listKind: SiteList
     plural: sites
+    shortNames:
+    - ezs
+    - site
     singular: site
   scope: Namespaced
   versions:

@@ -87,28 +87,6 @@ spec:
                   webhook enforces.
                 pattern: ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$
                 type: string
-              claimRef:
-                description: |-
-                  ClaimRef names the MachineClaim this machine is bound to. It lives
-                  in spec, not status, so the exactly-one-binding arbiter survives a
-                  status loss. Written by the claim controller and cleared by an
-                  operator during reclaim; nothing else touches it.
-                properties:
-                  name:
-                    description: |-
-                      Post-mutation admission always re-serialises this struct, so a
-                      zero-value Name would otherwise satisfy "required"; MinLength closes
-                      that gap. MaxLength mirrors the Kubernetes object name limit and
-                      bounds the CEL cost of any pattern-matching XValidation rule a
-                      field of this type carries (see ImageSlot.ContentRef).
-                    maxLength: 253
-                    minLength: 1
-                    type: string
-                  namespace:
-                    type: string
-                required:
-                - name
-                type: object
               dataImages:
                 description: |-
                   DataImages is an ordered list of additional, non-OS images deployed

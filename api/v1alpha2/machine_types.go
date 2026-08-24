@@ -210,12 +210,6 @@ type MachineSpec struct {
 	// +kubebuilder:default=Reboot
 	// +optional
 	AfterDeploy string `json:"afterDeploy,omitempty"`
-	// ClaimRef names the MachineClaim this machine is bound to. It lives
-	// in spec, not status, so the exactly-one-binding arbiter survives a
-	// status loss. Written by the claim controller and cleared by an
-	// operator during reclaim; nothing else touches it.
-	// +optional
-	ClaimRef *NameRef `json:"claimRef,omitempty"`
 }
 
 // MachineFinalizer blocks Machine deletion until the controller's cleanup
