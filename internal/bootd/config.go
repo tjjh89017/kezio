@@ -96,6 +96,25 @@ type Config struct {
 	// (still enrolled-MAC only).
 	LeaseMode bool
 
+	// Gateway is what machines are told about leaving this segment, as
+	// DHCP option 3. Three distinct states, and the pointer is what keeps
+	// the third one nameable:
+	//
+	//   - An address renders "dhcp-option=3,<address>" - the segment's
+	//     router.
+	//   - A pointer to the empty string renders a bare "dhcp-option=3",
+	//     dnsmasq's suppression form, so the machine receives no default
+	//     route: this segment has no exit.
+	//   - nil renders nothing, which lets dnsmasq fall back to
+	//     advertising bootd's own address. bootd forwards nothing, so
+	//     that fallback is a black hole. The Subnet API rejects it and
+	//     cmd/bootd refuses to start on it; the renderer stays a pure
+	//     function of its Config rather than duplicating that gate.
+	//
+	// Ignored unless LeaseMode is set: proxy mode leaves every routing
+	// option to the segment's own DHCP server.
+	Gateway *string
+
 	// LeaseRangeStart and LeaseRangeEnd optionally bound the dhcp-range
 	// LeaseMode renders. Leaving both empty (the default) auto-derives
 	// the range from ProvisioningNet: the subnet's first and last host

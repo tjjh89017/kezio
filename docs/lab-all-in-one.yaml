@@ -4336,6 +4336,13 @@ spec:
 # not relax: only an enrolled Machine's bootMACAddress gets a lease. Use
 # mode: proxy instead when the segment already has a DHCP server - that is
 # the shape kezio's end-to-end CI lane exercises.
+#
+# dhcp.gateway is required in lease mode, since bootd owns the lease and
+# must say what goes in the router option. "" means this segment has no
+# exit, which is right here: bootd, the seeder and the machines all share
+# it. A segment whose seeder lives elsewhere names its router instead.
+# Omitting the field is rejected, not defaulted - dnsmasq would otherwise
+# advertise bootd as the router, and bootd forwards nothing.
 apiVersion: kezio.kojuro.date/v1alpha1
 kind: Subnet
 metadata:
@@ -4352,6 +4359,7 @@ spec:
     name: kezio-seeder-network
   dhcp:
     mode: lease
+    gateway: ""
     leaseRangeStart: 192.0.2.10
     leaseRangeEnd: 192.0.2.100
 ---

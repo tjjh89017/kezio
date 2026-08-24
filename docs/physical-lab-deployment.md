@@ -59,6 +59,23 @@ defaults to the `Subnet`'s CIDR-derived first and last host addresses;
 set `spec.dhcp.leaseRangeStart` and `spec.dhcp.leaseRangeEnd` together to
 override it (the CRD schema rejects setting only one).
 
+`spec.dhcp.gateway` is **required** in this mode, because bootd now owns
+the lease and must say what it puts in the router option (DHCP option
+3). Give it the segment's router address when a machine has to reach
+anything off its own segment - a seeder or tracker on another `Subnet`
+above all. Give it the empty string (`gateway: ""`) when the segment has
+no exit, which is the case this scenario describes: an isolated segment
+where everything a machine talks to shares it.
+
+Leaving the field out is rejected rather than defaulted, and the reason
+is worth stating. With nothing set, dnsmasq fills the router option with
+its own address - bootd's. bootd is a pod on one segment and forwards
+nothing, so every machine would quietly receive a default route into a
+black hole. On a single-segment site nothing ever consults that route,
+so it stays invisible; add a second segment and it becomes a timeout far
+from its cause. The field is required so the choice is made once, in the
+open.
+
 The MAC gate does **not** relax in this mode: only enrolled MACs
 receive a lease. A device that is not an enrolled Machine gets nothing
 at all, even in an otherwise DHCP-server-less segment - it is out of
@@ -294,6 +311,17 @@ the objects above:
   `docs/network-model.md`'s no-NAT rule) can actually reach a leecher on
   either boot segment. `eth0`, where it still exists on a machine, stays
   untouched.
+- **A `spec.dhcp.gateway` on each boot `Subnet`**, naming that segment's
+  router - `198.51.100.1` and `198.51.101.1` in the objects above. This
+  is the machine's half of the same hop, and it is the half nothing else
+  supplies: a machine gets its address from bootd's DHCP, not from a
+  NAD's `ipam`, so the lease is the only thing that can tell it how to
+  leave its segment. Without it dnsmasq advertises bootd as the router,
+  and bootd forwards nothing, so a machine reaches its own segment and
+  no further - it boots, registers, and then times out fetching its
+  torrent from the seeder one segment away. A single-segment `Site` says
+  `gateway: ""` instead; a `Site` with more than one segment needs a
+  real address here.
 - One `BOOT_SERVER_URL` / `BOOT_AGENT_SERVER_URL` pair on the
   controller-manager, pointed at whichever boot `Subnet`'s bootd fronts
   the reverse proxy (section 2.4) - a routed segment's machines reach it

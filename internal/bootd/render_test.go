@@ -165,6 +165,102 @@ func TestRenderDnsmasqConf_LeaseModeExplicitRange(t *testing.T) {
 	}
 }
 
+// TestRenderDnsmasqConf_GatewayStates walks Config.Gateway's three
+// states in lease mode and pins that each changes the rendered config by
+// exactly its own routing line and nothing else - so a later refactor
+// cannot quietly alter what a machine's lease says about leaving its
+// segment.
+func TestRenderDnsmasqConf_GatewayStates(t *testing.T) {
+	base := testConfig()
+	base.LeaseMode = true
+	// The nil rendering is the baseline the other states are diffed
+	// against: no routing line at all, which is what every lease rendered
+	// before this option existed.
+	baseline, err := RenderDnsmasqConf(base, "/run/bootd")
+	if err != nil {
+		t.Fatalf("RenderDnsmasqConf: %v", err)
+	}
+	if strings.Contains(baseline, "dhcp-option=3") {
+		t.Fatalf("a nil Gateway must render no routing option:\n%s", baseline)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		gateway  string
+		wantLine string
+	}{
+		{
+			name:     "an address is the segment's router",
+			gateway:  "192.0.2.1",
+			wantLine: "dhcp-option=3,192.0.2.1\n",
+		},
+		{
+			// dnsmasq's suppression form: declaring the option with no
+			// value stops dnsmasq substituting its own address for it.
+			name:     "the empty string declares a segment with no exit",
+			gateway:  "",
+			wantLine: "dhcp-option=3\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base
+			cfg.Gateway = &tc.gateway
+			conf, err := RenderDnsmasqConf(cfg, "/run/bootd")
+			if err != nil {
+				t.Fatalf("RenderDnsmasqConf: %v", err)
+			}
+			if !strings.Contains(conf, tc.wantLine) {
+				t.Errorf("rendered config missing %q:\n%s", tc.wantLine, conf)
+			}
+			if got := strings.Replace(conf, tc.wantLine, "", 1); got != baseline {
+				t.Errorf("a Gateway changed the config beyond its own routing line:\nbaseline:\n%s\ngot:\n%s", baseline, conf)
+			}
+		})
+	}
+}
+
+// TestRenderDnsmasqConf_GatewayRejectsNonIPv4: the CRD pattern rejects
+// these already, so reaching the renderer means a Config was assembled
+// some other way - and a bad address must not become a silently
+// malformed dnsmasq line.
+func TestRenderDnsmasqConf_GatewayRejectsNonIPv4(t *testing.T) {
+	cfg := testConfig()
+	cfg.LeaseMode = true
+	for _, bad := range []string{"not-an-ip", "2001:db8::1", "192.0.2"} {
+		cfg.Gateway = &bad
+		if _, err := RenderDnsmasqConf(cfg, "/run/bootd"); err == nil {
+			t.Errorf("Gateway %q rendered without error, want a rejection", bad)
+		}
+	}
+}
+
+// TestRenderDnsmasqConf_ProxyModeRendersNoRouterOption: in proxy mode
+// bootd is not the DHCP server - the segment's own one is, and it owns
+// every routing option in the lease. So no Gateway state renders
+// anything here, and each must leave the config byte-identical to the
+// one that names no Gateway at all.
+func TestRenderDnsmasqConf_ProxyModeRendersNoRouterOption(t *testing.T) {
+	baseline, err := RenderDnsmasqConf(testConfig(), "/run/bootd")
+	if err != nil {
+		t.Fatalf("RenderDnsmasqConf: %v", err)
+	}
+
+	for _, gateway := range []string{"192.0.2.1", ""} {
+		cfg := testConfig()
+		cfg.Gateway = &gateway
+		conf, err := RenderDnsmasqConf(cfg, "/run/bootd")
+		if err != nil {
+			t.Fatalf("RenderDnsmasqConf: %v", err)
+		}
+		if strings.Contains(conf, "dhcp-option=3") {
+			t.Errorf("proxy-mode config renders a routing option, overriding the segment's own DHCP server:\n%s", conf)
+		}
+		if conf != baseline {
+			t.Errorf("a proxy-mode Gateway %q changed the rendered config:\nbaseline:\n%s\ngot:\n%s", gateway, baseline, conf)
+		}
+	}
+}
+
 // TestRenderDnsmasqConf_LeaseModeMACGateUnchanged: the same
 // dhcp-hostsfile/dhcp-ignore pair gates lease mode exactly as proxy mode,
 // and AnswerAll drops it the same way in both.

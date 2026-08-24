@@ -608,13 +608,24 @@ spec:
     name: kezio-seeder-network
   dhcp:
     mode: lease
+    gateway: ""
     leaseRangeStart: 192.0.2.10
     leaseRangeEnd: 192.0.2.100
 EOF
 ```
 
 `mode: lease` makes bootd's own dnsmasq the segment's DHCP authority.
-That fits this lab, because `vmbr1` has no DHCP server of its own. The
+That fits this lab, because `vmbr1` has no DHCP server of its own.
+
+`gateway: ""` says this segment has no exit, so machines receive no
+default route. That is right here: bootd, the seeder and the machines
+all sit on `vmbr1`, so nothing a machine talks to is off-segment. A lab
+whose seeder lived on another segment would name that segment's router
+here instead. The field is required in `mode: lease` rather than
+defaulted - left out, dnsmasq would advertise bootd itself as the
+router, and bootd forwards nothing.
+
+The
 MAC gate does not relax: only an enrolled Machine's
 `spec.bootMACAddress` gets a lease, and every other device on the
 segment gets nothing.

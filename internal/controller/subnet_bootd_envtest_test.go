@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -230,6 +231,48 @@ var _ = Describe("Subnet bootd Deployment reconciliation", func() {
 		Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(readyCond.Reason).To(Equal("BootdServerIPOutsideCIDR"))
 	})
+
+	// A lease-mode Subnet's gateway must survive the API server round
+	// trip into the bootd container's env, empty string included: the
+	// empty value is what tells bootd this segment has no exit, and
+	// corev1.EnvVar.Value is omitempty, so only a real round trip proves
+	// the variable is still set rather than dropped. The schema rules
+	// themselves live with the rest of the CRD schema specs, in
+	// internal/webhook/v1alpha2.
+	DescribeTable("carries a lease-mode Subnet's gateway into the bootd container",
+		func(gateway string) {
+			ns := createSubnetTestNamespace(ctx)
+			createTestNAD(ctx, ns, "boot-nad", bootdStaticNADConfig("192.0.2.2"))
+
+			subnet := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
+				s.Spec.DHCP = &keziov1alpha2.SubnetDHCP{
+					Mode:    keziov1alpha2.SubnetDHCPModeLease,
+					Gateway: ptr.To(gateway),
+				}
+			})
+			Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
+
+			r := newSubnetTestReconciler()
+			key := types.NamespacedName{Name: subnet.Name, Namespace: ns}
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+
+			var dep appsv1.Deployment
+			depKey := types.NamespacedName{Name: bootdDeploymentName(subnet.Name), Namespace: ns}
+			Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
+
+			var bootdC *corev1.Container
+			for i := range dep.Spec.Template.Spec.Containers {
+				if dep.Spec.Template.Spec.Containers[i].Name == "bootd" {
+					bootdC = &dep.Spec.Template.Spec.Containers[i]
+				}
+			}
+			Expect(bootdC).NotTo(BeNil())
+			Expect(bootdC.Env).To(ContainElement(corev1.EnvVar{Name: "BOOTD_GATEWAY", Value: gateway}))
+		},
+		Entry("an address", "192.0.2.1"),
+		Entry("the empty string, a segment with no exit", ""),
+	)
 
 	It("refuses both Subnets' bootd Deployments when two Subnets share the same bootdNetworkRef", func() {
 		ns := createSubnetTestNamespace(ctx)

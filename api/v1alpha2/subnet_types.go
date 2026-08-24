@@ -34,6 +34,10 @@ const (
 // SubnetDHCP configures the DHCP behavior of the bootd instance this
 // Subnet's BootdNetworkRef backs.
 // +kubebuilder:validation:XValidation:rule="has(self.leaseRangeStart) == has(self.leaseRangeEnd)",message="leaseRangeStart and leaseRangeEnd must be set together"
+// size(), not a comparison against an empty string literal: the quoting
+// that would need survives neither this marker's own quotes nor an
+// editor with smart quotes turned on.
+// +kubebuilder:validation:XValidation:rule="self.mode == 'lease' ? has(self.gateway) : (!has(self.gateway) || size(self.gateway) == 0)",message="gateway is required in lease mode (use an empty string for a segment with no exit); in proxy mode it must be absent or empty, because bootd is not the DHCP server there and cannot hand out a router option the segment's own DHCP server owns"
 type SubnetDHCP struct {
 	// Mode selects proxyDHCP (defer to an existing DHCP server on the
 	// segment) or lease (bootd's dnsmasq becomes the segment's own DHCP
@@ -50,6 +54,30 @@ type SubnetDHCP struct {
 	// +kubebuilder:validation:Pattern=`^(\d{1,3}\.){3}\d{1,3}$`
 	// +optional
 	LeaseRangeEnd string `json:"leaseRangeEnd,omitempty"`
+	// Gateway is the router option (DHCP option 3) bootd hands out when
+	// bootd is itself the segment's DHCP server. An IPv4 address is the
+	// segment's router - set it whenever the Site's seeder or tracker
+	// sits on another Subnet, since it is the only thing that tells a
+	// machine how to get there. The empty string hands out no router
+	// option, for a segment with no exit.
+	//
+	// Required in SubnetDHCPModeLease, where bootd owns the lease. Being
+	// required is the point: left optional, dnsmasq fills the gap by
+	// advertising bootd's own address, and bootd is a pod that forwards
+	// nothing, so machines would silently receive a default route into a
+	// black hole - a defect that only surfaces once a Site has a second
+	// segment, far from its cause. An empty string is a decision; an
+	// absent field was an oversight, and lease mode no longer admits one.
+	//
+	// In SubnetDHCPModeProxy bootd is not the DHCP server, so it hands
+	// out no router option either way: absent and empty are both accepted
+	// and mean the same thing here, while a non-empty address is rejected
+	// rather than ignored. Ignoring it would let an operator write an
+	// address, believe machines receive it, and discover otherwise much
+	// later.
+	// +kubebuilder:validation:Pattern=`^$|^(\d{1,3}\.){3}\d{1,3}$`
+	// +optional
+	Gateway *string `json:"gateway,omitempty"`
 }
 
 // SubnetSpec defines the desired state of Subnet.

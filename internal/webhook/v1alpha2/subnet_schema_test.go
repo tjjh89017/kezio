@@ -23,6 +23,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 )
@@ -58,6 +59,16 @@ var _ = Describe("Subnet CRD schema", func() {
 		}
 	}
 
+	// Lease mode requires a gateway, so every lease-mode fixture names
+	// one. The empty string - this segment has no exit - keeps each spec
+	// about the rule it is named for rather than about routing.
+	newLeaseSubnet := func() *keziov1alpha2.Subnet {
+		s := newSubnet()
+		s.Spec.DHCP.Mode = keziov1alpha2.SubnetDHCPModeLease
+		s.Spec.DHCP.Gateway = ptr.To("")
+		return s
+	}
+
 	It("admits a minimal valid Subnet with a full boot half", func() {
 		s := newSubnet()
 		Expect(k8sClient.Create(ctx, s)).To(Succeed())
@@ -82,16 +93,14 @@ var _ = Describe("Subnet CRD schema", func() {
 	})
 
 	It("rejects a leaseRangeStart that is not an IPv4 address", func() {
-		s := newSubnet()
-		s.Spec.DHCP.Mode = keziov1alpha2.SubnetDHCPModeLease
+		s := newLeaseSubnet()
 		s.Spec.DHCP.LeaseRangeStart = subnetSchemaTestNotAnIP
 		s.Spec.DHCP.LeaseRangeEnd = subnetSchemaTestLeaseEnd
 		Expect(k8sClient.Create(ctx, s)).To(HaveOccurred())
 	})
 
 	It("rejects a leaseRangeEnd that is not an IPv4 address", func() {
-		s := newSubnet()
-		s.Spec.DHCP.Mode = keziov1alpha2.SubnetDHCPModeLease
+		s := newLeaseSubnet()
 		s.Spec.DHCP.LeaseRangeStart = subnetSchemaTestLeaseStart
 		s.Spec.DHCP.LeaseRangeEnd = subnetSchemaTestNotAnIP
 		Expect(k8sClient.Create(ctx, s)).To(HaveOccurred())
@@ -128,26 +137,62 @@ var _ = Describe("Subnet CRD schema", func() {
 	})
 
 	It("rejects a leaseRangeStart set with no leaseRangeEnd", func() {
-		s := newSubnet()
-		s.Spec.DHCP.Mode = keziov1alpha2.SubnetDHCPModeLease
+		s := newLeaseSubnet()
 		s.Spec.DHCP.LeaseRangeStart = subnetSchemaTestLeaseStart
 		Expect(k8sClient.Create(ctx, s)).To(HaveOccurred())
 	})
 
 	It("rejects a leaseRangeEnd set with no leaseRangeStart", func() {
-		s := newSubnet()
-		s.Spec.DHCP.Mode = keziov1alpha2.SubnetDHCPModeLease
+		s := newLeaseSubnet()
 		s.Spec.DHCP.LeaseRangeEnd = subnetSchemaTestLeaseEnd
 		Expect(k8sClient.Create(ctx, s)).To(HaveOccurred())
 	})
 
 	It("admits both leaseRangeStart and leaseRangeEnd set together", func() {
-		s := newSubnet()
-		s.Spec.DHCP.Mode = keziov1alpha2.SubnetDHCPModeLease
+		s := newLeaseSubnet()
 		s.Spec.DHCP.LeaseRangeStart = subnetSchemaTestLeaseStart
 		s.Spec.DHCP.LeaseRangeEnd = subnetSchemaTestLeaseEnd
 		Expect(k8sClient.Create(ctx, s)).To(Succeed())
 	})
+
+	// dhcp.gateway is the router option bootd hands out when bootd is
+	// itself the DHCP server. Lease mode must say something; proxy mode,
+	// where bootd is not the DHCP server, must not claim what it cannot
+	// deliver.
+	DescribeTable("admits dhcp.gateway according to dhcp.mode",
+		func(mode string, gateway *string, admitted bool, because string) {
+			s := newSubnet()
+			s.Spec.DHCP = &keziov1alpha2.SubnetDHCP{Mode: mode, Gateway: gateway}
+			err := k8sClient.Create(ctx, s)
+			if admitted {
+				Expect(err).NotTo(HaveOccurred(), because)
+				return
+			}
+			Expect(err).To(HaveOccurred(), because)
+			Expect(err.Error()).To(ContainSubstring("gateway"))
+		},
+		Entry("lease mode naming the segment's router",
+			keziov1alpha2.SubnetDHCPModeLease, ptr.To("192.0.2.1"), true,
+			"an address is what a machine needs to leave the segment"),
+		Entry("lease mode with an empty gateway, a segment with no exit",
+			keziov1alpha2.SubnetDHCPModeLease, ptr.To(""), true,
+			"the empty string is a decision, not an omission"),
+		Entry("lease mode with no gateway at all",
+			keziov1alpha2.SubnetDHCPModeLease, nil, false,
+			"an absent gateway would leave dnsmasq advertising bootd, which forwards nothing"),
+		Entry("lease mode with a gateway that is not an IPv4 address",
+			keziov1alpha2.SubnetDHCPModeLease, ptr.To(subnetSchemaTestNotAnIP), false,
+			"the pattern admits an IPv4 address or the empty string, nothing else"),
+		Entry("proxy mode with no gateway",
+			keziov1alpha2.SubnetDHCPModeProxy, nil, true,
+			"proxy mode asserts nothing about routing, so there is nothing to be wrong about"),
+		Entry("proxy mode with an empty gateway",
+			keziov1alpha2.SubnetDHCPModeProxy, ptr.To(""), true,
+			`a templated Subnet carrying gateway: "" must not need conditional templating to switch modes`),
+		Entry("proxy mode naming an address",
+			keziov1alpha2.SubnetDHCPModeProxy, ptr.To("192.0.2.1"), false,
+			"bootd is not the DHCP server here; ignoring the address would mislead the operator"),
+	)
 
 	It("admits a Subnet with no boot half at all, given a seederNetworkRef", func() {
 		s := newSubnet()

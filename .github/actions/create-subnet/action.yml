@@ -66,6 +66,24 @@ inputs:
       empty) - no dhcp block is emitted in that case.
     required: false
     default: "proxydhcp"
+  gateway:
+    description: >-
+      Subnet.spec.dhcp.gateway - the router option bootd hands out when
+      bootd is itself the segment's DHCP server. Required when
+      dhcp-scenario is "dhcp", and must be left alone otherwise: in
+      proxydhcp the segment's own DHCP server owns the routing options.
+
+      Two spellings, because an Actions input cannot distinguish an
+      omitted value from a deliberately empty one, and both meanings are
+      needed: an IPv4 address is the segment's router, while the literal
+      "none" declares a segment with no exit and emits `gateway: ""` -
+      correct for an isolated provisioning network where everything a
+      machine talks to shares its segment. The default "unset" means the
+      caller said nothing, which lease mode rejects: leaving it out would
+      let dnsmasq advertise bootd as the router, and bootd forwards
+      nothing.
+    required: false
+    default: "unset"
   lease-range-start:
     description: Subnet.spec.dhcp.leaseRangeStart. Required when dhcp-scenario is "dhcp".
     required: false
@@ -105,6 +123,7 @@ runs:
         SEEDER_NETWORK_NAME: ${{ inputs.seeder-network-name }}
         SITE_REF: ${{ inputs.site-ref }}
         DHCP_SCENARIO: ${{ inputs.dhcp-scenario }}
+        GATEWAY: ${{ inputs.gateway }}
         LEASE_RANGE_START: ${{ inputs.lease-range-start }}
         LEASE_RANGE_END: ${{ inputs.lease-range-end }}
       run: |
@@ -137,6 +156,20 @@ runs:
             echo "::error::dhcp-scenario 'dhcp' requires both lease-range-start and lease-range-end" >&2
             exit 1
           fi
+          # "none" is the segment-has-no-exit spelling; it becomes an
+          # empty gateway below. Anything else is passed through and the
+          # CRD's own pattern judges it.
+          gateway_value=""
+          if [ "${dhcp_mode}" = lease ]; then
+            if [ "${GATEWAY}" = unset ]; then
+              echo "::error::dhcp-scenario 'dhcp' requires gateway: the segment's router address, or 'none' for a segment with no exit" >&2
+              exit 1
+            fi
+            [ "${GATEWAY}" != none ] && gateway_value="${GATEWAY}"
+          elif [ "${GATEWAY}" != unset ]; then
+            echo "::error::gateway is only meaningful with dhcp-scenario 'dhcp'; in proxydhcp the segment's own DHCP server owns the routing options" >&2
+            exit 1
+          fi
         fi
 
         subnet_yaml="$(cat <<EOF
@@ -160,6 +193,7 @@ runs:
         if [ "${has_boot_plane}" -eq 1 ]; then
           subnet_yaml+=$'\n  dhcp:\n    mode: '"${dhcp_mode}"
           if [ "${dhcp_mode}" = lease ]; then
+            subnet_yaml+=$'\n    gateway: "'"${gateway_value}"$'"'
             subnet_yaml+=$'\n    leaseRangeStart: '"${LEASE_RANGE_START}"
             subnet_yaml+=$'\n    leaseRangeEnd: '"${LEASE_RANGE_END}"
           fi

@@ -229,6 +229,16 @@ type bootdConfig struct {
 //     default) auto-derives the range from BOOTD_PROVISIONING_CIDR's
 //     first and last host addresses. Setting only one is an error.
 //     Ignored unless BOOTD_LEASE_MODE is set.
+//   - BOOTD_GATEWAY: what machines are told about leaving this segment,
+//     as DHCP option 3. Required when BOOTD_LEASE_MODE is true, where an
+//     IPv4 address is the segment's router - set it whenever a machine
+//     must reach a seeder or tracker on another segment - and the empty
+//     string declares the segment has no exit, handing out no default
+//     route. Leaving it unset in lease mode is a startup error, not a
+//     default: dnsmasq would otherwise advertise this bootd's own
+//     address, and bootd forwards nothing, so machines would receive a
+//     default route into a black hole. Ignored in proxy mode, where the
+//     segment's own DHCP server owns the lease.
 //   - BOOTD_NEXT_SERVER_IP: overrides the PXE boot-server address
 //     handed to clients, when the TFTP service is reachable at a
 //     different address than BOOTD_SERVER_IP. Optional, defaults to
@@ -300,6 +310,31 @@ type bootdConfig struct {
 // supported (dnsmasq's DHCP ports are the well-known 67/4011 only, and
 // bootd runs no DHCP relay); setting any of them is a startup error
 // rather than a silent no-op.
+// gatewayFromEnv resolves BOOTD_GATEWAY into bootd.Config.Gateway's
+// three states. LookupEnv rather than Getenv: an unset variable and one
+// set to the empty string mean different things here - "nothing was
+// said" versus "this segment has no exit" - and only LookupEnv tells
+// them apart. Unset in lease mode is an error rather than a default,
+// because dnsmasq's own fallback is to advertise bootd as the router,
+// and bootd forwards nothing.
+func gatewayFromEnv(leaseMode bool) (*string, error) {
+	s, ok := os.LookupEnv("BOOTD_GATEWAY")
+	if !ok {
+		if leaseMode {
+			return nil, fmt.Errorf(
+				"BOOTD_GATEWAY is required when BOOTD_LEASE_MODE is true: " +
+					"set it to the segment's router, or to the empty string for a segment with no exit")
+		}
+		return nil, nil
+	}
+	if s != "" {
+		if ip := net.ParseIP(s); ip == nil || ip.To4() == nil {
+			return nil, fmt.Errorf("BOOTD_GATEWAY %q is not a valid IPv4 address", s)
+		}
+	}
+	return &s, nil
+}
+
 func bootdConfigFromEnv() (bootdConfig, error) {
 	for _, removed := range []string{
 		"BOOTD_DHCP_ADDR", "BOOTD_PXE_ADDR", "BOOTD_DHCP_RELAY_SERVER",
@@ -368,6 +403,11 @@ func bootdConfigFromEnv() (bootdConfig, error) {
 		}
 	}
 
+	gateway, err := gatewayFromEnv(leaseMode)
+	if err != nil {
+		return bootdConfig{}, err
+	}
+
 	proxyCfg := bootd.ProxyConfig{
 		Addr:             os.Getenv("BOOTD_PROXY_ADDR"),
 		AgentUpstreamURL: os.Getenv("BOOTD_AGENT_UPSTREAM_URL"),
@@ -406,6 +446,7 @@ func bootdConfigFromEnv() (bootdConfig, error) {
 			HTTPBootURL:     httpBootURL,
 			AnswerAll:       os.Getenv("BOOTD_ANSWER_ALL") == "true",
 			LeaseMode:       leaseMode,
+			Gateway:         gateway,
 			LeaseRangeStart: leaseRangeStart,
 			LeaseRangeEnd:   leaseRangeEnd,
 		},

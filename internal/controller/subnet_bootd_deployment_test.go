@@ -46,6 +46,11 @@ const (
 	testLeaseRangeEnd   = "192.0.2.20"
 )
 
+// testGateway is the segment router every gateway fixture in this file
+// uses - deliberately outside testLeaseRangeStart/End, as a real
+// segment's router is.
+const testGateway = "192.0.2.1"
+
 func testSubnet(namespace string, mutate ...func(*keziov1alpha2.Subnet)) *keziov1alpha2.Subnet {
 	subnet := &keziov1alpha2.Subnet{
 		ObjectMeta: metav1.ObjectMeta{Name: testSubnetName, Namespace: namespace},
@@ -234,6 +239,45 @@ func TestBuildBootdDeploymentEnv(t *testing.T) {
 		// than pointing a netbooting machine at a 404.
 		if _, ok := envValue(env, "BOOTD_BOOT_CONFIG_URL"); ok {
 			t.Errorf("BOOTD_BOOT_CONFIG_URL is set, want unset when BootUpstreamURL is not configured")
+		}
+	})
+
+	// BOOTD_GATEWAY has to carry all three of the Subnet's states, and
+	// "set to the empty string" must stay distinguishable from "not set":
+	// cmd/bootd reads it with os.LookupEnv, where the first means "this
+	// segment has no exit" and the second is a startup error.
+	t.Run("lease mode carries all three gateway states", func(t *testing.T) {
+		cfg := BootdDeploymentConfig{Image: "bootd:test", BootArtifactsImage: "boot-artifacts:test"}
+
+		leaseSubnetWithGateway := func(gateway *string) *keziov1alpha2.Subnet {
+			return testSubnet("site-hq", func(s *keziov1alpha2.Subnet) {
+				s.Spec.DHCP = &keziov1alpha2.SubnetDHCP{
+					Mode:    keziov1alpha2.SubnetDHCPModeLease,
+					Gateway: gateway,
+				}
+			})
+		}
+
+		env := bootdContainer(t, buildBootdDeployment(leaseSubnetWithGateway(ptr.To(testGateway)), cfg)).Env
+		if got := envMust(t, env, "BOOTD_GATEWAY"); got != testGateway {
+			t.Errorf("BOOTD_GATEWAY = %q, want %q", got, testGateway)
+		}
+
+		env = bootdContainer(t, buildBootdDeployment(leaseSubnetWithGateway(ptr.To("")), cfg)).Env
+		got, ok := envValue(env, "BOOTD_GATEWAY")
+		if !ok {
+			t.Errorf("BOOTD_GATEWAY is absent for a no-exit segment, want present and empty")
+		}
+		if got != "" {
+			t.Errorf("BOOTD_GATEWAY = %q, want the empty string", got)
+		}
+
+		// The CRD rejects this, so it is unreachable for an admitted
+		// Subnet; the builder must still not invent an answer, because an
+		// empty value would claim the segment has no exit.
+		env = bootdContainer(t, buildBootdDeployment(leaseSubnetWithGateway(nil), cfg)).Env
+		if _, ok := envValue(env, "BOOTD_GATEWAY"); ok {
+			t.Errorf("BOOTD_GATEWAY is set, want unset when the Subnet names no gateway at all")
 		}
 	})
 

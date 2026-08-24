@@ -978,6 +978,12 @@ jobs:
           seeder-network-name: kezio-seeder-network
           site-ref: ${{ env.SITE_NAME }}
           dhcp-scenario: ${{ matrix.dhcp-scenario }}
+          # One isolated segment carrying bootd, the seeder and the
+          # machines, so there is nowhere for a machine to route to:
+          # "none". Only the lease leg may say anything at all - in
+          # proxydhcp the existing DHCP server owns the routing options,
+          # hence the "unset" other arm.
+          gateway: ${{ matrix.dhcp-scenario == 'dhcp' && 'none' || 'unset' }}
           lease-range-start: ${{ env.LEASE_RANGE_START }}
           lease-range-end: ${{ env.LEASE_RANGE_END }}
           # kezio-seeder-network's host-local ipam narrows its pool with
@@ -1642,6 +1648,11 @@ jobs:
           bootd-network-name: kezio-boot-network-a
           site-ref: ${{ env.SITE_NAME }}
           dhcp-scenario: dhcp
+          # The seeder and tracker live on segment C, so a machine here
+          # must leave its own segment to reach them. The runner holds
+          # this address on the segment's bridge and forwards between
+          # them (create-routed-segments); bootd cannot, being a pod.
+          gateway: ${{ env.SEG_A_HOST_ADDR }}
           lease-range-start: ${{ env.LEASE_A_START }}
           lease-range-end: ${{ env.LEASE_A_END }}
 
@@ -1654,6 +1665,9 @@ jobs:
           bootd-network-name: kezio-boot-network-b
           site-ref: ${{ env.SITE_NAME }}
           dhcp-scenario: dhcp
+          # Segment B's own exit toward the seeder on segment C - see
+          # Subnet A above.
+          gateway: ${{ env.SEG_B_HOST_ADDR }}
           lease-range-start: ${{ env.LEASE_B_START }}
           lease-range-end: ${{ env.LEASE_B_END }}
 
@@ -2327,6 +2341,9 @@ jobs:
           seeder-network-name: ${{ env.SEEDER_NAD_X_NAME }}
           site-ref: ${{ env.SITE_X_NAME }}
           dhcp-scenario: dhcp
+          # Site X's boot half and seeding half are the same segment, so
+          # its machines never route off it.
+          gateway: none
           lease-range-start: ${{ env.LEASE_X_START }}
           lease-range-end: ${{ env.LEASE_X_END }}
 
@@ -2340,6 +2357,8 @@ jobs:
           seeder-network-name: ${{ env.SEEDER_NAD_Y_NAME }}
           site-ref: ${{ env.SITE_Y_NAME }}
           dhcp-scenario: dhcp
+          # Same single-segment shape as Site X above.
+          gateway: none
           lease-range-start: ${{ env.LEASE_Y_START }}
           lease-range-end: ${{ env.LEASE_Y_END }}
 

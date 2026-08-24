@@ -24,6 +24,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -85,6 +86,9 @@ var _ = Describe("Subnet Controller", func() {
 		ctx := context.Background()
 		subnet := newSubnet()
 		subnet.Spec.DHCP.Mode = keziov1alpha2.SubnetDHCPModeLease
+		// Lease mode requires a gateway; the empty string keeps this spec
+		// about the lease range rather than about routing.
+		subnet.Spec.DHCP.Gateway = ptr.To("")
 		subnet.Spec.DHCP.LeaseRangeStart = "192.0.2.10"
 		subnet.Spec.DHCP.LeaseRangeEnd = "192.0.2.200"
 		Expect(k8sClient.Create(ctx, subnet)).To(Succeed())

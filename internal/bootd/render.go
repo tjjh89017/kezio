@@ -102,6 +102,12 @@ func HostsfilePath(runDir string) string {
 // in the BOOTP file field. BC_EFI or numeric 9 instead produce a PXE
 // boot menu UEFI firmware does not process.
 //
+// Config.Gateway carries what the lease says about leaving the segment:
+// an address renders the router option (3), the empty string renders
+// dnsmasq's suppression form so no default route is handed out at all,
+// and nil renders neither - see that field for the three states and for
+// which layer rejects the third.
+//
 // Config.HTTPBootURL adds a second, parallel answer for UEFI HTTP Boot
 // clients in both modes, keyed on client architecture 16 - see that
 // field's doc comment for the boot loop its absence produces, and the
@@ -168,6 +174,20 @@ func RenderDnsmasqConf(cfg Config, runDir string) (string, error) {
 		fmt.Fprintf(&b, "dhcp-range=%s,proxy,%s\n", network, mask)
 	}
 	fmt.Fprintf(&b, "dhcp-hostsfile=%s\n", HostsfilePath(runDir))
+	if cfg.LeaseMode && cfg.Gateway != nil {
+		if *cfg.Gateway == "" {
+			// dnsmasq's documented suppression form: the option is
+			// declared with no value, so nothing is sent and dnsmasq does
+			// not substitute its own address.
+			b.WriteString("dhcp-option=3\n")
+		} else {
+			gateway := net.ParseIP(*cfg.Gateway)
+			if gateway == nil || gateway.To4() == nil {
+				return "", fmt.Errorf("Config.Gateway %q is not a valid IPv4 address", *cfg.Gateway)
+			}
+			fmt.Fprintf(&b, "dhcp-option=3,%s\n", gateway.To4())
+		}
+	}
 	if cfg.LeaseMode {
 		// dhcp-boot is the non-proxy equivalent of pxe-service: a plain
 		// default followed by an architecture-tagged override. Only

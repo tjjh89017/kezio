@@ -134,6 +134,15 @@ func bootdEnv(subnet *keziov1alpha2.Subnet, cfg BootdDeploymentConfig) []corev1.
 		{Name: "BOOTD_LEASE_MODE", Value: strconv.FormatBool(leaseMode)},
 	}
 	if leaseMode {
+		// The CRD requires Gateway in lease mode, so the nil branch is
+		// unreachable for an admitted Subnet. Stamping the variable with
+		// an empty value would tell bootd "this segment has no exit",
+		// which is a claim only the Subnet gets to make - so an absent
+		// Gateway leaves the variable unset and bootd refuses to start,
+		// rather than silently inventing the answer.
+		if subnet.Spec.DHCP.Gateway != nil {
+			env = append(env, corev1.EnvVar{Name: "BOOTD_GATEWAY", Value: *subnet.Spec.DHCP.Gateway})
+		}
 		if subnet.Spec.DHCP.LeaseRangeStart != "" {
 			env = append(env, corev1.EnvVar{Name: "BOOTD_LEASE_RANGE_START", Value: subnet.Spec.DHCP.LeaseRangeStart})
 		}
