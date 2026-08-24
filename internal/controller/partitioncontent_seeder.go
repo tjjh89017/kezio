@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -50,12 +51,27 @@ func (r *PartitionContentReconciler) reconcileSeeder(ctx context.Context, pc *ke
 		return ctrl.Result{}, err
 	}
 
-	sites, err := r.collectSeederSites(ctx, pc, images)
+	findings, err := r.collectSeederSites(ctx, pc, images)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	return r.recordSeederStatus(ctx, pc, sites, demand)
+	return r.recordSeederStatus(ctx, pc, findings, demand)
+}
+
+// seederSiteFindings is collectSeederSites' result: the real
+// status.seeders[] entries, plus the same per-Site demand grouping and
+// no-seeding-Subnet Site list reconcileImageSeeder computes for its own
+// ImageConditionSeederDegraded (seederDemandBySite). Computing these here
+// too - rather than reading them back off any Image - keeps this
+// reconciler's status derivation self-contained: both reconcilers call
+// the same shared primitive against the same live Machines/Deployments,
+// so there is one source of truth (seederDemandBySite/
+// listImageSeederDeployments) and no cross-object staleness window.
+type seederSiteFindings struct {
+	sites         []keziov1alpha2.PartitionContentSeederSite
+	demandBySite  map[string]*seederSiteDemand
+	noSeederSites []string
 }
 
 // collectSeederSites derives pc's status.seeders[]: one real entry per
@@ -64,18 +80,18 @@ func (r *PartitionContentReconciler) reconcileSeeder(ctx context.Context, pc *ke
 // count reconcileImageSeeder itself groups by (seederDemandBySite) -
 // deduplicated across every referencing Image, so a Machine referencing
 // two Images that both reference pc is not counted twice.
-func (r *PartitionContentReconciler) collectSeederSites(ctx context.Context, pc *keziov1alpha2.PartitionContent, images []keziov1alpha2.Image) ([]keziov1alpha2.PartitionContentSeederSite, error) {
+func (r *PartitionContentReconciler) collectSeederSites(ctx context.Context, pc *keziov1alpha2.PartitionContent, images []keziov1alpha2.Image) (seederSiteFindings, error) {
 	machines, err := r.demandMachinesForContent(ctx, pc, images)
 	if err != nil {
-		return nil, err
+		return seederSiteFindings{}, err
 	}
-	demand, _ := seederDemandBySite(ctx, r.Client, machines)
+	demand, noSeederSites := seederDemandBySite(ctx, r.Client, machines)
 
 	available := make(map[string]bool)
 	for i := range images {
 		deployments, err := listImageSeederDeployments(ctx, r.Client, &images[i])
 		if err != nil {
-			return nil, fmt.Errorf("partitioncontent %q: listing seeder deployments for image %q: %w", pc.Name, images[i].Name, err)
+			return seederSiteFindings{}, fmt.Errorf("partitioncontent %q: listing seeder deployments for image %q: %w", pc.Name, images[i].Name, err)
 		}
 		for site, dep := range deployments {
 			if dep.DeletionTimestamp.IsZero() && dep.Status.AvailableReplicas > 0 {
@@ -93,7 +109,7 @@ func (r *PartitionContentReconciler) collectSeederSites(ctx context.Context, pc 
 		sites = append(sites, keziov1alpha2.PartitionContentSeederSite{Site: site, MachineCount: int32(count)})
 	}
 	sort.Slice(sites, func(i, j int) bool { return sites[i].Site < sites[j].Site })
-	return sites, nil
+	return seederSiteFindings{sites: sites, demandBySite: demand, noSeederSites: noSeederSites}, nil
 }
 
 // demandMachinesForContent returns the deduplicated set of Machines that
@@ -140,9 +156,9 @@ func (r *PartitionContentReconciler) demandMachinesForContent(ctx context.Contex
 	return seen, nil
 }
 
-// recordSeederStatus writes sites into pc.Status.Seeders and sets
-// PartitionContentConditionSeederDegraded from demand and sites together,
-// then writes both through applyPartitionContentStatus.
+// recordSeederStatus writes findings.sites into pc.Status.Seeders and sets
+// PartitionContentConditionSeederDegraded from demand and findings
+// together, then writes both through applyPartitionContentStatus.
 //
 // Seeders and SeederDegraded are deliberately independent: sites can
 // still be non-empty while demand has just dropped (a Deployment still
@@ -150,9 +166,12 @@ func (r *PartitionContentReconciler) demandMachinesForContent(ctx context.Contex
 // ever reacts to demand asking for something no Site is currently
 // providing - it is cleared entirely (not set False) when there is no
 // demand, since "degraded" does not apply to something nobody asked for.
-func (r *PartitionContentReconciler) recordSeederStatus(ctx context.Context, pc *keziov1alpha2.PartitionContent, sites []keziov1alpha2.PartitionContentSeederSite, demand bool) (ctrl.Result, error) {
-	pc.Status.Seeders = sites
-	available := len(sites) > 0
+// The "at least one Site is serving" success case (available) is
+// unconditional exactly as before; only the fully-unavailable case gains
+// a specific reason (recordSeederUnavailable).
+func (r *PartitionContentReconciler) recordSeederStatus(ctx context.Context, pc *keziov1alpha2.PartitionContent, findings seederSiteFindings, demand bool) (ctrl.Result, error) {
+	pc.Status.Seeders = findings.sites
+	available := len(findings.sites) > 0
 
 	switch {
 	case !demand:
@@ -161,14 +180,65 @@ func (r *PartitionContentReconciler) recordSeederStatus(ctx context.Context, pc 
 		setPartitionContentSeederDegradedCondition(pc, metav1.ConditionFalse, "SeederAvailable",
 			"at least one Site has a seeder deployment with an available replica")
 	default:
-		setPartitionContentSeederDegradedCondition(pc, metav1.ConditionTrue, "SeederUnavailable",
-			"seeding is demanded but no Site has a seeder deployment with an available replica yet")
+		r.recordSeederUnavailable(pc, findings)
 	}
 
 	if err := r.applyPartitionContentStatus(ctx, pc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("partitioncontent %q: recording seeder status: %w", pc.Name, err)
 	}
 	return ctrl.Result{}, nil
+}
+
+// partitionContentSeederDegradedCause mirrors imageSeederDegradedCause
+// (image_status.go): a Reason plus its ready-to-render message.
+type partitionContentSeederDegradedCause struct {
+	reason  string
+	message string
+}
+
+// recordSeederUnavailable sets SeederDegraded=True with a reason specific
+// to why: demanded from a Site with no seeding Subnet at all
+// (findings.noSeederSites - the same "SeederSubnetRefUnset" reason
+// ImageConditionSeederDegraded uses for the same fact), demanded but no
+// seeder image is configured on the manager at all (so no Site's Image
+// ever attempts a Deployment), or - the fallback, when the specific
+// causes above do not apply - a seeder Deployment that exists somewhere
+// but has not yet reported an available replica. Multiple causes share
+// Reason "SeederDegraded", mirroring updateImageSeederCondition.
+func (r *PartitionContentReconciler) recordSeederUnavailable(pc *keziov1alpha2.PartitionContent, findings seederSiteFindings) {
+	var causes []partitionContentSeederDegradedCause
+
+	if len(findings.demandBySite) > 0 && !r.Seeder.ready() {
+		causes = append(causes, partitionContentSeederDegradedCause{
+			reason: "SeederImageUnconfigured",
+			message: "no seeder image is configured on the manager (PARTITIONCONTENT_SEEDER_IMAGE); " +
+				"seeding is demanded but no seeder Deployment can be created until it is set",
+		})
+	}
+	if len(findings.noSeederSites) > 0 {
+		causes = append(causes, partitionContentSeederDegradedCause{
+			reason: "SeederSubnetRefUnset",
+			message: fmt.Sprintf("Site.spec.seederSubnetRef is unset for site(s) %s; no seeder Deployment is created there, "+
+				"so machines there cannot build a deploy plan for this content until it is set",
+				strings.Join(findings.noSeederSites, ", ")),
+		})
+	}
+	if len(causes) == 0 {
+		causes = append(causes, partitionContentSeederDegradedCause{
+			reason:  "SeederUnavailable",
+			message: "seeding is demanded but no Site has a seeder deployment with an available replica yet",
+		})
+	}
+
+	if len(causes) == 1 {
+		setPartitionContentSeederDegradedCondition(pc, metav1.ConditionTrue, causes[0].reason, causes[0].message)
+		return
+	}
+	messages := make([]string, len(causes))
+	for i, c := range causes {
+		messages[i] = c.message
+	}
+	setPartitionContentSeederDegradedCondition(pc, metav1.ConditionTrue, "SeederDegraded", strings.Join(messages, "; "))
 }
 
 // mapSeederDeploymentToPartitionContents maps a seeder Deployment event to

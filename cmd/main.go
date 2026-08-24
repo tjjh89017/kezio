@@ -251,11 +251,16 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	// Shared with PartitionContentReconciler below: both need the same
+	// answer to "is a seeder image configured at all" - the Image
+	// reconciler to act on it, PartitionContent to explain an unavailable
+	// seeder that is not even trying to appear.
+	seederConfig := imageSeederConfigFromEnv()
 	if err := (&controller.ImageReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 		Ingest: imageIngestConfigFromEnv(),
-		Seeder: imageSeederConfigFromEnv(),
+		Seeder: seederConfig,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Image")
 		os.Exit(1)
@@ -265,6 +270,7 @@ func main() {
 		Scheme:   mgr.GetScheme(),
 		Recorder: mgr.GetEventRecorderFor("partitioncontent-controller"),
 		Publish:  partitionContentPublishConfigFromEnv(),
+		Seeder:   seederConfig,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PartitionContent")
 		os.Exit(1)

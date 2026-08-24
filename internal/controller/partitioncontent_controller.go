@@ -71,6 +71,14 @@ type PartitionContentReconciler struct {
 	// value holds every PartitionContent at Pending - see
 	// PartitionContentPublishConfig's doc comment.
 	Publish PartitionContentPublishConfig
+	// Seeder is the same ImageSeederConfig the Image reconciler holds -
+	// wired from the same manager-wide setting in cmd/main.go. Read only
+	// for its ready() check: a demanded Site whose Image never gets a
+	// seeder Deployment because no seeder image is configured is a
+	// different fact from one whose Deployment merely is not available
+	// yet, and this reconciler needs the same config the Image reconciler
+	// checks to tell the two apart in status.seeders[]'s degraded reason.
+	Seeder ImageSeederConfig
 }
 
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=partitioncontents,verbs=get;list;watch;create;update;patch;delete
