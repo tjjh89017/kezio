@@ -10,8 +10,9 @@ description: >-
   directions, not assumed symmetric from a single-direction check.
 
   Every reachability target is a helper network namespace on its own
-  segment (its own veth pair and address, running a real TCP listener),
-  never the runner host's own address on that bridge - see
+  segment (its own veth pair, address, and default route through that
+  segment's own host address, running a real TCP listener), never the
+  runner host's own address on that bridge - see
   assert-site-isolation's own doc comment for why: traffic addressed to
   an address the host owns locally is delivered on the INPUT hook, not
   FORWARD, so it would answer regardless of whether any forwarding rule
@@ -52,6 +53,15 @@ inputs:
   bridge-c:
     description: Bridge name of segment C (must match its name field in `segments`).
     required: true
+  bridge-c-gateway-ip:
+    description: >-
+      Bare address (no prefix) of the runner's own host-cidr on
+      bridge-c. C is the segment nothing may reach, but its listener
+      still needs the same default route A's and B's get: a listener
+      that cannot route an answer back would time out even with every
+      deny rule removed, which would make the isolation half of this
+      probe vacuous.
+    required: true
   bridge-c-listener-ip:
     description: Bare address (no prefix) for C's helper listener namespace.
     required: true
@@ -84,18 +94,27 @@ runs:
       shell: bash
       env:
         BRIDGE_A: ${{ inputs.bridge-a }}
+        GATEWAY_A_IP: ${{ inputs.bridge-a-gateway-ip }}
         LISTENER_A_IP: ${{ inputs.bridge-a-listener-ip }}
         BRIDGE_B: ${{ inputs.bridge-b }}
+        GATEWAY_B_IP: ${{ inputs.bridge-b-gateway-ip }}
         LISTENER_B_IP: ${{ inputs.bridge-b-listener-ip }}
         BRIDGE_C: ${{ inputs.bridge-c }}
+        GATEWAY_C_IP: ${{ inputs.bridge-c-gateway-ip }}
         LISTENER_C_IP: ${{ inputs.bridge-c-listener-ip }}
         LISTENER_PREFIX_LENGTH: ${{ inputs.listener-prefix-length }}
         LISTENER_PORT: ${{ inputs.listener-port }}
       run: |
         set -euo pipefail
 
+        # Every listener gets a default route through its own segment's
+        # host address, the same route assert-site-isolation gives its
+        # probe namespaces. An on-link address alone lets a listener
+        # RECEIVE a probe from another segment but never answer it, so
+        # both halves of this probe would read "timed out" no matter
+        # what the forwarding policy did.
         create_listener() {
-          tag="$1"; bridge="$2"; ip="$3"
+          tag="$1"; bridge="$2"; ip="$3"; gateway="$4"
           netns="kezio-fwd-listener-${tag}"
           veth_host="kzfl${tag}-h"
           veth_ns="kzfl${tag}-n"
@@ -108,6 +127,7 @@ runs:
           sudo ip netns exec "${netns}" ip link set lo up
           sudo ip netns exec "${netns}" ip link set "${veth_ns}" up
           sudo ip netns exec "${netns}" ip addr add "${ip}/${LISTENER_PREFIX_LENGTH}" dev "${veth_ns}"
+          sudo ip netns exec "${netns}" ip route add default via "${gateway}"
 
           # shellcheck disable=SC2024 # the redirect target is runner-writable; only the netns exec needs root.
           sudo ip netns exec "${netns}" python3 -m http.server --bind "${ip}" "${LISTENER_PORT}" \
@@ -115,9 +135,9 @@ runs:
           echo "$!" >"/tmp/kezio-fwd-listener-${tag}.pid"
         }
 
-        create_listener a "${BRIDGE_A}" "${LISTENER_A_IP}"
-        create_listener b "${BRIDGE_B}" "${LISTENER_B_IP}"
-        create_listener c "${BRIDGE_C}" "${LISTENER_C_IP}"
+        create_listener a "${BRIDGE_A}" "${LISTENER_A_IP}" "${GATEWAY_A_IP}"
+        create_listener b "${BRIDGE_B}" "${LISTENER_B_IP}" "${GATEWAY_B_IP}"
+        create_listener c "${BRIDGE_C}" "${LISTENER_C_IP}" "${GATEWAY_C_IP}"
         sleep 1
 
     - name: Assert from segment A -- reaches B, does not reach C
@@ -128,6 +148,7 @@ runs:
         gateway-ip: ${{ inputs.bridge-a-gateway-ip }}
         reachable-endpoints: "${{ inputs.bridge-b-listener-ip }}:${{ inputs.listener-port }}"
         unreachable-endpoints: "${{ inputs.bridge-c-listener-ip }}:${{ inputs.listener-port }}"
+        unreachable-bridge-name: ${{ inputs.bridge-c }}
         timeout-seconds: ${{ inputs.timeout-seconds }}
         fast-threshold-ms: ${{ inputs.fast-threshold-ms }}
         netns-name: "kezio-fwd-probe-a"
@@ -140,6 +161,7 @@ runs:
         gateway-ip: ${{ inputs.bridge-b-gateway-ip }}
         reachable-endpoints: "${{ inputs.bridge-a-listener-ip }}:${{ inputs.listener-port }}"
         unreachable-endpoints: "${{ inputs.bridge-c-listener-ip }}:${{ inputs.listener-port }}"
+        unreachable-bridge-name: ${{ inputs.bridge-c }}
         timeout-seconds: ${{ inputs.timeout-seconds }}
         fast-threshold-ms: ${{ inputs.fast-threshold-ms }}
         netns-name: "kezio-fwd-probe-b"

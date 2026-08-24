@@ -162,7 +162,13 @@ runs:
             for j in "${!names[@]}"; do
               [ "${i}" -eq "${j}" ] && continue
               [ "${groups[$i]}" = "${groups[$j]}" ] && continue
-              ruleset+="    iifname \"${names[$i]}\" oifname \"${names[$j]}\" drop
+              # "counter" is load-bearing, not decoration: nft reports a
+              # packet count only for a rule that carries one, and
+              # assert-site-isolation reads this rule's count before and
+              # after each unreachable probe. Without it, a probe that
+              # times out because the destination cannot route back
+              # would be indistinguishable from one this rule dropped.
+              ruleset+="    iifname \"${names[$i]}\" oifname \"${names[$j]}\" counter drop
         "
             done
           done

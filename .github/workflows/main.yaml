@@ -319,6 +319,7 @@ jobs:
           bridge-b-listener-ip: 192.0.24.50
           bridge-b-probe-cidr: 192.0.24.60/24
           bridge-c: kezio-probe-c-c
+          bridge-c-gateway-ip: 192.0.25.1
           bridge-c-listener-ip: 192.0.25.50
 
       - name: Collect site/tracker/seeder/bootd/runner-network diagnostics
@@ -2808,6 +2809,7 @@ jobs:
           bridge-name: ${{ env.SEG_X_BRIDGE }}
           probe-cidr: "198.51.103.250/24"
           gateway-ip: ${{ env.SEG_X_HOST_ADDR }}
+          unreachable-bridge-name: ${{ env.SEG_Y_BRIDGE }}
           unreachable-endpoints: |
             ${{ env.TRACKER_Y_IP }}:6969
           reachable-endpoints: |
@@ -2820,6 +2822,7 @@ jobs:
           bridge-name: ${{ env.SEG_Y_BRIDGE }}
           probe-cidr: "198.51.104.250/24"
           gateway-ip: ${{ env.SEG_Y_HOST_ADDR }}
+          unreachable-bridge-name: ${{ env.SEG_X_BRIDGE }}
           unreachable-endpoints: |
             ${{ env.TRACKER_X_IP }}:6969
           reachable-endpoints: |
@@ -3025,6 +3028,7 @@ jobs:
           bridge-name: ${{ env.SEG_X_BRIDGE }}
           probe-cidr: "198.51.103.252/24"
           gateway-ip: ${{ env.SEG_X_HOST_ADDR }}
+          unreachable-bridge-name: ${{ env.SEG_Y_BRIDGE }}
           unreachable-endpoints: |
             ${{ env.TRACKER_Y_IP }}:6969
             ${{ env.SEEDER_Y_IP }}:16881
@@ -3041,6 +3045,7 @@ jobs:
           bridge-name: ${{ env.SEG_Y_BRIDGE }}
           probe-cidr: "198.51.104.252/24"
           gateway-ip: ${{ env.SEG_Y_HOST_ADDR }}
+          unreachable-bridge-name: ${{ env.SEG_X_BRIDGE }}
           unreachable-endpoints: |
             ${{ env.TRACKER_X_IP }}:6969
             ${{ env.SEEDER_X_IP }}:16881

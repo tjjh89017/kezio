@@ -36,6 +36,16 @@ description: >-
   land in the second bucket; endpoints in reachable-endpoints must land
   in either of the first two.
 
+  A timeout on its own is weak evidence, and this action does not accept
+  it alone: a destination that never receives the SYN, and a destination
+  that receives it but has no route to answer, both time out. To tell
+  the two apart, each unreachable probe must also move the packet
+  counter on the create-routed-segments deny rule for this exact
+  bridge-name -> unreachable-bridge-name pair. A probe that times out
+  while that counter stays still is reported as a FAILURE, because
+  whatever stopped it was not the isolation policy this action exists to
+  prove.
+
   This is a host-level TCP probe, not a BitTorrent handshake - it proves
   the network path is open or closed, not that the peer on the other
   end speaks the expected protocol. Whether the actual isolation rules
@@ -61,6 +71,14 @@ inputs:
     required: true
   unreachable-endpoints:
     description: Newline-separated "ip:port" endpoints expected to be unreachable (no packets arrive). Blank lines are skipped.
+    required: true
+  unreachable-bridge-name:
+    description: >-
+      The bridge every unreachable-endpoints address sits on - the
+      oifname half of the create-routed-segments deny rule that must be
+      what stops each of them. Its packet counter is read before and
+      after every unreachable probe, so a timeout that the deny rule did
+      not cause fails the assertion instead of passing it.
     required: true
   reachable-endpoints:
     description: Newline-separated "ip:port" endpoints expected to be reachable. Blank lines are skipped.
@@ -112,6 +130,8 @@ runs:
       shell: bash
       env:
         NETNS_NAME: ${{ inputs.netns-name }}
+        BRIDGE_NAME: ${{ inputs.bridge-name }}
+        UNREACHABLE_BRIDGE_NAME: ${{ inputs.unreachable-bridge-name }}
         UNREACHABLE_ENDPOINTS: ${{ inputs.unreachable-endpoints }}
         REACHABLE_ENDPOINTS: ${{ inputs.reachable-endpoints }}
         TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
@@ -148,15 +168,40 @@ runs:
           echo "${outcome} elapsed=$((end_ms - start_ms))ms"
         }
 
+        # Packets the create-routed-segments deny rule for this exact
+        # bridge pair has discarded so far. The rule carries an explicit
+        # "counter", so nft prints "counter packets N bytes M" for it;
+        # the deny chain sits at a lower priority number than every
+        # other forward-hook chain, so a cross-group packet reaches this
+        # rule before anything else can act on it.
+        deny_rule_packets() {
+          sudo nft list chain inet kezio_routed_segments_deny forward 2>/dev/null |
+            grep -F "iifname \"${BRIDGE_NAME}\" oifname \"${UNREACHABLE_BRIDGE_NAME}\"" |
+            grep -oE 'packets [0-9]+' |
+            head -n 1 |
+            cut -d ' ' -f 2
+        }
+
+        if [ -z "$(deny_rule_packets || true)" ]; then
+          echo "::error::no counted deny rule for ${BRIDGE_NAME} -> ${UNREACHABLE_BRIDGE_NAME} in table inet kezio_routed_segments_deny; without its counter a timeout cannot be told apart from a destination that simply cannot answer" >&2
+          sudo nft list table inet kezio_routed_segments_deny || true
+          exit 1
+        fi
+
         fail=0
 
         while IFS= read -r endpoint; do
           [ -z "${endpoint}" ] && continue
+          before="$(deny_rule_packets || true)"
           result="$(probe "${endpoint}")"
+          after="$(deny_rule_packets || true)"
           outcome="${result%% *}"
-          echo "unreachable-endpoints: ${endpoint} -> ${result}"
+          echo "unreachable-endpoints: ${endpoint} -> ${result} deny-rule-packets=${before:-?}->${after:-?}"
           if [ "${outcome}" != "timed-out" ]; then
             echo "::error::${endpoint} was expected UNREACHABLE from this segment but outcome was '${outcome}' (packets arrived) - isolation leak" >&2
+            fail=1
+          elif [ "${after:-0}" -le "${before:-0}" ]; then
+            echo "::error::${endpoint} timed out, but the ${BRIDGE_NAME} -> ${UNREACHABLE_BRIDGE_NAME} deny rule counted no packet (${before:-?} -> ${after:-?}); the timeout was not caused by the isolation policy, so this endpoint proves nothing about it" >&2
             fail=1
           fi
         done <<<"${UNREACHABLE_ENDPOINTS}"
