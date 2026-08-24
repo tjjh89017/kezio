@@ -225,7 +225,11 @@ jobs:
       # wait on, so wait for the rollout explicitly, then confirm the
       # conflist file the daemonset writes is actually on disk - the
       # rollout condition (pod Ready) can flip slightly before that
-      # write completes, which is exactly the gap Probe A hit.
+      # write completes, which is exactly the gap Probe A hit. The
+      # conflist directory is whatever the chart mounted, not a
+      # documented constant (a hardcoded rke2 agent path turned out not
+      # to even exist on the runner), so read the daemonset's own
+      # hostPath volumes and search those.
       - name: Wait for the Multus daemonset to finish rolling out
         shell: bash
         run: |
@@ -244,10 +248,19 @@ jobs:
           if [ "${remaining}" -lt 1 ]; then remaining=1; fi
           kubectl -n kube-system rollout status daemonset/rke2-multus --timeout="${remaining}s"
 
-          until sudo find /var/lib/rancher/rke2/agent/etc/cni/net.d -maxdepth 1 -iname '*multus*' 2>/dev/null | grep -q .; do
+          mapfile -t cni_dirs < <(kubectl -n kube-system get daemonset rke2-multus \
+            -o jsonpath='{range .spec.template.spec.volumes[?(@.hostPath)]}{.hostPath.path}{"\n"}{end}' \
+            | grep -E '/(cni/)?net\.d/?$' | sort -u)
+          if [ "${#cni_dirs[@]}" -eq 0 ]; then
+            echo "::error::daemonset rke2-multus mounts no host directory that looks like a CNI conf dir." >&2
+            kubectl -n kube-system get daemonset rke2-multus -o jsonpath='{.spec.template.spec.volumes}' | jq . || true
+            exit 1
+          fi
+          echo "Multus writes its conflist into: ${cni_dirs[*]}"
+          until sudo find "${cni_dirs[@]}" -maxdepth 1 -iname '*multus*' 2>/dev/null | grep -q .; do
             if [ "$(date +%s)" -ge "${deadline}" ]; then
-              echo "::error::rke2-multus rolled out but no multus CNI conflist appeared under /var/lib/rancher/rke2/agent/etc/cni/net.d." >&2
-              sudo ls -la /var/lib/rancher/rke2/agent/etc/cni/net.d || true
+              echo "::error::rke2-multus rolled out but no multus CNI conflist appeared under ${cni_dirs[*]}." >&2
+              sudo ls -la "${cni_dirs[@]}" || true
               exit 1
             fi
             sleep 2
