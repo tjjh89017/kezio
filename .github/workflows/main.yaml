@@ -1204,6 +1204,726 @@ jobs:
           bridges: ${{ env.PROVISIONING_BRIDGE }}
           extra-artifact-paths: ${{ runner.temp }}/console-${{ matrix.dhcp-scenario }}.log
 
+  # Routed lane: three segments, one Site. Segment A carries target
+  # machine 1 and its own bootd; segment B carries target machine 2 and
+  # its own bootd; segment C carries the seeder and the tracker and no
+  # target machine. The runner host forwards between all three (one
+  # create-routed-segments group), so the machine on A and the machine on
+  # B both leech from - and announce to - the one seeder/tracker pair on
+  # C over a real routed L3 hop, never a shared broadcast domain. This is
+  # the per-(Image, Site) seeder plane proving what per-content placement
+  # could not: two machines on two different Subnets of one Site sharing
+  # one seeder.
+  #
+  # What this lane does NOT claim: nothing about latency, bandwidth, or
+  # WAN copy counts - one runner cannot produce those. It also does not
+  # claim per-Subnet boot-server isolation: BOOT_SERVER_URL/
+  # BOOT_AGENT_SERVER_URL (below) are one manager-wide static value, so
+  # both machines' kernel/initrd fetch and agent traffic are addressed at
+  # segment A's bootd even for the machine on segment B - correct here
+  # only because A and B are routable to each other inside this one Site,
+  # the same routed hop the seeder/tracker assertions below exercise. A
+  # lane whose segments must NOT route to each other (the two-site lane)
+  # cannot reuse this shortcut; it needs its own boot server per Site.
+  #
+  # Heaviest lane so far: two full boot-and-deploy chains plus the
+  # KubeVirt stack on one runner. check-runner-resources below uses the
+  # same floor the single-machine deploy lane needs; if a real run shows
+  # this is not enough (OOM or CPU starvation rather than a genuine test
+  # failure), the fix is a larger runner class for this job specifically
+  # (a `runs-on` change), not serializing the two deploys - concurrency
+  # is this lane's reason to exist.
+  e2e-routed-site:
+    name: Routed lane
+    needs: [build-required, e2e-fast-lane, e2e-network-probes]
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      SEG_A_BRIDGE: kezio-routed-a
+      SEG_A_CIDR: 198.51.100.0/24
+      SEG_A_HOST_CIDR: 198.51.100.1/24
+      SEG_A_HOST_ADDR: 198.51.100.1
+      BOOTD_A_IP: 198.51.100.2
+      LEASE_A_START: 198.51.100.10
+      LEASE_A_END: 198.51.100.100
+      SEG_B_BRIDGE: kezio-routed-b
+      SEG_B_CIDR: 198.51.101.0/24
+      SEG_B_HOST_CIDR: 198.51.101.1/24
+      SEG_B_HOST_ADDR: 198.51.101.1
+      BOOTD_B_IP: 198.51.101.2
+      LEASE_B_START: 198.51.101.10
+      LEASE_B_END: 198.51.101.100
+      SEG_C_BRIDGE: kezio-routed-c
+      SEG_C_CIDR: 198.51.102.0/24
+      SEG_C_HOST_CIDR: 198.51.102.1/24
+      SEG_C_HOST_ADDR: 198.51.102.1
+      # Bare, like the single-segment deploy lane's own TRACKER_SERVER_IP/
+      # SEEDER_NET1_IP: the announce URL baked into every torrent must be
+      # the tracker's own address on this segment, with nothing rewriting
+      # it on the way.
+      TRACKER_IP: 198.51.102.3
+      SEEDER_NET1_IP: 198.51.102.4/24
+      # create-provisioning-nads always creates a "kezio-boot-network" and
+      # a "kezio-tracker-network" NAD alongside the seeder one; neither is
+      # referenced by any Subnet in this lane (segment C hosts no bootd,
+      # and the Site's tracker single-homes on the seeding Subnet's own
+      # seederNetworkRef - see internal/controller/site_tracker_deployment.go's
+      # trackerPodAnnotations, not a dedicated tracker NAD), so these two
+      # addresses back inert, unused NAD objects. Distinct from every real
+      # address on segment C so they cannot collide with one.
+      UNUSED_BOOTD_NET1_IP: 198.51.102.6/24
+      UNUSED_TRACKER_NET1_IP: 198.51.102.7/24
+      SITE_NAME: kezio-routed-site
+      SUBNET_A_NAME: kezio-routed-subnet-a
+      SUBNET_B_NAME: kezio-routed-subnet-b
+      SUBNET_C_NAME: kezio-routed-subnet-c
+      VM_A_NAME: kezio-routed-vm-a
+      VM_B_NAME: kezio-routed-vm-b
+      VM_A_MAC: "52:54:00:be:ef:10"
+      VM_B_MAC: "52:54:00:be:ef:11"
+      DISK_A_SERIAL: KEZIOROUTEDDISKA01
+      DISK_B_SERIAL: KEZIOROUTEDDISKB01
+      BOOT_ARTIFACTS_IMG: "example.com/kezio-boot-artifacts:e2e"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the live boot image artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: kezio-live-image
+          path: dist/live
+
+      - name: Fail fast if the downloaded boot artifacts are empty
+        uses: ./.github/actions/assert-boot-artifacts-present
+
+      - name: Prepare the KVM host
+        uses: ./.github/actions/prepare-kvm-host
+
+      # Same floor the single-machine deploy lane uses - see this job's
+      # own top comment on the budget risk two concurrent boot chains add
+      # on top of it.
+      - name: Resource check (fail fast if the runner is under-resourced)
+        uses: ./.github/actions/check-runner-resources
+        with:
+          min-cpus: "4"
+          min-mem-mb: "15800"
+          min-disk-gb: "35"
+          context-label: "the routed multi-segment e2e lane"
+
+      # Host-level bridges before RKE2/canal starts, the same ordering
+      # create-provisioning-bridge uses in the single-segment deploy lane.
+      # One group: all three segments belong to the one Site this lane
+      # creates, so create-routed-segments allows forwarding between every
+      # pair of them and would drop traffic to/from any other group (none
+      # exists in this lane).
+      - name: Create the three routed segments (one Site, one group)
+        uses: ./.github/actions/create-routed-segments
+        with:
+          segments: |
+            ${{ env.SEG_A_BRIDGE }} ${{ env.SEG_A_CIDR }} ${{ env.SEG_A_HOST_CIDR }} kezio-routed-site-group
+            ${{ env.SEG_B_BRIDGE }} ${{ env.SEG_B_CIDR }} ${{ env.SEG_B_HOST_CIDR }} kezio-routed-site-group
+            ${{ env.SEG_C_BRIDGE }} ${{ env.SEG_C_CIDR }} ${{ env.SEG_C_HOST_CIDR }} kezio-routed-site-group
+
+      - name: Download the manager, bootd, image-service, ingest, and seeder image tarballs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "image-tar-@(manager|bootd|image-service|ingest|seeder)"
+          path: /tmp/images
+          merge-multiple: true
+
+      - name: Install RKE2 with Multus enabled
+        uses: ./.github/actions/install-rke2
+        with:
+          rke2-version: "v1.36.2+rke2r1"
+          enable-multus: "true"
+
+      # All three bridges host Multus-attached pods (bootd on A and B,
+      # tracker/seeder on C), so every one needs canal's FORWARD-chain
+      # self-bridge fixup; only A and B carry real PXE/DHCP traffic, but
+      # the UDP-checksum fixup is harmless on C.
+      - name: Harden segment A for real PXE/DHCP traffic
+        uses: ./.github/actions/harden-provisioning-bridge
+        with:
+          bridge-name: ${{ env.SEG_A_BRIDGE }}
+
+      - name: Harden segment B for real PXE/DHCP traffic
+        uses: ./.github/actions/harden-provisioning-bridge
+        with:
+          bridge-name: ${{ env.SEG_B_BRIDGE }}
+
+      - name: Harden segment C for its own Multus-attached pods
+        uses: ./.github/actions/harden-provisioning-bridge
+        with:
+          bridge-name: ${{ env.SEG_C_BRIDGE }}
+
+      - name: Install local-path-provisioner and mark it the default StorageClass
+        uses: ./.github/actions/install-local-path-provisioner
+        with:
+          version: "v0.0.37"
+
+      - name: Install csi-driver-nfs and mark it the default StorageClass
+        uses: ./.github/actions/install-nfs-storage
+
+      - name: Build the boot-artifacts image
+        run: make docker-build-boot-artifacts BOOT_ARTIFACTS_IMG="${{ env.BOOT_ARTIFACTS_IMG }}"
+
+      - name: Save the boot-artifacts image to a tarball
+        run: docker save "${{ env.BOOT_ARTIFACTS_IMG }}" -o /tmp/images/boot-artifacts.tar
+
+      - name: Import the manager, bootd, boot-artifacts, image-service, ingest, and seeder images into RKE2 containerd
+        uses: ./.github/actions/import-image-tarballs
+        with:
+          images: manager bootd boot-artifacts image-service ingest seeder
+
+      - name: Install cert-manager, KubeVirt, virtctl, and CDI
+        uses: ./.github/actions/install-cluster-addons
+        with:
+          kubevirt-version: "v1.9.0"
+          cdi-version: "v1.65.0"
+
+      - name: Install KubeVirtBMC
+        uses: ./.github/actions/install-kubevirtbmc
+        with:
+          version: "v0.9.0"
+
+      # One controller-manager for the whole lane, same as the
+      # single-segment deploy lane. BOOT_SERVER_URL/BOOT_AGENT_SERVER_URL
+      # are a single manager-wide value (internal/bootserver.Config, set
+      # once at manager startup - see this job's own top comment): pointed
+      # at segment A's bootd, which segment B's machine reaches over the
+      # same routed hop this lane's Site provides. TRACKER_DEPLOYMENT_IMAGE
+      # backs the one Site-managed tracker Deployment created below.
+      - name: Deploy kezio CRDs and controller-manager
+        uses: ./.github/actions/deploy-kezio
+        with:
+          manager-image: example.com/kezio:e2e
+          kustomize-dir: config/netboot-e2e
+          extra-env: |
+            DEPLOYER=agent
+            BOOT_SERVER_ADDR=:8090
+            BOOT_SERVER_URL=http://${{ env.BOOTD_A_IP }}
+            BOOT_AGENT_SERVER_URL=http://${{ env.BOOTD_A_IP }}
+            AGENT_SERVER_ADDR=:8091
+            BOOTD_DEPLOYMENT_IMAGE=example.com/kezio-bootd:e2e
+            BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE=${{ env.BOOT_ARTIFACTS_IMG }}
+            BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL=http://boot-server.scaffold-system.svc.cluster.local:8090
+            BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL=http://agent-server.scaffold-system.svc.cluster.local:8091
+            IMAGE_INGEST_STAGING_PVC=kezio-image-service-staging
+            IMAGE_INGEST_IMAGE=example.com/kezio-ingest:e2e
+            IMAGE_INGEST_SOURCE_FORMAT=raw
+            PARTITIONCONTENT_PUBLISH_IMAGE=example.com/kezio-ingest:e2e
+            PARTITIONCONTENT_SEEDER_IMAGE=example.com/kezio-seeder:e2e
+            PARTITIONCONTENT_SEEDER_GRACE_PERIOD=30s
+            TRACKER_DEPLOYMENT_IMAGE=ghcr.io/tunisiano187/opentracker-docker:master
+
+      # Two independently-addressed boot NADs, one per PXE segment.
+      # create-provisioning-nads bakes fixed names ("kezio-boot-network",
+      # "kezio-boot-network-vm") for a single-bridge lane; composing it
+      # twice in this one namespace would collide on those names, so both
+      # pairs are created here instead, under per-segment names, using the
+      # identical manifest shape that action documents (static ipam for
+      # the real NAD, empty ipam for the VM's own - see its own doc
+      # comment for why the VM interface must not be IPAM'd).
+      - name: Create the boot NetworkAttachmentDefinitions for segments A and B
+        shell: bash
+        env:
+          NAMESPACE: "scaffold-system"
+          SEG_A_BRIDGE: ${{ env.SEG_A_BRIDGE }}
+          SEG_B_BRIDGE: ${{ env.SEG_B_BRIDGE }}
+          BOOTD_A_IP: ${{ env.BOOTD_A_IP }}
+          BOOTD_B_IP: ${{ env.BOOTD_B_IP }}
+        run: |
+          set -euo pipefail
+          for seg in a b; do
+            case "${seg}" in
+              a) bridge="${SEG_A_BRIDGE}"; addr="${BOOTD_A_IP}/24" ;;
+              b) bridge="${SEG_B_BRIDGE}"; addr="${BOOTD_B_IP}/24" ;;
+            esac
+            cat <<EOF | kubectl apply -f -
+          apiVersion: k8s.cni.cncf.io/v1
+          kind: NetworkAttachmentDefinition
+          metadata:
+            name: kezio-boot-network-${seg}
+            namespace: ${NAMESPACE}
+          spec:
+            config: |
+              {
+                "cniVersion": "0.3.1",
+                "name": "kezio-boot-network-${seg}",
+                "plugins": [
+                  {
+                    "type": "bridge",
+                    "bridge": "${bridge}",
+                    "ipam": {
+                      "type": "static",
+                      "addresses": [
+                        {"address": "${addr}"}
+                      ]
+                    }
+                  }
+                ]
+              }
+          EOF
+            cat <<EOF | kubectl apply -f -
+          apiVersion: k8s.cni.cncf.io/v1
+          kind: NetworkAttachmentDefinition
+          metadata:
+            name: kezio-boot-network-vm-${seg}
+            namespace: ${NAMESPACE}
+          spec:
+            config: |
+              {
+                "cniVersion": "0.3.1",
+                "name": "kezio-boot-network-vm-${seg}",
+                "plugins": [
+                  {
+                    "type": "bridge",
+                    "bridge": "${bridge}",
+                    "ipam": {}
+                  }
+                ]
+              }
+          EOF
+          done
+
+      # Routes toward both boot segments on the seeding NAD's own ipam:
+      # the single-homed seeder/tracker pod on segment C has no cluster
+      # network at all (section 3.4), so this route entry is the only path
+      # it has to either machine's segment.
+      - name: Create the tracker/seeder NetworkAttachmentDefinitions on segment C, with IPAM routes to segments A and B
+        uses: ./.github/actions/create-provisioning-nads
+        with:
+          bridge-name: ${{ env.SEG_C_BRIDGE }}
+          bootd-net1-ip: ${{ env.UNUSED_BOOTD_NET1_IP }}
+          tracker-net1-ip: ${{ env.UNUSED_TRACKER_NET1_IP }}
+          seeder-net1-ip: ${{ env.SEEDER_NET1_IP }}
+          seeding-routes-json: >-
+            [{"dst":"${{ env.SEG_A_CIDR }}","gw":"${{ env.SEG_C_HOST_ADDR }}"},{"dst":"${{ env.SEG_B_CIDR }}","gw":"${{ env.SEG_C_HOST_ADDR }}"}]
+
+      # SubnetReconciler's Valid condition checks the kezio-bootd
+      # ServiceAccount already exists - apply config/bootd's RBAC before
+      # either boot-half Subnet, same as the single-segment deploy lane.
+      - name: Apply kezio-bootd's RBAC ahead of the Subnets
+        run: kubectl apply -k config/bootd
+
+      # The Subnet webhook admits spec.siteRef only against a Site that
+      # already exists, and the Site/Subnet cross-reference is cyclic
+      # (create-site's own doc comment), so the Site is created bare
+      # first and patched once all three Subnets exist.
+      - name: Create the Site (bare)
+        uses: ./.github/actions/create-site
+        with:
+          name: ${{ env.SITE_NAME }}
+          wait-for: Valid
+
+      - name: Create Subnet A (segment A, boot half only)
+        uses: ./.github/actions/create-subnet
+        with:
+          name: ${{ env.SUBNET_A_NAME }}
+          cidr: ${{ env.SEG_A_CIDR }}
+          bootd-server-ip: ${{ env.BOOTD_A_IP }}
+          bootd-network-name: kezio-boot-network-a
+          site-ref: ${{ env.SITE_NAME }}
+          dhcp-scenario: dhcp
+          lease-range-start: ${{ env.LEASE_A_START }}
+          lease-range-end: ${{ env.LEASE_A_END }}
+
+      - name: Create Subnet B (segment B, boot half only)
+        uses: ./.github/actions/create-subnet
+        with:
+          name: ${{ env.SUBNET_B_NAME }}
+          cidr: ${{ env.SEG_B_CIDR }}
+          bootd-server-ip: ${{ env.BOOTD_B_IP }}
+          bootd-network-name: kezio-boot-network-b
+          site-ref: ${{ env.SITE_NAME }}
+          dhcp-scenario: dhcp
+          lease-range-start: ${{ env.LEASE_B_START }}
+          lease-range-end: ${{ env.LEASE_B_END }}
+
+      # Data-plane-only: no boot half, seederNetworkRef only - the
+      # no-machines-here segment section 2.4 makes expressible.
+      - name: Create Subnet C (segment C, data plane only - no boot half)
+        uses: ./.github/actions/create-subnet
+        with:
+          name: ${{ env.SUBNET_C_NAME }}
+          cidr: ${{ env.SEG_C_CIDR }}
+          seeder-network-name: kezio-seeder-network
+          site-ref: ${{ env.SITE_NAME }}
+
+      # Ready needs the tracker Deployment actually Available, which needs
+      # TRACKER_DEPLOYMENT_IMAGE (set on the manager above).
+      - name: Point the Site at its seeding Subnet (segment C)
+        uses: ./.github/actions/create-site
+        with:
+          name: ${{ env.SITE_NAME }}
+          seeder-subnet-name: ${{ env.SUBNET_C_NAME }}
+          tracker-ip: ${{ env.TRACKER_IP }}
+          wait-for: Ready
+
+      - name: Deploy kezio-bootd on segment A
+        uses: ./.github/actions/deploy-bootd
+        with:
+          subnet-name: ${{ env.SUBNET_A_NAME }}
+          bootd-server-ip: ${{ env.BOOTD_A_IP }}
+
+      - name: Deploy kezio-bootd on segment B
+        uses: ./.github/actions/deploy-bootd
+        with:
+          subnet-name: ${{ env.SUBNET_B_NAME }}
+          bootd-server-ip: ${{ env.BOOTD_B_IP }}
+
+      - name: Create target VM A on segment A
+        uses: ./.github/actions/create-target-vm
+        with:
+          vm-name: ${{ env.VM_A_NAME }}
+          vm-mac: ${{ env.VM_A_MAC }}
+          disk-serial: "${{ env.DISK_A_SERIAL }}"
+          boot-network-name: kezio-boot-network-vm-a
+
+      - name: Create target VM B on segment B
+        uses: ./.github/actions/create-target-vm
+        with:
+          vm-name: ${{ env.VM_B_NAME }}
+          vm-mac: ${{ env.VM_B_MAC }}
+          disk-serial: "${{ env.DISK_B_SERIAL }}"
+          boot-network-name: kezio-boot-network-vm-b
+
+      - name: Create Machine A
+        uses: ./.github/actions/create-bmc-machine
+        with:
+          secret-name: "${{ env.VM_A_NAME }}-bmc-creds"
+          machine-name: ${{ env.VM_A_NAME }}
+          bmc-address: "redfish+http://${{ env.VM_A_NAME }}-virtbmc.scaffold-system.svc.cluster.local/redfish/v1/Systems/1"
+          boot-mac: ${{ env.VM_A_MAC }}
+          subnet-name: ${{ env.SUBNET_A_NAME }}
+          target-disk-serial: "${{ env.DISK_A_SERIAL }}"
+
+      - name: Create Machine B
+        uses: ./.github/actions/create-bmc-machine
+        with:
+          secret-name: "${{ env.VM_B_NAME }}-bmc-creds"
+          machine-name: ${{ env.VM_B_NAME }}
+          bmc-address: "redfish+http://${{ env.VM_B_NAME }}-virtbmc.scaffold-system.svc.cluster.local/redfish/v1/Systems/1"
+          boot-mac: ${{ env.VM_B_MAC }}
+          subnet-name: ${{ env.SUBNET_B_NAME }}
+          target-disk-serial: "${{ env.DISK_B_SERIAL }}"
+
+      # Both machines' BMC/Redfish endpoints are stood up back-to-back,
+      # before either wait-agent-registered below, so both power on and
+      # PXE-boot concurrently rather than one fully enrolling before the
+      # other starts.
+      - name: Provision target VM A through a real KubeVirtBMC/Redfish endpoint
+        uses: ./.github/actions/provision-target-vm-via-bmc
+        with:
+          vm-name: ${{ env.VM_A_NAME }}
+          bmc-creds-secret-name: "${{ env.VM_A_NAME }}-bmc-creds"
+
+      - name: Provision target VM B through a real KubeVirtBMC/Redfish endpoint
+        uses: ./.github/actions/provision-target-vm-via-bmc
+        with:
+          vm-name: ${{ env.VM_B_NAME }}
+          bmc-creds-secret-name: "${{ env.VM_B_NAME }}-bmc-creds"
+
+      - name: Start continuous VM console capture (A)
+        uses: ./.github/actions/capture-vm-console
+        with:
+          vm-name: ${{ env.VM_A_NAME }}
+          logfile: ${{ runner.temp }}/console-routed-a.log
+
+      - name: Start continuous VM console capture (B)
+        uses: ./.github/actions/capture-vm-console
+        with:
+          vm-name: ${{ env.VM_B_NAME }}
+          logfile: ${{ runner.temp }}/console-routed-b.log
+
+      - name: Wait for machine A's agent to register and the Machine to become Available
+        uses: ./.github/actions/wait-agent-registered
+        with:
+          machine-name: ${{ env.VM_A_NAME }}
+
+      - name: Wait for machine B's agent to register and the Machine to become Available
+        uses: ./.github/actions/wait-agent-registered
+        with:
+          machine-name: ${{ env.VM_B_NAME }}
+
+      - name: Create the image-service bearer token Secret
+        uses: ./.github/actions/create-image-service-token-secret
+        with:
+          token: ${{ env.IMAGE_SERVICE_TOKEN }}
+
+      - name: Deploy image-service
+        uses: ./.github/actions/deploy-image-service
+        with:
+          image-service-image: example.com/kezio-image-service:e2e
+          staging-size: "2Gi"
+
+      - name: Verify image-path prerequisites
+        uses: ./.github/actions/verify-image-path-prerequisites
+        with:
+          tracker-label-selector: "app.kubernetes.io/component=tracker"
+
+      # Built and ingested once: both machines deploy this same Image, off
+      # the one shared seeder Deployment on segment C.
+      - name: Build and ingest the shared test image
+        id: build-image
+        uses: ./.github/actions/build-deploy-test-image
+        with:
+          token: ${{ env.IMAGE_SERVICE_TOKEN }}
+
+      - name: Create the full-deploy marker PostHook
+        id: marker
+        uses: ./.github/actions/create-deploy-marker-posthook
+
+      - name: Capture the pre-deploy timestamp
+        id: pre-deploy
+        run: echo "timestamp-ns=$(date -u +%s%N)" >>"${GITHUB_OUTPUT}"
+
+      # Both machines' deploy intent is patched in back-to-back, before
+      # either wait below - this is what starts both deploys inside the
+      # same window (proof 1). deploy-machine's own patch step later
+      # re-applies the identical merge patch (a no-op) before it waits.
+      - name: Set machine A's deploy intent
+        shell: bash
+        run: |
+          set -euo pipefail
+          patch='{"spec":{"imageRef":{"name":"${{ steps.build-image.outputs.image-name }}"},"postHookRefs":[{"name":"${{ steps.marker.outputs.name }}"},{"name":"kezio-default-finalize"}]}}'
+          kubectl patch machine "${{ env.VM_A_NAME }}" -n scaffold-system --type=merge -p "${patch}"
+
+      - name: Set machine B's deploy intent
+        shell: bash
+        run: |
+          set -euo pipefail
+          patch='{"spec":{"imageRef":{"name":"${{ steps.build-image.outputs.image-name }}"},"postHookRefs":[{"name":"${{ steps.marker.outputs.name }}"},{"name":"kezio-default-finalize"}]}}'
+          kubectl patch machine "${{ env.VM_B_NAME }}" -n scaffold-system --type=merge -p "${patch}"
+
+      # Proof 1 (concurrency) and proof 5 (PartitionContent.status.seeders[]
+      # reports one Site entry with machineCount 2) together: no existing
+      # action asserts either shape, so this polls until both Machines are
+      # observed mid-deploy (state != Provisioned, with a live DeployRun)
+      # at the same instant that a PartitionContent the shared Image
+      # references reports machineCount 2 for this Site - proving the two
+      # deploys actually overlapped rather than merely both eventually
+      # succeeding, and that Site-scoped demand grouping counts both
+      # machines as one Site's demand.
+      - name: Assert both deploys are in flight at once, with PartitionContent reporting machineCount 2
+        shell: bash
+        env:
+          NAMESPACE: "scaffold-system"
+          IMAGE_NAME: ${{ steps.build-image.outputs.image-name }}
+          SITE_IDENTITY: "scaffold-system/${{ env.SITE_NAME }}"
+        run: |
+          set -euo pipefail
+          content_names="$(kubectl get image "${IMAGE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.spec.slots[*].contentRef.name}')"
+          deadline=$(( $(date +%s) + 180 ))
+          found=0
+          while true; do
+            state_a="$(kubectl get machine "${{ env.VM_A_NAME }}" -n "${NAMESPACE}" -o jsonpath='{.status.state}' || true)"
+            run_a="$(kubectl get machine "${{ env.VM_A_NAME }}" -n "${NAMESPACE}" -o jsonpath='{.status.currentRunRef.name}' || true)"
+            state_b="$(kubectl get machine "${{ env.VM_B_NAME }}" -n "${NAMESPACE}" -o jsonpath='{.status.state}' || true)"
+            run_b="$(kubectl get machine "${{ env.VM_B_NAME }}" -n "${NAMESPACE}" -o jsonpath='{.status.currentRunRef.name}' || true)"
+            machine_count=0
+            for c in ${content_names}; do
+              mc="$(kubectl get partitioncontent "${c}" -n "${NAMESPACE}" -o json 2>/dev/null | \
+                jq -r --arg s "${SITE_IDENTITY}" '[(.status.seeders // [])[] | select(.site==$s) | .machineCount] | first // 0')"
+              if [ "${mc}" = "2" ]; then
+                machine_count=2
+                break
+              fi
+            done
+            echo "$(date -Is) machineA state=${state_a:-<empty>} run=${run_a:-<none>} | machineB state=${state_b:-<empty>} run=${run_b:-<none>} | PartitionContent machineCount seen=${machine_count}"
+            if [ "${state_a}" != "Provisioned" ] && [ -n "${run_a}" ] && \
+               [ "${state_b}" != "Provisioned" ] && [ -n "${run_b}" ] && \
+               [ "${machine_count}" = "2" ]; then
+              found=1
+              break
+            fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              break
+            fi
+            sleep 3
+          done
+          if [ "${found}" -ne 1 ]; then
+            echo "::error::never observed both machines mid-deploy together with PartitionContent.status.seeders[] reporting machineCount=2 for Site ${SITE_IDENTITY} within the timeout - the concurrent-deploy and per-Site-demand-grouping claims are unproven" >&2
+            exit 1
+          fi
+          {
+            echo "### Concurrent deploy evidence"
+            echo "Both ${{ env.VM_A_NAME }} and ${{ env.VM_B_NAME }} were observed mid-deploy (state != Provisioned, with an active DeployRun) at the same poll instant that PartitionContent reported machineCount=2 for Site ${SITE_IDENTITY}."
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Wait for machine A to reach Provisioned
+        id: deploy-a
+        uses: ./.github/actions/deploy-machine
+        with:
+          machine-name: ${{ env.VM_A_NAME }}
+          image-name: ${{ steps.build-image.outputs.image-name }}
+          posthook-names: |
+            ${{ steps.marker.outputs.name }}
+            kezio-default-finalize
+
+      - name: Wait for machine B to reach Provisioned
+        id: deploy-b
+        uses: ./.github/actions/deploy-machine
+        with:
+          machine-name: ${{ env.VM_B_NAME }}
+          image-name: ${{ steps.build-image.outputs.image-name }}
+          posthook-names: |
+            ${{ steps.marker.outputs.name }}
+            kezio-default-finalize
+
+      # Proof 7: the same three-layer verification the single-segment
+      # deploy lane uses, for both machines.
+      - name: Verify machine A's deploy landed
+        uses: ./.github/actions/verify-deploy
+        with:
+          machine-name: ${{ steps.deploy-a.outputs.machine-name }}
+          namespace: ${{ steps.deploy-a.outputs.namespace }}
+          deploy-run-name: ${{ steps.deploy-a.outputs.deploy-run-name }}
+          pre-deploy-timestamp-ns: ${{ steps.pre-deploy.outputs.timestamp-ns }}
+
+      - name: Verify machine B's deploy landed
+        uses: ./.github/actions/verify-deploy
+        with:
+          machine-name: ${{ steps.deploy-b.outputs.machine-name }}
+          namespace: ${{ steps.deploy-b.outputs.namespace }}
+          deploy-run-name: ${{ steps.deploy-b.outputs.deploy-run-name }}
+          pre-deploy-timestamp-ns: ${{ steps.pre-deploy.outputs.timestamp-ns }}
+
+      # Proof 2: exactly one seeder Deployment for the (Image, Site) pair,
+      # single-homed on segment C.
+      - name: Assert the shared seeder Deployment's placement and tuning contract
+        uses: ./.github/actions/assert-seeder-placement
+        with:
+          image-name: ${{ steps.build-image.outputs.image-name }}
+          site-namespace: "scaffold-system"
+          site-name: ${{ env.SITE_NAME }}
+          expected-seeding-nad: "scaffold-system/kezio-seeder-network"
+          expected-tracker-url: "http://${{ env.TRACKER_IP }}:6969/announce"
+
+      # Proof 2 (explicit half): no second seeder Deployment appeared even
+      # though two machines on two different Subnets demanded seeding -
+      # this is the defect section 3 describes, made an explicit check
+      # rather than an implication of the placement assertion above.
+      - name: Assert no second seeder Deployment appeared
+        shell: bash
+        run: |
+          set -euo pipefail
+          count="$(kubectl get deployments -n scaffold-system -l app.kubernetes.io/component=image-seeder -o json | jq '.items | length')"
+          echo "seeder Deployments in scaffold-system: ${count}"
+          if [ "${count}" -ne 1 ]; then
+            echo "::error::expected exactly 1 seeder Deployment in scaffold-system (one per (Image, Site) pair; this lane deploys one Image to one Site), found ${count}" >&2
+            kubectl get deployments -n scaffold-system -l app.kubernetes.io/component=image-seeder -o wide
+            exit 1
+          fi
+
+      # Proof 3: the tracker is Site-owned on segment C at its pinned
+      # address, with no Service.
+      - name: Assert the Site's tracker placement and status reflection
+        uses: ./.github/actions/assert-tracker-placement
+        with:
+          site-namespace: "scaffold-system"
+          site-name: ${{ env.SITE_NAME }}
+          expected-seeding-nad-namespace: "scaffold-system"
+          expected-seeding-nad-name: "kezio-seeder-network"
+          expected-tracker-ip: ${{ env.TRACKER_IP }}
+
+      # Reconstructs the exact torrent URL the plan handed each agent
+      # (planbuild.resolveTorrentURL's own output) the same way run-leecher
+      # does: no DeployRun field carries it (the plan is never persisted -
+      # see agentapi.DeployPlan's own doc comment), so it is rebuilt from
+      # the shared seeder's own pod IP and the Image's own content hash.
+      # Both machines were handed this identical URL, since they share the
+      # one seeder Deployment.
+      - name: Resolve the shared seeder's torrent URL
+        id: torrent
+        shell: bash
+        env:
+          NAMESPACE: "scaffold-system"
+          IMAGE_NAME: ${{ steps.build-image.outputs.image-name }}
+          SITE_IDENTITY: "scaffold-system/${{ env.SITE_NAME }}"
+        run: |
+          set -euo pipefail
+          prefix="kezio-seeder-"
+          suffix="-$(printf '%s' "${SITE_IDENTITY}" | sha256sum | cut -c1-8)"
+          max_name_length=63
+          max_base_len=$(( max_name_length - ${#prefix} - ${#suffix} ))
+          base="${IMAGE_NAME}"
+          if [ "${#base}" -gt "${max_base_len}" ]; then
+            base="${base:0:${max_base_len}}"
+          fi
+          seeder_name="${prefix}${base}${suffix}"
+          selector="$(kubectl get deployment "${seeder_name}" -n "${NAMESPACE}" -o json | \
+            jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")')"
+          pod_ip="$(kubectl get pods -n "${NAMESPACE}" -l "${selector}" -o jsonpath='{.items[0].status.podIP}')"
+          content_name="$(kubectl get image "${IMAGE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.spec.slots[0].contentRef.name}')"
+          info_hash="${content_name#pc-}"
+          torrent_url="http://${pod_ip}:8080/torrents/${info_hash}"
+          echo "seeder ${seeder_name} pod ${pod_ip}, torrent URL ${torrent_url}"
+          echo "torrent-url=${torrent_url}" >>"${GITHUB_OUTPUT}"
+
+      # Proof 4: each agent's torrent URL lies outside its own machine's
+      # subnet, the served torrent announces the Site's tracker, and both
+      # seeder ports answer across the segment boundary - once per
+      # machine, with that machine's own CIDR/bridge.
+      - name: Assert seeder L3 reachability from machine A's segment
+        uses: ./.github/actions/assert-seeder-l3
+        with:
+          machine-cidr: ${{ env.SEG_A_CIDR }}
+          torrent-url: ${{ steps.torrent.outputs.torrent-url }}
+          expected-tracker-url: "http://${{ env.TRACKER_IP }}:6969/announce"
+          bridge-name: ${{ env.SEG_A_BRIDGE }}
+          probe-cidr: "198.51.100.250/24"
+          gateway-ip: ${{ env.SEG_A_HOST_ADDR }}
+          netns-name: "kezio-seeder-l3-probe-a"
+
+      - name: Assert seeder L3 reachability from machine B's segment
+        uses: ./.github/actions/assert-seeder-l3
+        with:
+          machine-cidr: ${{ env.SEG_B_CIDR }}
+          torrent-url: ${{ steps.torrent.outputs.torrent-url }}
+          expected-tracker-url: "http://${{ env.TRACKER_IP }}:6969/announce"
+          bridge-name: ${{ env.SEG_B_BRIDGE }}
+          probe-cidr: "198.51.101.250/24"
+          gateway-ip: ${{ env.SEG_B_HOST_ADDR }}
+          netns-name: "kezio-seeder-l3-probe-b"
+
+      # Proof 6: Site status is healthy.
+      - name: Assert the Site's status
+        uses: ./.github/actions/assert-site-status
+        with:
+          site-namespace: "scaffold-system"
+          site-name: ${{ env.SITE_NAME }}
+          expected-subnet-refs: |
+            ${{ env.SUBNET_A_NAME }}
+            ${{ env.SUBNET_B_NAME }}
+            ${{ env.SUBNET_C_NAME }}
+          expected-seeder-ready: "true"
+          expected-conditions: |
+            Ready|True
+            Valid|True
+
+      # seeder-label-selector overrides this action's own default
+      # ("...component=partition-content-seeder", which matches no real
+      # object - the seeder Deployment's actual label, per
+      # internal/controller/partitioncontent_labels.go, is
+      # "component=image-seeder", the same value assert-seeder-placement
+      # and this job's own no-second-seeder check already use).
+      - name: Collect site/tracker/seeder/bootd/runner-network diagnostics
+        if: always()
+        uses: ./.github/actions/collect-site-diagnostics
+        with:
+          artifact-name-prefix: routed
+          namespaces: "scaffold-system"
+          tracker-label-selector: "app.kubernetes.io/name=kezio,app.kubernetes.io/component=tracker"
+          seeder-label-selector: "app.kubernetes.io/name=kezio,app.kubernetes.io/component=image-seeder"
+          bridges: |
+            ${{ env.SEG_A_BRIDGE }}
+            ${{ env.SEG_B_BRIDGE }}
+            ${{ env.SEG_C_BRIDGE }}
+          extra-artifact-paths: |
+            ${{ runner.temp }}/console-routed-a.log
+            ${{ runner.temp }}/console-routed-b.log
+
   # Stable required-check names for the branch ruleset. The real jobs
   # hang off these through `needs`; the ruleset references "Build" and
   # "E2E" so the graph can grow without ruleset edits.
@@ -1231,10 +1951,12 @@ jobs:
       - e2e-fast-lane
       - e2e-image-path
       - e2e-deploy
+      - e2e-routed-site
     steps:
       - name: All e2e lanes passed
         run: |
           [ "${{ needs.e2e-network-probes.result }}" = "success" ] && \
             [ "${{ needs.e2e-fast-lane.result }}" = "success" ] && \
             [ "${{ needs.e2e-image-path.result }}" = "success" ] && \
-            [ "${{ needs.e2e-deploy.result }}" = "success" ]
+            [ "${{ needs.e2e-deploy.result }}" = "success" ] && \
+            [ "${{ needs.e2e-routed-site.result }}" = "success" ]
