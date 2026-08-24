@@ -1145,14 +1145,29 @@ jobs:
           machine-name: ${{ env.TARGET_VM_NAME }}
           image-name: ${{ steps.build-image.outputs.image-name }}
 
-      # posthook-names left at deploy-machine's own default, empty: the
-      # controller substitutes kezio-default-finalize on its own.
+      # The only lane that runs a PostHook script step at all. Created
+      # here, one step before the deploy that names it, so the hook is
+      # already Valid when plan build reaches it.
+      - name: Create the script-step environment contract PostHook
+        id: script-env-hook
+        uses: ./.github/actions/create-script-env-posthook
+
+      # posthook-names names two hooks, in this order: the script-step
+      # environment contract check first, so a broken contract fails the
+      # deploy before the finalize builtins change the disk or the NVRAM,
+      # then kezio-default-finalize. A Machine that names any hook does
+      # not get the automatic substitution of kezio-default-finalize, thus
+      # this list must name it too (see deploy-machine's own guard and
+      # MachineSpec.PostHookRefs).
       - name: Set the Machine's deploy intent and wait for Provisioned
         id: deploy
         uses: ./.github/actions/deploy-machine
         with:
           machine-name: ${{ env.TARGET_VM_NAME }}
           image-name: ${{ steps.build-image.outputs.image-name }}
+          posthook-names: |
+            ${{ steps.script-env-hook.outputs.posthook-name }}
+            kezio-default-finalize
 
       - name: Verify the deploy landed
         uses: ./.github/actions/verify-deploy

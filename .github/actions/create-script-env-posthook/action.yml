@@ -1,0 +1,243 @@
+name: Create the PostHook that proves the script-step environment contract
+
+description: >-
+  Creates a PostHook with one script step and waits for it to pass static
+  validation, so a lane can name it in a Machine's postHookRefs. The step
+  is the only end-to-end coverage of the environment contract a script
+  step runs under (api/v1alpha2's PostHookStep.Script and
+  internal/agent/deploy's scriptStepEnv/slotEnv): the agent hands the
+  deploy plan's device paths to the script through KEZIO_TARGET_DISK,
+  KEZIO_PARTITIONS, KEZIO_PART_<number>, and the KEZIO_DATA_DISK_<index>*
+  set, keyed by partition number and not by list position. Unit tests
+  cover the names the agent builds; only a real deploying machine can
+  show that those names point at devices that exist.
+
+  The script is read only. It reads its own environment and sysfs, and
+  writes to, mounts, and changes nothing - the deployed file systems it
+  could reach are the highest-blast-radius surface in kezio, and this
+  step checks an interface rather than changing anything. It also uses no
+  marker token: the marker lives in the image and verify-deploy checks it
+  on its own.
+
+  Every check names what failed on stderr and exits with its own status,
+  listed in the script itself. The status is the part that travels: a
+  failed script step reaches the DeployRun as "running script: /bin/sh:
+  exit status N" (internal/agent/execrunner.go captures the command's
+  own output but does not put it in the error), so a distinct status per
+  check is what tells the reader which assertion broke.
+
+  What the script proves, all of it derived at run time rather than
+  hardcoded, since the numbers a real image carries are not contiguous
+  (the lane's Ubuntu cloud image ships 1, 14, 15, 16 - see
+  build-deploy-test-image):
+
+    - KEZIO_TARGET_DISK is set and equal to the "{{ .targetDisk }}"
+      reserved template value, which the manager resolves separately, and
+      names a block device present on the machine.
+    - Every number in KEZIO_PARTITIONS has its own KEZIO_PART_<number>,
+      each naming a block device that the kernel reports as that exact
+      partition number of the target disk. A contract keyed by list
+      position instead of partition number fails here.
+    - Every partition the kernel reports on the target disk appears in
+      KEZIO_PARTITIONS, so a short or truncated list cannot pass.
+    - KEZIO_DATA_DISKS is absent, which is how a script tells "the plan
+      has no data image" from "the plan has one". Name this PostHook only
+      on a deploy with no dataImages entry.
+
+  The caller must name kezio-default-finalize in the same postHookRefs
+  list (see deploy-machine's posthook-names input and its own guard):
+  naming any hook at all opts the Machine out of the automatic
+  substitution, and the deployed disk would never get its boot entry.
+  Name this hook first in that list, so a broken contract fails the
+  deploy before the finalize builtins change the disk or the NVRAM.
+
+inputs:
+  name:
+    description: Name to give the PostHook this action creates.
+    required: false
+    default: "kezio-e2e-script-env"
+  namespace:
+    description: >-
+      Namespace the PostHook is created in. Must be the namespace of the
+      Machine that names it - a Machine's postHookRefs resolve in the
+      Machine's own namespace unless the ref sets one.
+    required: false
+    default: "scaffold-system"
+  timeout:
+    description: >-
+      Timeout to wait for the PostHook's Valid condition to reach True,
+      in seconds as an integer, optionally suffixed with s. Static
+      validation only, so this is short: a hook that stays not-Valid
+      would otherwise only surface as a deploy that never leaves the
+      plan-build stage.
+    required: false
+    default: "60s"
+
+outputs:
+  posthook-name:
+    description: 'Name of the PostHook created (this action''s own name input, echoed back for a deploy-machine posthook-names list).'
+    value: ${{ inputs.name }}
+
+runs:
+  using: composite
+  steps:
+    - name: Create the script-step environment contract PostHook
+      shell: bash
+      env:
+        NAME: ${{ inputs.name }}
+        NAMESPACE: ${{ inputs.namespace }}
+      run: |
+        set -euo pipefail
+
+        # Quoted heredoc: every "${...}" below is a shell expansion the
+        # script performs on the deploying machine, and "{{ .targetDisk }}"
+        # is a template placeholder the manager resolves - neither may be
+        # expanded here. jq assembles the manifest so the script's own
+        # indentation never has to survive a YAML block scalar.
+        script_path="${RUNNER_TEMP}/kezio-script-env-posthook.sh"
+        cat >"${script_path}" <<'SCRIPT_ENV_CONTRACT'
+        #!/bin/sh
+        # Read-only check of the script-step environment contract. Reads
+        # the environment and sysfs; writes nothing, mounts nothing.
+        #
+        # Exit status per check, the only detail that reaches the
+        # DeployRun's error message:
+        #   11 KEZIO_TARGET_DISK unset
+        #   12 KEZIO_TARGET_DISK disagrees with the targetDisk template value
+        #   13 KEZIO_TARGET_DISK is not a block device
+        #   14 KEZIO_PARTITIONS unset or empty
+        #   15 KEZIO_DATA_DISKS set on a deploy with no data image
+        #   16 the target disk has no sysfs entry
+        #   17 KEZIO_PARTITIONS holds something that is not a number
+        #   18 a listed partition has no KEZIO_PART_<number>
+        #   19 a KEZIO_PART_<number> is not a block device
+        #   20 a KEZIO_PART_<number> is not a partition
+        #   21 a KEZIO_PART_<number> is a different partition number
+        #   22 a KEZIO_PART_<number> sits on another disk
+        #   23 the target disk carries a partition KEZIO_PARTITIONS omits
+
+        fail() {
+        	status="$1"
+        	shift
+        	echo "script-env-contract: $*" >&2
+        	exit "${status}"
+        }
+
+        # POSIX sh has no "${!name}", so the KEZIO_PART_<number> read goes
+        # through eval.
+        part_device() {
+        	eval "printf '%s' \"\${KEZIO_PART_$1:-}\""
+        }
+
+        # Kernel name of a device path, so a symlink (a /dev/disk/by-id
+        # path, for example) still lands on its /sys/class/block entry.
+        kernel_name() {
+        	resolved="$(readlink -f "$1")" || return 1
+        	printf '%s' "${resolved##*/}"
+        }
+
+        [ -n "${KEZIO_TARGET_DISK:-}" ] ||
+        	fail 11 "KEZIO_TARGET_DISK is unset, but this deploy writes an OS image"
+        # The manager resolves the target disk once and reports it through
+        # two independent channels: this reserved template value, and the
+        # agent's own environment. They must agree.
+        expected_disk='{{ .targetDisk }}'
+        [ "${KEZIO_TARGET_DISK}" = "${expected_disk}" ] ||
+        	fail 12 "KEZIO_TARGET_DISK is '${KEZIO_TARGET_DISK}', but the plan builder resolved the target disk as '${expected_disk}'"
+        [ -b "${KEZIO_TARGET_DISK}" ] ||
+        	fail 13 "KEZIO_TARGET_DISK names '${KEZIO_TARGET_DISK}', which is not a block device on this machine"
+        [ -n "${KEZIO_PARTITIONS:-}" ] ||
+        	fail 14 "KEZIO_PARTITIONS is unset or empty, but KEZIO_TARGET_DISK names '${KEZIO_TARGET_DISK}'"
+        [ -z "${KEZIO_DATA_DISKS:-}" ] ||
+        	fail 15 "KEZIO_DATA_DISKS is '${KEZIO_DATA_DISKS}', but this deploy has no data image"
+
+        disk_name="$(kernel_name "${KEZIO_TARGET_DISK}")" ||
+        	fail 16 "cannot resolve KEZIO_TARGET_DISK '${KEZIO_TARGET_DISK}' to a kernel device name"
+        [ -d "/sys/class/block/${disk_name}" ] ||
+        	fail 16 "KEZIO_TARGET_DISK names '${KEZIO_TARGET_DISK}', which has no /sys/class/block/${disk_name} entry"
+
+        for number in ${KEZIO_PARTITIONS}; do
+        	case "${number}" in
+        	'' | *[!0-9]*)
+        		fail 17 "KEZIO_PARTITIONS is '${KEZIO_PARTITIONS}', which holds '${number}' - every entry must be a partition number"
+        		;;
+        	esac
+
+        	device="$(part_device "${number}")"
+        	[ -n "${device}" ] ||
+        		fail 18 "KEZIO_PARTITIONS lists partition ${number}, but KEZIO_PART_${number} is unset"
+        	[ -b "${device}" ] ||
+        		fail 19 "KEZIO_PART_${number} names '${device}', which is not a block device on this machine"
+
+        	part_name="$(kernel_name "${device}")" ||
+        		fail 19 "cannot resolve KEZIO_PART_${number} '${device}' to a kernel device name"
+        	sysfs="/sys/class/block/${part_name}"
+        	[ -r "${sysfs}/partition" ] ||
+        		fail 20 "KEZIO_PART_${number} names '${device}', which the kernel does not report as a partition"
+
+        	read -r actual <"${sysfs}/partition"
+        	[ "${actual}" = "${number}" ] ||
+        		fail 21 "KEZIO_PART_${number} names '${device}', which the kernel reports as partition ${actual} - these names are keyed by partition number, not by position in KEZIO_PARTITIONS"
+
+        	holder="$(kernel_name "$(dirname "$(readlink -f "${sysfs}")")")" ||
+        		fail 22 "cannot resolve the disk KEZIO_PART_${number} '${device}' sits on"
+        	[ "${holder}" = "${disk_name}" ] ||
+        		fail 22 "KEZIO_PART_${number} names '${device}', which sits on ${holder}, not on the target disk ${disk_name}"
+
+        	echo "script-env-contract: KEZIO_PART_${number}=${device} is partition ${actual} of ${disk_name}"
+        done
+
+        # The other direction: a list that names fewer partitions than the
+        # disk carries would pass every check above.
+        for partition_file in "/sys/class/block/${disk_name}"/*/partition; do
+        	[ -r "${partition_file}" ] || continue
+        	read -r number <"${partition_file}"
+        	listed=""
+        	for candidate in ${KEZIO_PARTITIONS}; do
+        		if [ "${candidate}" = "${number}" ]; then
+        			listed="yes"
+        		fi
+        	done
+        	[ -n "${listed}" ] ||
+        		fail 23 "the target disk ${disk_name} carries partition ${number}, which KEZIO_PARTITIONS ('${KEZIO_PARTITIONS}') does not list"
+        done
+
+        echo "script-env-contract: ${KEZIO_TARGET_DISK} carries exactly the partitions KEZIO_PARTITIONS lists: ${KEZIO_PARTITIONS}"
+        SCRIPT_ENV_CONTRACT
+
+        jq -n \
+          --arg name "${NAME}" \
+          --arg namespace "${NAMESPACE}" \
+          --rawfile script "${script_path}" \
+          '{
+            apiVersion: "kezio.kojuro.date/v1alpha2",
+            kind: "PostHook",
+            metadata: {name: $name, namespace: $namespace},
+            spec: {steps: [{osFamily: "Linux", script: {script: $script}}]}
+          }' | kubectl apply -f -
+
+    - name: Wait for the PostHook to pass static validation
+      shell: bash
+      env:
+        NAME: ${{ inputs.name }}
+        NAMESPACE: ${{ inputs.namespace }}
+        TIMEOUT: ${{ inputs.timeout }}
+      run: |
+        set -euo pipefail
+        if [[ ! "${TIMEOUT}" =~ ^[0-9]+s?$ ]]; then
+          echo "::error::invalid timeout '${TIMEOUT}': want seconds like 60 or 60s" >&2
+          exit 1
+        fi
+        deadline=$(( $(date +%s) + ${TIMEOUT%s} ))
+
+        while true; do
+          valid="$(kubectl get posthook "${NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.conditions[?(@.type=="Valid")].status}' || true)"
+          echo "$(date -Is) PostHook ${NAME} Valid=${valid:-<none>}"
+          [ "${valid}" = "True" ] && break
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::PostHook ${NAME} did not reach Valid=True within ${TIMEOUT} - a Machine that names a not-Valid hook never leaves plan build, which would only surface as a deploy timeout" >&2
+            kubectl get posthook "${NAME}" -n "${NAMESPACE}" -o yaml || true
+            exit 1
+          fi
+          sleep 2
+        done
