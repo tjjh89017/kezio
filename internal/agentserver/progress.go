@@ -19,6 +19,7 @@ package agentserver
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -56,8 +57,8 @@ func (s *Server) persistProgress(ctx context.Context, machine *keziov1alpha2.Mac
 }
 
 // applyProgressToDeployRun maps one ProgressRequest onto run's status in
-// place: run.status.phase, phaseTimings, and - on a terminal report - the
-// DeployRunConditionSucceeded condition. It mirrors exactly what
+// place: run.status.phase, partitions, phaseTimings, and - on a terminal
+// report - the DeployRunConditionSucceeded condition. It mirrors what
 // internal/agent/deploy.Executor emits: reportRunning/reportSucceeded
 // pairs for every ordinary phase, and a single, Running-less
 // reportSucceeded(DeployRunPhaseSucceeded) as the whole run's terminal
@@ -67,6 +68,7 @@ func (s *Server) persistProgress(ctx context.Context, machine *keziov1alpha2.Mac
 func applyProgressToDeployRun(run *keziov1alpha2.DeployRun, req agentapi.ProgressRequest) {
 	ts := metav1.NewTime(req.Timestamp)
 	enterPhase(run, req.Step, ts)
+	applyPartitionProgress(run, req.Partitions)
 
 	switch req.State {
 	case agentapi.ProgressStateSucceeded:
@@ -78,6 +80,30 @@ func applyProgressToDeployRun(run *keziov1alpha2.DeployRun, req agentapi.Progres
 		closeCurrentPhaseTiming(run, ts)
 		run.Status.Phase = keziov1alpha2.DeployRunPhaseFailed
 		setSucceededCondition(run, metav1.ConditionFalse, "DeployFailed", progressMessage(req.Message, "deploy failed"))
+	}
+}
+
+// applyPartitionProgress upserts each reported partition onto
+// run.Status.Partitions, keyed by partition number: an entry already
+// there is replaced (a report is a snapshot, not a delta - see
+// agentapi.ProgressRequest.Partitions), and a partition number not seen
+// before is appended, so the list grows in the order the agent first
+// reported each partition. A report naming no partition leaves the list
+// untouched.
+func applyPartitionProgress(run *keziov1alpha2.DeployRun, partitions []agentapi.ProgressPartition) {
+	for _, p := range partitions {
+		entry := keziov1alpha2.DeployRunPartitionProgress{
+			Number:    p.Number,
+			Percent:   p.Percent,
+			BytesDone: p.BytesDone,
+		}
+		if i := slices.IndexFunc(run.Status.Partitions, func(e keziov1alpha2.DeployRunPartitionProgress) bool {
+			return e.Number == p.Number
+		}); i >= 0 {
+			run.Status.Partitions[i] = entry
+			continue
+		}
+		run.Status.Partitions = append(run.Status.Partitions, entry)
 	}
 }
 

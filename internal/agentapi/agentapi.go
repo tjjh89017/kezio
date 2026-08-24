@@ -404,8 +404,31 @@ type ProgressRequest struct {
 	// BytesDone is the number of bytes written so far, present under the
 	// same condition as PercentDone.
 	BytesDone *int64 `json:"bytesDone,omitempty"`
+	// Partitions carries per-partition detail for the partitions this
+	// report has fresh progress for - the whole-run PercentDone/BytesDone
+	// above aggregate over every partition and cannot say which one moved.
+	// Each entry is a snapshot of that partition's current state, not a
+	// delta, and a report names only the partitions it has news about, so
+	// a partition absent here keeps whatever the last report said about
+	// it. Empty on a report from an agent built before this field existed.
+	Partitions []ProgressPartition `json:"partitions,omitempty"`
 	// Timestamp is when the agent observed this report's state.
 	Timestamp time.Time `json:"timestamp"`
+}
+
+// ProgressPartition is one partition's progress within a ProgressRequest,
+// mirroring keziov1alpha2.DeployRunPartitionProgress (the shape the
+// controller records it in) field for field.
+type ProgressPartition struct {
+	// Number is the partition number, matching the DeploySlot.Number this
+	// progress is for. It is the only key the DeployRun status records, so
+	// two slots that share a number on different disks of one plan
+	// collapse into a single recorded entry.
+	Number int32 `json:"number"`
+	// Percent is this partition's completion percentage, 0-100.
+	Percent int32 `json:"percent"`
+	// BytesDone is the bytes written to this partition so far.
+	BytesDone int64 `json:"bytesDone,omitempty"`
 }
 
 // ProgressState values for ProgressRequest.State.

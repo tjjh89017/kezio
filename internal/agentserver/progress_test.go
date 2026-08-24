@@ -18,6 +18,7 @@ package agentserver
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -217,6 +218,41 @@ func TestPersistProgress_FailedSetsPhaseFailedWithMessage(t *testing.T) {
 	}
 	if len(stored.Status.PhaseTimings) != 1 || stored.Status.PhaseTimings[0].FinishedAt == nil {
 		t.Fatalf("PhaseTimings = %+v, want the Partitioning entry closed", stored.Status.PhaseTimings)
+	}
+}
+
+func TestPersistProgress_PartitionsAreUpsertedByNumber(t *testing.T) {
+	machine := newProgressTestMachine()
+	c := newProgressTestClient(t, machine)
+	run := newProgressTestRun(t, c)
+	s := &Server{Client: c}
+
+	reports := [][]agentapi.ProgressPartition{
+		{{Number: 1, Percent: 40, BytesDone: 400}},
+		{{Number: 1, Percent: 100, BytesDone: 1000}, {Number: 3, Percent: 100, BytesDone: 30}},
+	}
+	for i, partitions := range reports {
+		req := agentapi.ProgressRequest{
+			RunName: run.Name, RunUID: string(run.UID),
+			Step: keziov1alpha2.DeployRunPhaseWritingContent, State: agentapi.ProgressStateRunning,
+			Partitions: partitions,
+			Timestamp:  time.Now(),
+		}
+		if err := s.persistProgress(context.Background(), machine, req); err != nil {
+			t.Fatalf("persistProgress[%d]: %v", i, err)
+		}
+	}
+
+	var stored keziov1alpha2.DeployRun
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(run), &stored); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	want := []keziov1alpha2.DeployRunPartitionProgress{
+		{Number: 1, Percent: 100, BytesDone: 1000},
+		{Number: 3, Percent: 100, BytesDone: 30},
+	}
+	if !reflect.DeepEqual(stored.Status.Partitions, want) {
+		t.Fatalf("Partitions = %+v, want %+v", stored.Status.Partitions, want)
 	}
 }
 

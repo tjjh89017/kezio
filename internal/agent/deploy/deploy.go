@@ -368,6 +368,12 @@ func (e *Executor) writeSlots(ctx context.Context, dp diskPlan, handle EzioHandl
 		if err := e.writeSlot(ctx, dp, s, handle, plan); err != nil {
 			return err
 		}
+		if s.Torrent == nil {
+			// A mkfs or swap slot is fully written the moment its command
+			// returns; a torrent slot has only been handed to ezio here, so
+			// seedUntilStopped reports that one's progress instead.
+			e.reportPartitionComplete(ctx, plan, keziov1alpha2.DeployRunPhaseWritingContent, s.Number)
+		}
 	}
 	return nil
 }
@@ -487,6 +493,7 @@ func (e *Executor) seedUntilStopped(ctx context.Context, plan *agentapi.DeployPl
 	if len(hashes) == 0 {
 		return nil
 	}
+	slotNumbers := torrentSlotNumbers(plans)
 
 	ticker := time.NewTicker(e.pollInterval())
 	defer ticker.Stop()
@@ -497,16 +504,24 @@ func (e *Executor) seedUntilStopped(ctx context.Context, plan *agentapi.DeployPl
 			e.log("polling torrent status failed: %v", err)
 		} else {
 			var totalDone, total int64
+			partitions := make([]agentapi.ProgressPartition, 0, len(statuses))
 			for hash, t := range statuses {
 				totalDone += t.TotalDone
 				total += t.Total
+				if number, ok := slotNumbers[hash]; ok {
+					partitions = append(partitions, agentapi.ProgressPartition{
+						Number:    number,
+						Percent:   int32(aggregatePercent(t.Total, t.TotalDone)), //nolint:gosec // aggregatePercent clamps to [0,100]
+						BytesDone: t.TotalDone,
+					})
+				}
 				if shouldPauseTorrent(t) {
 					if err := client.PauseTorrent(ctx, hash); err != nil {
 						e.log("pausing torrent %s: %v", hash, err)
 					}
 				}
 			}
-			e.reportProgress(ctx, plan, keziov1alpha2.DeployRunPhaseWritingContent, aggregatePercent(total, totalDone), totalDone)
+			e.reportProgress(ctx, plan, keziov1alpha2.DeployRunPhaseWritingContent, aggregatePercent(total, totalDone), totalDone, partitions)
 			if allStopped(statuses) {
 				return nil
 			}
@@ -532,6 +547,21 @@ func torrentHashes(plans []diskPlan) []string {
 		}
 	}
 	return hashes
+}
+
+// torrentSlotNumbers maps every torrent slot's info hash to its partition
+// number, so a GetTorrentStatus response - keyed by info hash - can be
+// reported as per-partition progress.
+func torrentSlotNumbers(plans []diskPlan) map[string]int32 {
+	numbers := make(map[string]int32)
+	for _, dp := range plans {
+		for _, s := range dp.slots {
+			if s.Torrent != nil {
+				numbers[s.Torrent.InfoHash] = s.Number
+			}
+		}
+	}
+	return numbers
 }
 
 // aggregatePercent returns done as a 0-100 percentage of total, clamped,

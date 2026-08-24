@@ -19,6 +19,7 @@ package deploy
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -119,6 +120,29 @@ func TestExecute_HappyPath(t *testing.T) {
 	}
 	if last.RunName != plan.RunName || last.RunUID != plan.RunUID {
 		t.Errorf("final report run identity = %q/%q, want %q/%q", last.RunName, last.RunUID, plan.RunName, plan.RunUID)
+	}
+}
+
+func TestExecute_ReportsEveryPartitionReachingComplete(t *testing.T) {
+	client := newFakeEzioClient([]map[string]seeder.Torrent{finishedTorrent()})
+	e, _, _, reporter := newTestExecutor(client)
+
+	if err := e.Execute(context.Background(), basicPlan()); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	// The last percent reported for each partition number, across every
+	// report: basicPlan writes a mkfs slot, a swap slot, and a torrent
+	// slot, and all three must end at the documented 100 ceiling.
+	latest := map[int32]int32{}
+	for _, r := range reporter.Reports {
+		for _, p := range r.Partitions {
+			latest[p.Number] = p.Percent
+		}
+	}
+	want := map[int32]int32{1: 100, 2: 100, 3: 100}
+	if !maps.Equal(latest, want) {
+		t.Fatalf("per-partition progress = %v, want %v", latest, want)
 	}
 }
 

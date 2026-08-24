@@ -59,19 +59,21 @@ func (r *RecordingReporter) Report(_ context.Context, req agentapi.ProgressReque
 var now = time.Now
 
 // report sends one ProgressRequest built from plan's run identity plus
-// the given step/state/message/percent, through e.Progress. A delivery
-// error is logged, not propagated - see Reporter's doc comment.
-func (e *Executor) report(ctx context.Context, plan *agentapi.DeployPlan, step, state, message string, percentDone, bytesDone *int64) {
+// the given step/state/message/percent and per-partition detail, through
+// e.Progress. A delivery error is logged, not propagated - see Reporter's
+// doc comment.
+func (e *Executor) report(ctx context.Context, plan *agentapi.DeployPlan, step, state, message string, percentDone, bytesDone *int64, partitions []agentapi.ProgressPartition) {
 	if e.Progress == nil {
 		return
 	}
 	req := agentapi.ProgressRequest{
-		RunName:   plan.RunName,
-		RunUID:    plan.RunUID,
-		Step:      step,
-		State:     state,
-		Message:   message,
-		Timestamp: now(),
+		RunName:    plan.RunName,
+		RunUID:     plan.RunUID,
+		Step:       step,
+		State:      state,
+		Message:    message,
+		Partitions: partitions,
+		Timestamp:  now(),
 	}
 	if percentDone != nil {
 		p := int32(*percentDone) //nolint:gosec // callers clamp to [0,100]
@@ -87,22 +89,32 @@ func (e *Executor) report(ctx context.Context, plan *agentapi.DeployPlan, step, 
 
 // reportRunning reports step as having just started.
 func (e *Executor) reportRunning(ctx context.Context, plan *agentapi.DeployPlan, step string) {
-	e.report(ctx, plan, step, agentapi.ProgressStateRunning, "", nil, nil)
+	e.report(ctx, plan, step, agentapi.ProgressStateRunning, "", nil, nil, nil)
 }
 
 // reportProgress reports step still running, with the fine-grained detail
-// a content-writing tick carries.
-func (e *Executor) reportProgress(ctx context.Context, plan *agentapi.DeployPlan, step string, percentDone, bytesDone int64) {
-	e.report(ctx, plan, step, agentapi.ProgressStateRunning, "", &percentDone, &bytesDone)
+// a content-writing tick carries: the run-wide percent/bytes, and each
+// named partition's own share of it.
+func (e *Executor) reportProgress(ctx context.Context, plan *agentapi.DeployPlan, step string, percentDone, bytesDone int64, partitions []agentapi.ProgressPartition) {
+	e.report(ctx, plan, step, agentapi.ProgressStateRunning, "", &percentDone, &bytesDone, partitions)
+}
+
+// reportPartitionComplete reports one partition as fully written, while
+// step itself is still running. It is how a partition whose content is
+// laid down by a single command (mkfs, mkswap) reaches 100: unlike a
+// torrent slot, it has no intermediate progress to poll for.
+func (e *Executor) reportPartitionComplete(ctx context.Context, plan *agentapi.DeployPlan, step string, number int32) {
+	e.report(ctx, plan, step, agentapi.ProgressStateRunning, "", nil, nil,
+		[]agentapi.ProgressPartition{{Number: number, Percent: 100}})
 }
 
 // reportSucceeded reports step as finished successfully.
 func (e *Executor) reportSucceeded(ctx context.Context, plan *agentapi.DeployPlan, step, message string) {
-	e.report(ctx, plan, step, agentapi.ProgressStateSucceeded, message, nil, nil)
+	e.report(ctx, plan, step, agentapi.ProgressStateSucceeded, message, nil, nil, nil)
 }
 
 // reportFailed reports step as failed - Execute's terminal report on any
 // failing return (see Execute's doc comment).
 func (e *Executor) reportFailed(ctx context.Context, plan *agentapi.DeployPlan, step, message string) {
-	e.report(ctx, plan, step, agentapi.ProgressStateFailed, message, nil, nil)
+	e.report(ctx, plan, step, agentapi.ProgressStateFailed, message, nil, nil, nil)
 }
