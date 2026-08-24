@@ -1,0 +1,241 @@
+name: Probe that Multus honours the default-network annotation's ips field
+
+description: >-
+  Proves or disproves the one untested root assumption Site's tracker
+  placement rests on: that Multus, given
+  `v1.multus-cni.io/default-network` (the annotation that REPLACES a
+  pod's default network, not the additive
+  `k8s.v1.cni.cncf.io/networks`), honours that element's own "ips" field
+  and hands the pod the requested address rather than whatever its
+  IPAM's own static "addresses" list would allocate. Every other caller
+  in this repository only ever puts a bare NAD name string on that
+  annotation (see seederPodAnnotations in
+  internal/controller/image_seeder_placement.go); SiteReconciler's
+  tracker Deployment (internal/controller/site_tracker_deployment.go,
+  trackerPodAnnotations) is the first and only caller that puts the
+  richer JSON-array-of-objects form there, carrying "ips" - if Multus
+  silently ignores "ips" on THIS annotation (as opposed to the additive
+  one, which is documented to honour it), the tracker never binds
+  Site.spec.tracker.ip and every .torrent the Site's seeder serves
+  announces an address nothing is actually listening on.
+
+  Method: a NetworkAttachmentDefinition is created with a static IPAM
+  pool whose own default address (nad-default-cidr) differs from the
+  address requested through the annotation (requested-ip). A pod is
+  then created with EXACTLY the annotation shape
+  trackerPodAnnotations builds - a JSON array with one element carrying
+  "name", "namespace", and "ips": [requested-ip] (no CIDR suffix,
+  matching SiteTracker.IP's own bare-dotted-quad validation pattern) -
+  and nothing else. If Multus honours "ips" here, the pod's default
+  interface (eth0; default-network always attaches as eth0, not net1)
+  comes up with requested-ip, confirmed two ways: the
+  k8s.v1.cni.cncf.io/network-status annotation Multus itself writes
+  back, and a live `ip addr` read from inside the running pod. If
+  Multus instead falls back to the NAD's own static pool, the pod comes
+  up with nad-default-cidr's address instead, and both checks fail
+  loudly against the address that was actually requested.
+
+inputs:
+  namespace:
+    description: Namespace the NAD and the probe pod are created in.
+    required: false
+    default: "scaffold-system"
+  bridge-name:
+    description: Host Linux bridge the probe NAD attaches to.
+    required: true
+  nad-name:
+    description: Name of the probe NetworkAttachmentDefinition.
+    required: false
+    default: "kezio-probe-multus-network"
+  nad-default-cidr:
+    description: >-
+      The NAD's own static ipam address (with prefix), e.g.
+      "192.0.2.9/24" - deliberately NOT the address requested through
+      the annotation, so a pod that lands on this address instead is
+      unambiguous evidence the "ips" override was ignored.
+    required: true
+  requested-ip:
+    description: >-
+      Bare address (no CIDR suffix), e.g. "192.0.2.50" - mirrors
+      Site.spec.tracker.ip's own shape exactly, requested through the
+      default-network annotation's "ips" field.
+    required: true
+  requested-ip-prefix-length:
+    description: >-
+      Prefix length the requested-ip is expected to carry once bound
+      (matches nad-default-cidr's own prefix - the IPAM plugin's subnet,
+      not the request, determines this), used only to build the
+      expected "ip addr" CIDR for the in-pod check.
+    required: false
+    default: "24"
+  pod-name:
+    description: Name of the probe pod.
+    required: false
+    default: "kezio-probe-multus-pinned-ip"
+  pod-image:
+    description: Minimal image carrying a busybox "ip" applet, used to read the pod's own address.
+    required: false
+    default: "busybox:1.36"
+  timeout-seconds:
+    description: How long to wait for the probe pod to become Running.
+    required: false
+    default: "60"
+
+runs:
+  using: composite
+  steps:
+    - name: Create the probe NetworkAttachmentDefinition
+      # Same shape create-provisioning-nads uses for the tracker/seeder
+      # NADs (type "bridge", ipam type "static", one address) - no
+      # "capabilities" key, matching what the real tracker NAD carries,
+      # since this probe is about whether Multus's default-network
+      # handling honours "ips" without any extra opt-in on the NAD side.
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        BRIDGE_NAME: ${{ inputs.bridge-name }}
+        NAD_NAME: ${{ inputs.nad-name }}
+        NAD_DEFAULT_CIDR: ${{ inputs.nad-default-cidr }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: k8s.cni.cncf.io/v1
+        kind: NetworkAttachmentDefinition
+        metadata:
+          name: ${NAD_NAME}
+          namespace: ${NAMESPACE}
+        spec:
+          config: |
+            {
+              "cniVersion": "0.3.1",
+              "name": "${NAD_NAME}",
+              "plugins": [
+                {
+                  "type": "bridge",
+                  "bridge": "${BRIDGE_NAME}",
+                  "ipam": {
+                    "type": "static",
+                    "addresses": [
+                      {"address": "${NAD_DEFAULT_CIDR}"}
+                    ]
+                  }
+                }
+              ]
+            }
+        EOF
+
+    - name: Create the probe pod with the tracker's exact default-network annotation shape
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        NAD_NAME: ${{ inputs.nad-name }}
+        REQUESTED_IP: ${{ inputs.requested-ip }}
+        POD_NAME: ${{ inputs.pod-name }}
+        POD_IMAGE: ${{ inputs.pod-image }}
+      run: |
+        set -euo pipefail
+        # jq -c with an object literal preserves key insertion order, so
+        # this is byte-identical to Go's json.Marshal of
+        # trackerNetworkSelectionElement{Name, Namespace, IPs}: field
+        # order name, namespace, ips, no whitespace.
+        annotation="$(jq -nc --arg name "${NAD_NAME}" --arg ns "${NAMESPACE}" --arg ip "${REQUESTED_IP}" \
+          '[{name: $name, namespace: $ns, ips: [$ip]}]')"
+        echo "requesting default-network annotation: ${annotation}"
+
+        cat <<EOF | kubectl apply -f -
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: ${POD_NAME}
+          namespace: ${NAMESPACE}
+          labels:
+            app.kubernetes.io/component: probe-multus-pinned-ip
+          annotations:
+            v1.multus-cni.io/default-network: '${annotation}'
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: probe
+              image: ${POD_IMAGE}
+              command: ["sleep", "300"]
+        EOF
+
+    - name: Wait for the probe pod to become Running
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        POD_NAME: ${{ inputs.pod-name }}
+        TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
+      run: |
+        set -euo pipefail
+        if ! kubectl -n "${NAMESPACE}" wait --for=jsonpath='{.status.phase}'=Running \
+            "pod/${POD_NAME}" --timeout="${TIMEOUT_SECONDS}s"; then
+          echo "::error::probe pod ${NAMESPACE}/${POD_NAME} did not reach Running within ${TIMEOUT_SECONDS}s" >&2
+          kubectl -n "${NAMESPACE}" describe pod "${POD_NAME}" || true
+          exit 1
+        fi
+
+    - name: PASS/FAIL -- network-status reports the requested address
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        POD_NAME: ${{ inputs.pod-name }}
+        REQUESTED_IP: ${{ inputs.requested-ip }}
+      run: |
+        set -euo pipefail
+        status_json="$(kubectl -n "${NAMESPACE}" get pod "${POD_NAME}" \
+          -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}')"
+        echo "network-status: ${status_json}"
+        if [ -z "${status_json}" ]; then
+          echo "::error::FAIL observed=<no network-status annotation> expected=an entry carrying ${REQUESTED_IP}" >&2
+          exit 1
+        fi
+
+        # The default-network entry is the one Multus marks "default":
+        # true (there is no additive network here, so exactly one entry
+        # is expected).
+        observed_cidr="$(jq -r '[.[] | select(.default == true)][0].ips[0] // ""' <<<"${status_json}")"
+        observed_ip="${observed_cidr%%/*}"
+        echo "observed default-network address: ${observed_cidr:-<empty>}"
+
+        if [ "${observed_ip}" != "${REQUESTED_IP}" ]; then
+          echo "::error::FAIL observed=${observed_ip:-<empty>} expected=${REQUESTED_IP} -- Multus did not honour the default-network annotation's ips field; the tracker's own annotation shape cannot pin an address" >&2
+          exit 1
+        fi
+        echo "PASS observed=${observed_ip} expected=${REQUESTED_IP} (network-status)"
+
+    - name: PASS/FAIL -- a live "ip addr" from inside the pod matches the requested address
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        POD_NAME: ${{ inputs.pod-name }}
+        REQUESTED_IP: ${{ inputs.requested-ip }}
+        PREFIX_LEN: ${{ inputs.requested-ip-prefix-length }}
+      run: |
+        set -euo pipefail
+        # default-network always attaches as eth0, regardless of the
+        # NAD's own name - the additive k8s.v1.cni.cncf.io/networks
+        # annotation is the one that lands on net1/net2/...
+        addr_line="$(kubectl -n "${NAMESPACE}" exec "${POD_NAME}" -- ip -4 -o addr show dev eth0 2>&1 || true)"
+        echo "in-pod ip addr: ${addr_line}"
+        observed_cidr="$(awk '{for (i=1;i<=NF;i++) if ($i=="inet") print $(i+1)}' <<<"${addr_line}")"
+
+        want_cidr="${REQUESTED_IP}/${PREFIX_LEN}"
+        if [ "${observed_cidr}" != "${want_cidr}" ]; then
+          echo "::error::FAIL observed=${observed_cidr:-<empty>} expected=${want_cidr} -- in-pod eth0 address does not match the address requested via default-network's ips field" >&2
+          exit 1
+        fi
+        echo "PASS observed=${observed_cidr} expected=${want_cidr} (in-pod ip addr)"
+
+    - name: Clean up the probe pod and NetworkAttachmentDefinition
+      if: always()
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        NAD_NAME: ${{ inputs.nad-name }}
+        POD_NAME: ${{ inputs.pod-name }}
+      run: |
+        set +e
+        kubectl -n "${NAMESPACE}" delete pod "${POD_NAME}" --ignore-not-found --wait=false
+        kubectl -n "${NAMESPACE}" delete network-attachment-definition "${NAD_NAME}" --ignore-not-found
+        exit 0
