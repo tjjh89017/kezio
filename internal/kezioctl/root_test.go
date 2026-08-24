@@ -38,11 +38,20 @@ func TestNewRootCmd_HasImageCommandTree(t *testing.T) {
 			t.Errorf("Find(image %s) error = %v", use, err)
 		}
 	}
+}
 
-	// Machine verbs are a later addition; the root command must not
-	// advertise a command tree it does not implement.
-	if _, _, err := root.Find([]string{"machine"}); err == nil {
-		t.Error("expected no machine command yet")
+func TestNewRootCmd_HasMachineDeployAndStatusCommands(t *testing.T) {
+	root := NewRootCmd()
+
+	for _, use := range [][]string{
+		{"machine", "enroll"},
+		{"machine", "set-disk"},
+		{"deploy"},
+		{"status"},
+	} {
+		if _, _, err := root.Find(use); err != nil {
+			t.Errorf("Find(%v) error = %v", use, err)
+		}
 	}
 }
 

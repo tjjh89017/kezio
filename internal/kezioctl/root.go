@@ -41,9 +41,6 @@ type globalFlags struct {
 // tree. cmd/kezioctl's main package does nothing but call this and
 // Execute() the result; every actual behavior lives in this package so it
 // can be unit tested without going through cobra.
-//
-// Only the image verbs are wired up here; machine verbs against the
-// v1alpha2 Machine API are a separate, later addition.
 func NewRootCmd() *cobra.Command {
 	flags := &globalFlags{}
 
@@ -68,6 +65,9 @@ side with kezioctl.`,
 
 	root.AddCommand(newImageCmd(flags))
 	root.AddCommand(newContentCmd(flags))
+	root.AddCommand(newMachineCmd(flags))
+	root.AddCommand(newDeployCmd(flags))
+	root.AddCommand(newStatusCmd(flags))
 	return root
 }
 
