@@ -1,0 +1,267 @@
+name: Assert a per-(Image, Site) seeder Deployment's placement and tuning contract
+
+description: >-
+  Asserts, against the real cluster, everything internal/controller's
+  image_seeder_placement.go promises about one Image's seeder Deployment
+  at one Site: its name is the deterministic (Image, Site) one, it is
+  single-homed on the Site's seeding NAD (not additively attached), its
+  pod selector cannot match another seeder's pods, and both containers
+  carry the restored tuning/env contract (gRPC listen, content root,
+  daemon target, tracker URL, pinned BitTorrent port with a matching
+  declared containerPort).
+
+  Name derivation is reproduced faithfully in shell, not read off the
+  live object: seederdeploy.Name(imageName, siteIdentity) is
+  "kezio-seeder-" + imageName (truncated to fit 63 chars) + "-" + the
+  first 8 hex characters of sha256(siteIdentity). sha256sum's hex digest
+  and Go's hex.EncodeToString(sha256.Sum256(...)) agree byte-for-byte, so
+  taking its first 8 characters reproduces the Go suffix exactly; the
+  same truncation arithmetic (63 - len(prefix) - len(suffix)) reproduces
+  the overflow case. This is then cross-checked, not merely trusted: the
+  Deployment is also looked up independently by its labels
+  (app.kubernetes.io/component=image-seeder plus the seeder-site
+  annotation), and the two lookups must agree on one name - so a drift
+  between this action's arithmetic and seederdeploy.Name would fail
+  loudly here instead of silently passing on a name this action computed
+  wrong.
+
+  Single-homing is checked on the exact annotation shape
+  seederPodAnnotations builds: v1.multus-cni.io/default-network set to
+  the plain "namespace/name" string naming the expected seeding NAD, and
+  k8s.v1.cni.cncf.io/networks (the additive annotation bootd uses)
+  absent - a seeder carrying both would mean it kept a second, NAT'd
+  network path BitTorrent's peer-to-peer connections cannot tolerate.
+
+  Selector uniqueness is checked by ownership, not by counting: every pod
+  Deployment.spec.selector actually returns must trace back to this exact
+  Deployment through its ReplicaSet's own owner reference. This holds
+  regardless of how many other seeder Deployments exist in the same
+  namespace at the same time (the two-site lane's own shape, one Image,
+  two Sites, one namespace), which a bare pod count could not rule out.
+
+inputs:
+  namespace:
+    description: Namespace the Image (and its seeder Deployment) live in.
+    required: false
+    default: "scaffold-system"
+  image-name:
+    description: Name of the Image whose seeder Deployment is being asserted.
+    required: true
+  site-namespace:
+    description: Namespace of the Site this seeder was placed for.
+    required: true
+  site-name:
+    description: Name of the Site this seeder was placed for.
+    required: true
+  expected-seeding-nad:
+    description: >-
+      "namespace/name" of the NAD expected on the pod template's
+      v1.multus-cni.io/default-network annotation - the Site's seeding
+      Subnet's seederNetworkRef, namespace-qualified.
+    required: true
+  expected-grpc-port:
+    description: Expected EZIO_GRPC_LISTEN / containerPort "grpc" port (seederdeploy.EzioGRPCPort).
+    required: false
+    default: "50051"
+  expected-bt-port:
+    description: Expected EZIO_BT_PORT / containerPort "bt" port (seederdeploy.EzioBTPort).
+    required: false
+    default: "16881"
+  expected-torrent-port:
+    description: Expected containerPort "torrent" port (seederdeploy.TorrentHTTPPort).
+    required: false
+    default: "8080"
+  expected-content-root:
+    description: Expected CONTENT_ROOT on the seeder-register container (ingest.ContentMountRoot).
+    required: false
+    default: "/content"
+  expected-tracker-url:
+    description: >-
+      Expected TRACKER_URL on the seeder-register container. Empty
+      accepts any non-empty value (still asserting the key is set).
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Compute the deterministic (Image, Site) Deployment name
+      id: name
+      shell: bash
+      env:
+        IMAGE_NAME: ${{ inputs.image-name }}
+        SITE_NAMESPACE: ${{ inputs.site-namespace }}
+        SITE_NAME: ${{ inputs.site-name }}
+      run: |
+        set -euo pipefail
+        site_identity="${SITE_NAMESPACE}/${SITE_NAME}"
+        prefix="kezio-seeder-"
+        suffix="-$(printf '%s' "${site_identity}" | sha256sum | cut -c1-8)"
+        max_name_length=63
+        max_base_len=$(( max_name_length - ${#prefix} - ${#suffix} ))
+        base="${IMAGE_NAME}"
+        if [ "${#base}" -gt "${max_base_len}" ]; then
+          base="${base:0:${max_base_len}}"
+        fi
+        name="${prefix}${base}${suffix}"
+        echo "site identity: ${site_identity}"
+        echo "computed deployment name: ${name}"
+        echo "name=${name}" >>"${GITHUB_OUTPUT}"
+        echo "site-identity=${site_identity}" >>"${GITHUB_OUTPUT}"
+
+    - name: Assert the Deployment exists under the computed name and its label lookup agrees
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        COMPUTED_NAME: ${{ steps.name.outputs.name }}
+        SITE_IDENTITY: ${{ steps.name.outputs.site-identity }}
+      run: |
+        set -euo pipefail
+        if ! kubectl get deployment "${COMPUTED_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1; then
+          echo "::error::no seeder Deployment ${NAMESPACE}/${COMPUTED_NAME} (computed from seederdeploy.Name) exists" >&2
+          kubectl get deployments -n "${NAMESPACE}" -l app.kubernetes.io/component=image-seeder
+          exit 1
+        fi
+
+        by_label="$(kubectl get deployments -n "${NAMESPACE}" -l app.kubernetes.io/component=image-seeder -o json |
+          jq -c --arg site "${SITE_IDENTITY}" '[.items[] | select(.metadata.annotations["kezio.kojuro.date/seeder-site"] == $site)]')"
+        by_label_count="$(jq 'length' <<<"${by_label}")"
+        if [ "${by_label_count}" -ne 1 ]; then
+          echo "::error::expected exactly one seeder Deployment annotated seeder-site=${SITE_IDENTITY} in ${NAMESPACE}, found ${by_label_count}" >&2
+          echo "${by_label}" | jq .
+          exit 1
+        fi
+        by_label_name="$(jq -r '.[0].metadata.name' <<<"${by_label}")"
+        if [ "${by_label_name}" != "${COMPUTED_NAME}" ]; then
+          echo "::error::name computed from seederdeploy.Name (${COMPUTED_NAME}) disagrees with the Deployment found by seeder-site annotation (${by_label_name})" >&2
+          exit 1
+        fi
+        echo "name derivation confirmed: ${COMPUTED_NAME} (label lookup agrees)"
+
+    - name: Assert single-homed placement on the expected seeding NAD
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        COMPUTED_NAME: ${{ steps.name.outputs.name }}
+        EXPECTED_SEEDING_NAD: ${{ inputs.expected-seeding-nad }}
+      run: |
+        set -euo pipefail
+        dep_json="$(kubectl get deployment "${COMPUTED_NAME}" -n "${NAMESPACE}" -o json)"
+        fail=0
+
+        default_network="$(jq -r '.spec.template.metadata.annotations["v1.multus-cni.io/default-network"] // ""' <<<"${dep_json}")"
+        echo "pod template default-network=${default_network:-<empty>}"
+        if [ "${default_network}" != "${EXPECTED_SEEDING_NAD}" ]; then
+          echo "::error::v1.multus-cni.io/default-network=${default_network:-<empty>}, want ${EXPECTED_SEEDING_NAD}" >&2
+          fail=1
+        fi
+
+        additive_networks="$(jq -r '.spec.template.metadata.annotations["k8s.v1.cni.cncf.io/networks"] // ""' <<<"${dep_json}")"
+        if [ -n "${additive_networks}" ]; then
+          echo "::error::pod template carries the additive k8s.v1.cni.cncf.io/networks annotation (${additive_networks}) - a seeder must be single-homed only" >&2
+          fail=1
+        fi
+
+        [ "${fail}" -eq 0 ]
+
+    - name: Assert the pod selector cannot match another seeder's pods
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        COMPUTED_NAME: ${{ steps.name.outputs.name }}
+      run: |
+        set -euo pipefail
+        dep_json="$(kubectl get deployment "${COMPUTED_NAME}" -n "${NAMESPACE}" -o json)"
+        instance_label="$(jq -r '.spec.selector.matchLabels["kezio.kojuro.date/seeder-instance"] // ""' <<<"${dep_json}")"
+        echo "selector carries kezio.kojuro.date/seeder-instance=${instance_label:-<empty>}"
+        if [ "${instance_label}" != "${COMPUTED_NAME}" ]; then
+          echo "::error::spec.selector.matchLabels[kezio.kojuro.date/seeder-instance]=${instance_label:-<empty>}, want ${COMPUTED_NAME}" >&2
+          exit 1
+        fi
+
+        selector="$(jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")' <<<"${dep_json}")"
+        pod_names="$(kubectl get pods -n "${NAMESPACE}" -l "${selector}" -o name)"
+        if [ -z "${pod_names}" ]; then
+          echo "::error::no pods matched this Deployment's own selector (${selector}) - cannot prove selector exclusivity with no pods to check" >&2
+          exit 1
+        fi
+
+        fail=0
+        for pod in ${pod_names}; do
+          pod_name="${pod#pod/}"
+          rs_name="$(kubectl get pod "${pod_name}" -n "${NAMESPACE}" \
+            -o jsonpath='{.metadata.ownerReferences[?(@.kind=="ReplicaSet")].name}')"
+          if [ -z "${rs_name}" ]; then
+            echo "::error::pod ${pod_name} has no ReplicaSet owner reference, cannot trace it to a Deployment" >&2
+            fail=1
+            continue
+          fi
+          owning_dep="$(kubectl get replicaset "${rs_name}" -n "${NAMESPACE}" \
+            -o jsonpath='{.metadata.ownerReferences[?(@.kind=="Deployment")].name}')"
+          echo "pod ${pod_name} -> replicaset ${rs_name} -> deployment ${owning_dep:-<none>}"
+          if [ "${owning_dep}" != "${COMPUTED_NAME}" ]; then
+            echo "::error::pod ${pod_name} matched by ${COMPUTED_NAME}'s selector traces to Deployment ${owning_dep:-<none>} instead - selector is not exclusive" >&2
+            fail=1
+          fi
+        done
+        [ "${fail}" -eq 0 ]
+
+    - name: Assert the tuning/env contract on both containers
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        COMPUTED_NAME: ${{ steps.name.outputs.name }}
+        EXPECTED_GRPC_PORT: ${{ inputs.expected-grpc-port }}
+        EXPECTED_BT_PORT: ${{ inputs.expected-bt-port }}
+        EXPECTED_TORRENT_PORT: ${{ inputs.expected-torrent-port }}
+        EXPECTED_CONTENT_ROOT: ${{ inputs.expected-content-root }}
+        EXPECTED_TRACKER_URL: ${{ inputs.expected-tracker-url }}
+      run: |
+        set -euo pipefail
+        dep_json="$(kubectl get deployment "${COMPUTED_NAME}" -n "${NAMESPACE}" -o json)"
+        fail=0
+
+        container_env() {
+          jq -r --arg c "$1" --arg k "$2" \
+            '.spec.template.spec.containers[] | select(.name == $c) | (.env // []) | map(select(.name == $k)) | first | .value // ""' \
+            <<<"${dep_json}"
+        }
+        container_port() {
+          jq -r --arg c "$1" --arg p "$2" \
+            '.spec.template.spec.containers[] | select(.name == $c) | (.ports // []) | map(select(.name == $p)) | first | .containerPort // ""' \
+            <<<"${dep_json}"
+        }
+        check() {
+          desc="$1"; got="$2"; want="$3"
+          echo "${desc}=${got:-<empty>}"
+          if [ "${got}" != "${want}" ]; then
+            echo "::error::${desc}=${got:-<empty>}, want ${want}" >&2
+            fail=1
+          fi
+        }
+        check_nonempty() {
+          desc="$1"; got="$2"
+          echo "${desc}=${got:-<empty>}"
+          if [ -z "${got}" ]; then
+            echo "::error::${desc} is empty, want non-empty" >&2
+            fail=1
+          fi
+        }
+
+        check "ezio EZIO_GRPC_LISTEN" "$(container_env ezio EZIO_GRPC_LISTEN)" "0.0.0.0:${EXPECTED_GRPC_PORT}"
+        check "ezio EZIO_BT_PORT" "$(container_env ezio EZIO_BT_PORT)" "${EXPECTED_BT_PORT}"
+        check "ezio containerPort[grpc]" "$(container_port ezio grpc)" "${EXPECTED_GRPC_PORT}"
+        check "ezio containerPort[bt]" "$(container_port ezio bt)" "${EXPECTED_BT_PORT}"
+
+        check "seeder-register CONTENT_ROOT" "$(container_env seeder-register CONTENT_ROOT)" "${EXPECTED_CONTENT_ROOT}"
+        check "seeder-register EZIO_TARGET" "$(container_env seeder-register EZIO_TARGET)" "127.0.0.1:${EXPECTED_GRPC_PORT}"
+        check "seeder-register containerPort[torrent]" "$(container_port seeder-register torrent)" "${EXPECTED_TORRENT_PORT}"
+
+        tracker_url="$(container_env seeder-register TRACKER_URL)"
+        if [ -n "${EXPECTED_TRACKER_URL}" ]; then
+          check "seeder-register TRACKER_URL" "${tracker_url}" "${EXPECTED_TRACKER_URL}"
+        else
+          check_nonempty "seeder-register TRACKER_URL" "${tracker_url}"
+        fi
+
+        [ "${fail}" -eq 0 ] && echo "seeder tuning/env contract assertion passed"

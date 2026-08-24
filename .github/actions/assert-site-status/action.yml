@@ -1,0 +1,109 @@
+name: Assert a Site's status shape
+
+description: >-
+  Asserts api/v1alpha2/site_types.go's SiteStatus against the real
+  cluster: status.subnetRefs is the expected set, status.seederReady
+  matches an expected value, and each named condition carries the
+  expected status (and, where given, reason). Generic and read-only by
+  design so both the routed lane (one Site, expected healthy) and the
+  two-site lane (asserting a fault injected at one Site degrades only
+  that Site, while the other stays healthy) call this same action with
+  different expected values, rather than each lane growing its own
+  status-reading script.
+
+  Every check is independently skippable by leaving its input empty, so
+  a caller that only cares about one axis (for example, the two-site
+  lane's fault-injection step, which cares about conditions but not
+  subnetRefs) does not have to restate values it is not asserting.
+
+  Does not poll: a Site this action is pointed at is assumed to have
+  already reached the state under test (through create-site's own wait,
+  or a caller's own poll after injecting a fault) - mirroring
+  assert-deploy-run-progress's own no-poll design.
+
+inputs:
+  site-namespace:
+    description: Namespace the Site lives in.
+    required: false
+    default: "scaffold-system"
+  site-name:
+    description: Name of the Site to inspect.
+    required: true
+  expected-subnet-refs:
+    description: >-
+      Newline-separated Subnet names expected in status.subnetRefs, as a
+      set (order-independent). Empty skips this check entirely.
+    required: false
+    default: ""
+  expected-seeder-ready:
+    description: >-
+      Expected status.seederReady, "true" or "false". Empty skips this
+      check entirely.
+    required: false
+    default: ""
+  expected-conditions:
+    description: >-
+      Newline-separated condition expectations, one per line, each
+      "Type|Status" or "Type|Status|Reason" (Reason omitted skips the
+      reason check for that condition). Blank lines are skipped. Empty
+      input skips condition checking entirely.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Assert Site status
+      shell: bash
+      env:
+        SITE_NAMESPACE: ${{ inputs.site-namespace }}
+        SITE_NAME: ${{ inputs.site-name }}
+        EXPECTED_SUBNET_REFS: ${{ inputs.expected-subnet-refs }}
+        EXPECTED_SEEDER_READY: ${{ inputs.expected-seeder-ready }}
+        EXPECTED_CONDITIONS: ${{ inputs.expected-conditions }}
+      run: |
+        set -euo pipefail
+        site_json="$(kubectl get site "${SITE_NAME}" -n "${SITE_NAMESPACE}" -o json)"
+        fail=0
+
+        if [ -n "${EXPECTED_SUBNET_REFS}" ]; then
+          want_sorted="$(printf '%s\n' "${EXPECTED_SUBNET_REFS}" | sed '/^$/d' | sort)"
+          got_sorted="$(jq -r '(.status.subnetRefs // [])[]' <<<"${site_json}" | sort)"
+          echo "status.subnetRefs (sorted)=[${got_sorted//$'\n'/, }]"
+          if [ "${got_sorted}" != "${want_sorted}" ]; then
+            echo "::error::status.subnetRefs=[${got_sorted//$'\n'/, }], want [${want_sorted//$'\n'/, }]" >&2
+            fail=1
+          fi
+        fi
+
+        if [ -n "${EXPECTED_SEEDER_READY}" ]; then
+          got_ready="$(jq -r '.status.seederReady // false' <<<"${site_json}")"
+          echo "status.seederReady=${got_ready}"
+          if [ "${got_ready}" != "${EXPECTED_SEEDER_READY}" ]; then
+            echo "::error::status.seederReady=${got_ready}, want ${EXPECTED_SEEDER_READY}" >&2
+            fail=1
+          fi
+        fi
+
+        if [ -n "${EXPECTED_CONDITIONS}" ]; then
+          while IFS='|' read -r type want_status want_reason; do
+            [ -z "${type}" ] && continue
+            got_status="$(jq -r --arg t "${type}" '(.status.conditions // []) | map(select(.type == $t)) | first | .status // ""' <<<"${site_json}")"
+            got_reason="$(jq -r --arg t "${type}" '(.status.conditions // []) | map(select(.type == $t)) | first | .reason // ""' <<<"${site_json}")"
+            echo "status.conditions[type=${type}]: status=${got_status:-<empty>} reason=${got_reason:-<empty>}"
+            if [ "${got_status}" != "${want_status}" ]; then
+              echo "::error::status.conditions[type=${type}].status=${got_status:-<empty>}, want ${want_status}" >&2
+              fail=1
+            fi
+            if [ -n "${want_reason}" ] && [ "${got_reason}" != "${want_reason}" ]; then
+              echo "::error::status.conditions[type=${type}].reason=${got_reason:-<empty>}, want ${want_reason}" >&2
+              fail=1
+            fi
+          done <<<"${EXPECTED_CONDITIONS}"
+        fi
+
+        if [ "${fail}" -ne 0 ]; then
+          jq '.status' <<<"${site_json}"
+          exit 1
+        fi
+        echo "Site ${SITE_NAMESPACE}/${SITE_NAME} status assertion passed"

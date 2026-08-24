@@ -1,0 +1,209 @@
+name: Assert a Site's tracker Deployment placement and status reflection
+
+description: >-
+  Asserts, against the real cluster, everything internal/controller's
+  site_tracker_deployment.go and site_controller.go promise about one
+  Site's tracker: the Deployment exists under the deterministic name,
+  owned by the Site so garbage collection removes it with the Site, is
+  single-homed on the seeding NAD at the pinned tracker.ip, has no
+  Service pointed at it, and the Site's own status carries the resolved
+  trackerURL and the expected conditions.
+
+  Name derivation is reproduced faithfully in shell:
+  trackerDeploymentName(siteName) is "kezio-tracker-" + siteName, unless
+  that exceeds 63 characters, in which case it truncates siteName and
+  appends "-" + the first 8 hex characters of sha256(siteName) - the
+  same arithmetic assert-seeder-placement uses for seederdeploy.Name,
+  applied to trackerDeploymentName's own (shorter) prefix.
+
+  No-Service is checked by simulating Kubernetes' own selector match
+  against the tracker Deployment's pod template labels, not by checking
+  for one specific Service name: any Service in the namespace whose
+  spec.selector is satisfied by those labels would DNAT traffic meant to
+  reach tracker.ip directly, breaking the announce/reachability
+  consistency BitTorrent depends on - so this must rule out every
+  Service, not just an expected one.
+
+inputs:
+  site-namespace:
+    description: Namespace the Site (and its tracker Deployment) live in.
+    required: false
+    default: "scaffold-system"
+  site-name:
+    description: Name of the Site whose tracker placement is being asserted.
+    required: true
+  expected-seeding-nad-namespace:
+    description: Namespace of the NAD expected on the tracker's default-network selection element.
+    required: true
+  expected-seeding-nad-name:
+    description: Name of the NAD expected on the tracker's default-network selection element.
+    required: true
+  expected-tracker-ip:
+    description: Expected pinned address (Site.spec.tracker.ip) the tracker is bound to.
+    required: true
+  expected-announce-port:
+    description: Expected announce port (trackerAnnouncePort).
+    required: false
+    default: "6969"
+  expected-ready-status:
+    description: Expected status.conditions[type=Ready].status on the Site.
+    required: false
+    default: "True"
+  expected-valid-status:
+    description: Expected status.conditions[type=Valid].status on the Site.
+    required: false
+    default: "True"
+
+runs:
+  using: composite
+  steps:
+    - name: Compute the deterministic tracker Deployment name
+      id: name
+      shell: bash
+      env:
+        SITE_NAME: ${{ inputs.site-name }}
+      run: |
+        set -euo pipefail
+        prefix="kezio-tracker-"
+        name="${prefix}${SITE_NAME}"
+        max_name_length=63
+        if [ "${#name}" -gt "${max_name_length}" ]; then
+          suffix="-$(printf '%s' "${SITE_NAME}" | sha256sum | cut -c1-8)"
+          max_base_len=$(( max_name_length - ${#prefix} - ${#suffix} ))
+          name="${prefix}${SITE_NAME:0:${max_base_len}}${suffix}"
+        fi
+        echo "computed tracker deployment name: ${name}"
+        echo "name=${name}" >>"${GITHUB_OUTPUT}"
+
+    - name: Assert the tracker Deployment exists and is owned by the Site
+      shell: bash
+      env:
+        SITE_NAMESPACE: ${{ inputs.site-namespace }}
+        SITE_NAME: ${{ inputs.site-name }}
+        COMPUTED_NAME: ${{ steps.name.outputs.name }}
+      run: |
+        set -euo pipefail
+        if ! dep_json="$(kubectl get deployment "${COMPUTED_NAME}" -n "${SITE_NAMESPACE}" -o json 2>/dev/null)"; then
+          echo "::error::no tracker Deployment ${SITE_NAMESPACE}/${COMPUTED_NAME} (computed from trackerDeploymentName) exists" >&2
+          kubectl get deployments -n "${SITE_NAMESPACE}" -l app.kubernetes.io/component=tracker
+          exit 1
+        fi
+
+        owner="$(jq -r --arg site "${SITE_NAME}" \
+          '.metadata.ownerReferences // [] | map(select(.kind == "Site" and .name == $site and .controller == true)) | length' \
+          <<<"${dep_json}")"
+        echo "owner references naming Site ${SITE_NAME} as controller: ${owner}"
+        if [ "${owner}" -ne 1 ]; then
+          echo "::error::tracker Deployment ${COMPUTED_NAME} has no controller owner reference to Site ${SITE_NAME}" >&2
+          jq '.metadata.ownerReferences' <<<"${dep_json}"
+          exit 1
+        fi
+
+    - name: Assert single-homed placement pinned to tracker.ip
+      shell: bash
+      env:
+        SITE_NAMESPACE: ${{ inputs.site-namespace }}
+        COMPUTED_NAME: ${{ steps.name.outputs.name }}
+        EXPECTED_SEEDING_NAD_NAMESPACE: ${{ inputs.expected-seeding-nad-namespace }}
+        EXPECTED_SEEDING_NAD_NAME: ${{ inputs.expected-seeding-nad-name }}
+        EXPECTED_TRACKER_IP: ${{ inputs.expected-tracker-ip }}
+      run: |
+        set -euo pipefail
+        dep_json="$(kubectl get deployment "${COMPUTED_NAME}" -n "${SITE_NAMESPACE}" -o json)"
+        fail=0
+
+        raw_annotation="$(jq -r '.spec.template.metadata.annotations["v1.multus-cni.io/default-network"] // ""' <<<"${dep_json}")"
+        echo "pod template default-network=${raw_annotation:-<empty>}"
+        if [ -z "${raw_annotation}" ]; then
+          echo "::error::v1.multus-cni.io/default-network is unset - tracker is not single-homed on any NAD" >&2
+          exit 1
+        fi
+
+        got_name="$(jq -r '.[0].name // ""' <<<"${raw_annotation}")"
+        got_namespace="$(jq -r '.[0].namespace // ""' <<<"${raw_annotation}")"
+        got_ip="$(jq -r '.[0].ips[0] // ""' <<<"${raw_annotation}")"
+
+        if [ "${got_name}" != "${EXPECTED_SEEDING_NAD_NAME}" ] || [ "${got_namespace}" != "${EXPECTED_SEEDING_NAD_NAMESPACE}" ]; then
+          echo "::error::default-network element names ${got_namespace:-<empty>}/${got_name:-<empty>}, want ${EXPECTED_SEEDING_NAD_NAMESPACE}/${EXPECTED_SEEDING_NAD_NAME}" >&2
+          fail=1
+        fi
+        if [ "${got_ip}" != "${EXPECTED_TRACKER_IP}" ]; then
+          echo "::error::default-network element requests ips[0]=${got_ip:-<empty>}, want ${EXPECTED_TRACKER_IP}" >&2
+          fail=1
+        fi
+
+        additive_networks="$(jq -r '.spec.template.metadata.annotations["k8s.v1.cni.cncf.io/networks"] // ""' <<<"${dep_json}")"
+        if [ -n "${additive_networks}" ]; then
+          echo "::error::pod template carries the additive k8s.v1.cni.cncf.io/networks annotation (${additive_networks}) - a tracker must be single-homed only" >&2
+          fail=1
+        fi
+
+        [ "${fail}" -eq 0 ]
+
+    - name: Assert no Service points at the tracker
+      shell: bash
+      env:
+        SITE_NAMESPACE: ${{ inputs.site-namespace }}
+        COMPUTED_NAME: ${{ steps.name.outputs.name }}
+      run: |
+        set -euo pipefail
+        dep_json="$(kubectl get deployment "${COMPUTED_NAME}" -n "${SITE_NAMESPACE}" -o json)"
+        pod_labels="$(jq -c '.spec.template.metadata.labels // {}' <<<"${dep_json}")"
+        services_json="$(kubectl get services -n "${SITE_NAMESPACE}" -o json)"
+
+        matching="$(jq -c --argjson pod_labels "${pod_labels}" '
+          [.items[]
+            | select((.spec.selector // {}) | length > 0)
+            | select(
+                (.spec.selector | to_entries) as $sel
+                | ($sel | all(. as $e | $pod_labels[$e.key] == $e.value))
+              )
+            | .metadata.name]
+        ' <<<"${services_json}")"
+
+        count="$(jq 'length' <<<"${matching}")"
+        echo "Services in ${SITE_NAMESPACE} whose selector matches the tracker's pod labels: ${matching}"
+        if [ "${count}" -ne 0 ]; then
+          echo "::error::${count} Service(s) select the tracker pod - a ClusterIP would DNAT traffic meant to reach tracker.ip directly: ${matching}" >&2
+          exit 1
+        fi
+        echo "no-Service assertion passed"
+
+    - name: Assert the Site's status carries the resolved trackerURL and conditions
+      shell: bash
+      env:
+        SITE_NAMESPACE: ${{ inputs.site-namespace }}
+        SITE_NAME: ${{ inputs.site-name }}
+        EXPECTED_TRACKER_IP: ${{ inputs.expected-tracker-ip }}
+        EXPECTED_ANNOUNCE_PORT: ${{ inputs.expected-announce-port }}
+        EXPECTED_READY_STATUS: ${{ inputs.expected-ready-status }}
+        EXPECTED_VALID_STATUS: ${{ inputs.expected-valid-status }}
+      run: |
+        set -euo pipefail
+        site_json="$(kubectl get site "${SITE_NAME}" -n "${SITE_NAMESPACE}" -o json)"
+        fail=0
+
+        want_url="http://${EXPECTED_TRACKER_IP}:${EXPECTED_ANNOUNCE_PORT}/announce"
+        got_url="$(jq -r '.status.trackerURL // ""' <<<"${site_json}")"
+        echo "status.trackerURL=${got_url:-<empty>}"
+        if [ "${got_url}" != "${want_url}" ]; then
+          echo "::error::status.trackerURL=${got_url:-<empty>}, want ${want_url}" >&2
+          fail=1
+        fi
+
+        for pair in "Ready:${EXPECTED_READY_STATUS}" "Valid:${EXPECTED_VALID_STATUS}"; do
+          type="${pair%%:*}"
+          want_status="${pair#*:}"
+          got_status="$(jq -r --arg t "${type}" '(.status.conditions // []) | map(select(.type == $t)) | first | .status // ""' <<<"${site_json}")"
+          echo "status.conditions[type=${type}].status=${got_status:-<empty>}"
+          if [ "${got_status}" != "${want_status}" ]; then
+            echo "::error::status.conditions[type=${type}].status=${got_status:-<empty>}, want ${want_status}" >&2
+            fail=1
+          fi
+        done
+
+        if [ "${fail}" -ne 0 ]; then
+          jq '.status' <<<"${site_json}"
+          exit 1
+        fi
+        echo "Site status assertion passed"
