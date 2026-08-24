@@ -198,7 +198,20 @@ jobs:
             fi
             sleep 5
           done
-          kubectl wait --for=condition=Established crd/network-attachment-definitions.k8s.cni.cncf.io --timeout=60s
+          # kubectl wait --for=condition=Established errors out instead of
+          # retrying while the fresh CRD's status.conditions is still nil
+          # (".status.conditions accessor error"), so poll the condition
+          # with the failure tolerated inside the loop.
+          until kubectl get crd network-attachment-definitions.k8s.cni.cncf.io \
+              -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' 2>/dev/null \
+              | grep -q True; do
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::network-attachment-definitions.k8s.cni.cncf.io CRD never became Established." >&2
+              kubectl get crd network-attachment-definitions.k8s.cni.cncf.io -o yaml || true
+              exit 1
+            fi
+            sleep 5
+          done
 
       - name: Probe A -- Multus honours the default-network annotation's ips field
         uses: ./.github/actions/probe-multus-pinned-ip
@@ -338,6 +351,11 @@ jobs:
           bootd-server-ip: "203.0.113.2"
           bootd-network-name: kezio-boot-network
           site-ref: kezio-e2e-fast-lane-site
+          # This lane runs RKE2 with no Multus at all (the NAD CRD does
+          # not exist), so SubnetReconciler's NAD checks can only ever
+          # report Indeterminate (Valid=Unknown) - see this input's own
+          # description in create-subnet/action.yml.
+          accept-valid-unknown: "true"
 
       - name: Run a fake-deployer Machine walk
         uses: ./.github/actions/run-fake-deploy-walk
@@ -548,6 +566,11 @@ jobs:
           bootd-server-ip: "203.0.113.2"
           bootd-network-name: kezio-boot-network
           site-ref: kezio-e2e-image-path-site
+          # This lane runs RKE2 with no Multus at all (the NAD CRD does
+          # not exist), so SubnetReconciler's NAD checks can only ever
+          # report Indeterminate (Valid=Unknown) - see this input's own
+          # description in create-subnet/action.yml.
+          accept-valid-unknown: "true"
 
       # tracker.externalURL points at opentracker's Service (deployed
       # above) rather than Tracker.IP: a Site-managed tracker Deployment

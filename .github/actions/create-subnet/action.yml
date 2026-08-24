@@ -80,6 +80,16 @@ inputs:
       as an integer, optionally suffixed with s.
     required: false
     default: "120s"
+  accept-valid-unknown:
+    description: >-
+      Treat Valid=Unknown as success, not just Valid=True. Exists for a
+      cluster with no Multus at all (the NetworkAttachmentDefinition CRD
+      does not exist): SubnetReconciler's NAD checks can then only report
+      Indeterminate (NADKindAbsent), so Valid never reaches True even
+      though nothing else about the Subnet is actually broken. Leave this
+      at its default everywhere a NAD CRD is expected to exist.
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -162,6 +172,7 @@ runs:
         NAME: ${{ inputs.name }}
         NAMESPACE: ${{ inputs.namespace }}
         TIMEOUT: ${{ inputs.timeout }}
+        ACCEPT_VALID_UNKNOWN: ${{ inputs.accept-valid-unknown }}
       run: |
         set -euo pipefail
         if [[ ! "${TIMEOUT}" =~ ^[0-9]+s?$ ]]; then
@@ -175,6 +186,10 @@ runs:
             -o jsonpath='{.status.conditions[?(@.type=="Valid")].status}' || true)"
           echo "$(date -Is) Subnet Valid=${valid:-<none>}"
           [ "${valid}" = "True" ] && break
+          # On a cluster with no Multus at all, the NAD checks can only
+          # ever report Indeterminate (Valid=Unknown) - see this input's
+          # own description.
+          [ "${ACCEPT_VALID_UNKNOWN}" = "true" ] && [ "${valid}" = "Unknown" ] && break
           if [ "$(date +%s)" -ge "${deadline}" ]; then
             echo "::error::Subnet ${NAME} did not become Valid within ${TIMEOUT}." >&2
             kubectl get subnet "${NAME}" -n "${NAMESPACE}" -o yaml

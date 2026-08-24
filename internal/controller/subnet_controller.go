@@ -492,11 +492,23 @@ func (e nadContentError) Error() string { return e.err.Error() }
 func (e nadContentError) Unwrap() error { return e.err }
 
 // isIndeterminateNADErr reports whether a fetchNADConfig error may be
-// folded into an Indeterminate condition: the NAD does not exist, or its
-// config could not be read. Any other error must be returned up so
-// Reconcile requeues with backoff.
+// folded into an Indeterminate condition: the NAD does not exist, its
+// kind does not exist in this cluster at all (no NAD CRD installed - a
+// cluster with no Multus), or its config could not be read. Any other
+// error must be returned up so Reconcile requeues with backoff.
+//
+// A cluster with no NetworkAttachmentDefinition CRD is a different error
+// shape from a missing NAD object: the client can't resolve the GVK to a
+// REST resource at all, so it returns a RESTMapper error
+// (apimeta.IsNoMatchError), not kerrors.IsNotFound. Treating that as
+// transient (the pre-fix behavior) means Reconcile returns it as an
+// error forever and Valid/Ready are never written - see NADKindAbsent
+// below.
 func isIndeterminateNADErr(err error) bool {
 	if kerrors.IsNotFound(err) {
+		return true
+	}
+	if apimeta.IsNoMatchError(err) {
 		return true
 	}
 	var contentErr nadContentError
@@ -509,8 +521,11 @@ func isIndeterminateNADErr(err error) bool {
 // the same family as nadvalidate's own.
 func indeterminateFromFetchErr(reasonPrefix, what string, err error) nadvalidate.CheckResult {
 	reason := reasonPrefix + "NADUnresolved"
-	if kerrors.IsNotFound(err) {
+	switch {
+	case kerrors.IsNotFound(err):
 		reason = reasonPrefix + "NADNotFound"
+	case apimeta.IsNoMatchError(err):
+		reason = reasonPrefix + "NADKindAbsent"
 	}
 	return nadvalidate.CheckResult{
 		Verdict: nadvalidate.Indeterminate,
