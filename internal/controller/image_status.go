@@ -121,8 +121,8 @@ func (r *ImageReconciler) recordReady(ctx context.Context, image *keziov1alpha2.
 	return nil
 }
 
-// recordPending records Pending for a composed Image (no spec.source)
-// whose referenced content is missing or not yet Ready.
+// recordPending records Pending for an Image whose referenced content is
+// missing or not yet Ready.
 func (r *ImageReconciler) recordPending(ctx context.Context, image *keziov1alpha2.Image, notReady []string) (ctrl.Result, error) {
 	image.Status.State = keziov1alpha2.ImageStatePending
 	setImageReadyCondition(image, metav1.ConditionFalse, "ContentNotReady", boundedMessage(notReady))
@@ -246,22 +246,4 @@ func (r *ImageReconciler) updateImageSeederCondition(ctx context.Context, image 
 		return fmt.Errorf("image %q: recording seeder degraded condition: %w", image.Name, err)
 	}
 	return nil
-}
-
-// reconcileIngestPending holds an Image that has spec.source and whose
-// referenced content is not all present/Ready, at Pending with
-// IngestUnconfigured when no ingest Job image is configured on the
-// manager. Once r.Ingest is ready(), it hands off to reconcileIngesting
-// (image_ingest.go) instead, which creates or observes the ingest Job.
-func (r *ImageReconciler) reconcileIngestPending(ctx context.Context, image *keziov1alpha2.Image, notReady []string) (ctrl.Result, error) {
-	if !r.Ingest.ready() {
-		image.Status.State = keziov1alpha2.ImageStatePending
-		setImageReadyCondition(image, metav1.ConditionFalse, "IngestUnconfigured",
-			"spec.source is set but no ingest Job image is configured on the manager; content stays Pending until it is")
-		if err := r.applyImageStatus(ctx, image); err != nil {
-			return ctrl.Result{}, fmt.Errorf("image %q: recording IngestUnconfigured: %w", image.Name, err)
-		}
-		return ctrl.Result{}, nil
-	}
-	return r.reconcileIngesting(ctx, image, notReady)
 }

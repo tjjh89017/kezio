@@ -17,7 +17,9 @@ limitations under the License.
 package ingest
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -38,23 +40,23 @@ const DefaultWorkDir = "/work"
 // Config parametrizes one Run: everything about the source image being
 // ingested and the work volume this Job's pod mounts.
 type Config struct {
-	// SourceURL is Image.spec.source.url: an http(s):// URL or a
+	// SourceURL is ImageImport.spec.source.url: an http(s):// URL or a
 	// kezio-staged://<name> reference.
 	SourceURL string
 	// SourceFormat is the format the source is declared to be in. Run
 	// rejects a source whose actual format (per qemu-img info) does not
 	// match.
 	SourceFormat string
-	// SourceChecksum is Image.spec.source.checksum ("<algorithm>:<hex
+	// SourceChecksum is ImageImport.spec.source.checksum ("<algorithm>:<hex
 	// digest>"), or empty if none was given.
 	SourceChecksum string
 	// WorkDir is a scratch directory this run fills with temporary
 	// files: the downloaded/staged source, the raw conversion, each
 	// partition's extracted slice, and - unlike the shared-store-root
 	// legacy layout - each partition's own content directory (extent
-	// files plus torrent.info), since content addressing has moved to
-	// per-PartitionContent PVCs that do not exist yet when Run starts
-	// (see publish.go). The caller creates WorkDir and is responsible
+	// files plus torrent.info), since each content's own PVC does not
+	// exist yet when Run starts (see publish.go). The caller creates
+	// WorkDir and is responsible
 	// for removing it after Run returns.
 	WorkDir string
 }
@@ -84,8 +86,8 @@ type Dependencies struct {
 // Result{Success: false, Error: ...}, because the only consumer
 // (cmd/ingest) turns Run's outcome directly into the container's
 // termination message and exit code. Run never touches the Kubernetes
-// API: mapping a successful Result onto PartitionContent objects is the
-// Image controller's job.
+// API: mapping a successful Result onto PartitionContent objects and an
+// Image is the ImageImport controller's job.
 func Run(ctx context.Context, cfg Config, deps Dependencies) Result {
 	disk, err := run(ctx, cfg, deps)
 	if err != nil {
@@ -148,11 +150,30 @@ func run(ctx context.Context, cfg Config, deps Dependencies) (*ResultDisk, error
 		_ = CleanupStagedSource(deps.StagedRemover, StagedNameFromURL(cfg.SourceURL))
 	}
 
+	compactSfdisk, err := compactJSON(sfdiskJSON)
+	if err != nil {
+		return nil, fmt.Errorf("compact partition table dump: %w", err)
+	}
+
 	return &ResultDisk{
 		SizeBytes:      diskSize,
 		PartitionTable: parsed.PartitionTable,
+		SfdiskJSON:     compactSfdisk,
 		Partitions:     partitions,
 	}, nil
+}
+
+// compactJSON re-serializes data with no insignificant whitespace. The
+// sfdisk dump travels back to the controller inside a container
+// termination message, which Kubernetes caps at
+// TerminationMessageLimit - sfdisk's own pretty-printed output spends a
+// large part of that budget on indentation.
+func compactJSON(data []byte) (string, error) {
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, data); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
 }
 
 // processPartition slices one partition out of the converted raw disk,
@@ -177,6 +198,8 @@ func processPartition(ctx context.Context, cfg Config, deps Dependencies, rawPat
 		Role:      role,
 		FSType:    fsInfo.FSType,
 		SizeBytes: part.SizeBytes,
+		TypeGUID:  part.TypeGUID,
+		PartUUID:  part.PartUUID,
 	}
 
 	if role == keziov1alpha2.PartitionRoleSwap {
@@ -205,11 +228,10 @@ func processPartition(ctx context.Context, cfg Config, deps Dependencies, rawPat
 		return ResultPartition{}, fmt.Errorf("clone partition content: %w", err)
 	}
 
-	hash, usedBytes, lastExtentEnd, err := finalizeContent(contentDir)
+	usedBytes, lastExtentEnd, err := finalizeContent(contentDir)
 	if err != nil {
 		return ResultPartition{}, fmt.Errorf("finalize partition content: %w", err)
 	}
-	resultPart.InfoHash = hash.String()
 	resultPart.UsedBytes = usedBytes
 	resultPart.LastExtentEnd = lastExtentEnd
 	resultPart.PieceLength = store.PieceSize
@@ -218,15 +240,16 @@ func processPartition(ctx context.Context, cfg Config, deps Dependencies, rawPat
 }
 
 // finalizeContent nests partclone's flat extent-file output into
-// contentDir's content/ data subdirectory (see store.NestExtentFiles),
-// validates the result against its own torrent.info, and computes its
-// info hash. contentDir stays under cfg.WorkDir - not moved anywhere -
-// since content addressing now happens once a PartitionContent's own PVC
-// exists (see publish.go), not here.
-func finalizeContent(contentDir string) (hash store.InfoHash, usedBytes, lastExtentEnd int64, err error) {
+// contentDir's content/ data subdirectory (see store.NestExtentFiles) and
+// validates the result against its own torrent.info. contentDir stays
+// under cfg.WorkDir - not moved anywhere - since a content's own PVC does
+// not exist until the controller has created its PartitionContent (see
+// publish.go). It computes no info hash: the hash is observed once, by
+// the publish step, from the bytes that actually reach the PVC.
+func finalizeContent(contentDir string) (usedBytes, lastExtentEnd int64, err error) {
 	torrentInfo, err := store.LoadContentDirTorrentInfo(contentDir)
 	if err != nil {
-		return store.InfoHash{}, 0, 0, err
+		return 0, 0, err
 	}
 	// partclone -T writes torrent.info and every extent file flat,
 	// directly inside contentDir (see internal/ingest.Partclone's doc
@@ -236,14 +259,10 @@ func finalizeContent(contentDir string) (hash store.InfoHash, usedBytes, lastExt
 	// file entries resolve to on a real BitTorrent v1 client (see
 	// store.ContentDataDir).
 	if err := store.NestExtentFiles(contentDir, torrentInfo); err != nil {
-		return store.InfoHash{}, 0, 0, err
+		return 0, 0, err
 	}
 	if err := store.ValidateContentDir(contentDir, torrentInfo); err != nil {
-		return store.InfoHash{}, 0, 0, err
-	}
-	hash, err = store.ComputeInfoHash(torrentInfo)
-	if err != nil {
-		return store.InfoHash{}, 0, 0, err
+		return 0, 0, err
 	}
 
 	for _, e := range torrentInfo.Extents {
@@ -253,7 +272,7 @@ func finalizeContent(contentDir string) (hash store.InfoHash, usedBytes, lastExt
 		}
 	}
 
-	return hash, usedBytes, lastExtentEnd, nil
+	return usedBytes, lastExtentEnd, nil
 }
 
 // extractPartition copies the byte range [start, start+size) of src into

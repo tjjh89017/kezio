@@ -21,33 +21,44 @@ import (
 	"fmt"
 )
 
+// TerminationMessageLimit is the size Kubernetes truncates a container
+// termination message at. A Result over this never reaches the
+// controller intact, so cmd/ingest fails the run with a clear message
+// instead of emitting a payload that would parse as garbage on the other
+// side.
+const TerminationMessageLimit = 4096
+
 // Result is the JSON payload kezio-ingest writes to its container's
 // termination message on exit (see cmd/ingest), success or failure. The
-// Image controller reads it back from the completed Job's pod
-// (containerStatuses[0].state.terminated.message) to create or find each
-// partition's PartitionContent object, without ever mounting the ingest
-// work volume itself.
+// ImageImport controller reads it back from the completed Job's pod
+// (containerStatuses[0].state.terminated.message) to create each
+// partition's PartitionContent object and the Image binding them,
+// without ever mounting the ingest work volume itself.
 //
-// Kubernetes caps a termination message at 4KiB, so this payload is kept
-// to a compact per-partition summary: it deliberately excludes the full
-// extent lists and piece hashes (those stay in torrent.info inside each
-// partition's scratch content directory) and the verbatim sfdisk JSON
-// dump, which an unusually large partition table could grow past the cap
-// on its own.
+// The termination message is capped at TerminationMessageLimit, so this
+// payload is kept to a compact per-partition summary plus the sfdisk JSON
+// dump: it deliberately excludes the extent lists and piece hashes, which
+// stay in torrent.info inside each partition's scratch content directory.
+// The sfdisk dump has to travel here because the created Image's
+// spec.layout.sfdiskJSON is what recreates the partition table at deploy
+// time, and this is the only channel back from the ingest Job.
 type Result struct {
-	// Success is true when ingest completed and every field below is
-	// populated. False means Error explains what went wrong and Disk is
-	// nil.
+	// Success is true when the run completed and every field below is
+	// populated. False means Error explains what went wrong and the
+	// payload fields are nil.
 	Success bool `json:"success"`
 	// Error is a human-readable failure message, set only when Success
 	// is false.
 	Error string `json:"error,omitempty"`
 	// Disk is the captured disk-level layout and per-partition summary,
-	// set only when Success is true.
+	// set only by a successful ingest-mode run.
 	Disk *ResultDisk `json:"disk,omitempty"`
+	// Publish is the published content's summary, set only by a
+	// successful publish-mode run.
+	Publish *ResultPublish `json:"publish,omitempty"`
 }
 
-// ResultDisk is the disk-level portion of a successful Result.
+// ResultDisk is the disk-level portion of a successful ingest Result.
 type ResultDisk struct {
 	// SizeBytes is the total size of the source disk image (the raw
 	// conversion's file size).
@@ -55,19 +66,23 @@ type ResultDisk struct {
 	// PartitionTable is "gpt" or "mbr" (api/v1alpha2's
 	// PartitionTableGPT / PartitionTableMBR).
 	PartitionTable string `json:"partitionTable"`
+	// SfdiskJSON is the verbatim `sfdisk --dump --json` output for the
+	// converted raw disk, compacted. It becomes the created Image's
+	// spec.layout.sfdiskJSON.
+	SfdiskJSON string `json:"sfdiskJSON"`
 	// Partitions lists every partition ingest processed, in partition
 	// number order.
 	Partitions []ResultPartition `json:"partitions"`
 }
 
-// ResultPartition is one partition's summary in a successful Result. The
-// fields shared with api/v1alpha2.PartitionContentSpec (FSType,
-// UsedBytes, SizeBytes, LastExtentEnd, PieceLength) let the Image
-// controller copy them across with no translation; InfoHash names the
-// PartitionContent object itself (see internal/store.ObjectName). A
-// swap partition (Role == "swap") carries no content: FSType, UsedBytes,
-// LastExtentEnd, PieceLength, and InfoHash are all left zero, and UUID
-// holds the file-system UUID to restore by instead.
+// ResultPartition is one partition's summary in a successful ingest
+// Result. The fields shared with api/v1alpha2.PartitionContentSpec
+// (FSType, UsedBytes, SizeBytes, LastExtentEnd, PieceLength) let the
+// ImageImport controller copy them across with no translation; Role,
+// TypeGUID, PartUUID, UUID and SizeBytes fill in the Image slot that
+// partition becomes. A swap partition (Role == "swap") carries no
+// content: FSType, UsedBytes, LastExtentEnd and PieceLength are left
+// zero, and UUID holds the file-system UUID to restore by instead.
 type ResultPartition struct {
 	Number        int32  `json:"number"`
 	Role          string `json:"role"`
@@ -77,7 +92,17 @@ type ResultPartition struct {
 	LastExtentEnd int64  `json:"lastExtentEnd,omitempty"`
 	PieceLength   int64  `json:"pieceLength,omitempty"`
 	UUID          string `json:"uuid,omitempty"`
-	InfoHash      string `json:"infoHash,omitempty"`
+	TypeGUID      string `json:"typeGUID,omitempty"`
+	PartUUID      string `json:"partUUID,omitempty"`
+}
+
+// ResultPublish is the payload of a successful publish-mode run: the
+// BitTorrent v1 info hash of the content now sitting in the
+// PartitionContent's own PVC. It is computed from the copy that landed
+// there, not from the scratch source, so it describes what a leecher will
+// actually be served.
+type ResultPublish struct {
+	InfoHash string `json:"infoHash"`
 }
 
 // MarshalResult serializes r as compact JSON, suitable for writing to a

@@ -37,7 +37,7 @@ var _ = Describe("PartitionContent CRD schema", func() {
 		pcCount++
 		return &keziov1alpha2.PartitionContent{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      fmt.Sprintf("pc-%040x", pcCount),
+				Name:      fmt.Sprintf("golden-%d-p1", pcCount),
 				Namespace: "default",
 			},
 			Spec: keziov1alpha2.PartitionContentSpec{
@@ -47,7 +47,7 @@ var _ = Describe("PartitionContent CRD schema", func() {
 				LastExtentEnd: 2048,
 				PieceLength:   16384,
 				Source: keziov1alpha2.PartitionContentSource{
-					ImageName:       "image-a",
+					ImportName:      "image-a",
 					PartitionNumber: 1,
 				},
 			},
@@ -99,21 +99,20 @@ var _ = Describe("PartitionContent CRD schema", func() {
 		Expect(k8sClient.Status().Update(ctx, pc)).To(HaveOccurred())
 	})
 
-	It("rejects a name with the wrong prefix", func() {
+	It("admits an info hash in status", func() {
 		pc := newPartitionContent()
-		pc.Name = fmt.Sprintf("wrong-%040x", pcCount)
-		Expect(k8sClient.Create(ctx, pc)).To(HaveOccurred())
-	})
-
-	It("rejects a name whose hash is not 40 hex characters", func() {
-		pc := newPartitionContent()
-		pc.Name = "pc-abc123"
-		Expect(k8sClient.Create(ctx, pc)).To(HaveOccurred())
-	})
-
-	It("admits a name with a valid pc-prefixed 40-character hex hash", func() {
-		pc := newPartitionContent()
-		pc.Name = "pc-0123456789abcdef0123456789abcdef01234567"
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
+
+		pc.Status.State = keziov1alpha2.PartitionContentStateReady
+		pc.Status.InfoHash = "0123456789abcdef0123456789abcdef01234567"
+		Expect(k8sClient.Status().Update(ctx, pc)).To(Succeed())
+	})
+
+	It("rejects a status.infoHash that is not 40 hex characters", func() {
+		pc := newPartitionContent()
+		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
+
+		pc.Status.InfoHash = "abc123"
+		Expect(k8sClient.Status().Update(ctx, pc)).To(HaveOccurred())
 	})
 })

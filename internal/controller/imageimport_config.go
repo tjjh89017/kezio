@@ -21,14 +21,14 @@ import (
 )
 
 // defaultIngestSourceFormat is ImageIngestConfig.SourceFormat's default.
-// ImageSpec carries no format field of its own (see ImageSource's doc
-// comment), so a manager-wide default stands in for it.
+// ImageImportSpec carries no format field of its own, so a manager-wide
+// default stands in for it.
 const defaultIngestSourceFormat = "qcow2"
 
 // defaultIngestScratchSizeBytes is ImageIngestConfig.ScratchSizeBytes'
 // default (16Gi): the controller cannot know a source image's inflated
 // (converted-to-raw) size ahead of running ingest, so the scratch PVC is
-// sized to a fixed, generous request rather than one derived per-Image -
+// sized to a fixed, generous request rather than one derived per import -
 // mirrors legacy's ingest scratch volume being sized for "several GiB
 // once converted to raw".
 const defaultIngestScratchSizeBytes = 16 * 1024 * 1024 * 1024
@@ -37,10 +37,9 @@ const defaultIngestScratchSizeBytes = 16 * 1024 * 1024 * 1024
 // default - see the field's doc comment for why ReadWriteMany.
 var defaultIngestScratchAccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}
 
-// ImageIngestConfig configures the Image reconciler's ingest half: the
-// ingest Job's image plus everything needed to run it against a source
-// image. The zero value (Image == "") is not ready() - see
-// reconcileIngestPending - and holds every source-bearing Image at
+// ImageIngestConfig configures the ImageImport reconciler: the ingest
+// Job's image plus everything needed to run it against a source image.
+// The zero value (Image == "") is not ready() and holds every import at
 // Pending with a condition naming that ingest is unconfigured, mirroring
 // PartitionContentPublishConfig's zero-value behavior.
 type ImageIngestConfig struct {
@@ -75,8 +74,8 @@ type ImageIngestConfig struct {
 	// StagingPVCName names the PVC holding imageservice's staged uploads
 	// (see internal/imageservice.Staging), mounted read-only into the
 	// ingest Job when spec.source.url uses the kezio-staged:// scheme.
-	// Empty holds such an Image at Pending with a condition naming that
-	// staging is unconfigured - unlike Image, this only blocks Images
+	// Empty holds such an import at Pending with a condition naming that
+	// staging is unconfigured - unlike Image, this only blocks imports
 	// that actually reference a staged upload; one with an http(s)://
 	// source ingests fine with no staging PVC configured. Read from
 	// IMAGE_INGEST_STAGING_PVC.

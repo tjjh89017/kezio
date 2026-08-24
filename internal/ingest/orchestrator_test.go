@@ -88,14 +88,21 @@ func TestRun_Success(t *testing.T) {
 		t.Fatalf("got %d partitions, want 3", len(res.Disk.Partitions))
 	}
 
+	if res.Disk.SfdiskJSON == "" {
+		t.Error("expected the partition table dump to travel back in the result")
+	}
+
 	esp, data, swap := res.Disk.Partitions[0], res.Disk.Partitions[1], res.Disk.Partitions[2]
-	if esp.Role != "esp" || esp.FSType != "vfat" || esp.InfoHash == "" {
+	if esp.Role != "esp" || esp.FSType != "vfat" {
 		t.Errorf("esp partition = %+v", esp)
 	}
-	if data.Role != "data" || data.FSType != "ext4" || data.InfoHash == "" {
+	if esp.TypeGUID != "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" || esp.PartUUID != "AAAAAAAA-1111-1111-1111-111111111111" {
+		t.Errorf("esp partition identity = %+v", esp)
+	}
+	if data.Role != "data" || data.FSType != "ext4" {
 		t.Errorf("data partition = %+v", data)
 	}
-	if swap.Role != "swap" || swap.FSType != "" || swap.UUID != "CCCC-UUID" || swap.InfoHash != "" {
+	if swap.Role != "swap" || swap.FSType != "" || swap.UUID != "CCCC-UUID" {
 		t.Errorf("swap partition = %+v", swap)
 	}
 	if esp.PieceLength != store.PieceSize || data.PieceLength != store.PieceSize {
@@ -106,13 +113,6 @@ func TestRun_Success(t *testing.T) {
 	}
 	if swap.PieceLength != 0 || swap.LastExtentEnd != 0 {
 		t.Errorf("swap partition should record no content fields, got %+v", swap)
-	}
-
-	// Both content partitions used identical fixture bytes, so they hash
-	// identically: the Image controller is the one that decides whether
-	// to dedup onto a single PartitionContent.
-	if esp.InfoHash != data.InfoHash {
-		t.Errorf("expected esp and data to hash identically for identical bytes, got %q and %q", esp.InfoHash, data.InfoHash)
 	}
 
 	// Each content-bearing partition gets its own scratch content
@@ -292,11 +292,11 @@ func writeFixtureContentDir(t *testing.T, dir string, content []byte) {
 	}
 }
 
-func TestFinalizeContent_ComputesHashAndNestsExtents(t *testing.T) {
+func TestFinalizeContent_MeasuresContentAndNestsExtents(t *testing.T) {
 	contentDir := t.TempDir()
 	writeFixtureContentDir(t, contentDir, []byte("payload"))
 
-	hash, usedBytes, lastExtentEnd, err := finalizeContent(contentDir)
+	usedBytes, lastExtentEnd, err := finalizeContent(contentDir)
 	if err != nil {
 		t.Fatalf("finalizeContent: %v", err)
 	}
@@ -306,35 +306,14 @@ func TestFinalizeContent_ComputesHashAndNestsExtents(t *testing.T) {
 	if lastExtentEnd != int64(len("payload")) {
 		t.Errorf("lastExtentEnd = %d, want %d", lastExtentEnd, len("payload"))
 	}
-	if (hash == store.InfoHash{}) {
-		t.Error("expected a non-zero info hash")
-	}
 	if _, err := os.Stat(filepath.Join(store.ContentDataDir(contentDir), store.ExtentFileName(0))); err != nil {
 		t.Errorf("expected the extent file nested under content/, stat err = %v", err)
 	}
 }
 
-func TestFinalizeContent_IdenticalContentHashesIdentically(t *testing.T) {
-	dir1, dir2 := t.TempDir(), t.TempDir()
-	writeFixtureContentDir(t, dir1, []byte("same-bytes"))
-	writeFixtureContentDir(t, dir2, []byte("same-bytes"))
-
-	hash1, _, _, err := finalizeContent(dir1)
-	if err != nil {
-		t.Fatalf("finalizeContent(dir1): %v", err)
-	}
-	hash2, _, _, err := finalizeContent(dir2)
-	if err != nil {
-		t.Fatalf("finalizeContent(dir2): %v", err)
-	}
-	if hash1 != hash2 {
-		t.Errorf("expected identical content to hash identically, got %s and %s", hash1, hash2)
-	}
-}
-
 func TestFinalizeContent_MissingTorrentInfoFails(t *testing.T) {
 	contentDir := t.TempDir()
-	if _, _, _, err := finalizeContent(contentDir); err == nil {
+	if _, _, err := finalizeContent(contentDir); err == nil {
 		t.Fatal("expected an error for a content dir with no torrent.info")
 	}
 }

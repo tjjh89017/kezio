@@ -48,7 +48,7 @@ var _ = Describe("Image Controller seeder demand when a Site vanishes", func() {
 
 		img := newTestImageWithSlots("image-720", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
@@ -134,7 +134,7 @@ var _ = Describe("Image Controller seeder demand when a Site vanishes", func() {
 
 		img := newTestImageWithSlots("image-721", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 

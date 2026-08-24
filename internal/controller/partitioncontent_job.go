@@ -30,7 +30,6 @@ import (
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 	"github.com/tjjh89017/kezio/internal/ingest"
-	"github.com/tjjh89017/kezio/internal/store"
 )
 
 // publishJobNamePrefix identifies a Job as this reconciler's publish Job
@@ -44,18 +43,19 @@ const publishJobNamePrefix = "pc-publish-"
 // ingest/publish Jobs on the legacy branch used.
 const publishJobBackoffLimit = 0
 
-// publishJobName returns the deterministic Job name for hash's publish
-// run. hash.String() is a fixed-length 40-character hex string, so
-// unlike an Image- or Machine-name-derived Job name this never needs
-// truncate-and-hash handling to stay under the Kubernetes name limit.
-func publishJobName(hash store.InfoHash) string {
-	return publishJobNamePrefix + hash.String()
+// publishJobName returns the deterministic Job name for contentName's
+// publish run. A PartitionContent name is user-chosen and can run to
+// store.MaxContentNameLength, so this needs the same truncate-and-hash
+// handling an Image- or Machine-name-derived Job name does to stay under
+// the Kubernetes name limit.
+func publishJobName(contentName string) string {
+	return truncatedName(publishJobNamePrefix+contentName, k8sNameMaxLength)
 }
 
-// publishJobFor gets the publish Job for hash, if any.
-func (r *PartitionContentReconciler) publishJobFor(ctx context.Context, pc *keziov1alpha2.PartitionContent, hash store.InfoHash) (*batchv1.Job, error) {
+// publishJobFor gets pc's publish Job, if any.
+func (r *PartitionContentReconciler) publishJobFor(ctx context.Context, pc *keziov1alpha2.PartitionContent) (*batchv1.Job, error) {
 	job := &batchv1.Job{}
-	key := client.ObjectKey{Namespace: pc.Namespace, Name: publishJobName(hash)}
+	key := client.ObjectKey{Namespace: pc.Namespace, Name: publishJobName(pc.Name)}
 	if err := r.Get(ctx, key, job); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, nil
@@ -65,11 +65,11 @@ func (r *PartitionContentReconciler) publishJobFor(ctx context.Context, pc *kezi
 	return job, nil
 }
 
-// createPublishJob creates the publish Job for pc/hash. r.Publish must be
-// ready() (see PartitionContentPublishConfig) - the caller gates on that
-// before calling this, since an unready config means Pending, not a Job.
-func (r *PartitionContentReconciler) createPublishJob(ctx context.Context, pc *keziov1alpha2.PartitionContent, hash store.InfoHash, pvcName string) error {
-	job := r.buildPublishJob(pc, hash, pvcName)
+// createPublishJob creates pc's publish Job. r.Publish must be ready()
+// (see PartitionContentPublishConfig) - the caller gates on that before
+// calling this, since an unready config means Pending, not a Job.
+func (r *PartitionContentReconciler) createPublishJob(ctx context.Context, pc *keziov1alpha2.PartitionContent, pvcName string) error {
+	job := r.buildPublishJob(pc, pvcName)
 	if err := controllerutil.SetControllerReference(pc, job, r.Scheme); err != nil {
 		return fmt.Errorf("partitioncontent %q: setting publish job owner reference: %w", pc.Name, err)
 	}
@@ -81,23 +81,23 @@ func (r *PartitionContentReconciler) createPublishJob(ctx context.Context, pc *k
 
 // buildPublishJob constructs the (not yet created) Job that runs the
 // publish step for pc's content: it mounts the content PVC at
-// ingest.ContentMountPath(hash) - the same mount-path convention the
+// ingest.ContentMountPath(pc.Name) - the same mount-path convention the
 // seeder and the e2e lane use. It builds no announce URL into anything:
 // no Site is in scope at publish time (see
 // internal/ingest.PublishConfig's doc comment).
 //
-// It also mounts, read-only, the ingest scratch PVC of the Image named
-// by pc.Spec.Source.ImageName (ingestScratchPVCName, image_ingest.go's
-// naming convention) at ingest.DefaultWorkDir: that is where the ingest
-// Job left this partition's already-sliced content directory
-// (content-<pc.Spec.Source.PartitionNumber>, see
+// It also mounts, read-only, the ingest scratch PVC of the ImageImport
+// named by pc.Spec.Source.ImportName (ingestScratchPVCName,
+// imageimport_ingest.go's naming convention) at ingest.DefaultWorkDir:
+// that is where the ingest Job left this partition's already-sliced
+// content directory (content-<pc.Spec.Source.PartitionNumber>, see
 // internal/ingest/orchestrator.go's processPartition). SOURCE_CONTENT_DIR
 // names that directory so cmd/ingest's publish mode knows where to copy
 // from - PublishPartition.SourceDir (internal/ingest/publish.go). Every
-// PartitionContent this controller ever publishes was created by the
-// Image-side ingest orchestration (image_ingest.go's ensurePartitionContent),
-// so Source is always populated by the time a publish Job is built.
-func (r *PartitionContentReconciler) buildPublishJob(pc *keziov1alpha2.PartitionContent, hash store.InfoHash, pvcName string) *batchv1.Job {
+// PartitionContent this controller ever publishes was created by an
+// ImageImport (imageimport_controller.go's ensureImportedContent), so
+// Source is always populated by the time a publish Job is built.
+func (r *PartitionContentReconciler) buildPublishJob(pc *keziov1alpha2.PartitionContent, pvcName string) *batchv1.Job {
 	backoffLimit := int32(publishJobBackoffLimit)
 	labels := map[string]string{
 		partitionContentAppNameLabel:      partitionContentAppNameValue,
@@ -110,12 +110,12 @@ func (r *PartitionContentReconciler) buildPublishJob(pc *keziov1alpha2.Partition
 	trueVal := true
 	falseVal := false
 
-	scratchPVCName := ingestScratchPVCName(pc.Spec.Source.ImageName)
+	scratchPVCName := ingestScratchPVCName(pc.Spec.Source.ImportName)
 	sourceContentDir := filepath.Join(ingest.DefaultWorkDir, fmt.Sprintf("content-%d", pc.Spec.Source.PartitionNumber))
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      publishJobName(hash),
+			Name:      publishJobName(pc.Name),
 			Namespace: pc.Namespace,
 			Labels:    labels,
 		},
@@ -139,13 +139,13 @@ func (r *PartitionContentReconciler) buildPublishJob(pc *keziov1alpha2.Partition
 						Image: r.Publish.Image,
 						Env: []corev1.EnvVar{
 							{Name: "INGEST_MODE", Value: "publish"},
-							{Name: "PARTITION_CONTENT_HASH", Value: hash.String()},
+							{Name: "PARTITION_CONTENT_NAME", Value: pc.Name},
 							{Name: "SOURCE_CONTENT_DIR", Value: sourceContentDir},
 						},
 						VolumeMounts: []corev1.VolumeMount{
 							{
 								Name:      contentVolumeName,
-								MountPath: ingest.ContentMountPath(hash),
+								MountPath: ingest.ContentMountPath(pc.Name),
 							},
 							{
 								Name:      scratchVolumeName,
@@ -179,30 +179,4 @@ func (r *PartitionContentReconciler) buildPublishJob(pc *keziov1alpha2.Partition
 		},
 	}
 	return job
-}
-
-// publishJobOutcome is what reconcilePublishing needs to know about a
-// running publish Job.
-type publishJobOutcome int
-
-const (
-	publishJobRunning publishJobOutcome = iota
-	publishJobSucceeded
-	publishJobFailed
-)
-
-// outcomeOf reports job's outcome from its status alone: the reconciler
-// has no other way to observe a publish Job's result (it cannot mount the
-// content PVC's filesystem itself - see PartitionContentReconciler's doc
-// comment), so the Job is the sole witness to whether publishing
-// succeeded.
-func outcomeOf(job *batchv1.Job) publishJobOutcome {
-	switch {
-	case job.Status.Succeeded > 0:
-		return publishJobSucceeded
-	case job.Status.Failed > 0:
-		return publishJobFailed
-	default:
-		return publishJobRunning
-	}
 }

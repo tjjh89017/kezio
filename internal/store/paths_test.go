@@ -21,47 +21,42 @@ import (
 	"testing"
 )
 
-// partitionContentNamePattern mirrors the PartitionContent webhook's name
-// validation (internal/webhook/v1alpha2/partitioncontent_webhook.go): this
-// pins that ObjectName's output always satisfies it.
-var partitionContentNamePattern = regexp.MustCompile(`^pc-[0-9a-f]{40}$`)
+// dns1123Subdomain mirrors the Kubernetes object name rule every generated
+// PartitionContent and PVC name has to satisfy.
+var dns1123Subdomain = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`)
 
-func testInfoHash(fill byte) InfoHash {
-	var h InfoHash
-	for i := range h {
-		h[i] = fill
-	}
-	return h
-}
-
-func TestObjectName_MatchesPartitionContentNamePattern(t *testing.T) {
-	name := ObjectName(testInfoHash(0x42))
-	if !partitionContentNamePattern.MatchString(name) {
-		t.Errorf("ObjectName = %q, does not match %q", name, partitionContentNamePattern.String())
+func TestContentName_IsPrefixPlusPartitionNumber(t *testing.T) {
+	if got, want := ContentName("ubuntu-2404", 3), "ubuntu-2404-p3"; got != want {
+		t.Errorf("ContentName = %q, want %q", got, want)
 	}
 }
 
-func TestPVCName_IsObjectNamePlusContentSuffix(t *testing.T) {
-	hash := testInfoHash(0x42)
-	object := ObjectName(hash)
-	pvc := PVCName(hash)
-	if want := object + "-content"; pvc != want {
-		t.Errorf("PVCName = %q, want %q", pvc, want)
+func TestContentName_IsAValidObjectName(t *testing.T) {
+	name := ContentName("ubuntu-2404", 12)
+	if !dns1123Subdomain.MatchString(name) {
+		t.Errorf("ContentName = %q, does not match %q", name, dns1123Subdomain.String())
 	}
 }
 
-func TestObjectName_SameHashSameName(t *testing.T) {
-	h1, h2 := testInfoHash(0x42), testInfoHash(0x42)
-	if ObjectName(h1) != ObjectName(h2) {
-		t.Fatal("ObjectName differs for equal info hashes")
+func TestContentName_DifferentPartitionsDifferentNames(t *testing.T) {
+	if ContentName("golden", 1) == ContentName("golden", 2) {
+		t.Fatal("ContentName collides for different partition numbers")
 	}
 }
 
-func TestObjectName_DifferentHashDifferentName(t *testing.T) {
-	h1 := testInfoHash(0x00)
-	h2 := testInfoHash(0x00)
-	h2[0] = 0x01
-	if ObjectName(h1) == ObjectName(h2) {
-		t.Fatal("ObjectName collides for different info hashes")
+func TestPVCName_IsContentNamePlusContentSuffix(t *testing.T) {
+	name := ContentName("golden", 1)
+	if got, want := PVCName(name), name+"-content"; got != want {
+		t.Errorf("PVCName = %q, want %q", got, want)
+	}
+}
+
+func TestPVCName_FitsTheObjectNameLimitAtMaxContentNameLength(t *testing.T) {
+	name := make([]byte, MaxContentNameLength)
+	for i := range name {
+		name[i] = 'a'
+	}
+	if got := len(PVCName(string(name))); got > k8sObjectNameMaxLength {
+		t.Errorf("PVCName length = %d, over the %d-character object name limit", got, k8sObjectNameMaxLength)
 	}
 }

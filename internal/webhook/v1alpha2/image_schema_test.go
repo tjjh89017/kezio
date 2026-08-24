@@ -27,6 +27,9 @@ import (
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 )
 
+// notARealValue stands in for any value outside an enum.
+const notARealValue = "not-a-real-value"
+
 // These specs exercise the CRD schema (kubebuilder markers and CEL rules)
 // through the real envtest apiserver, not the Go type definitions: OpenAPI
 // and CEL validation only run there.
@@ -50,7 +53,7 @@ var _ = Describe("Image CRD schema", func() {
 							Number: 1,
 							Role:   keziov1alpha2.PartitionRoleESP,
 							ContentRef: &keziov1alpha2.NameRef{
-								Name: "pc-0123456789abcdef0123456789abcdef01234567",
+								Name: "ubuntu-2404-p1",
 							},
 						},
 						{
@@ -69,19 +72,10 @@ var _ = Describe("Image CRD schema", func() {
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 	})
 
-	It("admits an Image with a source", func() {
-		img := newImage()
-		img.Spec.Source = &keziov1alpha2.ImageSource{
-			URL:      "https://example.invalid/disk.raw",
-			Checksum: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-		}
-		Expect(k8sClient.Create(ctx, img)).To(Succeed())
-	})
-
 	It("rejects a slot with both contentRef and fsType", func() {
 		img := newImage()
 		img.Spec.Layout.Slots[1].ContentRef = &keziov1alpha2.NameRef{
-			Name: "pc-0123456789abcdef0123456789abcdef01234567",
+			Name: "ubuntu-2404-p1",
 		}
 		Expect(k8sClient.Create(ctx, img)).To(HaveOccurred())
 	})
@@ -96,32 +90,15 @@ var _ = Describe("Image CRD schema", func() {
 		Expect(k8sClient.Create(ctx, img)).To(HaveOccurred())
 	})
 
-	It("rejects a contentRef name with the wrong shape", func() {
+	It("admits a contentRef naming any user-chosen content name", func() {
 		img := newImage()
-		img.Spec.Layout.Slots[0].ContentRef = &keziov1alpha2.NameRef{Name: "not-a-content-name"}
-		Expect(k8sClient.Create(ctx, img)).To(HaveOccurred())
-	})
-
-	It("rejects a source with url but no checksum", func() {
-		img := newImage()
-		img.Spec.Source = &keziov1alpha2.ImageSource{
-			URL: "https://example.invalid/disk.raw",
-		}
-		Expect(k8sClient.Create(ctx, img)).To(HaveOccurred())
-	})
-
-	It("rejects a source with a malformed checksum", func() {
-		img := newImage()
-		img.Spec.Source = &keziov1alpha2.ImageSource{
-			URL:      "https://example.invalid/disk.raw",
-			Checksum: "md5:0123456789abcdef",
-		}
-		Expect(k8sClient.Create(ctx, img)).To(HaveOccurred())
+		img.Spec.Layout.Slots[0].ContentRef = &keziov1alpha2.NameRef{Name: "ubuntu-2404-p1"}
+		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 	})
 
 	It("rejects an unknown osFamily value", func() {
 		img := newImage()
-		img.Spec.OSFamily = "not-a-real-value"
+		img.Spec.OSFamily = notARealValue
 		Expect(k8sClient.Create(ctx, img)).To(HaveOccurred())
 	})
 
@@ -157,7 +134,7 @@ var _ = Describe("Image CRD schema", func() {
 		img := newImage()
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 
-		img.Status.State = "not-a-real-value"
+		img.Status.State = notARealValue
 		Expect(k8sClient.Status().Update(ctx, img)).To(HaveOccurred())
 	})
 })

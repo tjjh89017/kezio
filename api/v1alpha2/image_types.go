@@ -80,7 +80,6 @@ type ImageSlot struct {
 	// equal this Image's own namespace - the webhook denies any other
 	// value, since PartitionContent's deletion finalizer only ever looks
 	// for a referencing Image within the content's own namespace.
-	// +kubebuilder:validation:XValidation:rule="self.name.matches('^pc-[0-9a-f]{40}$')",message="contentRef.name must look like a PartitionContent name (pc-<40 hex chars>)"
 	// +optional
 	ContentRef *NameRef `json:"contentRef,omitempty"`
 	// FSType is the file system to create fresh at deploy time, for a
@@ -136,28 +135,19 @@ type ImageDiskLayout struct {
 	Slots []ImageSlot `json:"slots"`
 }
 
-// ImageSource describes where to fetch and how to verify a source disk
-// image to ingest. Absent on an Image composed entirely from existing
-// PartitionContent objects: a composed Image triggers no ingest.
-type ImageSource struct {
-	// URL is the location the ingest job fetches the source image from.
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=4096
-	URL string `json:"url"`
-	// Checksum verifies the fetched source image before ingest converts
-	// it: "sha256:<hex digest>".
-	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
-	Checksum string `json:"checksum"`
-}
-
 // ImageSpec defines the desired state of Image: a disk layout of ordered
-// slots, each optionally bound to a content-addressed PartitionContent.
-// The whole spec is immutable once created (see the type-level XValidation
-// rule): a slot's ContentRef binds into a BitTorrent swarm by that
-// content's fixed info hash, and allowing the layout to change afterward
-// would let an in-use Image silently start describing different content.
-// To publish a different layout or content set, create an Image with a
-// new name.
+// slots, each optionally bound to a PartitionContent. The whole spec is
+// immutable once created (see the type-level XValidation rule): a slot's
+// ContentRef binds into a BitTorrent swarm, and allowing the layout to
+// change afterward would let an in-use Image silently start describing
+// different content. To publish a different layout or content set, create
+// an Image with a new name.
+//
+// An Image never ingests anything itself: it is always a declaration over
+// PartitionContent objects that already exist. An ImageImport is what
+// runs partclone, captures those objects, and creates the Image once it
+// knows the whole layout - so this spec is complete the moment it is
+// created and never has to be patched afterwards.
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
 type ImageSpec struct {
 	// OSFamily gates OS-specific validation and builtins (for example
@@ -176,11 +166,6 @@ type ImageSpec struct {
 	// Layout is this image's disk-level partition table and ordered slot
 	// list.
 	Layout ImageDiskLayout `json:"layout"`
-	// Source describes where to fetch and verify a source disk image to
-	// ingest. Absent for an Image composed entirely from existing
-	// PartitionContent objects, which triggers no ingest.
-	// +optional
-	Source *ImageSource `json:"source,omitempty"`
 	// Params is schemaless input for the attached hooks' templating.
 	// Merge order: a PostHook's own declared param defaults first, then
 	// this field, then the deploying Machine's own spec.params; later
@@ -220,18 +205,14 @@ func (s ImageSpec) EffectiveOSFamily() string {
 
 // Image state enum values for ImageStatus.State.
 const (
-	// ImageStatePending is the initial state: no ingest has started and,
-	// for a composed image, referenced content has not yet been checked.
+	// ImageStatePending is the initial state: referenced content has not
+	// yet been checked, or is not all Ready.
 	ImageStatePending = "Pending"
-	// ImageStateIngesting means the ingest job is fetching, converting, or
-	// slicing the source image. Never entered by a composed Image (no
-	// Source).
-	ImageStateIngesting = "Ingesting"
 	// ImageStateReady means every slot's referenced content (if any) is
-	// ready and, for an ingested image, ingest has finished.
+	// Ready.
 	ImageStateReady = "Ready"
-	// ImageStateFailed means ingest, or referenced-content validation,
-	// failed; see the Ready condition's message for details.
+	// ImageStateFailed means referenced-content validation failed; see the
+	// Ready condition's message for details.
 	ImageStateFailed = "Failed"
 )
 
@@ -255,23 +236,15 @@ const (
 // ImageStatus defines the observed state of Image.
 //
 // The Image reconciler is thin: it aggregates the readiness of this
-// image's referenced PartitionContent objects and owns no seeders of its
-// own (those belong to PartitionContent). A composed image - one with no
-// Source - is create-only metadata over existing content: reconciling it
-// triggers no ingest, and the swarms of the content it references stay
-// valid and unaffected.
+// image's referenced PartitionContent objects and drives the per-Site
+// seeder Deployments those contents are served from. It runs no ingest of
+// its own - that belongs to ImageImport - so an Image is create-only
+// metadata over content that already exists.
 type ImageStatus struct {
-	// State is the object's position in the ingest/readiness workflow.
-	// +kubebuilder:validation:Enum=Pending;Ingesting;Ready;Failed
+	// State is the object's position in the readiness workflow.
+	// +kubebuilder:validation:Enum=Pending;Ready;Failed
 	// +optional
 	State string `json:"state,omitempty"`
-	// SourceChecksum is a verbatim echo of spec.source.checksum, for audit
-	// convenience. It carries no verification claim; ingest verification
-	// failures surface through the Image's state/conditions, not here.
-	// Absent for a composed image (no Source).
-	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
-	// +optional
-	SourceChecksum string `json:"sourceChecksum,omitempty"`
 	// Conditions report the current state of the image, including
 	// ImageConditionReady and ImageConditionValid. Every write carries
 	// observedGeneration (metav1.Condition's own field) set to the
@@ -292,7 +265,9 @@ type ImageStatus struct {
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // Image is the Schema for the images API. It binds a disk layout to
-// ordered slots that reference PartitionContent objects.
+// ordered slots that reference PartitionContent objects. It is created
+// either by an ImageImport, once that import knows the whole layout, or
+// by a user composing existing content by name.
 type Image struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

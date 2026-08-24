@@ -739,21 +739,24 @@ bin/kezioctl image upload ./ubuntu-24.04-minimal-cloudimg-amd64.img \
   --name lab-ubuntu \
   --namespace kezio-system \
   --server http://127.0.0.1:18080 \
-  --token "${IMAGE_SERVICE_TOKEN}" \
-  --format qcow2
+  --token "${IMAGE_SERVICE_TOKEN}"
 ```
 
-The upload starts an ingest Job that converts the image, records its
-`sfdisk` layout inline on the `Image` (`spec.layout`, not a separate
-kind), writes one immutable `PartitionContent` per partition, and
-builds a `.torrent` inside each one. Watch it:
+The upload creates an `ImageImport`. Its ingest Job converts the image
+and slices every partition once with partclone, in the cluster. The
+operator then writes one immutable `PartitionContent` per non-swap
+partition - `lab-ubuntu-p1`, `lab-ubuntu-p2`, ... - and the `Image`
+`lab-ubuntu`, whose `spec.layout` carries the `sfdisk` dump inline (not
+a separate kind). `--image-name` and `--content-prefix` override those
+names; both default to `--name`. Watch it:
 
 ```sh
+kubectl -n kezio-system get imageimport lab-ubuntu -w
 kubectl -n kezio-system get image lab-ubuntu -w
 kubectl -n kezio-system logs -l job-name --tail=50
 ```
 
-Wait until the Image reports `Ready`. No seeder runs yet - a seeder
+Wait until the `ImageImport` reports `Ready` and then the `Image` does. No seeder runs yet - a seeder
 Deployment exists only while a Machine at that Site is deploying that
 Image.
 

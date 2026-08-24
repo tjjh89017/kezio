@@ -73,7 +73,7 @@ var _ = Describe("Image Webhook", func() {
 					LastExtentEnd: lastExtentEnd,
 					PieceLength:   16384,
 					Source: keziov1alpha2.PartitionContentSource{
-						ImageName:       "source-image",
+						ImportName:      "source-image",
 						PartitionNumber: 1,
 					},
 				},
@@ -330,7 +330,7 @@ var _ = Describe("Image Webhook", func() {
 					LastExtentEnd: 4096,
 					PieceLength:   16384,
 					Source: keziov1alpha2.PartitionContentSource{
-						ImageName:       "image-b",
+						ImportName:      "image-b",
 						PartitionNumber: 1,
 					},
 				},

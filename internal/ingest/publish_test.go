@@ -109,12 +109,37 @@ func TestRunPublish_MissingSourceContentIsAFailure(t *testing.T) {
 }
 
 func TestContentMountPath(t *testing.T) {
-	var hash store.InfoHash
-	for i := range hash {
-		hash[i] = 0x42
-	}
-	want := ContentMountRoot + "/" + store.PVCName(hash)
-	if got := ContentMountPath(hash); got != want {
+	const contentName = "ubuntu-2404-p1"
+	want := ContentMountRoot + "/" + store.PVCName(contentName)
+	if got := ContentMountPath(contentName); got != want {
 		t.Errorf("ContentMountPath = %q, want %q", got, want)
+	}
+}
+
+func TestRunPublish_ReportsThePublishedContentsInfoHash(t *testing.T) {
+	sourceDir := t.TempDir()
+	writePublishedFixture(t, sourceDir, []byte("payload"))
+	destDir := filepath.Join(t.TempDir(), "content-dest")
+
+	result := RunPublish(PublishConfig{
+		Partitions: []PublishPartition{{Number: 1, SourceDir: sourceDir, DestDir: destDir}},
+	})
+	if !result.Success {
+		t.Fatalf("RunPublish: Success=false, Error=%q", result.Error)
+	}
+	if result.Publish == nil {
+		t.Fatal("result.Publish is nil, want the published content's info hash")
+	}
+
+	info, err := store.LoadContentDirTorrentInfo(destDir)
+	if err != nil {
+		t.Fatalf("LoadContentDirTorrentInfo(destDir): %v", err)
+	}
+	want, err := store.ComputeInfoHash(info)
+	if err != nil {
+		t.Fatalf("ComputeInfoHash: %v", err)
+	}
+	if result.Publish.InfoHash != want.String() {
+		t.Errorf("result.Publish.InfoHash = %q, want %q", result.Publish.InfoHash, want.String())
 	}
 }

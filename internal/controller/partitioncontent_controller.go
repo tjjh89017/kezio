@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -86,6 +85,7 @@ type PartitionContentReconciler struct {
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=partitioncontents/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=images,verbs=get;list;watch
@@ -116,22 +116,17 @@ func (r *PartitionContentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	hash, err := store.ParseInfoHash(strings.TrimPrefix(pc.Name, "pc-"))
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("partitioncontent %q: name is not a valid content hash: %w", pc.Name, err)
-	}
-
-	return r.onChange(ctx, &pc, hash)
+	return r.onChange(ctx, &pc)
 }
 
 // onChange drives one step of the publish walk: ensure the content PVC,
 // then Pending -> Publishing -> Ready|Failed. An already-Ready object
-// never re-enters the publish walk (see the branch below) - this is the
-// dedupe guarantee the seeder lifecycle relies on: reaching Ready never
-// re-triggers a second publish Job for the same content hash. Once
-// Ready, reconcileSeeder takes over instead.
-func (r *PartitionContentReconciler) onChange(ctx context.Context, pc *keziov1alpha2.PartitionContent, hash store.InfoHash) (ctrl.Result, error) {
-	pvc, err := r.ensureContentPVC(ctx, pc, hash)
+// never re-enters the publish walk (see the branch below) - this is what
+// the seeder lifecycle relies on: reaching Ready never re-triggers a
+// second publish Job for the same content. Once Ready, reconcileSeeder
+// takes over instead.
+func (r *PartitionContentReconciler) onChange(ctx context.Context, pc *keziov1alpha2.PartitionContent) (ctrl.Result, error) {
+	pvc, err := r.ensureContentPVC(ctx, pc)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -141,7 +136,7 @@ func (r *PartitionContentReconciler) onChange(ctx context.Context, pc *keziov1al
 		return r.reconcileSeeder(ctx, pc)
 	}
 
-	job, err := r.publishJobFor(ctx, pc, hash)
+	job, err := r.publishJobFor(ctx, pc)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -150,20 +145,50 @@ func (r *PartitionContentReconciler) onChange(ctx context.Context, pc *keziov1al
 		if !r.Publish.ready() {
 			return r.recordPending(ctx, pc, pvc)
 		}
-		if err := r.createPublishJob(ctx, pc, hash, pvc.Name); err != nil {
+		if err := r.createPublishJob(ctx, pc, pvc.Name); err != nil {
 			return ctrl.Result{}, err
 		}
 		return r.recordPublishing(ctx, pc, pvc)
 	}
 
 	switch outcomeOf(job) {
-	case publishJobSucceeded:
-		return r.recordReady(ctx, pc, pvc)
-	case publishJobFailed:
+	case jobSucceeded:
+		return r.completePublish(ctx, pc, pvc, job)
+	case jobFailed:
 		return r.recordFailed(ctx, pc, job)
 	default:
 		return r.recordPublishing(ctx, pc, pvc)
 	}
+}
+
+// completePublish handles a successfully completed publish Job: it reads
+// the info hash the Job computed from the bytes it actually wrote into
+// the content PVC, and records it alongside Ready.
+//
+// The hash has to travel this way round. It only exists once partclone
+// has run, so it cannot be declared in spec; and this reconciler can
+// never mount the content PVC to compute it itself (see the type's doc
+// comment), so the Job that did the writing is the only witness to it.
+// A Job that succeeded but reported no hash is a failure: without it,
+// nothing downstream can address this content's swarm.
+func (r *PartitionContentReconciler) completePublish(
+	ctx context.Context, pc *keziov1alpha2.PartitionContent, pvc *corev1.PersistentVolumeClaim, job *batchv1.Job,
+) (ctrl.Result, error) {
+	result, err := readJobResult(ctx, r.Client, pc.Namespace, job)
+	if err != nil {
+		return r.recordFailedMessage(ctx, pc, fmt.Sprintf("reading publish result: %s", err))
+	}
+	if !result.Success {
+		return r.recordFailedMessage(ctx, pc, "publish job reported failure: "+result.Error)
+	}
+	if result.Publish == nil || result.Publish.InfoHash == "" {
+		return r.recordFailedMessage(ctx, pc, "publish job reported success with no info hash")
+	}
+	if _, err := store.ParseInfoHash(result.Publish.InfoHash); err != nil {
+		return r.recordFailedMessage(ctx, pc, fmt.Sprintf("publish job reported an invalid info hash: %s", err))
+	}
+
+	return r.recordReady(ctx, pc, pvc, result.Publish.InfoHash)
 }
 
 // recordPending records Pending with a condition explaining that the
@@ -198,10 +223,11 @@ func (r *PartitionContentReconciler) recordPublishing(ctx context.Context, pc *k
 
 // recordReady records Ready: the publish Job succeeded, so the content
 // PVC holds a validated torrent.info a seeder at any Site can build a
-// .torrent from.
-func (r *PartitionContentReconciler) recordReady(ctx context.Context, pc *keziov1alpha2.PartitionContent, pvc *corev1.PersistentVolumeClaim) (ctrl.Result, error) {
+// .torrent from, and infoHash names the swarm that content forms.
+func (r *PartitionContentReconciler) recordReady(ctx context.Context, pc *keziov1alpha2.PartitionContent, pvc *corev1.PersistentVolumeClaim, infoHash string) (ctrl.Result, error) {
 	pc.Status.State = keziov1alpha2.PartitionContentStateReady
 	pc.Status.PVCRef = &keziov1alpha2.NameRef{Name: pvc.Name}
+	pc.Status.InfoHash = infoHash
 	setPartitionContentReadyCondition(pc, metav1.ConditionTrue,
 		"PublishJobSucceeded", "publish job succeeded; torrent.info is present in the content PVC")
 	onSuccess := func() {
@@ -217,8 +243,14 @@ func (r *PartitionContentReconciler) recordReady(ctx context.Context, pc *keziov
 // is no automatic retry in this item - an operator (or a later item)
 // deleting the failed Job and/or this object is what re-enters the walk.
 func (r *PartitionContentReconciler) recordFailed(ctx context.Context, pc *keziov1alpha2.PartitionContent, job *batchv1.Job) (ctrl.Result, error) {
+	return r.recordFailedMessage(ctx, pc, fmt.Sprintf("publish job %q failed", job.Name))
+}
+
+// recordFailedMessage records Failed with an explicit message: the
+// publish Job failed, or it succeeded but its result could not be
+// trusted.
+func (r *PartitionContentReconciler) recordFailedMessage(ctx context.Context, pc *keziov1alpha2.PartitionContent, message string) (ctrl.Result, error) {
 	pc.Status.State = keziov1alpha2.PartitionContentStateFailed
-	message := fmt.Sprintf("publish job %q failed", job.Name)
 	setPartitionContentReadyCondition(pc, metav1.ConditionFalse,
 		"PublishJobFailed", message)
 	onSuccess := func() {

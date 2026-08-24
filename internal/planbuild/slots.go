@@ -19,7 +19,6 @@ package planbuild
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -104,13 +103,17 @@ func (b *Builder) buildTorrent(ctx context.Context, image *keziov1alpha2.Image, 
 		return nil, &NotReadyError{Reason: fmt.Sprintf("machine's Site %s has no seeding subnet configured, but image %s/%s needs one for partitioncontent %s", siteRes.SiteIdentity, image.Namespace, image.Name, ref.Name)}
 	}
 
-	const namePrefix = "pc-"
-	if !strings.HasPrefix(ref.Name, namePrefix) {
-		return nil, fmt.Errorf("partitioncontent %s/%s: name does not carry the %q prefix", ns, ref.Name, namePrefix)
+	// The info hash is read from status, not derived from the name: a
+	// content's name is user-chosen and says nothing about its bytes.
+	// status.infoHash is written together with Ready, so a Ready content
+	// missing it means this read raced a stale cache rather than a
+	// misconfiguration - wait it out.
+	if pc.Status.InfoHash == "" {
+		return nil, &NotReadyError{Reason: fmt.Sprintf("partitioncontent %s/%s has not reported its info hash yet", ns, ref.Name)}
 	}
-	hash, err := store.ParseInfoHash(strings.TrimPrefix(ref.Name, namePrefix))
+	hash, err := store.ParseInfoHash(pc.Status.InfoHash)
 	if err != nil {
-		return nil, fmt.Errorf("partitioncontent %s/%s: name is not a valid content hash: %w", ns, ref.Name, err)
+		return nil, fmt.Errorf("partitioncontent %s/%s: status.infoHash is not a valid content hash: %w", ns, ref.Name, err)
 	}
 
 	// The seeder Deployment lives in the Image's own namespace (see

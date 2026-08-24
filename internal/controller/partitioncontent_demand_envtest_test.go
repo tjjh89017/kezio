@@ -21,14 +21,12 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	batchv1 "k8s.io/api/batch/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
-	"github.com/tjjh89017/kezio/internal/store"
 )
 
 var _ = Describe("PartitionContent Controller seed demand from Machines and DeployRuns", func() {
@@ -44,19 +42,14 @@ var _ = Describe("PartitionContent Controller seed demand from Machines and Depl
 		})
 	}
 
-	advanceToReady := func(r *PartitionContentReconciler, nn types.NamespacedName, hashHex string) {
+	advanceToReady := func(r *PartitionContentReconciler, pc *keziov1alpha2.PartitionContent, hashHex string) {
+		nn := types.NamespacedName{Name: pc.Name, Namespace: pc.Namespace}
 		reconcileAddsFinalizer(ctx, r, nn)
 
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		hash, err := store.ParseInfoHash(hashHex)
-		Expect(err).NotTo(HaveOccurred())
-
-		var job batchv1.Job
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: publishJobName(hash), Namespace: nn.Namespace}, &job)).To(Succeed())
-		job.Status.Succeeded = 1
-		Expect(k8sClient.Status().Update(ctx, &job)).To(Succeed())
+		fakePublishJobSucceeded(ctx, pc, hashHex)
 
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
@@ -64,7 +57,7 @@ var _ = Describe("PartitionContent Controller seed demand from Machines and Depl
 
 	It("holds SeederDegraded=True for a Machine's referenced Image while no seeder is available, and clears it once the Machine is deleted", func() {
 		hashHex := partitionContentTestHash(500)
-		name := "pc-" + hashHex
+		name := partitionContentTestName(500)
 		nn := types.NamespacedName{Name: name, Namespace: "default"}
 		pc := newTestPartitionContent(name)
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
@@ -79,7 +72,7 @@ var _ = Describe("PartitionContent Controller seed demand from Machines and Depl
 
 		r, cancel := newDemandReconciler()
 		DeferCleanup(cancel)
-		advanceToReady(r, nn, hashHex)
+		advanceToReady(r, pc, hashHex)
 
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
@@ -108,7 +101,7 @@ var _ = Describe("PartitionContent Controller seed demand from Machines and Depl
 
 	It("holds SeederDegraded=True for a non-terminal DeployRun's resolved Image and clears it once the run reaches a terminal phase", func() {
 		hashHex := partitionContentTestHash(501)
-		name := "pc-" + hashHex
+		name := partitionContentTestName(501)
 		nn := types.NamespacedName{Name: name, Namespace: "default"}
 		pc := newTestPartitionContent(name)
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
@@ -124,7 +117,7 @@ var _ = Describe("PartitionContent Controller seed demand from Machines and Depl
 
 		r, cancel := newDemandReconciler()
 		DeferCleanup(cancel)
-		advanceToReady(r, nn, hashHex)
+		advanceToReady(r, pc, hashHex)
 
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())

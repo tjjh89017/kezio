@@ -37,6 +37,9 @@ resources:
 - image_admin_role.yaml
 - image_editor_role.yaml
 - image_viewer_role.yaml
+- imageimport_admin_role.yaml
+- imageimport_editor_role.yaml
+- imageimport_viewer_role.yaml
 - machinehardware_admin_role.yaml
 - machinehardware_editor_role.yaml
 - machinehardware_viewer_role.yaml

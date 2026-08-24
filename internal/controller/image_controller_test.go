@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -44,15 +46,8 @@ func imageTestHash(seq int) string {
 	return fmt.Sprintf("%040x", seq+1000)
 }
 
-// imageTestChecksum returns a distinct, valid-looking "sha256:<64 hex>"
-// checksum for seq.
-func imageTestChecksum(seq int) string {
-	return fmt.Sprintf("sha256:%064x", seq+2000)
-}
-
-// newTestImageWithSlots builds an (uncreated) Image with the given slots
-// and, optionally, a spec.source.
-func newTestImageWithSlots(name string, slots []keziov1alpha2.ImageSlot, source *keziov1alpha2.ImageSource) *keziov1alpha2.Image {
+// newTestImageWithSlots builds an (uncreated) Image with the given slots.
+func newTestImageWithSlots(name string, slots []keziov1alpha2.ImageSlot) *keziov1alpha2.Image {
 	return &keziov1alpha2.Image{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec: keziov1alpha2.ImageSpec{
@@ -61,7 +56,6 @@ func newTestImageWithSlots(name string, slots []keziov1alpha2.ImageSlot, source 
 				SfdiskJSON:     `{"partitiontable":{"label":"gpt"}}`,
 				Slots:          slots,
 			},
-			Source: source,
 		},
 	}
 }
@@ -74,7 +68,21 @@ func createReadyContent(ctx context.Context, name string) *keziov1alpha2.Partiti
 	pc := newTestPartitionContent(name)
 	Expect(k8sClient.Create(ctx, pc)).To(Succeed())
 	setContentStatus(ctx, pc, keziov1alpha2.PartitionContentStateReady, metav1.ConditionTrue, "PublishJobSucceeded", "ready", pc.Generation)
+	// A Ready content always carries the info hash its publish Job
+	// reported; the seeder placement path skips one that does not.
+	sum := sha1.Sum([]byte(name))
+	setContentInfoHash(ctx, pc, hex.EncodeToString(sum[:]))
 	return pc
+}
+
+// setContentInfoHash stamps status.infoHash on pc, the way recordReady
+// does from a real publish Job's reported result.
+func setContentInfoHash(ctx context.Context, pc *keziov1alpha2.PartitionContent, infoHash string) {
+	var fresh keziov1alpha2.PartitionContent
+	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: pc.Name, Namespace: pc.Namespace}, &fresh)).To(Succeed())
+	fresh.Status.InfoHash = infoHash
+	Expect(k8sClient.Status().Update(ctx, &fresh)).To(Succeed())
+	*pc = fresh
 }
 
 // setContentStatus overwrites pc's status (State plus a Ready condition
@@ -102,7 +110,7 @@ func setContentStatus(ctx context.Context, pc *keziov1alpha2.PartitionContent, s
 // the same mechanism SetupWithManager wires in production - so
 // mapPartitionContentToImages exercises the actual field-selector List
 // rather than a full scan, mirroring newIndexedReconciler.
-func newIndexedImageReconciler(ctx context.Context, ingest ImageIngestConfig) (*ImageReconciler, func()) {
+func newIndexedImageReconciler(ctx context.Context) (*ImageReconciler, func()) {
 	c, err := cache.New(cfg, cache.Options{Scheme: k8sClient.Scheme()})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(c.IndexField(ctx, &keziov1alpha2.Image{}, imageContentRefIndex, indexImageContentRefs)).To(Succeed())
@@ -126,7 +134,7 @@ func newIndexedImageReconciler(ctx context.Context, ingest ImageIngestConfig) (*
 	})
 	Expect(err).NotTo(HaveOccurred())
 
-	r := &ImageReconciler{Client: cl, Scheme: k8sClient.Scheme(), Ingest: ingest}
+	r := &ImageReconciler{Client: cl, Scheme: k8sClient.Scheme()}
 	return r, cancel
 }
 
@@ -145,7 +153,7 @@ var _ = Describe("Image Controller", func() {
 			{Number: 1, Role: keziov1alpha2.PartitionRoleESP, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
 			{Number: 2, Role: keziov1alpha2.PartitionRoleData, FSType: "ext4"},
 			{Number: 3, Role: keziov1alpha2.PartitionRoleSwap, UUID: "11111111-1111-1111-1111-111111111111"},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
@@ -174,7 +182,7 @@ var _ = Describe("Image Controller", func() {
 
 		img := newTestImageWithSlots("image-content-not-ready", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
@@ -196,7 +204,7 @@ var _ = Describe("Image Controller", func() {
 	It("stays not Ready when the referenced content does not exist", func() {
 		img := newTestImageWithSlots("image-content-missing", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: "pc-" + imageTestHash(3)}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
@@ -226,7 +234,7 @@ var _ = Describe("Image Controller", func() {
 
 		img := newTestImageWithSlots("image-stale-content", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
@@ -242,59 +250,12 @@ var _ = Describe("Image Controller", func() {
 		Expect(got.Status.Conditions).To(BeEmpty())
 	})
 
-	It("holds source-bearing Images at Pending with IngestUnconfigured when no ingest image is configured", func() {
-		img := newTestImageWithSlots("image-ingest-unconfigured", []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: "pc-" + imageTestHash(5)}},
-		}, &keziov1alpha2.ImageSource{URL: "https://example.test/disk.img", Checksum: imageTestChecksum(1)})
-		Expect(k8sClient.Create(ctx, img)).To(Succeed())
-		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
-
-		r := &ImageReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
-		nn := types.NamespacedName{Name: img.Name, Namespace: "default"}
-		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
-		Expect(err).NotTo(HaveOccurred())
-
-		var got keziov1alpha2.Image
-		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
-		Expect(got.Status.State).To(Equal(keziov1alpha2.ImageStatePending))
-		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.ImageConditionReady)
-		Expect(readyCond).NotTo(BeNil())
-		Expect(readyCond.Reason).To(Equal("IngestUnconfigured"))
-		Expect(readyCond.Message).To(ContainSubstring("no ingest Job image is configured"))
-		Expect(got.Status.SourceChecksum).To(Equal(img.Spec.Source.Checksum))
-	})
-
-	It("dispatches an ingest Job and records Ingesting when ingest is configured but content is not ready", func() {
-		img := newTestImageWithSlots("image-ingest-pending", []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: "pc-" + imageTestHash(6)}},
-		}, &keziov1alpha2.ImageSource{URL: "https://example.test/disk.img", Checksum: imageTestChecksum(2)})
-		Expect(k8sClient.Create(ctx, img)).To(Succeed())
-		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
-
-		r := &ImageReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Ingest: ImageIngestConfig{Image: "example.test/kezio-ingest:test"}}
-		nn := types.NamespacedName{Name: img.Name, Namespace: "default"}
-		result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(result.RequeueAfter).To(BeNumerically(">", 0))
-
-		var got keziov1alpha2.Image
-		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
-		Expect(got.Status.State).To(Equal(keziov1alpha2.ImageStateIngesting))
-		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.ImageConditionReady)
-		Expect(readyCond).NotTo(BeNil())
-		Expect(readyCond.Reason).To(Equal("IngestJobCreated"))
-
-		var job batchv1.Job
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ingestJobName(img), Namespace: "default"}, &job)).To(Succeed())
-		Expect(job.Spec.Template.Spec.Containers[0].Image).To(Equal("example.test/kezio-ingest:test"))
-	})
-
 	It("sets Valid=False and keeps Ready=False when a slot's sizeBytes is smaller than its content's lastExtentEnd, for an Image admitted before the content existed", func() {
 		contentName := "pc-" + imageTestHash(7)
 
 		img := newTestImageWithSlots("image-invalid-size", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}, SizeBytes: 1024},
-		}, nil)
+		})
 		// Created while the content does not exist yet - the webhook
 		// (not exercised by this envtest suite) would only warn, not
 		// deny, in that situation; the reconciler re-derives Valid once
@@ -334,7 +295,7 @@ var _ = Describe("Image Controller", func() {
 
 		img := newTestImageWithSlots("image-content-failed", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
@@ -367,7 +328,7 @@ var _ = Describe("Image Controller", func() {
 		img := newTestImageWithSlots("image-content-failed-and-not-ready", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: failedName}},
 			{Number: 2, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: notReadyName}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
@@ -393,11 +354,11 @@ var _ = Describe("Image Controller", func() {
 
 		img := newTestImageWithSlots("image-watch-propagation", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
-		r, cancel := newIndexedImageReconciler(ctx, ImageIngestConfig{})
+		r, cancel := newIndexedImageReconciler(ctx)
 		DeferCleanup(cancel)
 		nn := types.NamespacedName{Name: img.Name, Namespace: "default"}
 

@@ -28,12 +28,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	"github.com/tjjh89017/kezio/internal/store"
 )
 
-// partitionContentNamePattern matches "pc-" followed by a 40-character hex
-// BitTorrent v1 info hash. CRD schema CEL cannot reach metadata.name, so
-// this rule lives in the webhook instead of the CRD.
-var partitionContentNamePattern = regexp.MustCompile(`^pc-[0-9a-f]{40}$`)
+// partitionContentNamePattern matches a lowercase RFC 1123 subdomain, the
+// shape Kubernetes itself requires of an object name. It is restated here
+// only so a name that would generate an invalid PVC name is caught with
+// the same message as one that is too long (see
+// validatePartitionContentName). CRD schema CEL cannot reach
+// metadata.name, so both rules live in the webhook instead of the CRD.
+var partitionContentNamePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`)
 
 // nolint:unused
 // log is for logging in this package.
@@ -102,12 +106,21 @@ func (v *PartitionContentCustomValidator) ValidateDelete(ctx context.Context, ob
 	return nil, nil
 }
 
-// validatePartitionContentName rejects a name that is not "pc-" followed by
-// a 40-character hex BitTorrent v1 info hash. Name is immutable in
-// Kubernetes, so this check only needs to run on create.
+// validatePartitionContentName rejects a name this content's own PVC name
+// cannot be derived from. A PartitionContent name is chosen by the user,
+// not derived from its bytes, so the only constraint left is that
+// store.PVCName(name) - the name plus a fixed suffix - still fits the
+// Kubernetes object name limit. Name is immutable in Kubernetes, so this
+// check only needs to run on create.
 func validatePartitionContentName(pc *keziov1alpha2.PartitionContent) error {
-	if !partitionContentNamePattern.MatchString(pc.GetName()) {
-		return fmt.Errorf("metadata.name %q must match %q (a BitTorrent v1 info hash prefixed \"pc-\")", pc.GetName(), partitionContentNamePattern.String())
+	name := pc.GetName()
+	if !partitionContentNamePattern.MatchString(name) {
+		return fmt.Errorf("metadata.name %q must match %q", name, partitionContentNamePattern.String())
+	}
+	if len(name) > store.MaxContentNameLength {
+		return fmt.Errorf(
+			"metadata.name %q is %d characters, over the %d-character limit: this content's own PVC is named %q, which has to fit the Kubernetes object name limit",
+			name, len(name), store.MaxContentNameLength, store.PVCName(name))
 	}
 	return nil
 }

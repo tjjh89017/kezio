@@ -499,7 +499,7 @@ func testSeederDeploymentMissingIsNotReady(t *testing.T, fx *fixtures) {
 		PartitionTable: keziov1alpha2.PartitionTableGPT,
 		SfdiskJSON:     `{"partitiontable":{}}`,
 		Slots: []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: store.ObjectName(hash)}},
+			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: fixtureContentName(hash)}},
 		},
 	}
 	image := fx.mustCreateImage(ns, layout)
@@ -533,7 +533,7 @@ func testSeederPodNoIPIsNotReady(t *testing.T, fx *fixtures) {
 		PartitionTable: keziov1alpha2.PartitionTableGPT,
 		SfdiskJSON:     `{"partitiontable":{}}`,
 		Slots: []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: store.ObjectName(hash)}},
+			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: fixtureContentName(hash)}},
 		},
 	}
 	image := fx.mustCreateImage(ns, layout)
@@ -1113,7 +1113,7 @@ func testSlotClassification(t *testing.T, fx *fixtures) {
 		PartitionTable: keziov1alpha2.PartitionTableGPT,
 		SfdiskJSON:     `{"partitiontable":{}}`,
 		Slots: []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleESP, ContentRef: &keziov1alpha2.NameRef{Name: store.ObjectName(hash)}},
+			{Number: 1, Role: keziov1alpha2.PartitionRoleESP, ContentRef: &keziov1alpha2.NameRef{Name: fixtureContentName(hash)}},
 			{Number: 2, Role: keziov1alpha2.PartitionRoleData, FSType: "ext4"},
 			{Number: 3, Role: keziov1alpha2.PartitionRoleSwap, UUID: "swap-uuid"},
 		},
@@ -1163,7 +1163,7 @@ func testPartitionContentNotReady(t *testing.T, fx *fixtures) {
 		PartitionTable: keziov1alpha2.PartitionTableGPT,
 		SfdiskJSON:     `{"partitiontable":{}}`,
 		Slots: []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: store.ObjectName(hash)}},
+			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: fixtureContentName(hash)}},
 		},
 	}
 	image := fx.mustCreateImage(ns, layout)
@@ -1350,6 +1350,15 @@ func (fx *fixtures) mustCreatePostHookWithValidity(ns, name string, spec keziov1
 	}
 }
 
+// fixtureContentName is the PartitionContent object name these fixtures
+// give a content. It is derived from the fixture's info hash only to keep
+// each fixture's name unique - production names come from an import's
+// contentPrefix and say nothing about the bytes (see
+// internal/store.ContentName).
+func fixtureContentName(hash store.InfoHash) string {
+	return "pc-" + hash.String()
+}
+
 func (fx *fixtures) mustCreatePartitionContentReady(ns string, hash store.InfoHash) {
 	fx.mustCreatePartitionContent(ns, hash, true)
 }
@@ -1361,10 +1370,10 @@ func (fx *fixtures) mustCreatePartitionContentPending(ns string, hash store.Info
 func (fx *fixtures) mustCreatePartitionContent(ns string, hash store.InfoHash, ready bool) {
 	fx.t.Helper()
 	pc := &keziov1alpha2.PartitionContent{
-		ObjectMeta: metav1.ObjectMeta{Name: store.ObjectName(hash), Namespace: ns},
+		ObjectMeta: metav1.ObjectMeta{Name: fixtureContentName(hash), Namespace: ns},
 		Spec: keziov1alpha2.PartitionContentSpec{
 			FSType: "ext4", UsedBytes: 1, SizeBytes: 1, LastExtentEnd: 1, PieceLength: store.PieceSize,
-			Source: keziov1alpha2.PartitionContentSource{ImageName: "src", PartitionNumber: 1},
+			Source: keziov1alpha2.PartitionContentSource{ImportName: "src", PartitionNumber: 1},
 		},
 	}
 	if err := fx.client.Create(context.Background(), pc); err != nil {
@@ -1372,6 +1381,7 @@ func (fx *fixtures) mustCreatePartitionContent(ns string, hash store.InfoHash, r
 	}
 	if ready {
 		pc.Status.State = keziov1alpha2.PartitionContentStateReady
+		pc.Status.InfoHash = hash.String()
 		meta.SetStatusCondition(&pc.Status.Conditions, metav1.Condition{
 			Type: keziov1alpha2.PartitionContentConditionReady, Status: metav1.ConditionTrue, Reason: "TestFixture", Message: "fixture",
 		})

@@ -14,15 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Command kezio-ingest is the binary the Image and PartitionContent
+// Command kezio-ingest is the binary the ImageImport and PartitionContent
 // controllers run inside a Job pod, selected by INGEST_MODE: "ingest"
-// (internal/controller's buildIngestJob) resolves an Image's source,
-// normalizes it, and captures its partition layout and content into a
-// scratch work directory; "publish" (buildPublishJob) copies one
-// partition's already-ingested content into its own PartitionContent PVC
-// and builds its .torrent file. See buildIngestJob's and buildPublishJob's
-// doc comments (internal/controller/image_ingest.go,
-// partitioncontent_job.go) for the authoritative env var contract.
+// (internal/controller's buildIngestJob) resolves an ImageImport's
+// source, normalizes it, and captures its partition layout and content
+// into a scratch work directory; "publish" (buildPublishJob) copies one
+// partition's already-ingested content into its own PartitionContent PVC.
+// See buildIngestJob's and buildPublishJob's doc comments
+// (internal/controller/imageimport_ingest.go, partitioncontent_job.go)
+// for the authoritative env var contract.
 //
 // Privilege requirements: none. Every external tool this binary shells
 // out to (qemu-img, sfdisk, blkid, partclone.<fs>) reads and writes plain
@@ -33,7 +33,7 @@ limitations under the License.
 // needed. This binary also never talks to the Kubernetes API in either
 // mode - internal/ingest.Run and RunPublish only touch mounted volumes
 // (see their doc comments); the controllers map a successful Result onto
-// PartitionContent objects themselves.
+// Kubernetes objects themselves.
 //
 // Result handoff: this binary always writes an internal/ingest.Result as
 // JSON to its container's termination message path (default
@@ -51,7 +51,6 @@ import (
 
 	"github.com/tjjh89017/kezio/internal/imageservice"
 	"github.com/tjjh89017/kezio/internal/ingest"
-	"github.com/tjjh89017/kezio/internal/store"
 )
 
 const defaultTerminationMessagePath = "/dev/termination-log"
@@ -81,7 +80,7 @@ func runIngest() int {
 		return 1
 	}
 
-	result := ingest.Run(context.Background(), cfg, deps)
+	result := boundResult(ingest.Run(context.Background(), cfg, deps))
 	writeResult(result)
 	if !result.Success {
 		log.Printf("kezio-ingest: failed: %s", result.Error)
@@ -109,33 +108,28 @@ func runPublish() int {
 	return 0
 }
 
-// publishConfigFromEnv reads PARTITION_CONTENT_HASH and
+// publishConfigFromEnv reads PARTITION_CONTENT_NAME and
 // SOURCE_CONTENT_DIR - what buildPublishJob sets - into a PublishConfig
 // naming exactly the one partition this publish Job runs for. No
 // announce URL is read here: at publish time no Site is in scope, so
 // there is no tracker to bake into anything (see ingest.PublishConfig's
-// doc comment). DestDir is derived from PARTITION_CONTENT_HASH via
+// doc comment). DestDir is derived from PARTITION_CONTENT_NAME via
 // ingest.ContentMountPath, the same convention buildPublishJob used to
 // mount the content PVC, so this needs no separate "where do I write"
 // input.
 func publishConfigFromEnv() (ingest.PublishConfig, error) {
-	hashStr := os.Getenv("PARTITION_CONTENT_HASH")
+	contentName := os.Getenv("PARTITION_CONTENT_NAME")
 	sourceDir := os.Getenv("SOURCE_CONTENT_DIR")
-	if hashStr == "" || sourceDir == "" {
+	if contentName == "" || sourceDir == "" {
 		return ingest.PublishConfig{}, fmt.Errorf(
-			"missing required environment: PARTITION_CONTENT_HASH=%q SOURCE_CONTENT_DIR=%q",
-			hashStr, sourceDir)
-	}
-
-	hash, err := store.ParseInfoHash(hashStr)
-	if err != nil {
-		return ingest.PublishConfig{}, fmt.Errorf("invalid PARTITION_CONTENT_HASH %q: %w", hashStr, err)
+			"missing required environment: PARTITION_CONTENT_NAME=%q SOURCE_CONTENT_DIR=%q",
+			contentName, sourceDir)
 	}
 
 	return ingest.PublishConfig{
 		Partitions: []ingest.PublishPartition{{
 			SourceDir: sourceDir,
-			DestDir:   ingest.ContentMountPath(hash),
+			DestDir:   ingest.ContentMountPath(contentName),
 		}},
 	}, nil
 }
@@ -184,6 +178,30 @@ func buildFromEnv() (ingest.Config, ingest.Dependencies, error) {
 	}
 
 	return cfg, deps, nil
+}
+
+// boundResult turns a successful result that will not survive the
+// container termination message cap into an explicit failure. The
+// controller's only channel back from this Job is that message, and
+// Kubernetes truncates it silently: a partition table large enough to
+// push the payload over ingest.TerminationMessageLimit would otherwise
+// reach the controller as unparseable JSON, reported as a corrupt result
+// rather than as the size problem it is.
+func boundResult(result ingest.Result) ingest.Result {
+	if !result.Success {
+		return result
+	}
+	data, err := ingest.MarshalResult(result)
+	if err != nil {
+		return ingest.FailureResult(err)
+	}
+	if len(data) > ingest.TerminationMessageLimit {
+		return ingest.FailureResult(fmt.Errorf(
+			"ingest result is %d bytes, over the %d-byte container termination message limit: "+
+				"this disk's partition table dump is too large to hand back to the controller",
+			len(data), ingest.TerminationMessageLimit))
+	}
+	return result
 }
 
 // writeResult marshals result and writes it to the container termination

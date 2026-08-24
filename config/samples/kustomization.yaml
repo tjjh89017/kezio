@@ -4,6 +4,7 @@ resources:
 - kezio_v1alpha2_deployrun.yaml
 - kezio_v1alpha2_machinehardware.yaml
 - kezio_v1alpha2_image.yaml
+- kezio_v1alpha2_imageimport.yaml
 - kezio_v1alpha2_partitioncontent.yaml
 - kezio_v1alpha2_subnet.yaml
 - kezio_v1alpha2_subnet_dataplane.yaml

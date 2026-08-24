@@ -259,10 +259,17 @@ func main() {
 	if err := (&controller.ImageReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-		Ingest: imageIngestConfigFromEnv(),
 		Seeder: seederConfig,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Image")
+		os.Exit(1)
+	}
+	if err := (&controller.ImageImportReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		Ingest: imageIngestConfigFromEnv(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "ImageImport")
 		os.Exit(1)
 	}
 	if err := (&controller.PartitionContentReconciler{

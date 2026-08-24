@@ -6,6 +6,7 @@ resources:
 - bases/kezio.kojuro.date_deployruns.yaml
 - bases/kezio.kojuro.date_machinehardwares.yaml
 - bases/kezio.kojuro.date_images.yaml
+- bases/kezio.kojuro.date_imageimports.yaml
 - bases/kezio.kojuro.date_partitioncontents.yaml
 - bases/kezio.kojuro.date_subnets.yaml
 - bases/kezio.kojuro.date_posthooks.yaml

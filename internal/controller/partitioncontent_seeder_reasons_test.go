@@ -97,7 +97,7 @@ var _ = Describe("PartitionContent seeder degraded reasons", func() {
 
 		img := newTestImageWithSlots("image-9001", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
@@ -131,7 +131,7 @@ var _ = Describe("PartitionContent seeder degraded reasons", func() {
 
 		img := newTestImageWithSlots("image-9002", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
@@ -172,7 +172,7 @@ var _ = Describe("PartitionContent seeder degraded reasons", func() {
 
 		img := newTestImageWithSlots("image-9003", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
@@ -205,7 +205,7 @@ var _ = Describe("PartitionContent seeder degraded reasons", func() {
 
 		img := newTestImageWithSlots("image-9004", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 

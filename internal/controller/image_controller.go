@@ -51,22 +51,13 @@ var imageStaleContentRequeueInterval = 5 * time.Second
 // PartitionContent objects into Ready/Valid conditions and status.state,
 // and - once Ready - owns the per-(Image, Site) seeder Deployment
 // lifecycle (create-on-demand, grace-period shutdown, placement; see
-// image_seeder.go). A composed Image (no spec.source) is create-only
-// metadata over existing content: reconciling it is pure aggregation
-// (plus seeder reconciliation), triggering no ingest. A source-bearing
-// Image additionally owns one ingest Job and its scratch PVC (see
-// image_ingest.go): reconcileIngesting creates or observes that Job and,
-// once it succeeds, creates the PartitionContent objects its declared
-// contentRef slots name (or reuses them, content-addressed, if they
-// already exist) - it never creates a PartitionContent's own content PVC
-// or publish Job itself, those stay PartitionContent's own.
+// image_seeder.go). It runs no ingest: an Image is always create-only
+// metadata over content that already exists, whether an ImageImport
+// created it (see ImageImportReconciler) or a user composed it by naming
+// existing content.
 type ImageReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
-	// Ingest configures the ingest Job an Image with spec.source needs.
-	// The zero value holds every such Image at Pending with a condition
-	// explaining why - see ImageIngestConfig's doc comment.
-	Ingest ImageIngestConfig
 	// Seeder configures the per-(Image, Site) seeder Deployment's image
 	// and grace period. The zero value means demand at any Site is simply
 	// not acted on - see ImageSeederConfig's doc comment.
@@ -120,10 +111,6 @@ func (r *ImageReconciler) onChange(ctx context.Context, image *keziov1alpha2.Ima
 		return ctrl.Result{RequeueAfter: imageStaleContentRequeueInterval}, nil
 	}
 
-	if image.Spec.Source != nil {
-		image.Status.SourceChecksum = image.Spec.Source.Checksum
-	}
-
 	validOK := len(agg.invalidSizes) == 0
 	setImageValidCondition(image, validOK, agg.invalidSizes)
 
@@ -137,8 +124,6 @@ func (r *ImageReconciler) onChange(ctx context.Context, image *keziov1alpha2.Ima
 		return r.reconcileImageSeeder(ctx, image)
 	case len(agg.notReady) == 0:
 		return r.recordInvalid(ctx, image, agg.invalidSizes)
-	case image.Spec.Source != nil:
-		return r.reconcileIngestPending(ctx, image, agg.notReady)
 	default:
 		return r.recordPending(ctx, image, agg.notReady)
 	}

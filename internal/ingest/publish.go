@@ -28,15 +28,15 @@ import (
 // ContentMountRoot is the directory a PartitionContent's own PVC is
 // mounted at inside the publish step's pod. This is the data-plane
 // contract the publish step, the seeder, and the e2e lane all share: a
-// content's PVC mount path is derived from its info hash by name alone
-// (see ContentMountPath), with no extra wiring needed to find it.
+// content's PVC mount path is derived from its object name alone (see
+// ContentMountPath), with no extra wiring needed to find it.
 const ContentMountRoot = "/content"
 
-// ContentMountPath returns the path a content's own PVC
-// (store.PVCName(hash)) is mounted at inside a pod that has that PVC
-// mounted under ContentMountRoot.
-func ContentMountPath(hash store.InfoHash) string {
-	return filepath.Join(ContentMountRoot, store.PVCName(hash))
+// ContentMountPath returns the path the content named contentName has its
+// own PVC (store.PVCName(contentName)) mounted at inside a pod that
+// mounts that PVC under ContentMountRoot.
+func ContentMountPath(contentName string) string {
+	return filepath.Join(ContentMountRoot, store.PVCName(contentName))
 }
 
 // PublishConfig configures one run of the publish step: copying one
@@ -68,45 +68,65 @@ type PublishPartition struct {
 
 // RunPublish copies every partition in cfg.Partitions from its scratch
 // content directory into its own destination PVC, validating each copy
-// against its torrent.info before considering it done. It never panics
-// and never returns an error value,
-// for the same reason Run does not (see Run's doc comment): cmd/ingest
-// turns the outcome directly into a termination message and exit code.
+// against its torrent.info before considering it done, and reports the
+// info hash of the last one published. It never panics and never returns
+// an error value, for the same reason Run does not (see Run's doc
+// comment): cmd/ingest turns the outcome directly into a termination
+// message and exit code.
+//
+// The reported info hash is what the PartitionContent's own
+// status.infoHash records - the torrent's identity, observed from the
+// bytes that actually landed in the PVC rather than declared anywhere.
+// One publish Job runs for exactly one PartitionContent, so there is only
+// ever one hash to report.
 func RunPublish(cfg PublishConfig) Result {
-	if err := runPublish(cfg); err != nil {
+	hash, err := runPublish(cfg)
+	if err != nil {
 		return FailureResult(err)
 	}
-	return Result{Success: true}
+	return Result{Success: true, Publish: &ResultPublish{InfoHash: hash}}
 }
 
-func runPublish(cfg PublishConfig) error {
+func runPublish(cfg PublishConfig) (string, error) {
+	var hash string
 	for _, p := range cfg.Partitions {
-		if err := publishPartition(p); err != nil {
-			return fmt.Errorf("partition %d: %w", p.Number, err)
+		h, err := publishPartition(p)
+		if err != nil {
+			return "", fmt.Errorf("partition %d: %w", p.Number, err)
 		}
+		hash = h
 	}
-	return nil
+	return hash, nil
 }
 
 // publishPartition copies one partition's content from its scratch
 // source directory into destDir, then validates the copy against the
 // torrent.info it just copied alongside it - so a truncated or otherwise
 // corrupted copy is caught here rather than surfacing later as a
-// leecher's hash-check failure.
-func publishPartition(p PublishPartition) error {
+// leecher's hash-check failure - and returns the copy's info hash.
+func publishPartition(p PublishPartition) (string, error) {
 	info, err := store.LoadContentDirTorrentInfo(p.SourceDir)
 	if err != nil {
-		return fmt.Errorf("load source torrent.info: %w", err)
+		return "", fmt.Errorf("load source torrent.info: %w", err)
 	}
 
 	if err := copyDir(p.SourceDir, p.DestDir); err != nil {
-		return fmt.Errorf("copy content: %w", err)
+		return "", fmt.Errorf("copy content: %w", err)
 	}
 
 	if err := store.ValidateContentDir(p.DestDir, info); err != nil {
-		return fmt.Errorf("validate published content: %w", err)
+		return "", fmt.Errorf("validate published content: %w", err)
 	}
-	return nil
+
+	published, err := store.LoadContentDirTorrentInfo(p.DestDir)
+	if err != nil {
+		return "", fmt.Errorf("load published torrent.info: %w", err)
+	}
+	hash, err := store.ComputeInfoHash(published)
+	if err != nil {
+		return "", fmt.Errorf("compute published info hash: %w", err)
+	}
+	return hash.String(), nil
 }
 
 // copyDir recursively copies src's regular files and directories into

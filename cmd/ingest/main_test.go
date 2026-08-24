@@ -22,7 +22,6 @@ import (
 	"testing"
 
 	"github.com/tjjh89017/kezio/internal/ingest"
-	"github.com/tjjh89017/kezio/internal/store"
 )
 
 func TestBuildFromEnv_Valid(t *testing.T) {
@@ -72,8 +71,8 @@ func TestBuildFromEnv_MissingRequiredEnv(t *testing.T) {
 }
 
 func TestPublishConfigFromEnv_Valid(t *testing.T) {
-	hash := store.InfoHash{0x01, 0x02, 0x03}
-	t.Setenv("PARTITION_CONTENT_HASH", hash.String())
+	const contentName = "ubuntu-2404-p1"
+	t.Setenv("PARTITION_CONTENT_NAME", contentName)
 	t.Setenv("SOURCE_CONTENT_DIR", "/work/partitions/1")
 
 	cfg, err := publishConfigFromEnv()
@@ -88,13 +87,13 @@ func TestPublishConfigFromEnv_Valid(t *testing.T) {
 	if part.SourceDir != "/work/partitions/1" {
 		t.Errorf("SourceDir = %q, want /work/partitions/1", part.SourceDir)
 	}
-	if wantDest := ingest.ContentMountPath(hash); part.DestDir != wantDest {
+	if wantDest := ingest.ContentMountPath(contentName); part.DestDir != wantDest {
 		t.Errorf("DestDir = %q, want %q", part.DestDir, wantDest)
 	}
 }
 
 func TestPublishConfigFromEnv_MissingRequiredEnv(t *testing.T) {
-	t.Setenv("PARTITION_CONTENT_HASH", "")
+	t.Setenv("PARTITION_CONTENT_NAME", "")
 	t.Setenv("SOURCE_CONTENT_DIR", "")
 
 	if _, err := publishConfigFromEnv(); err == nil {
@@ -102,11 +101,26 @@ func TestPublishConfigFromEnv_MissingRequiredEnv(t *testing.T) {
 	}
 }
 
-func TestPublishConfigFromEnv_BadHash(t *testing.T) {
-	t.Setenv("PARTITION_CONTENT_HASH", "not-a-valid-hash")
-	t.Setenv("SOURCE_CONTENT_DIR", "/work/partitions/1")
+func TestBoundResult_OversizedSuccessBecomesAFailure(t *testing.T) {
+	huge := make([]byte, ingest.TerminationMessageLimit)
+	for i := range huge {
+		huge[i] = 'x'
+	}
+	result := boundResult(ingest.Result{
+		Success: true,
+		Disk:    &ingest.ResultDisk{PartitionTable: "gpt", SfdiskJSON: string(huge)},
+	})
+	if result.Success {
+		t.Fatal("boundResult: want a failure for a result over the termination message limit")
+	}
+	if result.Error == "" {
+		t.Error("result.Error is empty, want a message naming the size limit")
+	}
+}
 
-	if _, err := publishConfigFromEnv(); err == nil {
-		t.Fatal("publishConfigFromEnv: want error for invalid PARTITION_CONTENT_HASH, got nil")
+func TestBoundResult_ResultThatFitsIsUntouched(t *testing.T) {
+	in := ingest.Result{Success: true, Publish: &ingest.ResultPublish{InfoHash: "abc"}}
+	if got := boundResult(in); !got.Success || got.Publish == nil {
+		t.Errorf("boundResult changed a result that fits: %+v", got)
 	}
 }

@@ -35,16 +35,19 @@ kezio defines these CRDs under the `kezio.kojuro.date/v1alpha2` group:
 | `Subnet` | One broadcast domain. Carries an optional boot half (bootd's address, its network attachment, and DHCP mode) and an optional seeder network reference. A `Subnet` names its `Site` through `spec.siteRef`. |
 | `Machine` | One bare-metal machine: BMC address and credentials, boot MAC, the `Subnet` it network boots through, the image(s) to deploy, and its own state (Enrolling, Inspecting, Available, Provisioning, Provisioned). |
 | `MachineHardware` | The disk/NIC/CPU/memory inventory a `Machine` reports at inspection. |
-| `Image` | A disk layout: an ordered list of partition slots, each optionally bound to a `PartitionContent`. Immutable once created. |
-| `PartitionContent` | One partition's content-addressed, immutable data set (a partclone data set plus its torrent). Named by its own BitTorrent info hash. |
+| `Image` | A disk layout: an ordered list of partition slots, each optionally bound to a `PartitionContent`. Immutable once created, and always created over content that already exists. |
+| `ImageImport` | One request to turn a source disk image into content plus the `Image` that binds it. It runs partclone exactly once, in the cluster, then creates one `PartitionContent` per non-swap partition and the `Image` over them. |
+| `PartitionContent` | One partition's immutable data set (a partclone data set plus its torrent). Named by the user: an import names partition N `<spec.contentPrefix>-p<N>`. Its BitTorrent info hash is reported in `status.infoHash` once it publishes. |
 | `DeployRun` | The resolved, immutable snapshot of one deployment attempt: which images, which disks, which hooks, and its phase (Partitioning, WritingContent, RunningPostHook, Finalizing, ...). |
 | `PostHook` | A named, reusable, ordered sequence of steps (builtins or scripts) that a `Machine` or `Image` can attach to run after content is written. A script step runs in the live environment, not in the deployed OS: no deployed file system is mounted for it, the plan's device paths come to it in the environment (`KEZIO_TARGET_DISK`, `KEZIO_PARTITIONS`, `KEZIO_PART_<number>`, and the `KEZIO_DATA_DISK_*` set), and a script that mounts a device must unmount it before it ends. |
 
 ## How a deploy works
 
-1. An ingest Job reads a source disk image, writes each partition's
-   content as an immutable `PartitionContent`, and records the disk
-   layout on an `Image`.
+1. An `ImageImport`'s ingest Job reads a source disk image, slices every
+   partition once with partclone, and reports the disk layout it found.
+   The operator then creates one immutable `PartitionContent` per
+   non-swap partition and the `Image` whose layout binds them. An import
+   fails rather than write over a name that already exists.
 2. A publish step builds a `.torrent` file for each `PartitionContent`.
 3. When a `Machine` needs an `Image`, the operator starts one seeder
    Deployment for that `Image` at that `Machine`'s `Site` - one process

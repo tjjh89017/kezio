@@ -35,7 +35,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
-	"github.com/tjjh89017/kezio/internal/store"
 )
 
 // newTestImage builds an (uncreated) Image with a single data slot bound
@@ -307,7 +306,7 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 
 	It("keeps reporting seed demand status while deletion is blocked", func() {
 		hashHex := partitionContentTestHash(205)
-		name := "pc-" + hashHex
+		name := partitionContentTestName(205)
 		nn := types.NamespacedName{Name: name, Namespace: "default"}
 		pc := newTestPartitionContent(name)
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
@@ -332,12 +331,7 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
-		hash, err := store.ParseInfoHash(hashHex)
-		Expect(err).NotTo(HaveOccurred())
-		var job batchv1.Job
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: publishJobName(hash), Namespace: "default"}, &job)).To(Succeed())
-		job.Status.Succeeded = 1
-		Expect(k8sClient.Status().Update(ctx, &job)).To(Succeed())
+		fakePublishJobSucceeded(ctx, pc, hashHex)
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn}) // -> Ready
 		Expect(err).NotTo(HaveOccurred())
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn}) // -> reflects seed demand

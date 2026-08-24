@@ -32,7 +32,9 @@ spec:
       openAPIV3Schema:
         description: |-
           Image is the Schema for the images API. It binds a disk layout to
-          ordered slots that reference PartitionContent objects.
+          ordered slots that reference PartitionContent objects. It is created
+          either by an ImageImport, once that import knows the whole layout, or
+          by a user composing existing content by name.
         properties:
           apiVersion:
             description: |-
@@ -54,13 +56,18 @@ spec:
           spec:
             description: |-
               ImageSpec defines the desired state of Image: a disk layout of ordered
-              slots, each optionally bound to a content-addressed PartitionContent.
-              The whole spec is immutable once created (see the type-level XValidation
-              rule): a slot's ContentRef binds into a BitTorrent swarm by that
-              content's fixed info hash, and allowing the layout to change afterward
-              would let an in-use Image silently start describing different content.
-              To publish a different layout or content set, create an Image with a
-              new name.
+              slots, each optionally bound to a PartitionContent. The whole spec is
+              immutable once created (see the type-level XValidation rule): a slot's
+              ContentRef binds into a BitTorrent swarm, and allowing the layout to
+              change afterward would let an in-use Image silently start describing
+              different content. To publish a different layout or content set, create
+              an Image with a new name.
+
+              An Image never ingests anything itself: it is always a declaration over
+              PartitionContent objects that already exist. An ImageImport is what
+              runs partclone, captures those objects, and creates the Image once it
+              knows the whole layout - so this spec is complete the moment it is
+              created and never has to be patched afterwards.
             properties:
               bootable:
                 default: true
@@ -127,10 +134,6 @@ spec:
                           required:
                           - name
                           type: object
-                          x-kubernetes-validations:
-                          - message: contentRef.name must look like a PartitionContent
-                              name (pc-<40 hex chars>)
-                            rule: self.name.matches('^pc-[0-9a-f]{40}$')
                         fsType:
                           description: |-
                             FSType is the file system to create fresh at deploy time, for a
@@ -250,28 +253,6 @@ spec:
                   type: object
                 maxItems: 64
                 type: array
-              source:
-                description: |-
-                  Source describes where to fetch and verify a source disk image to
-                  ingest. Absent for an Image composed entirely from existing
-                  PartitionContent objects, which triggers no ingest.
-                properties:
-                  checksum:
-                    description: |-
-                      Checksum verifies the fetched source image before ingest converts
-                      it: "sha256:<hex digest>".
-                    pattern: ^sha256:[0-9a-f]{64}$
-                    type: string
-                  url:
-                    description: URL is the location the ingest job fetches the source
-                      image from.
-                    maxLength: 4096
-                    minLength: 1
-                    type: string
-                required:
-                - checksum
-                - url
-                type: object
             required:
             - layout
             type: object
@@ -283,11 +264,10 @@ spec:
               ImageStatus defines the observed state of Image.
 
               The Image reconciler is thin: it aggregates the readiness of this
-              image's referenced PartitionContent objects and owns no seeders of its
-              own (those belong to PartitionContent). A composed image - one with no
-              Source - is create-only metadata over existing content: reconciling it
-              triggers no ingest, and the swarms of the content it references stay
-              valid and unaffected.
+              image's referenced PartitionContent objects and drives the per-Site
+              seeder Deployments those contents are served from. It runs no ingest of
+              its own - that belongs to ImageImport - so an Image is create-only
+              metadata over content that already exists.
             properties:
               conditions:
                 description: |-
@@ -353,20 +333,10 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
-              sourceChecksum:
-                description: |-
-                  SourceChecksum is a verbatim echo of spec.source.checksum, for audit
-                  convenience. It carries no verification claim; ingest verification
-                  failures surface through the Image's state/conditions, not here.
-                  Absent for a composed image (no Source).
-                pattern: ^sha256:[0-9a-f]{64}$
-                type: string
               state:
-                description: State is the object's position in the ingest/readiness
-                  workflow.
+                description: State is the object's position in the readiness workflow.
                 enum:
                 - Pending
-                - Ingesting
                 - Ready
                 - Failed
                 type: string

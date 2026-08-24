@@ -277,7 +277,7 @@ func TestReInspectAcceptable(t *testing.T) {
 // without running ImageReconciler - this file only exercises
 // MachineReconciler, which never writes Image status.
 func ensureReadyTestImage(ctx context.Context, name string) {
-	img := newTestImageWithSlots(name, []keziov1alpha2.ImageSlot{}, nil)
+	img := newTestImageWithSlots(name, []keziov1alpha2.ImageSlot{})
 	if err := k8sClient.Create(ctx, img); err != nil {
 		Expect(errors.IsAlreadyExists(err)).To(BeTrue())
 	}
@@ -948,7 +948,7 @@ var _ = Describe("Machine Controller", func() {
 
 		It("delays when the referenced Image exists but has no Ready condition yet", func() {
 			imageName := fmt.Sprintf("gate-notready-image-%d", GinkgoRandomSeed())
-			Expect(k8sClient.Create(ctx, newTestImageWithSlots(imageName, []keziov1alpha2.ImageSlot{}, nil))).To(Succeed())
+			Expect(k8sClient.Create(ctx, newTestImageWithSlots(imageName, []keziov1alpha2.ImageSlot{}))).To(Succeed())
 
 			name := newGatedMachine(fmt.Sprintf("gate-notready-%d", GinkgoRandomSeed()), imageName)
 			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}}
@@ -965,7 +965,7 @@ var _ = Describe("Machine Controller", func() {
 
 		It("delays when the referenced Image's Ready condition is stale (observedGeneration behind)", func() {
 			imageName := fmt.Sprintf("gate-stale-image-%d", GinkgoRandomSeed())
-			img := newTestImageWithSlots(imageName, []keziov1alpha2.ImageSlot{}, nil)
+			img := newTestImageWithSlots(imageName, []keziov1alpha2.ImageSlot{})
 			Expect(k8sClient.Create(ctx, img)).To(Succeed())
 			meta.SetStatusCondition(&img.Status.Conditions, metav1.Condition{
 				Type:               keziov1alpha2.ImageConditionReady,
@@ -1036,7 +1036,7 @@ var _ = Describe("Machine Controller", func() {
 			img := newTestImageWithSlots(imageName, []keziov1alpha2.ImageSlot{
 				{Number: 1, Role: keziov1alpha2.PartitionRoleESP, FSType: "vfat"},
 				{Number: 2, Role: keziov1alpha2.PartitionRoleData, FSType: "ext4"},
-			}, nil)
+			})
 			Expect(k8sClient.Create(ctx, img)).To(Succeed())
 			img.Status.State = keziov1alpha2.ImageStateReady
 			meta.SetStatusCondition(&img.Status.Conditions, metav1.Condition{

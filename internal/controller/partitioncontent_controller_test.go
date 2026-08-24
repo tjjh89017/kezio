@@ -37,10 +37,52 @@ import (
 )
 
 // partitionContentTestHash returns a distinct, valid-looking 40-character
-// hex info hash for seq, so each test case gets its own PartitionContent
-// name ("pc-" + hash) with no collisions in the shared envtest apiserver.
+// hex info hash for seq - what a publish Job reports back into
+// status.infoHash.
 func partitionContentTestHash(seq int) string {
 	return fmt.Sprintf("%040x", seq+1)
+}
+
+// partitionContentTestName returns a distinct PartitionContent name for
+// seq, in the shape an import generates (store.ContentName), so each test
+// case gets its own object with no collisions in the shared envtest
+// apiserver.
+func partitionContentTestName(seq int) string {
+	return store.ContentName(fmt.Sprintf("golden-%d", seq), 1)
+}
+
+// fakePublishJobSucceeded fakes pc's publish Job as succeeded, reporting
+// infoHash the way a real publish Job pod would (see readJobResult):
+// envtest runs no Job controller or kubelet.
+func fakePublishJobSucceeded(ctx context.Context, pc *keziov1alpha2.PartitionContent, infoHash string) {
+	data, err := ingest.MarshalResult(ingest.Result{Success: true, Publish: &ingest.ResultPublish{InfoHash: infoHash}})
+	Expect(err).NotTo(HaveOccurred())
+	fakePublishJobSucceededWithMessage(ctx, pc, string(data))
+}
+
+func fakePublishJobSucceededWithMessage(ctx context.Context, pc *keziov1alpha2.PartitionContent, message string) {
+	var job batchv1.Job
+	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: publishJobName(pc.Name), Namespace: pc.Namespace}, &job)).To(Succeed())
+	job.Status.Succeeded = 1
+	Expect(k8sClient.Status().Update(ctx, &job)).To(Succeed())
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      job.Name + "-pod",
+			Namespace: pc.Namespace,
+			Labels:    map[string]string{"job-name": job.Name},
+		},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever,
+			Containers:    []corev1.Container{{Name: "publish", Image: "example.test/kezio-ingest:test"}},
+		},
+	}
+	Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:  "publish",
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Message: message}},
+	}}
+	Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
 }
 
 func newTestPartitionContent(name string) *keziov1alpha2.PartitionContent {
@@ -56,7 +98,7 @@ func newTestPartitionContent(name string) *keziov1alpha2.PartitionContent {
 			LastExtentEnd: 2048,
 			PieceLength:   16384,
 			Source: keziov1alpha2.PartitionContentSource{
-				ImageName:       "image-a",
+				ImportName:      "image-a",
 				PartitionNumber: 1,
 			},
 		},
@@ -107,8 +149,7 @@ var _ = Describe("PartitionContent Controller", func() {
 	}
 
 	It("creates an owner-referenced RWX content PVC sized from spec.sizeBytes", func() {
-		hashHex := partitionContentTestHash(1)
-		name := "pc-" + hashHex
+		name := partitionContentTestName(1)
 		pc := newTestPartitionContent(name)
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
 		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
@@ -119,11 +160,8 @@ var _ = Describe("PartitionContent Controller", func() {
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		hash, err := store.ParseInfoHash(hashHex)
-		Expect(err).NotTo(HaveOccurred())
-
 		var pvc corev1.PersistentVolumeClaim
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: store.PVCName(hash), Namespace: "default"}, &pvc)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: store.PVCName(name), Namespace: "default"}, &pvc)).To(Succeed())
 
 		Expect(pvc.Spec.AccessModes).To(ConsistOf(corev1.ReadWriteMany))
 		wantSize := partitionContentPVCSize(pc.Spec.SizeBytes)
@@ -137,8 +175,7 @@ var _ = Describe("PartitionContent Controller", func() {
 	})
 
 	It("holds Pending with a condition and creates no Job when publish config is missing", func() {
-		hashHex := partitionContentTestHash(2)
-		name := "pc-" + hashHex
+		name := partitionContentTestName(2)
 		pc := newTestPartitionContent(name)
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
 		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
@@ -157,17 +194,15 @@ var _ = Describe("PartitionContent Controller", func() {
 		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(cond.Reason).To(Equal("PublishConfigMissing"))
 
-		hash, err := store.ParseInfoHash(hashHex)
-		Expect(err).NotTo(HaveOccurred())
 		var job batchv1.Job
-		err = k8sClient.Get(ctx, types.NamespacedName{Name: publishJobName(hash), Namespace: "default"}, &job)
+		err = k8sClient.Get(ctx, types.NamespacedName{Name: publishJobName(name), Namespace: "default"}, &job)
 		Expect(client.IgnoreNotFound(err)).To(Succeed())
 		Expect(err).To(HaveOccurred(), "no publish job should have been created")
 	})
 
 	It("creates a publish Job shaped correctly once publish config is set, and walks Pending->Publishing->Ready", func() {
 		hashHex := partitionContentTestHash(3)
-		name := "pc-" + hashHex
+		name := partitionContentTestName(3)
 		pc := newTestPartitionContent(name)
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
 		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
@@ -187,11 +222,8 @@ var _ = Describe("PartitionContent Controller", func() {
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		hash, err := store.ParseInfoHash(hashHex)
-		Expect(err).NotTo(HaveOccurred())
-
 		var job batchv1.Job
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: publishJobName(hash), Namespace: "default"}, &job)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: publishJobName(name), Namespace: "default"}, &job)).To(Succeed())
 		Expect(job.OwnerReferences).To(HaveLen(1))
 		Expect(job.OwnerReferences[0].Name).To(Equal(name))
 
@@ -205,7 +237,7 @@ var _ = Describe("PartitionContent Controller", func() {
 		Expect(container.VolumeMounts).To(HaveLen(2))
 		Expect(container.VolumeMounts).To(ContainElement(corev1.VolumeMount{
 			Name:      "content",
-			MountPath: ingest.ContentMountPath(hash),
+			MountPath: ingest.ContentMountPath(name),
 		}))
 		Expect(container.VolumeMounts).To(ContainElement(corev1.VolumeMount{
 			Name:      "scratch",
@@ -217,7 +249,7 @@ var _ = Describe("PartitionContent Controller", func() {
 		Expect(k8sClient.Get(ctx, nn, &afterCreate)).To(Succeed())
 		Expect(afterCreate.Status.State).To(Equal(keziov1alpha2.PartitionContentStatePublishing))
 		Expect(afterCreate.Status.PVCRef).NotTo(BeNil())
-		Expect(afterCreate.Status.PVCRef.Name).To(Equal(store.PVCName(hash)))
+		Expect(afterCreate.Status.PVCRef.Name).To(Equal(store.PVCName(name)))
 
 		// A second reconcile with the Job still running must not create a
 		// second Job and must stay Publishing.
@@ -233,11 +265,10 @@ var _ = Describe("PartitionContent Controller", func() {
 		}
 		Expect(count).To(Equal(1))
 
-		// The reconciler cannot literally write a .torrent in envtest (no
-		// real Job pod runs); it trusts the Job's own status instead - fake
-		// that here the way a real Job controller would report success.
-		job.Status.Succeeded = 1
-		Expect(k8sClient.Status().Update(ctx, &job)).To(Succeed())
+		// The reconciler cannot literally publish content in envtest (no
+		// real Job pod runs); it trusts the Job's own status and reported
+		// result instead - fake both here.
+		fakePublishJobSucceeded(ctx, pc, hashHex)
 
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
@@ -252,6 +283,7 @@ var _ = Describe("PartitionContent Controller", func() {
 		readyCond := meta.FindStatusCondition(ready.Status.Conditions, keziov1alpha2.PartitionContentConditionReady)
 		Expect(readyCond).NotTo(BeNil())
 		Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
+		Expect(ready.Status.InfoHash).To(Equal(hashHex), "the publish Job's reported info hash lands in status")
 
 		// Valid is trivially True on every reconcile (spec is
 		// CEL-validated at admission - see setPartitionContentValidCondition),
@@ -278,8 +310,7 @@ var _ = Describe("PartitionContent Controller", func() {
 	})
 
 	It("records Failed with a Ready=False condition on a terminal Job failure", func() {
-		hashHex := partitionContentTestHash(4)
-		name := "pc-" + hashHex
+		name := partitionContentTestName(4)
 		pc := newTestPartitionContent(name)
 		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
 		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
@@ -294,10 +325,8 @@ var _ = Describe("PartitionContent Controller", func() {
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		hash, err := store.ParseInfoHash(hashHex)
-		Expect(err).NotTo(HaveOccurred())
 		var job batchv1.Job
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: publishJobName(hash), Namespace: "default"}, &job)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: publishJobName(name), Namespace: "default"}, &job)).To(Succeed())
 		job.Status.Failed = 1
 		Expect(k8sClient.Status().Update(ctx, &job)).To(Succeed())
 
@@ -311,5 +340,31 @@ var _ = Describe("PartitionContent Controller", func() {
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(cond.Reason).To(Equal("PublishJobFailed"))
+	})
+
+	It("records Failed when the publish Job succeeds but reports no info hash", func() {
+		name := partitionContentTestName(5)
+		pc := newTestPartitionContent(name)
+		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
+		DeferCleanup(func() { deletePartitionContent(ctx, pc) })
+
+		r := newReconciler(PartitionContentPublishConfig{Image: "example.test/kezio-ingest:test"})
+		nn := types.NamespacedName{Name: name, Namespace: "default"}
+		reconcileAddsFinalizer(ctx, r, nn)
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		fakePublishJobSucceededWithMessage(ctx, pc, `{"success":true}`)
+
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		var failed keziov1alpha2.PartitionContent
+		Expect(k8sClient.Get(ctx, nn, &failed)).To(Succeed())
+		Expect(failed.Status.State).To(Equal(keziov1alpha2.PartitionContentStateFailed))
+		cond := meta.FindStatusCondition(failed.Status.Conditions, keziov1alpha2.PartitionContentConditionReady)
+		Expect(cond.Message).To(ContainSubstring("no info hash"))
+		Expect(failed.Status.InfoHash).To(BeEmpty())
 	})
 })

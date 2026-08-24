@@ -22,7 +22,6 @@ import (
 	"maps"
 	"sort"
 	"strconv"
-	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -92,17 +91,28 @@ func seederRegisterEnv(cfg ImageSeederConfig, res sitederive.Resolution) []corev
 	return env
 }
 
-// imageSeededContents returns the info hash of every Ready
-// PartitionContent image's layout slots reference, deduplicated and
-// sorted for a deterministic Deployment spec. reconcileImageSeeder only
-// calls this once image itself is Ready, at which point every non-blank
-// slot's content is expected to already be Ready (ImageReconciler's own
-// aggregation gate); a content that fails to resolve here is skipped
-// rather than failing the whole reconcile; the content's own status
-// change will requeue this Image once it does resolve.
-func (r *ImageReconciler) imageSeededContents(ctx context.Context, image *keziov1alpha2.Image) ([]store.InfoHash, error) {
+// seededContent is one content a seeder Deployment serves: the
+// PartitionContent's own name, which its PVC and mount path derive from,
+// plus the info hash that content published under, which its pod-local
+// volume name derives from.
+type seededContent struct {
+	name     string
+	infoHash string
+}
+
+// imageSeededContents returns every Ready PartitionContent image's layout
+// slots reference, deduplicated and sorted for a deterministic Deployment
+// spec. reconcileImageSeeder only calls this once image itself is Ready,
+// at which point every non-blank slot's content is expected to already be
+// Ready (ImageReconciler's own aggregation gate); a content that fails to
+// resolve here is skipped rather than failing the whole reconcile; the
+// content's own status change will requeue this Image once it does
+// resolve. A Ready content with no recorded info hash is skipped the same
+// way - Ready is written together with the hash, so this only ever sees a
+// stale cache read.
+func (r *ImageReconciler) imageSeededContents(ctx context.Context, image *keziov1alpha2.Image) ([]seededContent, error) {
 	seen := make(map[string]bool)
-	hashes := make([]store.InfoHash, 0, len(image.Spec.Layout.Slots))
+	contents := make([]seededContent, 0, len(image.Spec.Layout.Slots))
 	for _, slot := range image.Spec.Layout.Slots {
 		if slot.ContentRef == nil || seen[slot.ContentRef.Name] {
 			continue
@@ -123,22 +133,34 @@ func (r *ImageReconciler) imageSeededContents(ctx context.Context, image *keziov
 		if !meta.IsStatusConditionTrue(pc.Status.Conditions, keziov1alpha2.PartitionContentConditionReady) {
 			continue
 		}
-		hash, err := store.ParseInfoHash(strings.TrimPrefix(pc.Name, "pc-"))
-		if err != nil {
-			return nil, fmt.Errorf("image %q: partitioncontent %q: name is not a valid content hash: %w", image.Name, pc.Name, err)
+		if pc.Status.InfoHash == "" {
+			continue
 		}
-		hashes = append(hashes, hash)
+		contents = append(contents, seededContent{name: pc.Name, infoHash: pc.Status.InfoHash})
 	}
-	sort.Slice(hashes, func(i, j int) bool { return hashes[i].String() < hashes[j].String() })
-	return hashes, nil
+	sort.Slice(contents, func(i, j int) bool { return contents[i].name < contents[j].name })
+	return contents, nil
+}
+
+// seederContentVolumeName is the pod-local volume name a seeded content
+// gets. It is derived from the info hash rather than the object name: a
+// volume name has to be a DNS-1123 label (no dots, at most 63
+// characters), while a PartitionContent name is a DNS-1123 subdomain and
+// satisfies neither bound. The hash prefix is fixed-shape and collision
+// resistant enough to keep two contents in one pod apart.
+func seederContentVolumeName(infoHash string) string {
+	if len(infoHash) > 16 {
+		infoHash = infoHash[:16]
+	}
+	return "content-" + infoHash
 }
 
 // buildImageSeederDeployment constructs the (not yet created) per-(Image,
 // Site) seeder Deployment: one replica running ezio alongside
 // kezio-seeder-register (same image, different command - see
-// docker/seeder), mounting every content in hashes read-only at
-// ingest.ContentMountPath(hash) - one ezio process serving every torrent
-// the Image's slots reference, at siteIdentity's Site.
+// docker/seeder), mounting every content in contents read-only at
+// ingest.ContentMountPath(content.name) - one ezio process serving every
+// torrent the Image's slots reference, at siteIdentity's Site.
 //
 // The Selector.MatchLabels/pod template labels carry imageSeederInstanceLabel
 // set to this Deployment's own name, which is unique per (Image, Site) by
@@ -149,7 +171,7 @@ func (r *ImageReconciler) imageSeededContents(ctx context.Context, image *keziov
 // must never depend on anything that can change after the Deployment is
 // first created - it does not: the name is deterministic from (Image,
 // Site) alone.
-func (r *ImageReconciler) buildImageSeederDeployment(image *keziov1alpha2.Image, siteIdentity string, hashes []store.InfoHash, res sitederive.Resolution) *appsv1.Deployment {
+func (r *ImageReconciler) buildImageSeederDeployment(image *keziov1alpha2.Image, siteIdentity string, contents []seededContent, res sitederive.Resolution) *appsv1.Deployment {
 	name := seederdeploy.Name(image.Name, siteIdentity)
 	labels := map[string]string{
 		partitionContentAppNameLabel:      partitionContentAppNameValue,
@@ -163,20 +185,20 @@ func (r *ImageReconciler) buildImageSeederDeployment(image *keziov1alpha2.Image,
 		depLabels[partitionContentSeederSubnetLabel] = res.Subnet.Name
 	}
 
-	volumes := make([]corev1.Volume, 0, len(hashes))
-	mounts := make([]corev1.VolumeMount, 0, len(hashes))
-	for _, hash := range hashes {
-		volName := "content-" + hash.String()[:16]
+	volumes := make([]corev1.Volume, 0, len(contents))
+	mounts := make([]corev1.VolumeMount, 0, len(contents))
+	for _, content := range contents {
+		volName := seederContentVolumeName(content.infoHash)
 		volumes = append(volumes, corev1.Volume{
 			Name: volName,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: store.PVCName(hash),
+					ClaimName: store.PVCName(content.name),
 					ReadOnly:  true,
 				},
 			},
 		})
-		mounts = append(mounts, corev1.VolumeMount{Name: volName, MountPath: ingest.ContentMountPath(hash), ReadOnly: true})
+		mounts = append(mounts, corev1.VolumeMount{Name: volName, MountPath: ingest.ContentMountPath(content.name), ReadOnly: true})
 	}
 
 	replicas := int32(1)

@@ -39,7 +39,9 @@ func newImageCmd(flags *globalFlags) *cobra.Command {
 func newImageUploadCmd(flags *globalFlags) *cobra.Command {
 	var (
 		name          string
-		layoutFile    string
+		imageName     string
+		contentPrefix string
+		osFamily      string
 		server        string
 		token         string
 		tokenFile     string
@@ -48,16 +50,17 @@ func newImageUploadCmd(flags *globalFlags) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "upload <file>",
-		Short: "Upload a disk image and create its Image CR",
+		Short: "Upload a disk image and create its ImageImport CR",
 		Long: `image upload streams a local file to the image service, then creates
-the Image CR once the service reports the content's checksum. The ingest
-Job does all conversion server-side; this command never needs qemu,
-partclone, or sfdisk.
+an ImageImport CR once the service reports the content's checksum. The
+ingest Job does all conversion, slicing, and classification server-side;
+this command never needs qemu, partclone, or sfdisk, and never has to
+know what is inside the file it uploads.
 
---layout points at a file describing the Image's partition table and
-slots (ImageSpec.Layout is required and immutable, so it must be known
-before the Image is created). See LoadLayout's doc comment for its shape:
-it wraps an sfdisk --dump --json dump plus the slot list by hand.
+The import creates one PartitionContent per non-swap partition, named
+"<--content-prefix>-p<partition number>", and then the Image binding
+them. Both names are rejected if something already holds them: content
+and Image are immutable, so an import never writes over one.
 
 The image service's URL and bearer token can be given on the command
 line, or left to environment variables/a token file:
@@ -91,28 +94,32 @@ The first source in each list that is set wins.`,
 
 			ctx := cmd.Context()
 			result, err := ImageUpload(ctx, httpClient, c, ImageUploadOptions{
-				File:       file,
-				Name:       name,
-				Namespace:  namespace,
-				LayoutFile: layoutFile,
-				Server:     resolvedServer,
-				Token:      resolvedToken,
-				Progress:   cmd.ErrOrStderr(),
+				File:          file,
+				Name:          name,
+				Namespace:     namespace,
+				ImageName:     imageName,
+				ContentPrefix: contentPrefix,
+				OSFamily:      osFamily,
+				Server:        resolvedServer,
+				Token:         resolvedToken,
+				Progress:      cmd.ErrOrStderr(),
 			})
 			if err != nil {
 				return err
 			}
 
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "image.kezio.kojuro.date/%s created in namespace %q (staged at %s, checksum %s)\n",
-				result.Image.Name, result.Image.Namespace, result.Upload.URL, result.Upload.Checksum)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "imageimport.kezio.kojuro.date/%s created in namespace %q (staged at %s, checksum %s); it will create image.kezio.kojuro.date/%s\n",
+				result.Import.Name, result.Import.Namespace, result.Upload.URL, result.Upload.Checksum, result.Import.Spec.ImageName)
 			return nil
 		},
 	}
 
-	cmd.Flags().StringVar(&name, "name", "", "name of the Image to create (required)")
+	cmd.Flags().StringVar(&name, "name", "", "name of the ImageImport to create (required)")
 	_ = cmd.MarkFlagRequired("name")
-	cmd.Flags().StringVar(&layoutFile, "layout", "", "path to a layout file describing spec.layout (required)")
-	_ = cmd.MarkFlagRequired("layout")
+	cmd.Flags().StringVar(&imageName, "image-name", "", "name of the Image the import creates (defaults to --name)")
+	cmd.Flags().StringVar(&contentPrefix, "content-prefix", "",
+		"prefix for the PartitionContent names the import creates, as <prefix>-p<partition number> (defaults to --name)")
+	cmd.Flags().StringVar(&osFamily, "os-family", "", "OS family to stamp on the created Image (Linux, Windows, FreeBSD, Other)")
 	cmd.Flags().StringVar(&server, "server", "", "image service base URL (or set "+ServerEnvVar+")")
 	cmd.Flags().StringVar(&token, "token", "", "bearer token for the image service (or set "+TokenEnvVar+")")
 	cmd.Flags().StringVar(&tokenFile, "token-file", "",

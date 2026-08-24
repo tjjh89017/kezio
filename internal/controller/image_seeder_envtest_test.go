@@ -34,6 +34,7 @@ import (
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 	"github.com/tjjh89017/kezio/internal/ingest"
 	"github.com/tjjh89017/kezio/internal/seederdeploy"
+	"github.com/tjjh89017/kezio/internal/store"
 )
 
 // imageSeederTestHash returns a distinct, valid-looking 40-character hex
@@ -133,7 +134,7 @@ var _ = Describe("Image Controller seeder placement", func() {
 
 		img := newTestImageWithSlots("image-701", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
@@ -152,6 +153,17 @@ var _ = Describe("Image Controller seeder placement", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: depName, Namespace: "default"}, &dep)).To(Succeed())
 		Expect(dep.Spec.Replicas).NotTo(BeNil())
 		Expect(*dep.Spec.Replicas).To(Equal(int32(1)))
+
+		// The content is mounted by object name, not by info hash: the PVC
+		// belongs to the PartitionContent, and the seeder derives the info
+		// hash itself from the torrent.info it finds there.
+		Expect(dep.Spec.Template.Spec.Volumes).To(HaveLen(1))
+		Expect(dep.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim.ClaimName).To(Equal(store.PVCName(contentName)))
+		Expect(dep.Spec.Template.Spec.Containers[0].VolumeMounts).To(ContainElement(corev1.VolumeMount{
+			Name:      dep.Spec.Template.Spec.Volumes[0].Name,
+			MountPath: ingest.ContentMountPath(contentName),
+			ReadOnly:  true,
+		}))
 
 		// Exactly one Deployment for this Image: no second one under any
 		// other name exists.
@@ -179,7 +191,7 @@ var _ = Describe("Image Controller seeder placement", func() {
 
 		img := newTestImageWithSlots("image-702", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
@@ -223,12 +235,12 @@ var _ = Describe("Image Controller seeder placement", func() {
 
 		imgA := newTestImageWithSlots("image-703a", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentNameA}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, imgA)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, imgA) })
 		imgB := newTestImageWithSlots("image-703b", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentNameB}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, imgB)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, imgB) })
 
@@ -285,7 +297,7 @@ var _ = Describe("Image Controller seeder placement", func() {
 
 		img := newTestImageWithSlots("image-708", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
@@ -329,7 +341,7 @@ var _ = Describe("Image Controller seeder placement", func() {
 
 		img := newTestImageWithSlots("image-709", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
@@ -420,7 +432,7 @@ var _ = Describe("PartitionContent status seeder reflection", func() {
 
 		img := newTestImageWithSlots("image-707", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
@@ -472,7 +484,7 @@ var _ = Describe("Image Controller seeder demand grouping", func() {
 
 		img := newTestImageWithSlots("image-705", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
@@ -528,7 +540,7 @@ var _ = Describe("Image Controller seeder demand grouping", func() {
 
 		img := newTestImageWithSlots("image-706", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
@@ -579,7 +591,7 @@ var _ = Describe("Image Controller seeder degradation reporting", func() {
 
 		img := newTestImageWithSlots("image-710", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
@@ -639,7 +651,7 @@ var _ = Describe("Image Controller seeder degradation reporting", func() {
 
 		img := newTestImageWithSlots("image-711", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
@@ -717,7 +729,7 @@ var _ = Describe("Image Controller seeder degradation reporting", func() {
 
 		img := newTestImageWithSlots("image-712", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
@@ -754,7 +766,7 @@ var _ = Describe("Image Controller seeder degradation reporting", func() {
 
 		img := newTestImageWithSlots("image-713", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
@@ -814,7 +826,7 @@ var _ = Describe("Image Controller seeder degradation reporting", func() {
 
 		img := newTestImageWithSlots("image-714", []keziov1alpha2.ImageSlot{
 			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
-		}, nil)
+		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 

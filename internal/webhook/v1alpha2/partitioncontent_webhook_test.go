@@ -17,15 +17,18 @@ limitations under the License.
 package v1alpha2
 
 import (
+	"strings"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	"github.com/tjjh89017/kezio/internal/store"
 )
 
-const validPartitionContentName = "pc-0123456789abcdef0123456789abcdef01234567"
+const validPartitionContentName = "ubuntu-2404-p1"
 
 var _ = Describe("PartitionContent Webhook", func() {
 	var (
@@ -56,18 +59,23 @@ var _ = Describe("PartitionContent Webhook", func() {
 			Expect(validator.ValidateUpdate(ctx, oldObj, obj)).Error().NotTo(HaveOccurred())
 		})
 
-		It("rejects a name with the wrong prefix", func() {
-			obj.Name = "wrong-0123456789abcdef0123456789abcdef01234567"
+		It("admits a user-chosen name that is not derived from any hash", func() {
+			obj.Name = "ubuntu-2404-p1"
+			Expect(validator.ValidateCreate(ctx, obj)).Error().NotTo(HaveOccurred())
+		})
+
+		It("rejects a name that leaves no room for this content's own PVC name", func() {
+			obj.Name = strings.Repeat("a", store.MaxContentNameLength+1)
 			Expect(validator.ValidateCreate(ctx, obj)).Error().To(HaveOccurred())
 		})
 
-		It("rejects a name with a hash that is too short", func() {
-			obj.Name = "pc-0123"
-			Expect(validator.ValidateCreate(ctx, obj)).Error().To(HaveOccurred())
+		It("admits a name exactly at the length limit", func() {
+			obj.Name = strings.Repeat("a", store.MaxContentNameLength)
+			Expect(validator.ValidateCreate(ctx, obj)).Error().NotTo(HaveOccurred())
 		})
 
-		It("rejects a name with non-hex characters", func() {
-			obj.Name = "pc-g123456789abcdef0123456789abcdef0123456"
+		It("rejects a name that is not a lowercase RFC 1123 subdomain", func() {
+			obj.Name = "Ubuntu_2404"
 			Expect(validator.ValidateCreate(ctx, obj)).Error().To(HaveOccurred())
 		})
 	})
@@ -86,7 +94,7 @@ var _ = Describe("PartitionContent Webhook", func() {
 					LastExtentEnd: 2048,
 					PieceLength:   16384,
 					Source: keziov1alpha2.PartitionContentSource{
-						ImageName:       "image-a",
+						ImportName:      "image-a",
 						PartitionNumber: 1,
 					},
 				},
@@ -95,10 +103,10 @@ var _ = Describe("PartitionContent Webhook", func() {
 			Expect(k8sClient.Delete(ctx, created)).To(Succeed())
 		})
 
-		It("rejects a name that is not a pc-prefixed info hash", func() {
+		It("rejects a name too long for its own PVC name", func() {
 			created := &keziov1alpha2.PartitionContent{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "not-a-valid-name",
+					Name:      strings.Repeat("a", store.MaxContentNameLength+1),
 					Namespace: "default",
 				},
 				Spec: keziov1alpha2.PartitionContentSpec{
@@ -108,7 +116,7 @@ var _ = Describe("PartitionContent Webhook", func() {
 					LastExtentEnd: 2048,
 					PieceLength:   16384,
 					Source: keziov1alpha2.PartitionContentSource{
-						ImageName:       "image-a",
+						ImportName:      "image-a",
 						PartitionNumber: 1,
 					},
 				},

@@ -20,26 +20,29 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// PartitionContentSource records where a PartitionContent's bytes were
-// first ingested from, for audit only. It is not a reference the
-// controller resolves: the source Image or partition may since have
-// changed or been deleted.
+// PartitionContentSource records which import captured a
+// PartitionContent's bytes, and from which partition of that import's
+// source disk. The publish Job resolves ImportName to find the ingest
+// scratch volume this content's bytes still sit in; PartitionNumber is
+// audit metadata only.
 type PartitionContentSource struct {
-	// ImageName is the name of the Image this content was captured from.
+	// ImportName is the name of the ImageImport this content was captured
+	// by.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
-	ImageName string `json:"imageName"`
-	// PartitionNumber is the partition number within that Image this
-	// content was captured from.
+	ImportName string `json:"importName"`
+	// PartitionNumber is the partition number within that import's source
+	// disk this content was captured from.
 	// +kubebuilder:validation:Minimum=1
 	PartitionNumber int32 `json:"partitionNumber"`
 }
 
 // PartitionContentSpec defines the desired state of PartitionContent. It
-// is the immutable, content-addressed record of one partition's data (see
-// the type-level XValidation rule): every field describes the bytes
-// identified by the object's name, so none of them can change without
-// changing what the name identifies.
+// is the immutable record of one partition's data (see the type-level
+// XValidation rule). Immutability is enforced rather than inherited: the
+// object's name is chosen by the user, so nothing about the name pins the
+// bytes, and an Image slot that references this name must be able to
+// trust that the bytes behind it never change.
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
 type PartitionContentSpec struct {
 	// FSType is the filesystem type of the partition, for example "ext4"
@@ -65,13 +68,12 @@ type PartitionContentSpec struct {
 	LastExtentEnd int64 `json:"lastExtentEnd"`
 	// PieceLength is the BitTorrent piece length used to hash this
 	// content. It is a pinned constant, recorded here only: a piece
-	// length that varies between ingests of identical bytes would fork
-	// them into different info hashes, breaking the content-addressed
-	// dedupe this object exists for.
+	// length that varies between ingests would give identical bytes
+	// different info hashes, so pinning it keeps a re-imported partition's
+	// swarm identity reproducible.
 	// +kubebuilder:validation:Minimum=1
 	PieceLength int64 `json:"pieceLength"`
-	// Source records where this content was first ingested from, for
-	// audit only.
+	// Source records which import captured this content.
 	Source PartitionContentSource `json:"source"`
 }
 
@@ -149,6 +151,17 @@ type PartitionContentStatus struct {
 	// +kubebuilder:validation:Enum=Pending;Publishing;Ready;Failed
 	// +optional
 	State string `json:"state,omitempty"`
+	// InfoHash is the BitTorrent v1 info hash of this content, as
+	// lowercase hex. It is the torrent's own identity - what the deploy
+	// plan hands the agent, and what the agent verifies the restored
+	// bytes against - but it is not this object's identity: it only
+	// exists once partclone has run, so it is observed here rather than
+	// declared in spec. The publish Job reports it, and it stays the same
+	// for the life of the object (spec is immutable, so the bytes behind
+	// it never change). Absent until publishing succeeds.
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{40}$`
+	// +optional
+	InfoHash string `json:"infoHash,omitempty"`
 	// PVCRef names the PVC holding this content's bytes, in the same
 	// namespace as this object.
 	// +optional
@@ -172,11 +185,16 @@ type PartitionContentStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="State",type=string,JSONPath=`.status.state`
 // +kubebuilder:printcolumn:name="FSType",type=string,JSONPath=`.spec.fsType`
+// +kubebuilder:printcolumn:name="InfoHash",type=string,JSONPath=`.status.infoHash`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // PartitionContent is the Schema for the partitioncontents API. Its name
-// is the BitTorrent v1 info hash of its content, prefixed "pc-"; the
-// PartitionContent webhook enforces that name shape.
+// is chosen by the user: an ImageImport names the content it captures
+// "<spec.contentPrefix>-p<partition number>" (internal/store.ContentName),
+// and a user who wants another name creates the content under that name
+// instead. The name says nothing about the bytes, so the object is
+// immutable and an import that would write over an existing name is
+// rejected instead of replacing it.
 type PartitionContent struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

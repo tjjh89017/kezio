@@ -61,23 +61,14 @@ func writeTestImageFile(t *testing.T, content []byte) string {
 	return path
 }
 
-func writeTestLayoutFile(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "layout.json")
-	if err := os.WriteFile(path, []byte(testLayoutJSON), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
+const testUploadName = "ubuntu-2404-golden"
 
-func TestImageUpload_ChecksumAndLayoutPropagateIntoCR(t *testing.T) {
+func TestImageUpload_ChecksumAndNamesPropagateIntoCR(t *testing.T) {
 	srv := newImageServiceTestServer(t, "test-token")
 	defer srv.Close()
 
 	content := []byte("raw disk bytes for testing")
 	path := writeTestImageFile(t, content)
-	layoutPath := writeTestLayoutFile(t)
 
 	wantSum := sha256.Sum256(content)
 	wantChecksum := "sha256:" + hex.EncodeToString(wantSum[:])
@@ -85,12 +76,11 @@ func TestImageUpload_ChecksumAndLayoutPropagateIntoCR(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(Scheme).Build()
 
 	res, err := ImageUpload(context.Background(), srv.Client(), c, ImageUploadOptions{
-		File:       path,
-		Name:       "ubuntu-2404-golden",
-		Namespace:  "kezio-system",
-		LayoutFile: layoutPath,
-		Server:     srv.URL,
-		Token:      "test-token",
+		File:      path,
+		Name:      testUploadName,
+		Namespace: "kezio-system",
+		Server:    srv.URL,
+		Token:     "test-token",
 	})
 	if err != nil {
 		t.Fatalf("ImageUpload() error = %v", err)
@@ -99,26 +89,50 @@ func TestImageUpload_ChecksumAndLayoutPropagateIntoCR(t *testing.T) {
 	if res.Upload.Checksum != wantChecksum {
 		t.Fatalf("Upload.Checksum = %q, want %q", res.Upload.Checksum, wantChecksum)
 	}
-	if res.Image.Spec.Source == nil || res.Image.Spec.Source.Checksum != wantChecksum {
-		t.Errorf("Image.Spec.Source.Checksum = %+v, want %q", res.Image.Spec.Source, wantChecksum)
-	}
-	if res.Image.Spec.Source.URL != "kezio-staged://ubuntu-2404-golden" {
-		t.Errorf("Image.Spec.Source.URL = %q, want kezio-staged://ubuntu-2404-golden", res.Image.Spec.Source.URL)
-	}
-	if res.Image.Spec.Layout.PartitionTable != keziov1alpha2.PartitionTableGPT {
-		t.Errorf("Image.Spec.Layout.PartitionTable = %q, want gpt", res.Image.Spec.Layout.PartitionTable)
-	}
-	if len(res.Image.Spec.Layout.Slots) != 1 {
-		t.Fatalf("Image.Spec.Layout.Slots = %+v, want one slot", res.Image.Spec.Layout.Slots)
-	}
 
-	stored := &keziov1alpha2.Image{}
-	key := client.ObjectKey{Namespace: "kezio-system", Name: "ubuntu-2404-golden"}
+	stored := &keziov1alpha2.ImageImport{}
+	key := client.ObjectKey{Namespace: "kezio-system", Name: testUploadName}
 	if err := c.Get(context.Background(), key, stored); err != nil {
-		t.Fatalf("get created Image: %v", err)
+		t.Fatalf("get created ImageImport: %v", err)
 	}
 	if stored.Spec.Source.Checksum != wantChecksum {
-		t.Errorf("stored Image checksum = %q, want %q", stored.Spec.Source.Checksum, wantChecksum)
+		t.Errorf("stored ImageImport checksum = %q, want %q", stored.Spec.Source.Checksum, wantChecksum)
+	}
+	if stored.Spec.Source.URL != "kezio-staged://ubuntu-2404-golden" {
+		t.Errorf("stored ImageImport URL = %q, want kezio-staged://ubuntu-2404-golden", stored.Spec.Source.URL)
+	}
+	if stored.Spec.ImageName != testUploadName {
+		t.Errorf("spec.imageName = %q, want it to default to --name", stored.Spec.ImageName)
+	}
+	if stored.Spec.ContentPrefix != testUploadName {
+		t.Errorf("spec.contentPrefix = %q, want it to default to --name", stored.Spec.ContentPrefix)
+	}
+}
+
+func TestImageUpload_ExplicitImageNameAndContentPrefixWin(t *testing.T) {
+	srv := newImageServiceTestServer(t, "test-token")
+	defer srv.Close()
+
+	path := writeTestImageFile(t, []byte("data"))
+	c := fake.NewClientBuilder().WithScheme(Scheme).Build()
+
+	res, err := ImageUpload(context.Background(), srv.Client(), c, ImageUploadOptions{
+		File:          path,
+		Name:          "import-run-7",
+		Namespace:     "default",
+		ImageName:     "ubuntu-2404",
+		ContentPrefix: "ubuntu-2404-golden",
+		Server:        srv.URL,
+		Token:         "test-token",
+	})
+	if err != nil {
+		t.Fatalf("ImageUpload() error = %v", err)
+	}
+	if res.Import.Spec.ImageName != "ubuntu-2404" {
+		t.Errorf("spec.imageName = %q, want ubuntu-2404", res.Import.Spec.ImageName)
+	}
+	if res.Import.Spec.ContentPrefix != "ubuntu-2404-golden" {
+		t.Errorf("spec.contentPrefix = %q, want ubuntu-2404-golden", res.Import.Spec.ContentPrefix)
 	}
 }
 
@@ -127,16 +141,14 @@ func TestImageUpload_WrongTokenIsRejected(t *testing.T) {
 	defer srv.Close()
 
 	path := writeTestImageFile(t, []byte("data"))
-	layoutPath := writeTestLayoutFile(t)
 	c := fake.NewClientBuilder().WithScheme(Scheme).Build()
 
 	_, err := ImageUpload(context.Background(), srv.Client(), c, ImageUploadOptions{
-		File:       path,
-		Name:       "n",
-		Namespace:  "default",
-		LayoutFile: layoutPath,
-		Server:     srv.URL,
-		Token:      "wrong-token",
+		File:      path,
+		Name:      "n",
+		Namespace: "default",
+		Server:    srv.URL,
+		Token:     "wrong-token",
 	})
 	if err == nil {
 		t.Fatal("expected an error for a wrong bearer token")
@@ -146,78 +158,54 @@ func TestImageUpload_WrongTokenIsRejected(t *testing.T) {
 	}
 }
 
-func TestImageUpload_UploadFailureDoesNotCreateImage(t *testing.T) {
+func TestImageUpload_UploadFailureDoesNotCreateImageImport(t *testing.T) {
 	srv := newImageServiceTestServer(t, "test-token")
 	defer srv.Close()
 
 	path := writeTestImageFile(t, []byte("data"))
-	layoutPath := writeTestLayoutFile(t)
 	c := fake.NewClientBuilder().WithScheme(Scheme).Build()
 
 	_, err := ImageUpload(context.Background(), srv.Client(), c, ImageUploadOptions{
-		File:       path,
-		Name:       "should-not-exist",
-		Namespace:  "default",
-		LayoutFile: layoutPath,
-		Server:     srv.URL,
-		Token:      "wrong-token",
+		File:      path,
+		Name:      "should-not-exist",
+		Namespace: "default",
+		Server:    srv.URL,
+		Token:     "wrong-token",
 	})
 	if err == nil {
 		t.Fatal("expected an error when the upload fails")
 	}
 
-	list := &keziov1alpha2.ImageList{}
+	list := &keziov1alpha2.ImageImportList{}
 	if err := c.List(context.Background(), list); err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
 	if len(list.Items) != 0 {
-		t.Fatalf("Image CR created despite upload failure: %+v", list.Items)
+		t.Fatalf("ImageImport CR created despite upload failure: %+v", list.Items)
 	}
 }
 
-func TestImageUpload_ImageAlreadyExists(t *testing.T) {
+func TestImageUpload_ImportAlreadyExists(t *testing.T) {
 	srv := newImageServiceTestServer(t, "test-token")
 	defer srv.Close()
 
-	layoutPath := writeTestLayoutFile(t)
-	existing := &keziov1alpha2.Image{}
+	existing := &keziov1alpha2.ImageImport{}
 	existing.Name = "dup"
 	existing.Namespace = "default"
 	c := fake.NewClientBuilder().WithScheme(Scheme).WithObjects(existing).Build()
 
 	path := writeTestImageFile(t, []byte("x"))
 	_, err := ImageUpload(context.Background(), srv.Client(), c, ImageUploadOptions{
-		File:       path,
-		Name:       "dup",
-		Namespace:  "default",
-		LayoutFile: layoutPath,
-		Server:     srv.URL,
-		Token:      "test-token",
+		File:      path,
+		Name:      "dup",
+		Namespace: "default",
+		Server:    srv.URL,
+		Token:     "test-token",
 	})
 	if err == nil {
-		t.Fatal("expected an error when the Image already exists")
+		t.Fatal("expected an error when the ImageImport already exists")
 	}
 	if !strings.Contains(err.Error(), "already exists") {
-		t.Errorf("error = %q, want it to mention the Image already exists", err.Error())
-	}
-}
-
-func TestImageUpload_MissingLayoutFile(t *testing.T) {
-	srv := newImageServiceTestServer(t, "test-token")
-	defer srv.Close()
-
-	path := writeTestImageFile(t, []byte("data"))
-	c := fake.NewClientBuilder().WithScheme(Scheme).Build()
-
-	_, err := ImageUpload(context.Background(), srv.Client(), c, ImageUploadOptions{
-		File:       path,
-		Name:       "n",
-		Namespace:  "default",
-		LayoutFile: "/nonexistent/layout.json",
-		Server:     srv.URL,
-		Token:      "test-token",
-	})
-	if err == nil {
-		t.Fatal("expected an error when the layout file is missing")
+		t.Errorf("error = %q, want it to mention the ImageImport already exists", err.Error())
 	}
 }

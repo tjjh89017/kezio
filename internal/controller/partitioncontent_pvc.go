@@ -63,7 +63,7 @@ func partitionContentPVCSize(sizeBytes int64) resource.Quantity {
 }
 
 // ensureContentPVC gets or creates the content PVC named
-// store.PVCName(hash), owner-referenced to pc so it is reclaimed
+// store.PVCName(pc.Name), owner-referenced to pc so it is reclaimed
 // automatically when pc is deleted (see the type-level doc comment on
 // PartitionContentReconciler: this item owns the PVC's lifecycle only,
 // not a demand-blocking finalizer). An already-existing PVC is returned
@@ -71,8 +71,8 @@ func partitionContentPVCSize(sizeBytes int64) resource.Quantity {
 // spec.sizeBytes never changes (PartitionContentSpec is immutable) and a
 // PVC's request size and access modes are themselves immutable once
 // bound.
-func (r *PartitionContentReconciler) ensureContentPVC(ctx context.Context, pc *keziov1alpha2.PartitionContent, hash store.InfoHash) (*corev1.PersistentVolumeClaim, error) {
-	name := store.PVCName(hash)
+func (r *PartitionContentReconciler) ensureContentPVC(ctx context.Context, pc *keziov1alpha2.PartitionContent) (*corev1.PersistentVolumeClaim, error) {
+	name := store.PVCName(pc.Name)
 	key := client.ObjectKey{Namespace: pc.Namespace, Name: name}
 
 	existing := &corev1.PersistentVolumeClaim{}
