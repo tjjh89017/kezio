@@ -131,8 +131,8 @@ func (r *ImageReconciler) onChange(ctx context.Context, image *keziov1alpha2.Ima
 	case len(agg.failed) > 0:
 		return r.recordFailed(ctx, image, agg.failed)
 	case len(agg.notReady) == 0 && validOK:
-		if result, err := r.recordReady(ctx, image); err != nil {
-			return result, err
+		if err := r.recordReady(ctx, image); err != nil {
+			return ctrl.Result{}, err
 		}
 		return r.reconcileImageSeeder(ctx, image)
 	case len(agg.notReady) == 0:

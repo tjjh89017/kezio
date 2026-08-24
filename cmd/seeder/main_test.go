@@ -285,7 +285,8 @@ func TestReconcile_RegisteredBytesMatchServedBytesAndAnnounceTracker(t *testing.
 	}
 
 	if !bytes.Equal(servedBytes, registeredBytes) {
-		t.Fatalf("served .torrent bytes differ from registered bytes:\n served=%x\nregistered=%x", servedBytes, registeredBytes)
+		t.Fatalf("served .torrent bytes differ from registered bytes:\n served=%x\nregistered=%x",
+			servedBytes, registeredBytes)
 	}
 
 	// The info hash inside the built .torrent must still be the

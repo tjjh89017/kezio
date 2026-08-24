@@ -100,7 +100,7 @@ func (r *PartitionContentReconciler) collectSeederSites(ctx context.Context, pc 
 		}
 	}
 
-	var sites []keziov1alpha2.PartitionContentSeederSite
+	sites := make([]keziov1alpha2.PartitionContentSeederSite, 0, len(available))
 	for site := range available {
 		count := 0
 		if d, ok := demand[site]; ok {

@@ -102,7 +102,7 @@ func seederRegisterEnv(cfg ImageSeederConfig, res sitederive.Resolution) []corev
 // change will requeue this Image once it does resolve.
 func (r *ImageReconciler) imageSeededContents(ctx context.Context, image *keziov1alpha2.Image) ([]store.InfoHash, error) {
 	seen := make(map[string]bool)
-	var hashes []store.InfoHash
+	hashes := make([]store.InfoHash, 0, len(image.Spec.Layout.Slots))
 	for _, slot := range image.Spec.Layout.Slots {
 		if slot.ContentRef == nil || seen[slot.ContentRef.Name] {
 			continue

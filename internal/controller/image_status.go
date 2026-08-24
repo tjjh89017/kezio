@@ -112,13 +112,13 @@ func setImageValidCondition(image *keziov1alpha2.Image, valid bool, problems []s
 
 // recordReady records Ready: every referenced content is Ready (fresh)
 // and every contentRef slot's declared size fits its content.
-func (r *ImageReconciler) recordReady(ctx context.Context, image *keziov1alpha2.Image) (ctrl.Result, error) {
+func (r *ImageReconciler) recordReady(ctx context.Context, image *keziov1alpha2.Image) error {
 	image.Status.State = keziov1alpha2.ImageStateReady
 	setImageReadyCondition(image, metav1.ConditionTrue, "ContentReady", "every referenced PartitionContent is Ready")
 	if err := r.applyImageStatus(ctx, image); err != nil {
-		return ctrl.Result{}, fmt.Errorf("image %q: recording Ready: %w", image.Name, err)
+		return fmt.Errorf("image %q: recording Ready: %w", image.Name, err)
 	}
-	return ctrl.Result{}, nil
+	return nil
 }
 
 // recordPending records Pending for a composed Image (no spec.source)

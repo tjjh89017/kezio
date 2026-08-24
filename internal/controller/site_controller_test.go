@@ -62,6 +62,14 @@ func setSeederSubnetRef(ctx context.Context, site *keziov1alpha2.Site, subnetNam
 	ExpectWithOffset(1, k8sClient.Update(ctx, site)).To(Succeed())
 }
 
+// rack-2's identity and network values, shared by the subnetRefs test
+// below to avoid repeating the same literals.
+const (
+	rack2SubnetName    = "rack-2"
+	rack2CIDR          = "192.0.3.0/24"
+	rack2BootdServerIP = "192.0.3.2"
+)
+
 // findTrackerDeployment lists the Deployments in ns carrying
 // trackerDeploymentSiteLabel=siteName, failing the test unless there is
 // exactly one.
@@ -184,9 +192,9 @@ var _ = Describe("Site Controller", func() {
 		})
 		Expect(k8sClient.Create(ctx, first)).To(Succeed())
 		second := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
-			s.Name = "rack-2"
-			s.Spec.CIDR = "192.0.3.0/24"
-			s.Spec.BootdServerIP = "192.0.3.2"
+			s.Name = rack2SubnetName
+			s.Spec.CIDR = rack2CIDR
+			s.Spec.BootdServerIP = rack2BootdServerIP
 			s.Spec.SiteRef = keziov1alpha2.NameRef{Name: "site-d"}
 		})
 		Expect(k8sClient.Create(ctx, second)).To(Succeed())

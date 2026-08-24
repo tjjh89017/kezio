@@ -239,9 +239,9 @@ var _ = Describe("Subnet bootd Deployment reconciliation", func() {
 		Expect(k8sClient.Create(ctx, first)).To(Succeed())
 
 		second := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
-			s.Name = "rack-2"
-			s.Spec.CIDR = "192.0.3.0/24"
-			s.Spec.BootdServerIP = "192.0.3.2"
+			s.Name = rack2SubnetName
+			s.Spec.CIDR = rack2CIDR
+			s.Spec.BootdServerIP = rack2BootdServerIP
 			// Same bootdNetworkRef as first - the collision this check
 			// exists to catch.
 			s.Spec.BootdNetworkRef = &keziov1alpha2.NameRef{Name: "boot-nad"}
