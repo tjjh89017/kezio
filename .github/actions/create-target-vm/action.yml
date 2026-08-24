@@ -81,14 +81,18 @@ runs:
         EOF
 
     - name: Create the target KubeVirt VirtualMachine, powered off
-      # `running: false`: this VM is never started here. The network
-      # interface carries bootOrder 1 and the disk bootOrder 2 - OVMF
-      # tries PXE first on every boot, falling back to disk only once
-      # kezio-agent's efibootmgr entry exists and PXE itself declines (no
-      # boot files served, or bootd's boot config server answers "boot
-      # local"). secureBoot is off: OVMF's secure-boot variable store
-      # needs a vendor-signed shim/grub chain CI's built artifacts don't
-      # carry.
+      # `running: false`: this VM is never started here. Neither device
+      # carries a static bootOrder: a static bootOrder keeps QEMU's
+      # "bootorder" fw_cfg file non-empty on every boot, and OVMF's
+      # QemuBootOrderLib rewrites NVRAM BootOrder from that file whenever
+      # it is present - which discards the persistent efibootmgr entry
+      # kezio-agent writes at finalize and drops the machine back to PXE.
+      # With no static bootOrder, fw_cfg goes back to empty once
+      # KubeVirtBMC's one-shot PXE override is consumed and restored, so
+      # OVMF leaves NVRAM BootOrder untouched on the boot into disk -
+      # the same as real firmware with no BMC override in effect.
+      # secureBoot is off: OVMF's secure-boot variable store needs a
+      # vendor-signed shim/grub chain CI's built artifacts don't carry.
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
@@ -133,12 +137,10 @@ runs:
                   interfaces:
                     - name: provisioning
                       macAddress: "${VM_MAC}"
-                      bootOrder: 1
                       bridge: {}
                   disks:
                     - name: data
                       serial: "${DISK_SERIAL}"
-                      bootOrder: 2
                       disk:
                         bus: virtio
                     - name: cloudinitdisk

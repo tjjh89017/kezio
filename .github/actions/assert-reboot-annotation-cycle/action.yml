@@ -45,19 +45,21 @@ description: >-
   VirtualMachineBMC.status.bootOverride is restored to its pre-override
   boot order only once the VMI is recreated - see
   kubevirtbmc/internal/controller/bootorderrestore) does not need an
-  e2e-only accommodation here: create-target-vm bakes the VM's own boot
-  order as PXE-first (interface bootOrder 1, disk bootOrder 2)
-  permanently, and this Reboot call never calls
+  e2e-only accommodation here: this Reboot call never calls
   bmc.BMC.SetOneTimePXEBoot at all - only the deploy's own
-  boot-into-agent step (AgentDeployer.Provision) does that, and its
-  oneshot override was already consumed and cleared by
-  bootorderrestore's controller on the VMI transition that landed the
-  original deploy, well before this action runs. Falling through PXE to
-  disk on every boot (including this one) depends only on bootd
-  declining to serve this already-deployed MAC, the same mechanism
-  verify-deploy's own layer 2 already relies on for the initial
-  post-deploy boot - nothing about this action's BMC-driven cycle changes
-  that.
+  boot-into-agent step (AgentDeployer.Provision) does that, and it
+  power-cycles through the BMC right after, so bootorderrestore's
+  controller already consumed and cleared that override on the VMI
+  recreation the deploy itself caused, well before this action runs. The
+  VM therefore carries no boot order at all when this cycle recreates
+  the VMI (create-target-vm sets no static bootOrder, on purpose - see
+  its own comment), QEMU's "bootorder" fw_cfg file is empty, and OVMF
+  keeps the NVRAM BootOrder kezio-agent wrote with efibootmgr at
+  finalize - so the guest boots its deployed disk directly. bootd
+  declining to serve this already-deployed MAC stays the backstop for
+  any boot that still tries PXE first, the same mechanism
+  verify-deploy's own layer 2 relies on for the initial post-deploy
+  reboot, which happens in the guest inside the still-overridden VMI.
 
 inputs:
   machine-name:
