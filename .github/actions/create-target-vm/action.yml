@@ -43,10 +43,68 @@ inputs:
     description: CPU core count for the VM's domain.
     required: false
     default: "2"
+  disable-legacy-pxe-boot:
+    description: >-
+      When "true", installs a KubeVirt hook-sidecar (the ConfigMap-driven
+      generic sidecar-shim KubeVirt ships) that adds
+      "-fw_cfg name=opt/org.tianocore/IPv4PXESupport,string=no" and the
+      IPv6 counterpart to OVMF's QEMU command line, so BdsDxe skips both
+      PXEv4/PXEv6 boot options entirely instead of trying and winning
+      them before ever reaching UEFI HTTP Boot (EDK2 enumerates a NIC's
+      network boot options PXEv4/PXEv6/HTTPv4/HTTPv6 in that fixed order,
+      and bootd - unless told otherwise - answers a PXE request from an
+      enrolled MAC just as readily as an HTTP Boot one, so PXE winning the
+      race is the default outcome, not a rare one). Off by default;
+      existing callers are unaffected.
+    required: false
+    default: "false"
+  sidecar-shim-image:
+    description: >-
+      Image reference for KubeVirt's own "sidecar-shim" hook-sidecar
+      binary (ships as part of every KubeVirt release, quay.io/kubevirt/
+      sidecar-shim) - only used when disable-legacy-pxe-boot is "true".
+      Must match the installed KubeVirt version's hook-sidecar gRPC
+      protocol.
+    required: false
+    default: "quay.io/kubevirt/sidecar-shim:v1.9.0"
 
 runs:
   using: composite
   steps:
+    - name: Create the disable-PXE hook-sidecar ConfigMap
+      if: inputs.disable-legacy-pxe-boot == 'true'
+      # onDefineDomain hook contract (KubeVirt's generic ConfigMap-based
+      # sidecar-shim): invoked as "<script> --vmi <vmiJSON> --domain
+      # <domainXML>", must print the (possibly modified) domain XML on
+      # stdout. This inserts one <qemu:commandline> element carrying both
+      # fw_cfg args right before </domain> - libvirt's qemu:commandline
+      # element requires the domain's xmlns:qemu declaration, which
+      # KubeVirt's own generated XML already carries for its own use.
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        VM_NAME: ${{ inputs.vm-name }}
+      run: |
+        set -euo pipefail
+        # envsubst is restricted to VM_NAME/NAMESPACE (its shell-format
+        # argument) so it leaves ${domain_xml} inside the embedded script
+        # untouched - that variable is set later, inside the sidecar
+        # container, when the hook actually runs.
+        envsubst '${VM_NAME} ${NAMESPACE}' <<'EOF' | kubectl apply -f -
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: ${VM_NAME}-disable-pxe-hook
+          namespace: ${NAMESPACE}
+        data:
+          disable-pxe.sh: |
+            #!/bin/sh
+            set -e
+            domain_xml="$4"
+            echo "${domain_xml}" | sed \
+              -e 's#</domain>#<qemu:commandline><qemu:arg value="-fw_cfg"/><qemu:arg value="name=opt/org.tianocore/IPv4PXESupport,string=no"/><qemu:arg value="-fw_cfg"/><qemu:arg value="name=opt/org.tianocore/IPv6PXESupport,string=no"/></qemu:commandline></domain>#'
+        EOF
+
     - name: Create the target VM's data disk PVC
       # A power cycle recreates the VMI to consume KubeVirtBMC's one-shot
       # PXE override (the BMC lane's stand-in for a power-button press).
@@ -98,8 +156,18 @@ runs:
         BOOT_NETWORK_NAME: ${{ inputs.boot-network-name }}
         VM_MEMORY: ${{ inputs.memory }}
         VM_CPUS: ${{ inputs.cpus }}
+        DISABLE_LEGACY_PXE_BOOT: ${{ inputs.disable-legacy-pxe-boot }}
+        SIDECAR_SHIM_IMAGE: ${{ inputs.sidecar-shim-image }}
       run: |
         set -euo pipefail
+        hook_sidecar_annotation=""
+        if [ "${DISABLE_LEGACY_PXE_BOOT}" = "true" ]; then
+          hook_json="$(jq -nc \
+            --arg image "${SIDECAR_SHIM_IMAGE}" \
+            --arg name "${VM_NAME}-disable-pxe-hook" \
+            '[{"args": ["--version", "v1alpha3"], "image": $image, "configMap": {"name": $name, "key": "disable-pxe.sh", "hookPath": "/usr/bin/onDefineDomain"}}]')"
+          hook_sidecar_annotation=$'\n                hooks.kubevirt.io/hookSidecars: '"'${hook_json}'"
+        fi
         cat <<EOF | kubectl apply -f -
         apiVersion: kubevirt.io/v1
         kind: VirtualMachine
@@ -112,6 +180,7 @@ runs:
             metadata:
               labels:
                 kubevirt.io/vm: ${VM_NAME}
+              annotations:${hook_sidecar_annotation:-" {}"}
             spec:
               domain:
                 cpu:

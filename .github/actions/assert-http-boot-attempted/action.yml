@@ -1,0 +1,80 @@
+name: Fast-fail unless firmware attempted UEFI HTTP Boot
+
+description: >-
+  The lane's first post-boot-attempt gate: within a bounded wait, checks
+  bootd's dnsmasq log (forwarded into the bootd container's own log
+  stream, see internal/bootd's RenderDnsmasqConf doc comment) for the
+  vendor-class-60 exchange EDK2's HttpBootDxe sends
+  ("HTTPClient:Arch:00016:UNDI:..." - see internal/bootd/render.go's
+  httpBootVendorClass) for the target MAC. If that never shows up, this
+  fails immediately with a message distinguishable from every later
+  kezio-side failure: the firmware itself never tried UEFI HTTP Boot, most
+  likely because the OVMF build this KubeVirt installation ships was not
+  compiled with HTTP Boot support (NETWORK_HTTP_BOOT_ENABLE) - a decision
+  for the repository owner (a custom OVMF build, or dropping this lane),
+  never a silent fall back to plain PXE.
+
+inputs:
+  namespace:
+    description: Namespace the bootd Deployment lives in.
+    required: false
+    default: "scaffold-system"
+  bootd-deployment-name:
+    description: 'Name of the Subnet''s bootd Deployment, e.g. "kezio-bootd-<subnet-name>".'
+    required: true
+  mac:
+    description: The target VM's provisioning MAC address.
+    required: true
+  wait-seconds:
+    description: Bounded wait for the HTTPClient-tagged DHCP exchange to appear in bootd's log, in seconds.
+    required: false
+    default: "180"
+  console-logfile:
+    description: >-
+      Path to the running capture-vm-console logfile (see that action),
+      printed on failure so the firmware-side evidence is visible in the
+      job log immediately, not only in the later uploaded artifact.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Wait for the HTTPClient vendor-class DHCP exchange, or fail fast
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        BOOTD_DEPLOYMENT_NAME: ${{ inputs.bootd-deployment-name }}
+        MAC: ${{ inputs.mac }}
+        WAIT_SECONDS: ${{ inputs.wait-seconds }}
+        CONSOLE_LOGFILE: ${{ inputs.console-logfile }}
+      run: |
+        set -euo pipefail
+        mac_lower="$(echo "${MAC}" | tr '[:upper:]' '[:lower:]')"
+        deadline=$(( $(date +%s) + WAIT_SECONDS ))
+        seen_mac=0
+        seen_httpclient=0
+        while true; do
+          bootd_log="$(kubectl -n "${NAMESPACE}" logs deployment/"${BOOTD_DEPLOYMENT_NAME}" -c bootd --tail=-1 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+          if grep -qF "${mac_lower}" <<<"${bootd_log}"; then
+            seen_mac=1
+          fi
+          if grep -qF "vendor class: httpclient" <<<"${bootd_log}"; then
+            seen_httpclient=1
+          fi
+          if [ "${seen_mac}" -eq 1 ] && [ "${seen_httpclient}" -eq 1 ]; then
+            echo "Confirmed: bootd's dnsmasq log shows an HTTPClient vendor-class DHCP exchange for ${MAC} - firmware attempted UEFI HTTP Boot."
+            exit 0
+          fi
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::FIRMWARE DID NOT ATTEMPT HTTP BOOT - no HTTPClient vendor-class (option 60) DHCP exchange for ${MAC} appeared in bootd's dnsmasq log within ${WAIT_SECONDS}s. This is a firmware capability gap, not a kezio defect: the OVMF build this KubeVirt installation ships most likely was not compiled with UEFI HTTP Boot support (NETWORK_HTTP_BOOT_ENABLE), or its BootOrder never reached the HTTPv4 boot option. Resolving this is a decision for the repository owner - a custom OVMF build with HTTP Boot enabled, or dropping this lane - NOT a silent fall back to plain PXE." >&2
+            echo "===== bootd log (last 200 lines) ====="
+            kubectl -n "${NAMESPACE}" logs deployment/"${BOOTD_DEPLOYMENT_NAME}" -c bootd --tail=200 || true
+            if [ -n "${CONSOLE_LOGFILE}" ] && [ -f "${CONSOLE_LOGFILE}" ]; then
+              echo "===== VM console log (last 100 lines) ====="
+              tail -n 100 "${CONSOLE_LOGFILE}" || true
+            fi
+            exit 1
+          fi
+          sleep 5
+        done
