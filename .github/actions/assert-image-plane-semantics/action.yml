@@ -190,8 +190,14 @@ runs:
         set -euo pipefail
         source "${GITHUB_ACTION_PATH}/lib.sh"
 
-        info_hash="${CONTENT_NAME#pc-}"
-        seeder_deployment="kezio-seeder-${info_hash}"
+        # The seeder Deployment name is no longer derived from the
+        # content hash (that per-content naming was retired for one
+        # Deployment per (Image, Site) - see seederdeploy.Name); it is
+        # found instead, once it appears, by its component label plus
+        # the owning Image's own controller reference
+        # (listImageSeederDeployments' own lookup, reproduced here).
+        seeder_deployment=""
+        seeder_label_selector="app.kubernetes.io/name=kezio,app.kubernetes.io/component=image-seeder"
         demand_machine="kezio-e2e-grace-demand"
         demand_bmc_creds_secret="kezio-e2e-grace-demand-bmc-creds"
 
@@ -226,6 +232,22 @@ runs:
           imageRef:
             name: ${FIRST_IMAGE_NAME}
         EOF
+        echo "Waiting for the seeder Deployment owned by Image ${FIRST_IMAGE_NAME} to appear"
+        deadline=$(( $(date +%s) + SEEDER_WAIT_TIMEOUT_SECONDS ))
+        while [ -z "${seeder_deployment}" ]; do
+          seeder_deployment="$(kubectl get deployments -n "${NAMESPACE}" -l "${seeder_label_selector}" -o json | \
+            jq -r --arg image "${FIRST_IMAGE_NAME}" \
+              '[.items[] | select((.metadata.ownerReferences // []) | any(.kind == "Image" and .name == $image))][0].metadata.name // ""')"
+          if [ -n "${seeder_deployment}" ]; then
+            break
+          fi
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::no seeder Deployment owned by Image ${FIRST_IMAGE_NAME} (label ${seeder_label_selector}) ever appeared in ${NAMESPACE}" >&2
+            exit 1
+          fi
+          sleep 3
+        done
+        echo "found seeder Deployment ${seeder_deployment}"
         kubectl wait --for=condition=Available "deployment/${seeder_deployment}" -n "${NAMESPACE}" \
           --timeout="${SEEDER_WAIT_TIMEOUT_SECONDS}s"
 

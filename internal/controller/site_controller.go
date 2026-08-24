@@ -165,9 +165,12 @@ func (r *SiteReconciler) onChange(ctx context.Context, site *keziov1alpha2.Site)
 			"no tracker Deployment image is configured on the manager (TRACKER_DEPLOYMENT_IMAGE); the tracker is not reconciled for this Site")
 	}
 
-	dep, unowned, err := r.reconcileTrackerDeployment(ctx, site, subnet)
+	dep, unowned, invalid, err := r.reconcileTrackerDeployment(ctx, site, subnet)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if invalid != nil {
+		return ctrl.Result{}, r.updateSiteConditions(ctx, site, invalid, checks, false, false, false, "", "")
 	}
 
 	var requeueAfter time.Duration
@@ -291,10 +294,22 @@ func (r *SiteReconciler) seederPlacementReady(ctx context.Context, subnet *kezio
 // through this reconciler. Mirrors
 // SubnetReconciler.reconcileBootdDeployment; see its doc comment for the
 // unowned-Deployment return value's meaning.
-func (r *SiteReconciler) reconcileTrackerDeployment(ctx context.Context, site *keziov1alpha2.Site, seedingSubnet *keziov1alpha2.Subnet) (dep *appsv1.Deployment, unowned bool, err error) {
-	desired := buildTrackerDeployment(site, seedingSubnet, r.TrackerDeployment)
+//
+// invalid is non-nil, with dep/unowned/err all zero, when
+// seedingSubnet.Spec.CIDR does not parse (buildTrackerDeployment): that is
+// a Site misconfiguration by way of its seeding Subnet, surfaced the same
+// way resolveSeedingSubnet's own failures are, not a create/update error
+// worth retrying as one.
+func (r *SiteReconciler) reconcileTrackerDeployment(ctx context.Context, site *keziov1alpha2.Site, seedingSubnet *keziov1alpha2.Subnet) (dep *appsv1.Deployment, unowned bool, invalid *siteValidationFailure, err error) {
+	desired, err := buildTrackerDeployment(site, seedingSubnet, r.TrackerDeployment)
+	if err != nil {
+		return nil, false, &siteValidationFailure{
+			reason:  "SeederSubnetCIDRUnparseable",
+			message: fmt.Sprintf("seeding Subnet %s/%s cidr %q cannot be parsed, so the tracker's pinned address cannot be given the CIDR notation Multus requires: %v", seedingSubnet.Namespace, seedingSubnet.Name, seedingSubnet.Spec.CIDR, err),
+		}, nil
+	}
 	if err := ctrl.SetControllerReference(site, desired, r.Scheme); err != nil {
-		return nil, false, fmt.Errorf("set owner reference on tracker deployment: %w", err)
+		return nil, false, nil, fmt.Errorf("set owner reference on tracker deployment: %w", err)
 	}
 
 	existing := &appsv1.Deployment{}
@@ -302,22 +317,22 @@ func (r *SiteReconciler) reconcileTrackerDeployment(ctx context.Context, site *k
 	switch {
 	case kerrors.IsNotFound(getErr):
 		if err := r.Create(ctx, desired); err != nil && !kerrors.IsAlreadyExists(err) {
-			return nil, false, fmt.Errorf("create tracker deployment: %w", err)
+			return nil, false, nil, fmt.Errorf("create tracker deployment: %w", err)
 		}
-		return desired, false, nil
+		return desired, false, nil, nil
 	case getErr != nil:
-		return nil, false, fmt.Errorf("get tracker deployment: %w", getErr)
+		return nil, false, nil, fmt.Errorf("get tracker deployment: %w", getErr)
 	case !metav1.IsControlledBy(existing, site):
-		return existing, true, nil
+		return existing, true, nil, nil
 	default:
 		if !equality.Semantic.DeepEqual(existing.Spec, desired.Spec) || !equality.Semantic.DeepEqual(existing.Labels, desired.Labels) {
 			existing.Labels = desired.Labels
 			existing.Spec = desired.Spec
 			if err := r.Update(ctx, existing); err != nil {
-				return nil, false, fmt.Errorf("update tracker deployment: %w", err)
+				return nil, false, nil, fmt.Errorf("update tracker deployment: %w", err)
 			}
 		}
-		return existing, false, nil
+		return existing, false, nil, nil
 	}
 }
 

@@ -21,19 +21,25 @@ description: >-
 
   Method: a NetworkAttachmentDefinition is created with a static IPAM
   pool whose own default address (nad-default-cidr) differs from the
-  address requested through the annotation (requested-ip). A pod is
-  then created with EXACTLY the annotation shape
+  address requested through the annotation (requested-ip-cidr). A pod
+  is then created with EXACTLY the annotation shape
   trackerPodAnnotations builds - a JSON array with one element carrying
-  "name", "namespace", and "ips": [requested-ip] (no CIDR suffix,
-  matching SiteTracker.IP's own bare-dotted-quad validation pattern) -
-  and nothing else. If Multus honours "ips" here, the pod's default
-  interface (eth0; default-network always attaches as eth0, not net1)
-  comes up with requested-ip, confirmed two ways: the
-  k8s.v1.cni.cncf.io/network-status annotation Multus itself writes
-  back, and a live `ip addr` read from inside the running pod. If
-  Multus instead falls back to the NAD's own static pool, the pod comes
-  up with nad-default-cidr's address instead, and both checks fail
-  loudly against the address that was actually requested.
+  "name", "namespace", and "ips": [requested-ip-cidr] (CIDR notation,
+  matching the prefix length trackerIPWithPrefix now appends from the
+  seeding Subnet's own cidr - a bare dotted-quad is rejected by the
+  bridge CNI plugin's IPAM with "the 'ip' field is expected to be in
+  CIDR notation") - and nothing else. If Multus honours "ips" here, the
+  pod's default interface (eth0; default-network always attaches as
+  eth0, not net1) comes up with requested-ip-cidr's address, confirmed
+  two ways: the k8s.v1.cni.cncf.io/network-status annotation Multus
+  itself writes back (which reports only the bare address, so the
+  comparison there strips requested-ip-cidr's own prefix), and a live
+  `ip addr` read from inside the running pod (which reports the full
+  ip/prefix the interface actually bound, compared against
+  requested-ip-cidr verbatim). If Multus instead falls back to the
+  NAD's own static pool, the pod comes up with nad-default-cidr's
+  address instead, and both checks fail loudly against the address that
+  was actually requested.
 
 inputs:
   namespace:
@@ -54,20 +60,14 @@ inputs:
       the annotation, so a pod that lands on this address instead is
       unambiguous evidence the "ips" override was ignored.
     required: true
-  requested-ip:
+  requested-ip-cidr:
     description: >-
-      Bare address (no CIDR suffix), e.g. "192.0.2.50" - mirrors
-      Site.spec.tracker.ip's own shape exactly, requested through the
-      default-network annotation's "ips" field.
+      Address with CIDR suffix, e.g. "192.0.2.50/24" - mirrors the
+      "ips" entry trackerPodAnnotations now builds (Site.spec.tracker.ip
+      plus the seeding Subnet's own prefix length via
+      trackerIPWithPrefix), requested through the default-network
+      annotation's "ips" field.
     required: true
-  requested-ip-prefix-length:
-    description: >-
-      Prefix length the requested-ip is expected to carry once bound
-      (matches nad-default-cidr's own prefix - the IPAM plugin's subnet,
-      not the request, determines this), used only to build the
-      expected "ip addr" CIDR for the in-pod check.
-    required: false
-    default: "24"
   pod-name:
     description: Name of the probe pod.
     required: false
@@ -129,7 +129,7 @@ runs:
       env:
         NAMESPACE: ${{ inputs.namespace }}
         NAD_NAME: ${{ inputs.nad-name }}
-        REQUESTED_IP: ${{ inputs.requested-ip }}
+        REQUESTED_IP_CIDR: ${{ inputs.requested-ip-cidr }}
         POD_NAME: ${{ inputs.pod-name }}
         POD_IMAGE: ${{ inputs.pod-image }}
       run: |
@@ -138,7 +138,7 @@ runs:
         # this is byte-identical to Go's json.Marshal of
         # trackerNetworkSelectionElement{Name, Namespace, IPs}: field
         # order name, namespace, ips, no whitespace.
-        annotation="$(jq -nc --arg name "${NAD_NAME}" --arg ns "${NAMESPACE}" --arg ip "${REQUESTED_IP}" \
+        annotation="$(jq -nc --arg name "${NAD_NAME}" --arg ns "${NAMESPACE}" --arg ip "${REQUESTED_IP_CIDR}" \
           '[{name: $name, namespace: $ns, ips: [$ip]}]')"
         echo "requesting default-network annotation: ${annotation}"
 
@@ -180,14 +180,19 @@ runs:
       env:
         NAMESPACE: ${{ inputs.namespace }}
         POD_NAME: ${{ inputs.pod-name }}
-        REQUESTED_IP: ${{ inputs.requested-ip }}
+        REQUESTED_IP_CIDR: ${{ inputs.requested-ip-cidr }}
       run: |
         set -euo pipefail
+        # network-status's own ips entries carry only the bare address
+        # (no prefix, regardless of what the request itself specified),
+        # so the expected side is stripped to match.
+        requested_ip="${REQUESTED_IP_CIDR%%/*}"
+
         status_json="$(kubectl -n "${NAMESPACE}" get pod "${POD_NAME}" \
           -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}')"
         echo "network-status: ${status_json}"
         if [ -z "${status_json}" ]; then
-          echo "::error::FAIL observed=<no network-status annotation> expected=an entry carrying ${REQUESTED_IP}" >&2
+          echo "::error::FAIL observed=<no network-status annotation> expected=an entry carrying ${requested_ip}" >&2
           exit 1
         fi
 
@@ -198,19 +203,18 @@ runs:
         observed_ip="${observed_cidr%%/*}"
         echo "observed default-network address: ${observed_cidr:-<empty>}"
 
-        if [ "${observed_ip}" != "${REQUESTED_IP}" ]; then
-          echo "::error::FAIL observed=${observed_ip:-<empty>} expected=${REQUESTED_IP} -- Multus did not honour the default-network annotation's ips field; the tracker's own annotation shape cannot pin an address" >&2
+        if [ "${observed_ip}" != "${requested_ip}" ]; then
+          echo "::error::FAIL observed=${observed_ip:-<empty>} expected=${requested_ip} -- Multus did not honour the default-network annotation's ips field; the tracker's own annotation shape cannot pin an address" >&2
           exit 1
         fi
-        echo "PASS observed=${observed_ip} expected=${REQUESTED_IP} (network-status)"
+        echo "PASS observed=${observed_ip} expected=${requested_ip} (network-status)"
 
     - name: PASS/FAIL -- a live "ip addr" from inside the pod matches the requested address
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
         POD_NAME: ${{ inputs.pod-name }}
-        REQUESTED_IP: ${{ inputs.requested-ip }}
-        PREFIX_LEN: ${{ inputs.requested-ip-prefix-length }}
+        REQUESTED_IP_CIDR: ${{ inputs.requested-ip-cidr }}
       run: |
         set -euo pipefail
         # default-network always attaches as eth0, regardless of the
@@ -220,12 +224,14 @@ runs:
         echo "in-pod ip addr: ${addr_line}"
         observed_cidr="$(awk '{for (i=1;i<=NF;i++) if ($i=="inet") print $(i+1)}' <<<"${addr_line}")"
 
-        want_cidr="${REQUESTED_IP}/${PREFIX_LEN}"
-        if [ "${observed_cidr}" != "${want_cidr}" ]; then
-          echo "::error::FAIL observed=${observed_cidr:-<empty>} expected=${want_cidr} -- in-pod eth0 address does not match the address requested via default-network's ips field" >&2
+        # The bridge CNI plugin binds the interface to exactly the
+        # ip/prefix it was handed, so the in-pod address is compared
+        # against the full requested CIDR, unlike network-status above.
+        if [ "${observed_cidr}" != "${REQUESTED_IP_CIDR}" ]; then
+          echo "::error::FAIL observed=${observed_cidr:-<empty>} expected=${REQUESTED_IP_CIDR} -- in-pod eth0 address does not match the address requested via default-network's ips field" >&2
           exit 1
         fi
-        echo "PASS observed=${observed_cidr} expected=${want_cidr} (in-pod ip addr)"
+        echo "PASS observed=${observed_cidr} expected=${REQUESTED_IP_CIDR} (in-pod ip addr)"
 
     - name: Clean up the probe pod and NetworkAttachmentDefinition
       if: always()

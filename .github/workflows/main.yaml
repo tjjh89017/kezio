@@ -213,12 +213,21 @@ jobs:
             sleep 5
           done
 
+      # This lane never deploys kezio (deploy-kezio, which creates
+      # config/manager/manager.yaml's scaffold-system namespace, is not
+      # part of it) - so the namespace every probe below defaults to must
+      # be created directly. --dry-run=client | kubectl apply keeps this
+      # idempotent across reruns of the same job.
+      - name: Create the scaffold-system namespace the probes default to
+        shell: bash
+        run: kubectl create namespace scaffold-system --dry-run=client -o yaml | kubectl apply -f -
+
       - name: Probe A -- Multus honours the default-network annotation's ips field
         uses: ./.github/actions/probe-multus-pinned-ip
         with:
           bridge-name: kezio-probe-a-br0
           nad-default-cidr: 192.0.20.9/24
-          requested-ip: 192.0.20.50
+          requested-ip-cidr: 192.0.20.50/24
 
       - name: Probe B -- a single-homed pod reaches another segment through NAD IPAM routes
         uses: ./.github/actions/probe-nad-routes

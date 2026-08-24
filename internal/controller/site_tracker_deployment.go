@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"strconv"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -87,26 +88,49 @@ type trackerNetworkSelectionElement struct {
 	IPs       []string `json:"ips,omitempty"`
 }
 
+// trackerIPWithPrefix returns ip in CIDR notation using subnetCIDR's own
+// prefix length. Multus hands the bridge CNI plugin the ips selection
+// element verbatim, and that plugin rejects a bare address ("the 'ip'
+// field is expected to be in CIDR notation") - so ip needs a prefix, and
+// the seeding Subnet's own is the only one that describes the broadcast
+// domain the tracker pod actually joins.
+func trackerIPWithPrefix(subnetCIDR, ip string) (string, error) {
+	_, network, err := net.ParseCIDR(subnetCIDR)
+	if err != nil {
+		return "", fmt.Errorf("seeding Subnet cidr %q: %w", subnetCIDR, err)
+	}
+	ones, _ := network.Mask.Size()
+	return fmt.Sprintf("%s/%d", ip, ones), nil
+}
+
 // trackerPodAnnotations returns the pod template annotations placing
 // seedingSubnet's SeederNetworkRef as the pod's default (and only)
-// network, pinned to ip - or nil when seedingSubnet carries no
-// SeederNetworkRef at all (callers withhold the Deployment in that case;
-// see SiteReconciler.resolveTrackerPlacement).
+// network, pinned to ip in seedingSubnet's own CIDR notation - or nil
+// when seedingSubnet carries no SeederNetworkRef at all (callers
+// withhold the Deployment in that case; see
+// SiteReconciler.resolveTrackerPlacement). An error means
+// seedingSubnet.Spec.CIDR itself does not parse; the caller surfaces
+// that as a Site misconfiguration rather than falling back to a bare
+// address the bridge CNI plugin would reject.
 //
 // Single-homed via multusDefaultNetworkAnnotation, not the additive one,
 // for the same no-NAT reason seederPodAnnotations is: a peer connects to
 // the address the tracker's announce response advertises, which must be
 // the address the tracker pod actually listens on.
-func trackerPodAnnotations(seedingSubnet *keziov1alpha2.Subnet, ip string) map[string]string {
+func trackerPodAnnotations(seedingSubnet *keziov1alpha2.Subnet, ip string) (map[string]string, error) {
 	if seedingSubnet.Spec.SeederNetworkRef == nil {
-		return nil
+		return nil, nil
+	}
+	ipWithPrefix, err := trackerIPWithPrefix(seedingSubnet.Spec.CIDR, ip)
+	if err != nil {
+		return nil, err
 	}
 	ref := *seedingSubnet.Spec.SeederNetworkRef
 	ns := resolveNamespace(ref, seedingSubnet.Namespace)
-	elements := []trackerNetworkSelectionElement{{Name: ref.Name, Namespace: ns, IPs: []string{ip}}}
+	elements := []trackerNetworkSelectionElement{{Name: ref.Name, Namespace: ns, IPs: []string{ipWithPrefix}}}
 	// Marshaling a fixed struct of strings never fails.
 	encoded, _ := json.Marshal(elements)
-	return map[string]string{multusDefaultNetworkAnnotation: string(encoded)}
+	return map[string]string{multusDefaultNetworkAnnotation: string(encoded)}, nil
 }
 
 // buildTrackerDeployment constructs the (not yet created) tracker
@@ -117,7 +141,16 @@ func trackerPodAnnotations(seedingSubnet *keziov1alpha2.Subnet, ip string) map[s
 // directly, and a ClusterIP would DNAT that address, breaking the
 // announce/reachability consistency BitTorrent's peer-to-peer connections
 // depend on (see multusDefaultNetworkAnnotation's own doc comment).
-func buildTrackerDeployment(site *keziov1alpha2.Site, seedingSubnet *keziov1alpha2.Subnet, cfg TrackerDeploymentConfig) *appsv1.Deployment {
+//
+// An error means seedingSubnet.Spec.CIDR does not parse (see
+// trackerPodAnnotations); the caller surfaces that as a Site
+// misconfiguration instead of creating a Deployment.
+func buildTrackerDeployment(site *keziov1alpha2.Site, seedingSubnet *keziov1alpha2.Subnet, cfg TrackerDeploymentConfig) (*appsv1.Deployment, error) {
+	annotations, err := trackerPodAnnotations(seedingSubnet, site.Spec.Tracker.IP)
+	if err != nil {
+		return nil, err
+	}
+
 	replicas := int32(1)
 	labels := map[string]string{
 		trackerAppNameLabel:        trackerAppNameValue,
@@ -140,7 +173,7 @@ func buildTrackerDeployment(site *keziov1alpha2.Site, seedingSubnet *keziov1alph
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels:      labels,
-					Annotations: trackerPodAnnotations(seedingSubnet, site.Spec.Tracker.IP),
+					Annotations: annotations,
 				},
 				Spec: corev1.PodSpec{
 					NodeSelector: nodeSelectorOrNil(seedingSubnet.Spec.NodeSelector),
@@ -188,7 +221,7 @@ func buildTrackerDeployment(site *keziov1alpha2.Site, seedingSubnet *keziov1alph
 				},
 			},
 		},
-	}
+	}, nil
 }
 
 // trackerAnnounceURL builds the announce URL Site.Status.TrackerURL
