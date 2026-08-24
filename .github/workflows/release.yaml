@@ -1,0 +1,115 @@
+name: Release
+
+# Publishes every kezio image and the boot artifacts on a "v*" tag. Never
+# touches main.yaml's ":main" ghcr tag. A tag is cut from a commit on main,
+# which lint/test/e2e already gated before it merged - re-running the full
+# suite here would double the cost for no new signal, so this workflow goes
+# straight to publishing.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAMESPACE: tjjh89017
+
+jobs:
+  # Matrix and steps mirror main.yaml's images job: same composite action
+  # (push-image-to-ghcr), same Dockerfile/platform per component - only the
+  # tag spec and the unconditional push differ, both of which stay on the
+  # calling workflow by push-image-to-ghcr's own design.
+  images:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: manager
+            image: kezio
+            dockerfile: Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - name: ingest
+            image: kezio-ingest
+            dockerfile: docker/ingest/Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - name: seeder
+            image: kezio-seeder
+            dockerfile: docker/seeder/Dockerfile
+            # amd64-only: ezio's C++ build is too slow under QEMU emulation.
+            platforms: linux/amd64
+          - name: image-service
+            image: kezio-image-service
+            dockerfile: docker/image-service/Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - name: bootd
+            image: kezio-bootd
+            dockerfile: docker/bootd/Dockerfile
+            platforms: linux/amd64,linux/arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Push to ghcr.io
+        uses: ./.github/actions/push-image-to-ghcr
+        with:
+          registry: ${{ env.REGISTRY }}
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}
+          tags-spec: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          dockerfile: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platforms }}
+          cache-scope: ${{ matrix.name }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Same build-live-image/assert-boot-artifacts-present composite actions
+  # main.yaml's boot-artifacts job uses, plus push-image-to-ghcr (shared
+  # with the images job above) to publish the packaged artifacts as the
+  # kezio-boot-artifacts image config/components/boot-artifacts and
+  # BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE both pull by tag - the only
+  # form the deploy path actually consumes; there is no release-asset
+  # consumer anywhere in the deploy path.
+  boot-artifacts:
+    name: Boot artifacts
+    runs-on: ubuntu-latest
+    # `lb build` compiles ezio from source and assembles a full Debian sid
+    # chroot into a squashfs - budget generously.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the live boot image
+        uses: ./.github/actions/build-live-image
+
+      - name: Fail fast if the built boot artifacts are empty
+        uses: ./.github/actions/assert-boot-artifacts-present
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Push to ghcr.io
+        uses: ./.github/actions/push-image-to-ghcr
+        with:
+          registry: ${{ env.REGISTRY }}
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/kezio-boot-artifacts
+          tags-spec: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          dockerfile: docker/boot-artifacts/Dockerfile
+          platforms: linux/amd64
+          cache-scope: boot-artifacts
+          github-token: ${{ secrets.GITHUB_TOKEN }}
