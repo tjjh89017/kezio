@@ -27,5 +27,10 @@ runs:
       run: |
         set -euo pipefail
         sudo ip link add "${PROVISIONING_BRIDGE}" type bridge
+        # Per-device opt-out of br_netfilter: bridged frames on this
+        # segment stay pure L2 instead of traversing the CNI's iptables
+        # chains. ORed by the kernel with the global bridge-nf-call
+        # sysctls, so it fully applies only where those are 0.
+        sudo ip link set dev "${PROVISIONING_BRIDGE}" type bridge nf_call_iptables 0 nf_call_ip6tables 0
         sudo ip addr add "${PROVISIONING_HOST_IP}" dev "${PROVISIONING_BRIDGE}"
         sudo ip link set "${PROVISIONING_BRIDGE}" up

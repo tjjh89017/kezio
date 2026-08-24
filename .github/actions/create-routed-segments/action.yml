@@ -96,6 +96,16 @@ runs:
           fi
           echo "segment ${name}: cidr=${cidr} host=${host_cidr} group=${group}"
           sudo ip link add "${name}" type bridge
+          # Keep this bridge's own L2 traffic out of the L3 netfilter
+          # hooks (br_netfilter would otherwise hand bridged frames to
+          # whatever chains the cluster CNI installed there). Per-device
+          # only, so the cluster's own bridges are untouched. The kernel
+          # ORs this with the global bridge-nf-call sysctls, so on a
+          # runner where those are 1 this alone does not exempt the
+          # bridge - the routed-traffic accept rules below stay needed
+          # either way, since routed forwarding never involves
+          # br_netfilter.
+          sudo ip link set dev "${name}" type bridge nf_call_iptables 0 nf_call_ip6tables 0
           sudo ip addr add "${host_cidr}" dev "${name}"
           sudo ip link set "${name}" up
           segment_count=$((segment_count + 1))
