@@ -57,7 +57,7 @@ runs:
         pod_ip="$(kubectl get pods -n "${NAMESPACE}" -l "${selector}" -o jsonpath='{.items[0].status.podIP}')"
 
         content_name="$(kubectl get images.kezio.kojuro.date "${IMAGE_NAME}" -n "${NAMESPACE}" -o json | \
-          jq -r '[.spec.slots[] | select(.contentRef != null)][0].contentRef.name // ""')"
+          jq -r '[(.spec.layout.slots // [])[] | select(.contentRef != null)][0].contentRef.name // ""')"
         if [ -z "${content_name}" ]; then
           echo "::error::Image ${IMAGE_NAME} binds no content in any slot" >&2
           exit 1

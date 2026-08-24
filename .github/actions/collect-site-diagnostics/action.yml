@@ -10,9 +10,11 @@ description: >-
   such pod's `k8s.v1.cni.cncf.io/network-status` annotation (the only
   place Multus records the address a pod actually got - what
   address-pinning assertions live or die on), the same treatment for
-  bootd pods per Subnet, and a runner-wide network snapshot (bridges,
-  addresses, routes, neighbor table, nftables/iptables rulesets, sysctl
-  forwarding flags) rather than one bridge's iptables rules alone.
+  bootd pods per Subnet, every kezio v1alpha2 object in each scanned
+  namespace (the status a failing assertion read, not only the pods
+  behind it), and a runner-wide network snapshot (bridges, addresses,
+  routes, neighbor table, nftables/iptables rulesets, sysctl forwarding
+  flags) rather than one bridge's iptables rules alone.
 
   Every command runs under `set +e` and is best-effort: a label
   selector that matches nothing, or a tool that is not installed (nft on
@@ -148,11 +150,35 @@ runs:
           done
         }
 
+        # kezio's own API objects, per namespace. Without these the bundle
+        # shows the seeder plane (pods, Deployments, addresses) but nothing
+        # about what the controller derived from it, so a status-level
+        # failure - a PartitionContent that reports no seeders[] entry, a
+        # DeployRun that never started - is not diagnosable from the
+        # artifact alone. Kept here rather than as a separate
+        # dump-kezio-resources step per lane: that action writes one fixed
+        # file under RUNNER_TEMP for one namespace, which two namespaces or
+        # two lanes would overwrite, and every caller would additionally
+        # have to list that file in extra-artifact-paths to get it into
+        # this bundle at all.
+        collect_kezio_resources() {
+          namespace="$1"
+          kezio_dir="${OUTPUT_DIR}/kezio-resources"
+          mkdir -p "${kezio_dir}"
+          kubectl get machines,machinehardwares,subnets,sites,deployruns,images,imageimports,partitioncontents,posthooks \
+            -n "${namespace}" -o yaml >"${kezio_dir}/${namespace}.yaml" 2>&1
+          # The wide listing stays readable when the YAML above is
+          # thousands of lines: states, phases, and ages at a glance.
+          kubectl get machines,subnets,sites,deployruns,images,partitioncontents \
+            -n "${namespace}" -o wide >"${kezio_dir}/${namespace}-summary.txt" 2>&1
+        }
+
         while IFS= read -r namespace; do
           [ -z "${namespace}" ] && continue
           collect_role tracker "${namespace}" "${TRACKER_LABEL_SELECTOR}"
           collect_role seeder "${namespace}" "${SEEDER_LABEL_SELECTOR}"
           collect_role bootd "${namespace}" "${BOOTD_LABEL_SELECTOR}"
+          collect_kezio_resources "${namespace}"
         done <<<"${NAMESPACES}"
 
         # Runner-wide network snapshot: every command is best-effort and

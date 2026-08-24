@@ -1,0 +1,162 @@
+name: Assert concurrent deploys with the expected per-Site seeder demand
+
+description: >-
+  Polls until every named Machine is observed mid-deploy (status.state !=
+  Provisioned, with a live status.currentRunRef) at the SAME poll instant
+  that a PartitionContent the deployed Image references reports the
+  expected machineCount for each named Site in its status.seeders[]. This
+  proves two things one lane cannot prove separately: the deploys really
+  overlapped rather than merely both eventually succeeding, and Site-scoped
+  demand grouping attributed each Machine to the correct Site.
+
+  The content set comes from the Image's spec.layout.slots[] - the path the
+  Image CRD actually declares. A slot list read from any other path returns
+  nothing, every poll then compares nothing, and the lane times out with a
+  message that blames the controller; this action fails immediately, and by
+  name, when an Image binds no content at all.
+
+  Every poll reports what it saw per (content, Site), and an absent
+  status.seeders[] entry is reported as "absent" rather than as a count of
+  zero. The two are different failures - no seeder Deployment available at
+  that Site at all, versus an available Deployment credited with no demand -
+  and a report that collapses them into one number cannot say which one a
+  timeout hit.
+
+inputs:
+  namespace:
+    description: Namespace the Image, Machines, and PartitionContents live in.
+    required: false
+    default: "scaffold-system"
+  image-name:
+    description: >-
+      Name of the Image every named Machine deploys. Its
+      spec.layout.slots[].contentRef names the PartitionContents whose
+      status.seeders[] is read.
+    required: true
+  machines:
+    description: >-
+      Newline-separated Machine names that must ALL be mid-deploy at one
+      poll instant. Blank lines are skipped.
+    required: true
+  expected-demand:
+    description: >-
+      Newline-separated "<site-namespace>/<site-name>=<machineCount>"
+      entries. Each Site must be reported with exactly that machineCount by
+      at least one of the Image's contents at the same poll instant. Blank
+      lines are skipped.
+    required: true
+  timeout-seconds:
+    description: How long to poll before failing.
+    required: false
+    default: "180"
+  summary-title:
+    description: Heading written to the job summary once the assertion holds.
+    required: false
+    default: "Concurrent deploy evidence"
+
+runs:
+  using: composite
+  steps:
+    - name: Poll for concurrent deploys with the expected per-Site demand
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+        MACHINES: ${{ inputs.machines }}
+        EXPECTED_DEMAND: ${{ inputs.expected-demand }}
+        TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
+        SUMMARY_TITLE: ${{ inputs.summary-title }}
+      run: |
+        set -euo pipefail
+
+        machine_names=""
+        while IFS= read -r m; do
+          [ -n "${m}" ] || continue
+          machine_names="${machine_names}${m} "
+        done <<<"${MACHINES}"
+        if [ -z "${machine_names}" ]; then
+          echo "::error::no machine names given" >&2
+          exit 1
+        fi
+
+        content_names="$(kubectl get image "${IMAGE_NAME}" -n "${NAMESPACE}" \
+          -o jsonpath='{.spec.layout.slots[*].contentRef.name}')"
+        if [ -z "${content_names}" ]; then
+          echo "::error::Image ${NAMESPACE}/${IMAGE_NAME} binds no content in spec.layout.slots[], so no PartitionContent can report seeder demand" >&2
+          kubectl get image "${IMAGE_NAME}" -n "${NAMESPACE}" -o yaml >&2 || true
+          exit 1
+        fi
+        echo "contents referenced by ${IMAGE_NAME}: ${content_names}"
+
+        deadline=$(( $(date +%s) + TIMEOUT_SECONDS ))
+        found=0
+        seeders_json="{}"
+        while true; do
+          machines_ok=1
+          machine_report=""
+          for m in ${machine_names}; do
+            state="$(kubectl get machine "${m}" -n "${NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || true)"
+            run="$(kubectl get machine "${m}" -n "${NAMESPACE}" -o jsonpath='{.status.currentRunRef.name}' 2>/dev/null || true)"
+            machine_report="${machine_report} ${m} state=${state:-<empty>} run=${run:-<none>} |"
+            if [ "${state}" = "Provisioned" ] || [ -z "${run}" ]; then
+              machines_ok=0
+            fi
+          done
+
+          # One object per content, mapping every Site in its
+          # status.seeders[] to that Site's machineCount. A Site missing
+          # from the object is a missing entry, which is what keeps
+          # "absent" distinguishable from a reported count of 0.
+          seeders_json="{}"
+          for c in ${content_names}; do
+            entry="$(kubectl get partitioncontent "${c}" -n "${NAMESPACE}" -o json 2>/dev/null |
+              jq -c '(.status.seeders // []) | map({(.site): .machineCount}) | add // {}')"
+            [ -n "${entry}" ] || entry='{}'
+            seeders_json="$(jq -c --arg c "${c}" --argjson e "${entry}" '. + {($c): $e}' <<<"${seeders_json}")"
+          done
+
+          demand_ok=1
+          demand_report=""
+          while IFS= read -r spec; do
+            [ -n "${spec}" ] || continue
+            site="${spec%%=*}"
+            want="${spec##*=}"
+            seen="$(jq -r --arg s "${site}" \
+              '[to_entries[] | "\(.key)=" + ((.value[$s] // "absent") | tostring)] | join(",")' <<<"${seeders_json}")"
+            demand_report="${demand_report} ${site} want=${want} seen=${seen} |"
+            if ! jq -e --arg s "${site}" --argjson w "${want}" 'any(.[]; .[$s] == $w)' <<<"${seeders_json}" >/dev/null; then
+              demand_ok=0
+            fi
+          done <<<"${EXPECTED_DEMAND}"
+
+          echo "$(date -Is) |${machine_report}${demand_report}"
+          if [ "${machines_ok}" -eq 1 ] && [ "${demand_ok}" -eq 1 ]; then
+            found=1
+            break
+          fi
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            break
+          fi
+          sleep 3
+        done
+
+        if [ "${found}" -ne 1 ]; then
+          echo "::error::never observed machines ${machine_names}mid-deploy at one poll instant with PartitionContent.status.seeders[] reporting the expected machineCount per Site - the concurrent-deploy and per-Site-demand-grouping claims are unproven" >&2
+          echo "last observed status.seeders[] per content (\"absent\" below means the Site has no entry at all, which is not the same as machineCount 0):" >&2
+          jq . <<<"${seeders_json}" >&2
+          for c in ${content_names}; do
+            echo "--- partitioncontent ${c} status ---" >&2
+            kubectl get partitioncontent "${c}" -n "${NAMESPACE}" -o jsonpath='{.status}' >&2 || true
+            echo >&2
+          done
+          exit 1
+        fi
+
+        {
+          echo "### ${SUMMARY_TITLE}"
+          echo "Machines ${machine_names}were all observed mid-deploy (state != Provisioned, with an active DeployRun) at one poll instant, with PartitionContent.status.seeders[] reporting:"
+          while IFS= read -r spec; do
+            [ -n "${spec}" ] || continue
+            echo "- Site ${spec%%=*}: machineCount=${spec##*=}"
+          done <<<"${EXPECTED_DEMAND}"
+        } >>"${GITHUB_STEP_SUMMARY}"

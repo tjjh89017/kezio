@@ -1812,59 +1812,22 @@ jobs:
           kubectl patch machine "${{ env.VM_B_NAME }}" -n scaffold-system --type=merge -p "${patch}"
 
       # Proof 1 (concurrency) and proof 5 (PartitionContent.status.seeders[]
-      # reports one Site entry with machineCount 2) together: no existing
-      # action asserts either shape, so this polls until both Machines are
-      # observed mid-deploy (state != Provisioned, with a live DeployRun)
-      # at the same instant that a PartitionContent the shared Image
-      # references reports machineCount 2 for this Site - proving the two
-      # deploys actually overlapped rather than merely both eventually
-      # succeeding, and that Site-scoped demand grouping counts both
-      # machines as one Site's demand.
+      # reports one Site entry with machineCount 2) together: both machines
+      # must be mid-deploy at the same instant that a PartitionContent the
+      # shared Image references reports machineCount 2 for this Site -
+      # proving the two deploys actually overlapped rather than merely both
+      # eventually succeeding, and that Site-scoped demand grouping counts
+      # both machines as one Site's demand.
       - name: Assert both deploys are in flight at once, with PartitionContent reporting machineCount 2
-        shell: bash
-        env:
-          NAMESPACE: "scaffold-system"
-          IMAGE_NAME: ${{ steps.build-image.outputs.image-name }}
-          SITE_IDENTITY: "scaffold-system/${{ env.SITE_NAME }}"
-        run: |
-          set -euo pipefail
-          content_names="$(kubectl get image "${IMAGE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.spec.slots[*].contentRef.name}')"
-          deadline=$(( $(date +%s) + 180 ))
-          found=0
-          while true; do
-            state_a="$(kubectl get machine "${{ env.VM_A_NAME }}" -n "${NAMESPACE}" -o jsonpath='{.status.state}' || true)"
-            run_a="$(kubectl get machine "${{ env.VM_A_NAME }}" -n "${NAMESPACE}" -o jsonpath='{.status.currentRunRef.name}' || true)"
-            state_b="$(kubectl get machine "${{ env.VM_B_NAME }}" -n "${NAMESPACE}" -o jsonpath='{.status.state}' || true)"
-            run_b="$(kubectl get machine "${{ env.VM_B_NAME }}" -n "${NAMESPACE}" -o jsonpath='{.status.currentRunRef.name}' || true)"
-            machine_count=0
-            for c in ${content_names}; do
-              mc="$(kubectl get partitioncontent "${c}" -n "${NAMESPACE}" -o json 2>/dev/null | \
-                jq -r --arg s "${SITE_IDENTITY}" '[(.status.seeders // [])[] | select(.site==$s) | .machineCount] | first // 0')"
-              if [ "${mc}" = "2" ]; then
-                machine_count=2
-                break
-              fi
-            done
-            echo "$(date -Is) machineA state=${state_a:-<empty>} run=${run_a:-<none>} | machineB state=${state_b:-<empty>} run=${run_b:-<none>} | PartitionContent machineCount seen=${machine_count}"
-            if [ "${state_a}" != "Provisioned" ] && [ -n "${run_a}" ] && \
-               [ "${state_b}" != "Provisioned" ] && [ -n "${run_b}" ] && \
-               [ "${machine_count}" = "2" ]; then
-              found=1
-              break
-            fi
-            if [ "$(date +%s)" -ge "${deadline}" ]; then
-              break
-            fi
-            sleep 3
-          done
-          if [ "${found}" -ne 1 ]; then
-            echo "::error::never observed both machines mid-deploy together with PartitionContent.status.seeders[] reporting machineCount=2 for Site ${SITE_IDENTITY} within the timeout - the concurrent-deploy and per-Site-demand-grouping claims are unproven" >&2
-            exit 1
-          fi
-          {
-            echo "### Concurrent deploy evidence"
-            echo "Both ${{ env.VM_A_NAME }} and ${{ env.VM_B_NAME }} were observed mid-deploy (state != Provisioned, with an active DeployRun) at the same poll instant that PartitionContent reported machineCount=2 for Site ${SITE_IDENTITY}."
-          } >>"${GITHUB_STEP_SUMMARY}"
+        uses: ./.github/actions/assert-concurrent-deploy-demand
+        with:
+          namespace: "scaffold-system"
+          image-name: ${{ steps.build-image.outputs.image-name }}
+          machines: |
+            ${{ env.VM_A_NAME }}
+            ${{ env.VM_B_NAME }}
+          expected-demand: |
+            scaffold-system/${{ env.SITE_NAME }}=2
 
       - name: Wait for machine A to reach Provisioned
         id: deploy-a
@@ -2656,59 +2619,23 @@ jobs:
 
       # Proof 4 (concurrency) and proof 5's own machine-count half
       # (PartitionContent.status.seeders[] reports two real Site entries):
-      # polls until both Machines are observed mid-deploy (state !=
-      # Provisioned, with a live DeployRun) at the same instant that the
+      # both Machines must be mid-deploy at the same instant that the
       # shared Image's PartitionContent reports machineCount 1 for BOTH
       # Site X and Site Y - proving the two deploys actually overlapped,
       # each against its own Site's demand, rather than merely both
       # eventually succeeding one after the other.
       - name: Assert both deploys are in flight at once, with PartitionContent reporting one machine per Site
-        shell: bash
-        env:
-          NAMESPACE: "scaffold-system"
-          IMAGE_NAME: ${{ steps.build-image.outputs.image-name }}
-          SITE_X_IDENTITY: "scaffold-system/${{ env.SITE_X_NAME }}"
-          SITE_Y_IDENTITY: "scaffold-system/${{ env.SITE_Y_NAME }}"
-        run: |
-          set -euo pipefail
-          content_names="$(kubectl get image "${IMAGE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.spec.slots[*].contentRef.name}')"
-          deadline=$(( $(date +%s) + 180 ))
-          found=0
-          while true; do
-            state_x="$(kubectl get machine "${{ env.VM_X_NAME }}" -n "${NAMESPACE}" -o jsonpath='{.status.state}' || true)"
-            run_x="$(kubectl get machine "${{ env.VM_X_NAME }}" -n "${NAMESPACE}" -o jsonpath='{.status.currentRunRef.name}' || true)"
-            state_y="$(kubectl get machine "${{ env.VM_Y_NAME }}" -n "${NAMESPACE}" -o jsonpath='{.status.state}' || true)"
-            run_y="$(kubectl get machine "${{ env.VM_Y_NAME }}" -n "${NAMESPACE}" -o jsonpath='{.status.currentRunRef.name}' || true)"
-            count_x=0
-            count_y=0
-            for c in ${content_names}; do
-              mc_x="$(kubectl get partitioncontent "${c}" -n "${NAMESPACE}" -o json 2>/dev/null | \
-                jq -r --arg s "${SITE_X_IDENTITY}" '[(.status.seeders // [])[] | select(.site==$s) | .machineCount] | first // 0')"
-              mc_y="$(kubectl get partitioncontent "${c}" -n "${NAMESPACE}" -o json 2>/dev/null | \
-                jq -r --arg s "${SITE_Y_IDENTITY}" '[(.status.seeders // [])[] | select(.site==$s) | .machineCount] | first // 0')"
-              [ "${mc_x}" = "1" ] && count_x=1
-              [ "${mc_y}" = "1" ] && count_y=1
-            done
-            echo "$(date -Is) machineX state=${state_x:-<empty>} run=${run_x:-<none>} | machineY state=${state_y:-<empty>} run=${run_y:-<none>} | PartitionContent machineCount seen: X=${count_x} Y=${count_y}"
-            if [ "${state_x}" != "Provisioned" ] && [ -n "${run_x}" ] && \
-               [ "${state_y}" != "Provisioned" ] && [ -n "${run_y}" ] && \
-               [ "${count_x}" = "1" ] && [ "${count_y}" = "1" ]; then
-              found=1
-              break
-            fi
-            if [ "$(date +%s)" -ge "${deadline}" ]; then
-              break
-            fi
-            sleep 3
-          done
-          if [ "${found}" -ne 1 ]; then
-            echo "::error::never observed both machines mid-deploy together with PartitionContent.status.seeders[] reporting machineCount=1 for both Site ${SITE_X_IDENTITY} and Site ${SITE_Y_IDENTITY} within the timeout - the concurrent-deploy and per-Site-isolation-of-demand claims are unproven" >&2
-            exit 1
-          fi
-          {
-            echo "### Concurrent two-site deploy evidence"
-            echo "Both ${{ env.VM_X_NAME }} (Site X) and ${{ env.VM_Y_NAME }} (Site Y) were observed mid-deploy (state != Provisioned, with an active DeployRun) at the same poll instant that PartitionContent reported machineCount=1 for each Site independently."
-          } >>"${GITHUB_STEP_SUMMARY}"
+        uses: ./.github/actions/assert-concurrent-deploy-demand
+        with:
+          namespace: "scaffold-system"
+          image-name: ${{ steps.build-image.outputs.image-name }}
+          machines: |
+            ${{ env.VM_X_NAME }}
+            ${{ env.VM_Y_NAME }}
+          expected-demand: |
+            scaffold-system/${{ env.SITE_X_NAME }}=1
+            scaffold-system/${{ env.SITE_Y_NAME }}=1
+          summary-title: "Concurrent two-site deploy evidence"
 
       - name: Wait for machine X to reach Provisioned
         id: deploy-x
