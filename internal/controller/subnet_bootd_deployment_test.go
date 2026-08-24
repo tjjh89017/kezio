@@ -708,10 +708,10 @@ func TestBuildBootdDeploymentLabelValues(t *testing.T) {
 func bootdContainer(t *testing.T, dep *appsv1.Deployment) corev1.Container {
 	t.Helper()
 	for _, c := range dep.Spec.Template.Spec.Containers {
-		if c.Name == "bootd" {
+		if c.Name == bootdComponentValue {
 			return c
 		}
 	}
-	t.Fatalf("no %q container found in Deployment %s/%s", "bootd", dep.Namespace, dep.Name)
+	t.Fatalf("no %q container found in Deployment %s/%s", bootdComponentValue, dep.Namespace, dep.Name)
 	return corev1.Container{}
 }
