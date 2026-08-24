@@ -17,6 +17,7 @@ limitations under the License.
 package bootserver
 
 import (
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -80,6 +81,39 @@ func TestGrubNetPath(t *testing.T) {
 				t.Fatalf("GrubNetPath(%q, %q) = %q, want %q", tc.serverURL, tc.filePath, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestBootLocalConfig_ChainloadsTheImageContractLoader pins what
+// "boot local" must actually do: load the deployed disk's own bootloader
+// itself. "exit" alone cannot do that - GRUB exits with EFI_SUCCESS, the
+// firmware records the net boot option as a successful boot, stops walking
+// BootOrder, and lands in its setup application, so the disk entry the
+// finalize hook wrote in NVRAM is never tried.
+func TestBootLocalConfig_ChainloadsTheImageContractLoader(t *testing.T) {
+	// The exact path kezio's image contract guarantees on a bootable
+	// Image's ESP (see internal/agent/deploy.efiRemovableLoaderPath).
+	const fallbackLoader = "/EFI/BOOT/BOOTX64.EFI"
+
+	for _, want := range []string{
+		// Find the ESP by the one file the contract guarantees, into a
+		// variable of kezio's own: a failed "search" leaves $root at the
+		// net boot device, so $root cannot report whether it matched.
+		"search --no-floppy --file --set=kezio_esp " + fallbackLoader,
+		"set root=${kezio_esp}",
+		"chainloader " + fallbackLoader,
+		"boot\n",
+		// Last resort only, for a machine that carries no local system at
+		// all.
+		"\nexit\n",
+	} {
+		if !strings.Contains(bootLocalConfig, want) {
+			t.Fatalf("bootLocalConfig does not contain %q:\n%s", want, bootLocalConfig)
+		}
+	}
+
+	if strings.Index(bootLocalConfig, "\nexit\n") < strings.Index(bootLocalConfig, "chainloader") {
+		t.Fatalf("exit precedes the chainloader, so the local system is never tried:\n%s", bootLocalConfig)
 	}
 }
 

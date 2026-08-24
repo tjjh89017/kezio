@@ -37,10 +37,32 @@ const grubContentType = "text/plain; charset=utf-8"
 // right now" case is byte-identical - a device probing MACs cannot
 // distinguish "not yours" from "not right now" from "never heard of it".
 //
-// "exit" returns control to the firmware's own boot order (ordinarily the
-// local disk) without GRUB attempting to load anything further.
+// It loads the local system itself instead of handing the decision back
+// to the firmware. Returning to the firmware is not a boot: GRUB's "exit"
+// leaves with EFI_SUCCESS, which the firmware records as this net boot
+// option having booted successfully - it then stops walking BootOrder and
+// starts its setup application, so the NVRAM entry the finalize hook
+// wrote is never tried. "exit" therefore stays only as the last resort
+// for a machine that carries no local system at all.
+//
+// The chainloaded file is the UEFI removable-media fallback path, which
+// kezio's image contract requires every bootable Image to carry on its
+// ESP (see internal/agent/deploy.efiRemovableLoaderPath) - the one path
+// this fixed string can name without knowing the deployed system. Only
+// the x86_64 name appears, matching bootd.ShimFilename/GrubFilename: the
+// GRUB that reads this config is itself x86_64-only.
+//
+// "search" writes kezio_esp, not $root: a search that matches nothing
+// leaves $root at the net boot device it already holds, so $root cannot
+// report whether the ESP was found.
 const bootLocalConfig = `# kezio: this machine does not need the live boot environment right now.
 set timeout=0
+search --no-floppy --file --set=kezio_esp /EFI/BOOT/BOOTX64.EFI
+if [ -n "${kezio_esp}" ]; then
+  set root=${kezio_esp}
+  chainloader /EFI/BOOT/BOOTX64.EFI
+  boot
+fi
 exit
 `
 

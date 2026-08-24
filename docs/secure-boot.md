@@ -140,7 +140,7 @@ boot path, not a GRUB feature: `internal/bootserver` resolves the
 requesting MAC to a `Machine` and only returns a live-boot config
 (carrying a freshly minted, single-use token) when that machine's state
 calls for one; every other case - an unrecognized MAC included - gets
-the fixed, fail-secure `bootLocalConfig` that exits back to local disk
+the fixed, fail-secure `bootLocalConfig` that chainloads the local disk
 (see `internal/bootserver`'s package doc). Operators are also expected
 to run the boot L2 segment as a controlled network per
 `config/bootd/README.md`'s network assumptions rather than an open,
