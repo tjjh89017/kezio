@@ -3,11 +3,12 @@ name: Create the target VM
 description: >-
   The VM-creation half of BMC-driven provisioning: creates the target
   VM's power-cycle-surviving data disk PVC and the VirtualMachine itself
-  powered off (`running: false`), then asserts it stays off. Does not
-  create the VirtualMachineBMC or touch Redfish - that belongs to
-  provision-target-vm-via-bmc, which expects this action's VM to already
-  exist and be off. Does not create a Machine CR or the BMC credentials
-  Secret either - both belong to create-bmc-machine.
+  powered off (`runStrategy: Manual`, with no start request), then
+  asserts it stays off. Does not create the VirtualMachineBMC or touch
+  Redfish - that belongs to provision-target-vm-via-bmc, which expects
+  this action's VM to already exist and be off. Does not create a
+  Machine CR or the BMC credentials Secret either - both belong to
+  create-bmc-machine.
 
 inputs:
   namespace:
@@ -81,7 +82,15 @@ runs:
         EOF
 
     - name: Create the target KubeVirt VirtualMachine, powered off
-      # `running: false`: this VM is never started here. Neither device
+      # `runStrategy: Manual` models a physical chassis: the VMI exists
+      # only while the BMC's start/stop API says so, so a guest that
+      # powers itself off stays off. `running: false` (and the
+      # `running: true` KubeVirtBMC's power-on writes over it) means
+      # RunStrategyAlways, under which virt-controller re-creates the VMI
+      # seconds after any guest shutdown - a machine that powers back on
+      # by itself, which no BMC-driven deploy can model.
+      #
+      # This VM is never started here. Neither device
       # carries a static bootOrder: a static bootOrder keeps QEMU's
       # "bootorder" fw_cfg file non-empty on every boot, and OVMF's
       # QemuBootOrderLib rewrites NVRAM BootOrder from that file whenever
@@ -111,7 +120,7 @@ runs:
           name: ${VM_NAME}
           namespace: ${NAMESPACE}
         spec:
-          running: false
+          runStrategy: Manual
           template:
             metadata:
               labels:

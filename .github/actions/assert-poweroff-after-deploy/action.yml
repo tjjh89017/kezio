@@ -42,6 +42,13 @@ description: >-
   restarting the VMI would be exactly the kind of silent regression this
   assertion exists to catch).
 
+  The settle check only holds while the target VM keeps
+  create-target-vm's `runStrategy: Manual`: `spec.running` (either value)
+  resolves to RunStrategyAlways the moment a BMC powers the VM on, and
+  virt-controller then re-creates the VMI seconds after the guest's own
+  `systemctl poweroff` - a restart no kezio component asks for and none
+  can suppress.
+
 inputs:
   machine-name:
     description: Name of the Machine to reshape into a dataImages-only, PowerOff deploy intent. Must already be Provisioned from a prior OS deploy (see deploy-machine).
