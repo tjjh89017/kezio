@@ -26,6 +26,13 @@ runs:
         PROVISIONING_HOST_IP: ${{ inputs.host-ip }}
       run: |
         set -euo pipefail
+        # A device name over IFNAMSIZ-1 makes the kernel answer ERANGE,
+        # which surfaces far from here as a CNI "numerical result out of
+        # range" on the first pod that attaches. Say so at the source.
+        if [ "${#PROVISIONING_BRIDGE}" -gt 15 ]; then
+          echo "::error::bridge name '${PROVISIONING_BRIDGE}' is ${#PROVISIONING_BRIDGE} characters; the kernel accepts at most 15." >&2
+          exit 1
+        fi
         sudo ip link add "${PROVISIONING_BRIDGE}" type bridge
         # Per-device opt-out of br_netfilter: bridged frames on this
         # segment stay pure L2 instead of traversing the CNI's iptables

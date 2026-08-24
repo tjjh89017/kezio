@@ -94,6 +94,13 @@ runs:
             echo "::error::malformed segments line (want 4 fields): '${line}'" >&2
             exit 1
           fi
+          # A device name over IFNAMSIZ-1 makes the kernel answer ERANGE,
+          # which surfaces far from here as a CNI "numerical result out of
+          # range" on the first pod that attaches. Say so at the source.
+          if [ "${#name}" -gt 15 ]; then
+            echo "::error::segment bridge name '${name}' is ${#name} characters; the kernel accepts at most 15." >&2
+            exit 1
+          fi
           echo "segment ${name}: cidr=${cidr} host=${host_cidr} group=${group}"
           sudo ip link add "${name}" type bridge
           # Keep this bridge's own L2 traffic out of the L3 netfilter

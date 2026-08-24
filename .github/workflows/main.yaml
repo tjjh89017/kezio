@@ -278,18 +278,18 @@ jobs:
       - name: Probe A -- Multus honours the default-network annotation's ips field
         uses: ./.github/actions/probe-multus-pinned-ip
         with:
-          bridge-name: kezio-probe-a-br0
+          bridge-name: kezio-probe-a0
           nad-default-cidr: 192.0.20.9/24
           requested-ip-cidr: 192.0.20.50/24
 
       - name: Probe B -- a single-homed pod reaches another segment through NAD IPAM routes
         uses: ./.github/actions/probe-nad-routes
         with:
-          segment1-bridge: kezio-probe-b-seg1
+          segment1-bridge: kezio-probe-b1
           segment1-cidr: 192.0.21.0/24
           segment1-host-cidr: 192.0.21.1/24
           segment1-gateway-ip: 192.0.21.1
-          segment2-bridge: kezio-probe-b-seg2
+          segment2-bridge: kezio-probe-b2
           segment2-host-cidr: 192.0.22.1/24
           segment2-route-cidr: 192.0.22.0/24
           segment2-gateway-ip: 192.0.22.1
@@ -322,9 +322,9 @@ jobs:
           artifact-name-prefix: network-probes
           namespaces: "scaffold-system"
           bridges: |
-            kezio-probe-a-br0
-            kezio-probe-b-seg1
-            kezio-probe-b-seg2
+            kezio-probe-a0
+            kezio-probe-b1
+            kezio-probe-b2
             kezio-probe-c-a
             kezio-probe-c-b
             kezio-probe-c-c
