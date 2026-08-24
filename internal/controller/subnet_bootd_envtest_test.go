@@ -67,8 +67,9 @@ func newSubnetTestReconciler() *SubnetReconciler {
 }
 
 // createSubnetTestNamespace creates a fresh namespace for one spec, with
-// the PSA label and the kezio-bootd ServiceAccount already present, so
-// specs exercise the healthy case unless they deliberately withhold one.
+// the PSA label, the kezio-bootd ServiceAccount, and a bare Site named
+// "hq" (testSubnet's default spec.siteRef) already present, so specs
+// exercise the healthy case unless they deliberately withhold one.
 func createSubnetTestNamespace(ctx context.Context) string {
 	name := fmt.Sprintf("subnet-test-%s", rand.String(5))
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
@@ -80,6 +81,7 @@ func createSubnetTestNamespace(ctx context.Context) string {
 		ExpectWithOffset(1, k8sClient.Delete(ctx, ns)).To(Succeed())
 	})
 	createBootdServiceAccount(ctx, name)
+	ExpectWithOffset(1, k8sClient.Create(ctx, &keziov1alpha2.Site{ObjectMeta: metav1.ObjectMeta{Name: "hq", Namespace: name}})).To(Succeed())
 	return name
 }
 

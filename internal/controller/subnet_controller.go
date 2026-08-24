@@ -33,10 +33,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 	"github.com/tjjh89017/kezio/internal/nadvalidate"
+	"github.com/tjjh89017/kezio/internal/sitederive"
 	"github.com/tjjh89017/kezio/internal/subnetvalidate"
 )
 
@@ -75,6 +78,7 @@ type SubnetReconciler struct {
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=subnets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=subnets/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=subnets/finalizers,verbs=update
+// +kubebuilder:rbac:groups=kezio.kojuro.date,resources=sites,verbs=get;list;watch
 // +kubebuilder:rbac:groups=k8s.cni.cncf.io,resources=network-attachment-definitions,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
@@ -124,14 +128,23 @@ type subnetCheck struct {
 // A blocking check's Violation (BootdNetworkCollision, DHCPLeaseRangeValid,
 // BootdServerIPInCIDR, or an unowned name collision) withholds the
 // Deployment entirely; every other Violation (for example a
-// CheckBootdAddress mismatch) still fails Valid/Ready but leaves an
-// already-serving Deployment in place, since withholding it would break
-// every other machine on the segment too.
+// CheckBootdAddress mismatch, or checkSiteRef's SiteNotFound) still fails
+// Valid/Ready but leaves an already-serving Deployment in place - for
+// SiteNotFound specifically, because bootd keeps PXE-ing machines on this
+// segment regardless of whether the Site it claims to belong to still
+// exists, and Ready already carries that same "misconfigured but still
+// serving" meaning for every other non-blocking Violation.
 func (r *SubnetReconciler) onChange(ctx context.Context, subnet *keziov1alpha2.Subnet) (ctrl.Result, error) {
 	checks, err := r.runNADChecks(ctx, subnet)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+
+	siteCheck, err := r.checkSiteRef(ctx, subnet)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	checks = append(checks, siteCheck)
 
 	// A Subnet with no boot half carries no bootd Deployment at all: none
 	// of the bootd-specific checks below apply, and hasBootPlane is the
@@ -416,6 +429,40 @@ func (r *SubnetReconciler) runNADChecks(ctx context.Context, subnet *keziov1alph
 	return checks, nil
 }
 
+// checkSiteRef reports whether subnet.Spec.SiteRef still names a Site that
+// exists. The webhook (SubnetCustomValidator.validateSiteRef) enforces
+// this at admission; a Site can be deleted afterward, leaving the
+// reference dangling with nothing else to surface it, since a dangling
+// siteRef changes no field Owns/the bootd Deployment watch would ever see.
+// SetupWithManager's Site watch (mapSiteToSubnets) is what gets this
+// Subnet reconciled again when that happens.
+//
+// Never blocking: subnet's own bootd Deployment does not depend on the
+// Site existing, only Site-scoped features (seeder/tracker placement) do.
+func (r *SubnetReconciler) checkSiteRef(ctx context.Context, subnet *keziov1alpha2.Subnet) (subnetCheck, error) {
+	ref := subnet.Spec.SiteRef
+	ns := resolveNamespace(ref, subnet.Namespace)
+
+	site := &keziov1alpha2.Site{}
+	err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: ref.Name}, site)
+	switch {
+	case err == nil:
+		return subnetCheck{result: nadvalidate.CheckResult{
+			Verdict: nadvalidate.OK,
+			Reason:  "SiteFound",
+			Message: fmt.Sprintf("Site %s/%s exists", ns, ref.Name),
+		}}, nil
+	case kerrors.IsNotFound(err):
+		return subnetCheck{result: nadvalidate.CheckResult{
+			Verdict: nadvalidate.Violation,
+			Reason:  "SiteNotFound",
+			Message: fmt.Sprintf("spec.siteRef names Site %s/%s, which does not exist", ns, ref.Name),
+		}}, nil
+	default:
+		return subnetCheck{}, fmt.Errorf("get site %s/%s: %w", ns, ref.Name, err)
+	}
+}
+
 // fetchNADConfig fetches the NAD ref names (in defaultNS when ref carries
 // no namespace of its own) through c and returns its spec.config. Shared
 // by SubnetReconciler and SiteReconciler, both of which resolve a NAD ref
@@ -574,14 +621,43 @@ func (r *SubnetReconciler) updateSubnetConditions(ctx context.Context, subnet *k
 	return nil
 }
 
+// mapSiteToSubnets requeues every Subnet in the changed Site's own
+// namespace whose spec.siteRef names it. Owner references and Owns' watch
+// only ever see this Subnet's own bootd Deployment; a Site going away
+// touches no Subnet directly, so nothing else would ever bring this
+// Subnet back through the workqueue for checkSiteRef to catch. Mirrors
+// SiteReconciler.mapSubnetToSite in the opposite direction.
+func (r *SubnetReconciler) mapSiteToSubnets(ctx context.Context, obj client.Object) []reconcile.Request {
+	site, ok := obj.(*keziov1alpha2.Site)
+	if !ok {
+		return nil
+	}
+	var subnets keziov1alpha2.SubnetList
+	if err := r.List(ctx, &subnets, client.InNamespace(site.Namespace)); err != nil {
+		return nil
+	}
+	siteIdentity := sitederive.SiteIdentity(site)
+	var requests []reconcile.Request
+	for i := range subnets.Items {
+		if sitederive.SiteRefIdentity(&subnets.Items[i]) == siteIdentity {
+			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&subnets.Items[i])})
+		}
+	}
+	return requests
+}
+
 // SetupWithManager sets up the controller with the Manager. Owns
 // requeues a Subnet whenever a bootd Deployment it controls changes -
 // for example rolling out to Available - so Ready reflects that without
-// waiting for the Subnet's own next spec change.
+// waiting for the Subnet's own next spec change. Watches Site requeues a
+// Subnet when the Site its own siteRef names is created, deleted, or
+// otherwise changes (see mapSiteToSubnets) - in particular, a Site
+// deletion, which checkSiteRef must surface as Valid=False.
 func (r *SubnetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&keziov1alpha2.Subnet{}).
 		Owns(&appsv1.Deployment{}).
+		Watches(&keziov1alpha2.Site{}, handler.EnqueueRequestsFromMapFunc(r.mapSiteToSubnets)).
 		Named("subnet").
 		Complete(r)
 }
