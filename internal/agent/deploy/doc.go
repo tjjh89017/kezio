@@ -25,10 +25,11 @@ limitations under the License.
 // This package never opens or modifies a deployed disk's own file system
 // content on its own initiative - the content ezio restored is
 // byte-identical to the source image, so nothing needs regenerating. The
-// only exception is a chrootScript hook step, run only on the operator's
-// explicit request, and the install-removable-fallback builtin, which
-// mounts the ESP only to check for (and possibly copy in) a fallback
-// bootloader file.
+// one exception is the install-removable-fallback builtin, which mounts
+// the ESP only to check for (and possibly copy in) a fallback bootloader
+// file. A post hook script step runs in the live environment with no
+// deployed file system mounted; a script that mounts one does so itself,
+// from the device paths the plan gives it in the environment.
 //
 // This is the highest-blast-radius code in kezio: a wrong disk here
 // destroys data with no undo. Every destructive command names a device the

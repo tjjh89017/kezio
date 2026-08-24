@@ -193,9 +193,6 @@ const (
 	// HookStepTypeScript means Content runs in the live OS, nothing
 	// mounted.
 	HookStepTypeScript = "script"
-	// HookStepTypeChrootScript means Content runs inside a chroot of the
-	// deployed OS image's root partition.
-	HookStepTypeChrootScript = "chrootScript"
 )
 
 // ResolvedHook is one PostHook attached to a deploy, fully resolved: its
@@ -211,10 +208,10 @@ type ResolvedHook struct {
 }
 
 // ResolvedHookStep is one PostHook step, resolved for the agent to run
-// with no cluster access: a script or chrootScript step's Content is
-// already fetched from its configMapRef/secretRef (or copied from an
-// inline script) and templated - never a ConfigMap or Secret reference on
-// the wire, since the manager resolves those.
+// with no cluster access: a script step's Content is already fetched from
+// its configMapRef/secretRef (or copied from an inline script) and
+// templated - never a ConfigMap or Secret reference on the wire, since the
+// manager resolves those.
 type ResolvedHookStep struct {
 	// Type is one of the HookStepType* constants.
 	Type string `json:"type"`
@@ -225,7 +222,7 @@ type ResolvedHookStep struct {
 	// HookStepTypeBuiltin.
 	Params map[string]string `json:"params,omitempty"`
 	// Content is the already-templated script to run, set iff Type is
-	// HookStepTypeScript or HookStepTypeChrootScript.
+	// HookStepTypeScript.
 	Content string `json:"content,omitempty"`
 	// OSFamily restricts this step to a target OS family; empty means it
 	// applies regardless.
@@ -372,7 +369,7 @@ func validateHookStep(s ResolvedHookStep) error {
 		if s.Builtin == "" {
 			return fmt.Errorf("builtin step has no builtin name")
 		}
-	case HookStepTypeScript, HookStepTypeChrootScript:
+	case HookStepTypeScript:
 		if s.Content == "" {
 			return fmt.Errorf("%s step has no content", s.Type)
 		}

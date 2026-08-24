@@ -84,7 +84,7 @@ func TestValidateStep(t *testing.T) {
 		{
 			name:    "no kind set",
 			step:    keziov1alpha2.PostHookStep{},
-			wantErr: "spec.steps[0]: exactly one of builtin, script, or chrootScript must be set",
+			wantErr: "spec.steps[0]: exactly one of builtin or script must be set",
 		},
 		{
 			name: "builtin only, unrestricted",
@@ -130,13 +130,6 @@ func TestValidateStep(t *testing.T) {
 				Script: &keziov1alpha2.PostHookScriptSource{Script: "echo {{ .bogus }}"},
 			},
 			wantErr: `spec.steps[0].script.script: placeholder "bogus" does not reference a declared param or a reserved name (machineName, imageName, targetDisk)`,
-		},
-		{
-			name: "chrootScript with undeclared placeholder",
-			step: keziov1alpha2.PostHookStep{
-				ChrootScript: &keziov1alpha2.PostHookScriptSource{Script: "echo {{ .bogus }}"},
-			},
-			wantErr: `spec.steps[0].chrootScript.script: placeholder "bogus" does not reference a declared param or a reserved name (machineName, imageName, targetDisk)`,
 		},
 		{
 			name: "builtin with allowed param",
@@ -274,17 +267,9 @@ func TestCheckOSFamilyCompatible(t *testing.T) {
 			wantErr: `spec.steps[0]: osFamily "Windows" is incompatible with the image's osFamily "Linux"`,
 		},
 		{
-			name: "mismatched explicit osFamily on a chrootScript step",
+			name: "script step with no osFamily applies regardless, no error",
 			steps: []keziov1alpha2.PostHookStep{
-				{OSFamily: keziov1alpha2.OSFamilyWindows, ChrootScript: &keziov1alpha2.PostHookScriptSource{Script: "echo hi"}},
-			},
-			image:   keziov1alpha2.OSFamilyLinux,
-			wantErr: `spec.steps[0]: osFamily "Windows" is incompatible with the image's osFamily "Linux"`,
-		},
-		{
-			name: "chrootScript step with no osFamily applies regardless, no error",
-			steps: []keziov1alpha2.PostHookStep{
-				{ChrootScript: &keziov1alpha2.PostHookScriptSource{Script: "echo hi"}},
+				{Script: &keziov1alpha2.PostHookScriptSource{Script: "echo hi"}},
 			},
 			image: keziov1alpha2.OSFamilyWindows,
 		},

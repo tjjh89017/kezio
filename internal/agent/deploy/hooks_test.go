@@ -26,6 +26,9 @@ import (
 	"github.com/tjjh89017/kezio/internal/agentapi"
 )
 
+// shellCommand is the command a script step always runs through.
+const shellCommand = "/bin/sh"
+
 func newHooksExecutor() (*Executor, *fakeRunner) {
 	runner := newFakeRunner()
 	return &Executor{Runner: runner}, runner
@@ -50,7 +53,7 @@ func TestRunHooks_OrderAcrossHooksAndSteps(t *testing.T) {
 
 	var shCalls int
 	for _, c := range runner.calls {
-		if c.name == "/bin/sh" {
+		if c.name == shellCommand {
 			shCalls++
 		}
 	}
@@ -78,7 +81,7 @@ func TestRunHooks_StepFailureAbortsRemainingSteps(t *testing.T) {
 		t.Fatalf("runHooks error = %v, want it to name the unknown builtin", err)
 	}
 	for _, c := range runner.calls {
-		if c.name == "/bin/sh" {
+		if c.name == shellCommand {
 			t.Errorf("the script step after a failing step still ran")
 		}
 	}
@@ -98,50 +101,79 @@ func TestRunHookStep_ScriptRunsInLiveOSNoMount(t *testing.T) {
 	}
 }
 
-func TestRunHookStep_ChrootScriptMountsAndCleansUp(t *testing.T) {
+func TestRunHookStep_ChrootScriptTypeIsRejected(t *testing.T) {
 	e, runner := newHooksExecutor()
-	step := agentapi.ResolvedHookStep{Type: agentapi.HookStepTypeChrootScript, Content: "echo hi", TimeoutSeconds: 5}
+	step := agentapi.ResolvedHookStep{Type: "chrootScript", Content: "echo hi", TimeoutSeconds: 5}
 
-	if err := e.runHookStep(context.Background(), basicPlan(), step); err != nil {
+	err := e.runHookStep(context.Background(), basicPlan(), step)
+	if err == nil {
+		t.Fatal("runHookStep: want an error for the removed chrootScript step type")
+	}
+	if !strings.Contains(err.Error(), "unknown post hook step type") {
+		t.Fatalf("runHookStep error = %v, want it to report an unknown step type", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("a chrootScript step still ran commands: %v", runner.commandNames())
+	}
+}
+
+func TestRunScriptStep_PassesPlanDevicesInTheEnvironment(t *testing.T) {
+	e, runner := newHooksExecutor()
+	plan := basicPlan()
+	plan.DataImages = []agentapi.DeployDataImagePlan{{
+		ImageRef:     keziov1alpha2.NameRef{Name: "data"},
+		TargetDisk:   "/dev/sdb",
+		SfdiskScript: fixtureSfdisk,
+		Slots:        []agentapi.DeploySlot{{Number: 1, Device: "/dev/sdb1", Mkfs: &agentapi.DeployMkfs{Filesystem: "ext4"}}},
+	}}
+	step := agentapi.ResolvedHookStep{Type: agentapi.HookStepTypeScript, Content: "echo hi", TimeoutSeconds: 5}
+
+	if err := e.runHookStep(context.Background(), plan, step); err != nil {
 		t.Fatalf("runHookStep: %v", err)
 	}
 
-	calls := runner.commandNames()
-	if !slices.ContainsFunc(calls, func(c string) bool { return strings.HasPrefix(c, "mount /dev/sda3 ") }) {
-		t.Errorf("chrootScript did not mount the plan's last (root) slot /dev/sda3; calls: %v", calls)
-	}
-	var mounts, umounts int
-	for _, c := range calls {
-		switch {
-		case strings.HasPrefix(c, "mount "):
-			mounts++
-		case strings.HasPrefix(c, "umount "):
-			umounts++
+	var env []string
+	for _, c := range runner.calls {
+		if c.name == shellCommand {
+			env = c.env
 		}
 	}
-	if mounts == 0 || mounts != umounts {
-		t.Errorf("mount/umount calls are unbalanced: %d mounts, %d umounts; calls: %v", mounts, umounts, calls)
-	}
-	if !slices.ContainsFunc(calls, func(c string) bool { return strings.HasPrefix(c, "chroot ") }) {
-		t.Errorf("chrootScript never ran chroot; calls: %v", calls)
-	}
-}
-
-func TestChrootRootSlot_RejectsBlankLastSlot(t *testing.T) {
-	plan := basicPlan()
-	plan.Slots = []agentapi.DeploySlot{
-		{Number: 1, Device: "/dev/sda1", Mkfs: &agentapi.DeployMkfs{Filesystem: "vfat"}},
-	}
-	if _, err := chrootRootSlot(plan); err == nil {
-		t.Fatal("chrootRootSlot: want an error when the last slot carries no restored content")
+	for _, want := range []string{
+		"KEZIO_TARGET_DISK=/dev/sda",
+		"KEZIO_PARTITIONS=1 2 3",
+		"KEZIO_PART_1=/dev/sda1",
+		"KEZIO_PART_3=/dev/sda3",
+		"KEZIO_DATA_DISKS=1",
+		"KEZIO_DATA_DISK_1=/dev/sdb",
+		"KEZIO_DATA_DISK_1_PARTITIONS=1",
+		"KEZIO_DATA_DISK_1_PART_1=/dev/sdb1",
+	} {
+		if !slices.Contains(env, want) {
+			t.Errorf("script step environment is missing %q; got %v", want, env)
+		}
 	}
 }
 
-func TestChrootRootSlot_RejectsEmptyPlan(t *testing.T) {
+func TestRunScriptStep_OmitsDiskNamesAPlanDoesNotCarry(t *testing.T) {
+	e, runner := newHooksExecutor()
 	plan := basicPlan()
+	plan.TargetDisk = ""
 	plan.Slots = nil
-	if _, err := chrootRootSlot(plan); err == nil {
-		t.Fatal("chrootRootSlot: want an error for a plan with no OS disk slots")
+	step := agentapi.ResolvedHookStep{Type: agentapi.HookStepTypeScript, Content: "echo hi", TimeoutSeconds: 5}
+
+	if err := e.runHookStep(context.Background(), plan, step); err != nil {
+		t.Fatalf("runHookStep: %v", err)
+	}
+
+	for _, c := range runner.calls {
+		if c.name != shellCommand {
+			continue
+		}
+		for _, entry := range c.env {
+			if strings.HasPrefix(entry, "KEZIO_TARGET_DISK=") || strings.HasPrefix(entry, "KEZIO_PART") {
+				t.Errorf("a plan with no OS disk still set %q", entry)
+			}
+		}
 	}
 }
 

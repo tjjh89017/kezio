@@ -11,16 +11,16 @@ description: >-
   enrolling, and the register/inspect phase already needs a Machine with
   no deploy intent set (create-bmc-machine's own doc comment).
 
-  Guards the postHookRefs footgun from PostHook.spec.steps'
-  chrootScript kind and MachineSpec.PostHookRefs' doc comment: naming
-  any hook at all opts a Machine out of the kezio-default-finalize
-  substitution the controller would otherwise apply, so a caller whose
-  posthook-names already includes a chrootScript hook (e.g. the
-  full-deploy marker from create-deploy-marker-posthook) must name
+  Guards the postHookRefs footgun from MachineSpec.PostHookRefs' doc
+  comment: naming any hook at all opts a Machine out of the
+  kezio-default-finalize substitution the controller would otherwise
+  apply, so a caller that names its own hook must name
   kezio-default-finalize alongside it to still get its mkswap/efibootmgr
   step, or the disk is written but never made bootable. This action
   fails before patching anything if posthook-names is non-empty and
   omits it, rather than silently deploying a disk that cannot boot.
+  posthook-names is empty by default, which leaves spec.postHookRefs
+  unset and lets the controller substitute kezio-default-finalize itself.
 
   Waiting distinguishes the two status axes on Machine
   (api/v1alpha2/machine_types.go's MachineStatus): status.state reaching
@@ -45,17 +45,13 @@ inputs:
   posthook-names:
     description: >-
       Newline-separated PostHook names, written in order to
-      spec.postHookRefs. Blank lines are skipped. Defaults to the
-      full-deploy lane's own pair (marker plus the shipped default
-      finalize hook) - see this action's own description for why both
-      are required together whenever a chrootScript hook is named at
-      all. Pass an empty string to leave spec.postHookRefs unset instead
-      (the controller substitutes kezio-default-finalize on its own in
-      that case).
+      spec.postHookRefs. Blank lines are skipped. Empty by default, which
+      leaves spec.postHookRefs unset so the controller substitutes
+      kezio-default-finalize on its own. A caller that names its own hook
+      must also name kezio-default-finalize - see this action's own
+      description.
     required: false
-    default: |
-      kezio-e2e-deploy-marker
-      kezio-default-finalize
+    default: ""
   timeout:
     description: >-
       Timeout to wait for status.state to reach "Provisioned" after the

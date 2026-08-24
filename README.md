@@ -38,7 +38,7 @@ kezio defines these CRDs under the `kezio.kojuro.date/v1alpha2` group:
 | `Image` | A disk layout: an ordered list of partition slots, each optionally bound to a `PartitionContent`. Immutable once created. |
 | `PartitionContent` | One partition's content-addressed, immutable data set (a partclone data set plus its torrent). Named by its own BitTorrent info hash. |
 | `DeployRun` | The resolved, immutable snapshot of one deployment attempt: which images, which disks, which hooks, and its phase (Partitioning, WritingContent, RunningPostHook, Finalizing, ...). |
-| `PostHook` | A named, reusable, ordered sequence of steps (builtins, live-OS scripts, or chroot scripts) that a `Machine` or `Image` can attach to run after content is written. |
+| `PostHook` | A named, reusable, ordered sequence of steps (builtins or scripts) that a `Machine` or `Image` can attach to run after content is written. A script step runs in the live environment, not in the deployed OS: no deployed file system is mounted for it, the plan's device paths come to it in the environment (`KEZIO_TARGET_DISK`, `KEZIO_PARTITIONS`, `KEZIO_PART_<number>`, and the `KEZIO_DATA_DISK_*` set), and a script that mounts a device must unmount it before it ends. |
 
 ## How a deploy works
 

@@ -179,7 +179,7 @@ func validDeployPlan() DeployPlan {
 				Steps: []ResolvedHookStep{
 					{Type: HookStepTypeBuiltin, Builtin: "efibootmgr", TimeoutSeconds: 30},
 					{Type: HookStepTypeScript, Content: "echo hi", TimeoutSeconds: 30},
-					{Type: HookStepTypeChrootScript, Content: "echo chroot", OSFamily: keziov1alpha2.OSFamilyLinux, TimeoutSeconds: 30},
+					{Type: HookStepTypeScript, Content: "echo linux", OSFamily: keziov1alpha2.OSFamilyLinux, TimeoutSeconds: 30},
 				},
 			},
 		},
@@ -328,7 +328,7 @@ func TestDeployPlanValidate_HookStepInvariants(t *testing.T) {
 	}{
 		{name: "builtin with no name", step: ResolvedHookStep{Type: HookStepTypeBuiltin, TimeoutSeconds: 30}},
 		{name: "script with no content", step: ResolvedHookStep{Type: HookStepTypeScript, TimeoutSeconds: 30}},
-		{name: "chrootScript with no content", step: ResolvedHookStep{Type: HookStepTypeChrootScript, TimeoutSeconds: 30}},
+		{name: "chrootScript is no longer a step type", step: ResolvedHookStep{Type: "chrootScript", Content: "echo hi", TimeoutSeconds: 30}},
 		{name: "unknown type", step: ResolvedHookStep{Type: "bogus", TimeoutSeconds: 30}},
 		{name: "non-positive timeout", step: ResolvedHookStep{Type: HookStepTypeBuiltin, Builtin: "mkswap", TimeoutSeconds: 0}},
 	}

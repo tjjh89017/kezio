@@ -248,8 +248,8 @@ func testMachineHookIncompatibleOSFamilyIsValidationError(t *testing.T, fx *fixt
 	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
 	fx.mustCreatePostHook(ns, "windows-hook", keziov1alpha2.PostHookSpec{
 		Steps: []keziov1alpha2.PostHookStep{{
-			OSFamily:     keziov1alpha2.OSFamilyWindows,
-			ChrootScript: &keziov1alpha2.PostHookScriptSource{Script: "echo hi"},
+			OSFamily: keziov1alpha2.OSFamilyWindows,
+			Script:   &keziov1alpha2.PostHookScriptSource{Script: "echo hi"},
 		}},
 	})
 	image := fx.mustCreateImage(ns, blankDataLayout()) // OSFamily defaults to Linux

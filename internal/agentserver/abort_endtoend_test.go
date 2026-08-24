@@ -62,6 +62,10 @@ func (abortE2ERunner) Run(_ context.Context, _ []byte, name string, args ...stri
 	return nil, nil
 }
 
+func (r abortE2ERunner) RunEnv(ctx context.Context, _ []string, stdin []byte, name string, args ...string) ([]byte, error) {
+	return r.Run(ctx, stdin, name, args...)
+}
+
 // abortE2EEzioClient is a deploy.EzioClient whose torrent never finishes
 // on its own - only the deploy's own context being cancelled ever ends
 // the seeding loop that polls it.

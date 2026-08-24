@@ -70,7 +70,7 @@ var _ = Describe("PostHook Webhook", func() {
 			obj.Spec.Steps = []keziov1alpha2.PostHookStep{{}}
 			_, err := validator.ValidateCreate(ctx, obj)
 			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("exactly one of builtin, script, or chrootScript"))
+			Expect(err.Error()).To(ContainSubstring("exactly one of builtin or script"))
 		})
 
 		It("denies a step with no kind set on update", func() {

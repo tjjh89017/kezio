@@ -25,11 +25,12 @@ import (
 	"github.com/tjjh89017/kezio/internal/seeder"
 )
 
-// fakeCall records one Runner.Run invocation.
+// fakeCall records one Runner.Run/RunEnv invocation.
 type fakeCall struct {
 	stdin string
 	name  string
 	args  []string
+	env   []string
 }
 
 func (c fakeCall) String() string {
@@ -63,10 +64,14 @@ func newFakeRunner() *fakeRunner {
 	}
 }
 
-func (f *fakeRunner) Run(_ context.Context, stdin []byte, name string, args ...string) ([]byte, error) {
+func (f *fakeRunner) Run(ctx context.Context, stdin []byte, name string, args ...string) ([]byte, error) {
+	return f.RunEnv(ctx, nil, stdin, name, args...)
+}
+
+func (f *fakeRunner) RunEnv(_ context.Context, env []string, stdin []byte, name string, args ...string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	call := fakeCall{stdin: string(stdin), name: name, args: args}
+	call := fakeCall{stdin: string(stdin), name: name, args: args, env: env}
 	f.calls = append(f.calls, call)
 
 	key := call.String()

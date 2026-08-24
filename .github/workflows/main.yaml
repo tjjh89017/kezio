@@ -729,8 +729,9 @@ jobs:
   # and bootd answers proxyDHCP only, and dhcp, where bootd's own
   # dnsmasq issues leases) and its MAC-gate assertion (fail-secure
   # against an unenrolled MAC). The lane then continues past
-  # registration: a real OS test image is built and ingested, a marker
-  # PostHook proves a specific deploy ran, and the Machine is driven
+  # registration: a real OS test image is built and ingested, carrying a
+  # fresh per-run marker token that proves the deployed disk holds this
+  # run's content, and the Machine is driven
   # through a full deploy - partition write over BitTorrent, hooks,
   # finalize, reboot from disk - verified on three independent layers.
   # This is the slowest, flakiest lane, so it deliberately gates only
@@ -1107,10 +1108,6 @@ jobs:
         with:
           token: ${{ env.IMAGE_SERVICE_TOKEN }}
 
-      - name: Create the full-deploy marker PostHook
-        id: marker
-        uses: ./.github/actions/create-deploy-marker-posthook
-
       # Two-axis status proof, strictly before the happy-path deploy
       # below: injects one plan-build failure, asserts status.state stays
       # unchanged while status.operationalStatus becomes "error", then
@@ -1148,21 +1145,8 @@ jobs:
           machine-name: ${{ env.TARGET_VM_NAME }}
           image-name: ${{ steps.build-image.outputs.image-name }}
 
-      # Captured right before deploy-machine patches the deploy intent in,
-      # so verify-deploy's layer 3 can tell this run's marker apart from a
-      # stale one left by an earlier deploy of the same disk. The aborted
-      # run above never reached DeployRunPhaseRunningPostHook (it was
-      # caught and deleted mid-WritingContent), so it never wrote a
-      # full-deploy marker - this timestamp's position relative to the
-      # abort action above is therefore immaterial to freshness, only its
-      # position relative to deploy-machine's own patch matters.
-      - name: Capture the pre-deploy timestamp
-        id: pre-deploy
-        run: echo "timestamp-ns=$(date -u +%s%N)" >>"${GITHUB_OUTPUT}"
-
-      # posthook-names left at deploy-machine's own default: it already
-      # pairs create-deploy-marker-posthook's default name with
-      # kezio-default-finalize.
+      # posthook-names left at deploy-machine's own default, empty: the
+      # controller substitutes kezio-default-finalize on its own.
       - name: Set the Machine's deploy intent and wait for Provisioned
         id: deploy
         uses: ./.github/actions/deploy-machine
@@ -1176,7 +1160,8 @@ jobs:
           machine-name: ${{ steps.deploy.outputs.machine-name }}
           namespace: ${{ steps.deploy.outputs.namespace }}
           deploy-run-name: ${{ steps.deploy.outputs.deploy-run-name }}
-          pre-deploy-timestamp-ns: ${{ steps.pre-deploy.outputs.timestamp-ns }}
+          marker-path: ${{ steps.build-image.outputs.marker-path }}
+          expected-marker-token: ${{ steps.build-image.outputs.marker-token }}
 
       # After verify-deploy: this asserts recorded history on the DeployRun
       # itself (phase, per-partition percent, phase timings), not an
@@ -1196,6 +1181,7 @@ jobs:
         uses: ./.github/actions/assert-reboot-annotation-cycle
         with:
           machine-name: ${{ env.TARGET_VM_NAME }}
+          marker-path: ${{ steps.build-image.outputs.marker-path }}
 
       # Last disk-touching step in this lane, deliberately: it reshapes the
       # Machine's spec away from the OS image just verified above onto a
@@ -1266,7 +1252,6 @@ jobs:
             site/${{ env.SITE_NAME }}:site.yaml
             machinehardware/${{ env.TARGET_VM_NAME }}:machinehardware.yaml
             image/${{ steps.build-image.outputs.image-name }}:image.yaml
-            posthook/${{ steps.marker.outputs.name }}:posthook.yaml
             deployrun/${{ steps.deploy.outputs.deploy-run-name }}:deployrun.yaml
             image/${{ steps.build-data-image.outputs.image-name }}:data-image.yaml
             deployrun/${{ steps.poweroff.outputs.deploy-run-name }}:poweroff-deployrun.yaml
@@ -1791,14 +1776,6 @@ jobs:
         with:
           token: ${{ env.IMAGE_SERVICE_TOKEN }}
 
-      - name: Create the full-deploy marker PostHook
-        id: marker
-        uses: ./.github/actions/create-deploy-marker-posthook
-
-      - name: Capture the pre-deploy timestamp
-        id: pre-deploy
-        run: echo "timestamp-ns=$(date -u +%s%N)" >>"${GITHUB_OUTPUT}"
-
       # Both machines' deploy intent is patched in back-to-back, before
       # either wait below - this is what starts both deploys inside the
       # same window (proof 1). deploy-machine's own patch step later
@@ -1807,14 +1784,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          patch='{"spec":{"imageRef":{"name":"${{ steps.build-image.outputs.image-name }}"},"postHookRefs":[{"name":"${{ steps.marker.outputs.name }}"},{"name":"kezio-default-finalize"}]}}'
+          patch='{"spec":{"imageRef":{"name":"${{ steps.build-image.outputs.image-name }}"},"postHookRefs":[]}}'
           kubectl patch machine "${{ env.VM_A_NAME }}" -n scaffold-system --type=merge -p "${patch}"
 
       - name: Set machine B's deploy intent
         shell: bash
         run: |
           set -euo pipefail
-          patch='{"spec":{"imageRef":{"name":"${{ steps.build-image.outputs.image-name }}"},"postHookRefs":[{"name":"${{ steps.marker.outputs.name }}"},{"name":"kezio-default-finalize"}]}}'
+          patch='{"spec":{"imageRef":{"name":"${{ steps.build-image.outputs.image-name }}"},"postHookRefs":[]}}'
           kubectl patch machine "${{ env.VM_B_NAME }}" -n scaffold-system --type=merge -p "${patch}"
 
       # Proof 1 (concurrency) and proof 5 (PartitionContent.status.seeders[]
@@ -1878,9 +1855,6 @@ jobs:
         with:
           machine-name: ${{ env.VM_A_NAME }}
           image-name: ${{ steps.build-image.outputs.image-name }}
-          posthook-names: |
-            ${{ steps.marker.outputs.name }}
-            kezio-default-finalize
 
       - name: Wait for machine B to reach Provisioned
         id: deploy-b
@@ -1888,9 +1862,6 @@ jobs:
         with:
           machine-name: ${{ env.VM_B_NAME }}
           image-name: ${{ steps.build-image.outputs.image-name }}
-          posthook-names: |
-            ${{ steps.marker.outputs.name }}
-            kezio-default-finalize
 
       # Proof 7: the same three-layer verification the single-segment
       # deploy lane uses, for both machines.
@@ -1900,7 +1871,8 @@ jobs:
           machine-name: ${{ steps.deploy-a.outputs.machine-name }}
           namespace: ${{ steps.deploy-a.outputs.namespace }}
           deploy-run-name: ${{ steps.deploy-a.outputs.deploy-run-name }}
-          pre-deploy-timestamp-ns: ${{ steps.pre-deploy.outputs.timestamp-ns }}
+          marker-path: ${{ steps.build-image.outputs.marker-path }}
+          expected-marker-token: ${{ steps.build-image.outputs.marker-token }}
 
       - name: Verify machine B's deploy landed
         uses: ./.github/actions/verify-deploy
@@ -1908,7 +1880,8 @@ jobs:
           machine-name: ${{ steps.deploy-b.outputs.machine-name }}
           namespace: ${{ steps.deploy-b.outputs.namespace }}
           deploy-run-name: ${{ steps.deploy-b.outputs.deploy-run-name }}
-          pre-deploy-timestamp-ns: ${{ steps.pre-deploy.outputs.timestamp-ns }}
+          marker-path: ${{ steps.build-image.outputs.marker-path }}
+          expected-marker-token: ${{ steps.build-image.outputs.marker-token }}
 
       # Proof 2: exactly one seeder Deployment for the (Image, Site) pair,
       # single-homed on segment C.
@@ -2561,14 +2534,6 @@ jobs:
         with:
           token: ${{ env.IMAGE_SERVICE_TOKEN }}
 
-      - name: Create the full-deploy marker PostHook
-        id: marker
-        uses: ./.github/actions/create-deploy-marker-posthook
-
-      - name: Capture the pre-deploy timestamp
-        id: pre-deploy
-        run: echo "timestamp-ns=$(date -u +%s%N)" >>"${GITHUB_OUTPUT}"
-
       # Both machines' deploy intent is patched in back-to-back, before
       # either wait below - this is what starts both deploys inside the
       # same window (proof 4) and what creates per-Site seeder demand for
@@ -2577,14 +2542,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          patch='{"spec":{"imageRef":{"name":"${{ steps.build-image.outputs.image-name }}"},"postHookRefs":[{"name":"${{ steps.marker.outputs.name }}"},{"name":"kezio-default-finalize"}]}}'
+          patch='{"spec":{"imageRef":{"name":"${{ steps.build-image.outputs.image-name }}"},"postHookRefs":[]}}'
           kubectl patch machine "${{ env.VM_X_NAME }}" -n scaffold-system --type=merge -p "${patch}"
 
       - name: Set machine Y's deploy intent
         shell: bash
         run: |
           set -euo pipefail
-          patch='{"spec":{"imageRef":{"name":"${{ steps.build-image.outputs.image-name }}"},"postHookRefs":[{"name":"${{ steps.marker.outputs.name }}"},{"name":"kezio-default-finalize"}]}}'
+          patch='{"spec":{"imageRef":{"name":"${{ steps.build-image.outputs.image-name }}"},"postHookRefs":[]}}'
           kubectl patch machine "${{ env.VM_Y_NAME }}" -n scaffold-system --type=merge -p "${patch}"
 
       # Waits for both per-(Image, Site) seeder Deployments to exist -
@@ -2738,9 +2703,6 @@ jobs:
         with:
           machine-name: ${{ env.VM_X_NAME }}
           image-name: ${{ steps.build-image.outputs.image-name }}
-          posthook-names: |
-            ${{ steps.marker.outputs.name }}
-            kezio-default-finalize
 
       - name: Wait for machine Y to reach Provisioned
         id: deploy-y
@@ -2748,9 +2710,6 @@ jobs:
         with:
           machine-name: ${{ env.VM_Y_NAME }}
           image-name: ${{ steps.build-image.outputs.image-name }}
-          posthook-names: |
-            ${{ steps.marker.outputs.name }}
-            kezio-default-finalize
 
       # Proof 6: the same three-layer verification the single-segment
       # deploy lane uses, for both machines.
@@ -2760,7 +2719,8 @@ jobs:
           machine-name: ${{ steps.deploy-x.outputs.machine-name }}
           namespace: ${{ steps.deploy-x.outputs.namespace }}
           deploy-run-name: ${{ steps.deploy-x.outputs.deploy-run-name }}
-          pre-deploy-timestamp-ns: ${{ steps.pre-deploy.outputs.timestamp-ns }}
+          marker-path: ${{ steps.build-image.outputs.marker-path }}
+          expected-marker-token: ${{ steps.build-image.outputs.marker-token }}
 
       - name: Verify machine Y's deploy landed
         uses: ./.github/actions/verify-deploy
@@ -2768,7 +2728,8 @@ jobs:
           machine-name: ${{ steps.deploy-y.outputs.machine-name }}
           namespace: ${{ steps.deploy-y.outputs.namespace }}
           deploy-run-name: ${{ steps.deploy-y.outputs.deploy-run-name }}
-          pre-deploy-timestamp-ns: ${{ steps.pre-deploy.outputs.timestamp-ns }}
+          marker-path: ${{ steps.build-image.outputs.marker-path }}
+          expected-marker-token: ${{ steps.build-image.outputs.marker-token }}
 
       # Proof 2: two seeder Deployments for the one Image, one per Site,
       # each single-homed on its own Site's seeding NAD.

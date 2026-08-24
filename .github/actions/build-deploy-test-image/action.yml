@@ -7,7 +7,14 @@ description: >-
   this lane's own surface minimal), injects qemu-guest-agent into it
   offline, slices and content-hashes every one of its partitions the same
   way the ingest Job will, then uploads it and waits for the resulting
-  Image to reach Ready. The guest agent is baked in at build time rather
+  Image to reach Ready.
+
+  The same offline virt-customize call also writes a fresh per-run marker
+  token to marker-path in the image, and this action reports the token and
+  that path as outputs. A later step reads the file back out of the booted
+  guest through the guest agent: the token is new on every CI run and the
+  target disk starts blank, so reading it back is proof that the guest
+  runs content this run wrote. The guest agent is baked in at build time rather
   than installed by a deploy-time hook: the provisioning network a
   deployed guest boots into has no guaranteed internet egress, so
   package installation belongs on the runner (which already needs
@@ -33,6 +40,13 @@ inputs:
     description: 'Name to give the uploaded Image (and image-service upload).'
     required: false
     default: "kezio-e2e-deploy-test"
+  marker-path:
+    description: >-
+      Guest path the per-run marker token is written to at build time. Its
+      parent directory must already exist in the base image: virt-customize
+      --write creates the file, not the path to it.
+    required: false
+    default: "/etc/kezio-build-id"
   namespace:
     description: 'Namespace the image-service Service and the Image live in.'
     required: false
@@ -68,6 +82,12 @@ outputs:
   image-name:
     description: 'Name of the Image object created (this action''s own image-name input, echoed back for a downstream step that only has this action''s outputs to work from).'
     value: ${{ inputs.image-name }}
+  marker-path:
+    description: 'Guest path the marker token was written to (this action''s own marker-path input, echoed back so a verifying step needs no second copy of it).'
+    value: ${{ inputs.marker-path }}
+  marker-token:
+    description: 'Marker token baked into the image for this run. A verifying step reads marker-path back out of the booted guest and compares it against this value.'
+    value: ${{ steps.marker.outputs.token }}
 
 runs:
   using: composite
@@ -102,7 +122,12 @@ runs:
         manifest_url="${CLOUD_IMAGE_URL%.img}.manifest"
         curl -fsSL --retry 3 -o "${RUNNER_TEMP}/base.manifest" "${manifest_url}"
 
-    - name: Inject qemu-guest-agent offline
+    - name: Generate this run's marker token
+      id: marker
+      shell: bash
+      run: echo "token=$(openssl rand -hex 16)" >>"${GITHUB_OUTPUT}"
+
+    - name: Inject qemu-guest-agent and the marker token offline
       # --no-network + dpkg -i rather than --network + --install: booting
       # the appliance's networking hit unresolvable passt/DHCP failures
       # in a runner environment in the past (see this repo's history for
@@ -128,7 +153,15 @@ runs:
       # no [Install] section - it is systemd device-activated, starting
       # itself the moment the guest's virtio-serial guest-agent channel
       # appears (which KubeVirt always exposes), with nothing to enable.
+      #
+      # --write places the marker token in the same call: it is a plain
+      # file write inside the appliance and needs no network, so it stays
+      # beside the offline install rather than adding a second appliance
+      # boot.
       shell: bash
+      env:
+        MARKER_PATH: ${{ inputs.marker-path }}
+        MARKER_TOKEN: ${{ steps.marker.outputs.token }}
       run: |
         set -euo pipefail
 
@@ -184,6 +217,7 @@ runs:
         # minute on KVM).
         if ! timeout 300 virt-customize -a "${RUNNER_TEMP}/base.img" \
           --no-network \
+          --write "${MARKER_PATH}:${MARKER_TOKEN}" \
           --copy-in "${qga_deb_dir}:/tmp" \
           --run-command 'dpkg -i /tmp/qga-debs/*.deb' \
           --verbose >"${guestfs_log}" 2>&1; then

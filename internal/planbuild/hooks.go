@@ -119,9 +119,9 @@ func hookTemplateData(shared map[string]any, hook *keziov1alpha2.PostHook) map[s
 }
 
 // resolveStep resolves one PostHookStep into its wire ResolvedHookStep: a
-// builtin step carries its name through verbatim; a script or
-// chrootScript step has its content fetched (fetchScriptSource) and
-// templated (renderTemplate) against data.
+// builtin step carries its name through verbatim; a script step has its
+// content fetched (fetchScriptSource) and templated (renderTemplate)
+// against data.
 func (b *Builder) resolveStep(ctx context.Context, ns string, step keziov1alpha2.PostHookStep, data map[string]any, defaults builtinDefaults) (agentapi.ResolvedHookStep, error) {
 	switch step.Type() {
 	case keziov1alpha2.PostHookStepTypeBuiltin:
@@ -138,19 +138,16 @@ func (b *Builder) resolveStep(ctx context.Context, ns string, step keziov1alpha2
 		}, nil
 
 	case keziov1alpha2.PostHookStepTypeScript:
-		return b.resolveScriptStep(ctx, ns, agentapi.HookStepTypeScript, step.OSFamily, *step.Script, data)
-
-	case keziov1alpha2.PostHookStepTypeChrootScript:
-		return b.resolveScriptStep(ctx, ns, agentapi.HookStepTypeChrootScript, step.OSFamily, *step.ChrootScript, data)
+		return b.resolveScriptStep(ctx, ns, step.OSFamily, *step.Script, data)
 
 	default:
-		return agentapi.ResolvedHookStep{}, fmt.Errorf("step has no builtin, script, or chrootScript set")
+		return agentapi.ResolvedHookStep{}, fmt.Errorf("step has neither builtin nor script set")
 	}
 }
 
 // resolveScriptStep fetches source's content, templates it against data,
-// and wraps the result as a ResolvedHookStep of the given wire type.
-func (b *Builder) resolveScriptStep(ctx context.Context, ns, stepType, osFamily string, source keziov1alpha2.PostHookScriptSource, data map[string]any) (agentapi.ResolvedHookStep, error) {
+// and wraps the result as a script ResolvedHookStep.
+func (b *Builder) resolveScriptStep(ctx context.Context, ns, osFamily string, source keziov1alpha2.PostHookScriptSource, data map[string]any) (agentapi.ResolvedHookStep, error) {
 	raw, err := b.fetchScriptSource(ctx, ns, source)
 	if err != nil {
 		return agentapi.ResolvedHookStep{}, err
@@ -160,7 +157,7 @@ func (b *Builder) resolveScriptStep(ctx context.Context, ns, stepType, osFamily 
 		return agentapi.ResolvedHookStep{}, &ValidationError{Reason: fmt.Sprintf("templating script: %v", err)}
 	}
 	return agentapi.ResolvedHookStep{
-		Type:           stepType,
+		Type:           agentapi.HookStepTypeScript,
 		Content:        content,
 		OSFamily:       osFamily,
 		TimeoutSeconds: source.EffectiveTimeoutSeconds(),

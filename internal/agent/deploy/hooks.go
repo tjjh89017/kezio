@@ -20,19 +20,19 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 )
 
-// hookCleanupTimeout bounds mount/unmount cleanup work done after a
-// chrootScript step's own timeout has already elapsed (or the step
-// panicked) - see runChrootScriptStep. It is independent of the step's
-// own TimeoutSeconds so cleanup is not itself cut short by the deadline
-// that just fired.
+// hookCleanupTimeout bounds unmount cleanup work done after the step that
+// made the mount has already failed or timed out. It is independent of
+// the step's own TimeoutSeconds so cleanup is not itself cut short by the
+// deadline that just fired.
 const hookCleanupTimeout = 30 * time.Second
 
 // runHooks runs every hook in plan.Hooks, in order, and every step within
@@ -82,19 +82,19 @@ func (e *Executor) runHookStep(ctx context.Context, plan *agentapi.DeployPlan, s
 	case agentapi.HookStepTypeBuiltin:
 		return e.runBuiltinStep(ctx, plan, step)
 	case agentapi.HookStepTypeScript:
-		return e.runScriptStep(ctx, step)
-	case agentapi.HookStepTypeChrootScript:
-		return e.runChrootScriptStep(ctx, plan, step)
+		return e.runScriptStep(ctx, plan, step)
 	default:
 		return fmt.Errorf("unknown post hook step type %q", step.Type)
 	}
 }
 
 // runScriptStep writes step.Content to a temp file in the live OS and
-// runs it with /bin/sh -e - nothing mounted, no chroot. The script is
-// removed once it returns, whether it succeeded, failed, or its context
-// expired.
-func (e *Executor) runScriptStep(ctx context.Context, step agentapi.ResolvedHookStep) error {
+// runs it with /bin/sh -e - nothing mounted. The script gets plan's
+// device paths through its environment (scriptStepEnv), which is all a
+// script that must reach the deployed content needs to mount the right
+// device itself. The temp file is removed once the script returns,
+// whether it succeeded, failed, or its context expired.
+func (e *Executor) runScriptStep(ctx context.Context, plan *agentapi.DeployPlan, step agentapi.ResolvedHookStep) error {
 	f, err := os.CreateTemp("", "kezio-posthook-*.sh")
 	if err != nil {
 		return fmt.Errorf("creating script temp file: %w", err)
@@ -114,103 +114,79 @@ func (e *Executor) runScriptStep(ctx context.Context, step agentapi.ResolvedHook
 		return fmt.Errorf("making script temp file executable: %w", err)
 	}
 
-	if _, err := e.Runner.Run(ctx, nil, "/bin/sh", "-e", path); err != nil {
+	if _, err := e.Runner.RunEnv(ctx, scriptStepEnv(plan), nil, "/bin/sh", "-e", path); err != nil {
 		return fmt.Errorf("running script: %w", err)
 	}
 	return nil
 }
 
-// chrootBindMounts is the ordered list of live-OS directories
-// runChrootScriptStep bind-mounts into the chroot. Mounted in this
-// order; unmounted in the reverse order.
-var chrootBindMounts = []string{"proc", "sys", "dev"}
+// Environment variable names a script step gets its device paths under.
+// This set is the documented contract a PostHook script may rely on (see
+// keziov1alpha2.PostHookStep.Script); keep the names stable.
+//
+//   - KEZIO_TARGET_DISK is the OS image's target disk, absent when the
+//     plan deploys no OS image.
+//   - KEZIO_PARTITIONS lists that disk's partition numbers, separated by
+//     spaces, in plan order.
+//   - KEZIO_PART_<number> is one such partition's device path.
+//   - KEZIO_DATA_DISKS lists the 1-based index of every data image disk,
+//     separated by spaces, in plan order.
+//   - KEZIO_DATA_DISK_<index> is one data image disk's device path, with
+//     KEZIO_DATA_DISK_<index>_PARTITIONS and
+//     KEZIO_DATA_DISK_<index>_PART_<number> as that disk's counterparts of
+//     the two names above.
+const (
+	envTargetDisk = "KEZIO_TARGET_DISK"
+	envPartitions = "KEZIO_PARTITIONS"
+	envPartPrefix = "KEZIO_PART_"
+	envDataDisks  = "KEZIO_DATA_DISKS"
+	envDataPrefix = "KEZIO_DATA_DISK_"
+)
 
-// chrootRootSlot returns the slot runChrootScriptStep mounts as "the
-// deployed root file system": plan.Slots' last entry (kezio's own layout
-// convention puts the OS root last, the same partition
-// growLastPartition's own default targets - see that function's doc
-// comment), which must carry restored content (Torrent set) for a chroot
-// to make sense. A blank slot (mkfs/swap) in last position means the
-// plan has no root file system this step can chroot into.
-func chrootRootSlot(plan *agentapi.DeployPlan) (agentapi.DeploySlot, error) {
-	if len(plan.Slots) == 0 {
-		return agentapi.DeploySlot{}, fmt.Errorf("plan has no OS disk slots to chroot into")
+// scriptStepEnv builds the "NAME=value" environment entries a script step
+// runs with. A disk with no device path contributes nothing, so a script
+// reading a name that is absent can tell "the plan has no such disk" from
+// "the plan has one" with a plain shell test.
+func scriptStepEnv(plan *agentapi.DeployPlan) []string {
+	env := make([]string, 0, 2+len(plan.Slots)+2*len(plan.DataImages))
+	if plan.TargetDisk != "" {
+		env = append(env, envTargetDisk+"="+plan.TargetDisk)
+		env = append(env, slotEnv(envPartitions, envPartPrefix, plan.Slots)...)
 	}
-	last := plan.Slots[len(plan.Slots)-1]
-	if last.Torrent == nil {
-		return agentapi.DeploySlot{}, fmt.Errorf("plan's last OS disk slot (number %d) has no restored content to chroot into", last.Number)
+
+	indexes := make([]string, 0, len(plan.DataImages))
+	for i, di := range plan.DataImages {
+		if di.TargetDisk == "" {
+			continue
+		}
+		index := strconv.Itoa(i + 1)
+		indexes = append(indexes, index)
+		env = append(env, envDataPrefix+index+"="+di.TargetDisk)
+		env = append(env, slotEnv(envDataPrefix+index+"_PARTITIONS", envDataPrefix+index+"_PART_", di.Slots)...)
 	}
-	return last, nil
+	if len(indexes) > 0 {
+		env = append(env, envDataDisks+"="+strings.Join(indexes, " "))
+	}
+	return env
 }
 
-// runChrootScriptStep mounts the OS image's root partition
-// (chrootRootSlot) at a fresh temp mountpoint, bind-mounts /proc, /sys,
-// /dev under it, writes step.Content inside as a script, and runs it via
-// chroot + /bin/sh -e. Every mount made here is unmounted (in reverse
-// order) before this method returns, including when the script fails,
-// times out, or this method itself panics.
-//
-// Unlike the reference this was ported from, the root slot's own file
-// system type is not on the wire (DeployTorrent carries none), so the
-// mount below cannot pass an explicit -t the way the ESP mount in
-// finalize.go does; it relies on the kernel's own file system
-// autodetection.
-func (e *Executor) runChrootScriptStep(ctx context.Context, plan *agentapi.DeployPlan, step agentapi.ResolvedHookStep) error {
-	root, err := chrootRootSlot(plan)
-	if err != nil {
-		return err
-	}
-
-	mountpoint, err := os.MkdirTemp("", "kezio-posthook-root-")
-	if err != nil {
-		return fmt.Errorf("creating chroot mountpoint: %w", err)
-	}
-
-	// mounted tracks every successful mount, in mount order, so the
-	// deferred cleanup below can unmount in exactly the reverse order -
-	// including a partial set, when a bind mount partway through this
-	// function failed. Capacity is the root mount plus every
-	// chrootBindMounts entry, the most this ever holds.
-	mounted := make([]string, 0, 1+len(chrootBindMounts))
-	defer func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), hookCleanupTimeout)
-		e.unmountAll(cleanupCtx, mounted)
-		cancel()
-		if err := os.Remove(mountpoint); err != nil && !os.IsNotExist(err) {
-			e.log("removing chroot mountpoint %s: %v", mountpoint, err)
+// slotEnv returns one disk's slot entries: listName carrying every
+// partition number, then one devicePrefix+number entry per slot that has
+// a resolved device path.
+func slotEnv(listName, devicePrefix string, slots []agentapi.DeploySlot) []string {
+	env := make([]string, 0, len(slots)+1)
+	numbers := make([]string, 0, len(slots))
+	for _, s := range slots {
+		number := strconv.Itoa(int(s.Number))
+		numbers = append(numbers, number)
+		if s.Device != "" {
+			env = append(env, devicePrefix+number+"="+s.Device)
 		}
-		if r := recover(); r != nil {
-			panic(r)
-		}
-	}()
-
-	if _, err := e.Runner.Run(ctx, nil, "mount", root.Device, mountpoint); err != nil {
-		return fmt.Errorf("mounting root partition %s at %s: %w", root.Device, mountpoint, err)
 	}
-	mounted = append(mounted, mountpoint)
-
-	for _, sub := range chrootBindMounts {
-		target := filepath.Join(mountpoint, sub)
-		if err := os.MkdirAll(target, 0o755); err != nil {
-			return fmt.Errorf("creating chroot bind mount target %s: %w", target, err)
-		}
-		if _, err := e.Runner.Run(ctx, nil, "mount", "--bind", "/"+sub, target); err != nil {
-			return fmt.Errorf("bind mounting /%s at %s: %w", sub, target, err)
-		}
-		mounted = append(mounted, target)
+	if len(numbers) == 0 {
+		return nil
 	}
-
-	const chrootScriptPath = "/.kezio-posthook.sh"
-	hostScriptPath := filepath.Join(mountpoint, chrootScriptPath)
-	if err := os.WriteFile(hostScriptPath, []byte(step.Content), 0o700); err != nil {
-		return fmt.Errorf("writing chroot script: %w", err)
-	}
-	defer func() { _ = os.Remove(hostScriptPath) }()
-
-	if _, err := e.Runner.Run(ctx, nil, "chroot", mountpoint, "/bin/sh", "-e", chrootScriptPath); err != nil {
-		return fmt.Errorf("running chroot script: %w", err)
-	}
-	return nil
+	return append(env, listName+"="+strings.Join(numbers, " "))
 }
 
 // unmountAll unmounts every path in mounted, in reverse order (last

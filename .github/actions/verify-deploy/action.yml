@@ -27,15 +27,14 @@ description: >-
   of a real reboot into the deployed disk - the live boot environment
   kezio-agent ran from never runs qemu-guest-agent at all.
 
-  Layer 3 (marker file) reads back the marker
-  create-deploy-marker-posthook's PostHook wrote, through the same guest
+  Layer 3 (marker token) reads back the marker token
+  build-deploy-test-image baked into the image, through the same guest
   agent: `virsh qemu-agent-command` inside the VM's own virt-launcher pod
   issuing QGA's guest-file-open/read/close, since there is no SSH path to
-  the guest. Checked against two things, per create-deploy-marker-
-  posthook's own contract - the marker's "machine=" line must match this
-  Machine, and its "deployedAt=" nanosecond timestamp must postdate
-  pre-deploy-timestamp-ns, ruling out a stale marker a previous deploy of
-  the same disk left behind.
+  the guest. The token read back must equal expected-marker-token. The
+  token is new on every CI run and the target disk starts blank, so a
+  match proves the guest runs content this run wrote, not content an
+  earlier run left on the disk.
 
 inputs:
   machine-name:
@@ -56,17 +55,13 @@ inputs:
       lane's own convention.
     required: false
     default: ""
-  pre-deploy-timestamp-ns:
-    description: >-
-      Unix nanosecond timestamp captured before deploy-machine was called
-      (e.g. `date -u +%s%N`). The marker's deployedAt must be later than
-      this, or it is a stale marker left by an earlier deploy of the same
-      disk.
+  expected-marker-token:
+    description: Marker token baked into the deployed image (build-deploy-test-image's own marker-token output).
     required: true
   marker-path:
-    description: Guest path the marker file was written to (create-deploy-marker-posthook's own contract).
+    description: Guest path the marker token was written to (build-deploy-test-image's own marker-path output).
     required: false
-    default: "/var/lib/kezio/e2e-deploy-marker"
+    default: "/etc/kezio-build-id"
   guest-agent-timeout:
     description: >-
       Timeout to wait for the VMI's AgentConnected condition after the
@@ -140,7 +135,7 @@ runs:
         done
         echo "layer 2 (booted from disk) passed"
 
-    - name: "Layer 3: marker file read back through the guest agent"
+    - name: "Layer 3: marker token read back through the guest agent"
       # No SSH path to the guest: read via QGA's guest-file-* commands
       # issued through `virsh qemu-agent-command` inside the VM's own
       # virt-launcher pod, the same route KubeVirt itself uses to detect
@@ -151,7 +146,7 @@ runs:
         MACHINE_NAME: ${{ inputs.machine-name }}
         VM_NAME: ${{ inputs.vm-name }}
         MARKER_PATH: ${{ inputs.marker-path }}
-        PRE_DEPLOY_TIMESTAMP_NS: ${{ inputs.pre-deploy-timestamp-ns }}
+        EXPECTED_MARKER_TOKEN: ${{ inputs.expected-marker-token }}
       run: |
         set -euo pipefail
         vm_name="${VM_NAME:-${MACHINE_NAME}}"
@@ -172,7 +167,7 @@ runs:
         open_reply="$(qga_exec "{\"execute\":\"guest-file-open\",\"arguments\":{\"path\":\"${MARKER_PATH}\",\"mode\":\"r\"}}")"
         handle="$(jq -r '.return' <<<"${open_reply}")"
         if [ "${handle}" = "null" ] || [ -z "${handle}" ]; then
-          echo "::error::layer 3 (marker file) failed: guest-file-open on ${MARKER_PATH} failed - the marker is missing, meaning the PostHook that writes it never ran on this disk: ${open_reply}" >&2
+          echo "::error::layer 3 (marker token) failed: guest-file-open on ${MARKER_PATH} failed - the marker is missing, so the guest is not running the image this run built: ${open_reply}" >&2
           exit 1
         fi
 
@@ -180,32 +175,18 @@ runs:
         buf_b64="$(jq -r '.return["buf-b64"] // empty' <<<"${read_reply}")"
         qga_exec "{\"execute\":\"guest-file-close\",\"arguments\":{\"handle\":${handle}}}" >/dev/null
         if [ -z "${buf_b64}" ]; then
-          echo "::error::layer 3 (marker file) failed: guest-file-read on ${MARKER_PATH} failed - the guest agent did not return marker content: ${read_reply}" >&2
+          echo "::error::layer 3 (marker token) failed: guest-file-read on ${MARKER_PATH} failed - the guest agent did not return marker content: ${read_reply}" >&2
           exit 1
         fi
 
-        marker_content="$(printf '%s' "${buf_b64}" | base64 -d)"
-        echo "marker content: ${marker_content}"
+        marker_token="$(printf '%s' "${buf_b64}" | base64 -d | tr -d '\n')"
+        echo "marker token: ${marker_token}"
 
-        marker_machine="$(printf '%s\n' "${marker_content}" | sed -n 's/^machine=//p')"
-        marker_deployed_at="$(printf '%s\n' "${marker_content}" | sed -n 's/^deployedAt=//p')"
-
-        fail=0
-        if [ "${marker_machine}" != "${MACHINE_NAME}" ]; then
-          echo "::error::layer 3 (marker file) failed: marker machine=${marker_machine:-<empty>}, want ${MACHINE_NAME} - the marker on disk was not written by this Machine's deploy" >&2
-          fail=1
-        fi
-        if ! [[ "${marker_deployed_at}" =~ ^[0-9]+$ ]]; then
-          echo "::error::layer 3 (marker file) failed: marker deployedAt=${marker_deployed_at:-<empty>} is not a valid unix nanosecond timestamp" >&2
-          fail=1
-        elif [ "${marker_deployed_at}" -le "${PRE_DEPLOY_TIMESTAMP_NS}" ]; then
-          echo "::error::layer 3 (marker file) failed: marker deployedAt=${marker_deployed_at} does not postdate pre-deploy-timestamp-ns=${PRE_DEPLOY_TIMESTAMP_NS} - this is a stale marker left by an earlier deploy of the same disk" >&2
-          fail=1
-        fi
-        if [ "${fail}" -ne 0 ]; then
+        if [ "${marker_token}" != "${EXPECTED_MARKER_TOKEN}" ]; then
+          echo "::error::layer 3 (marker token) failed: guest has '${marker_token}', expected '${EXPECTED_MARKER_TOKEN}' - the disk does not carry the image this run built" >&2
           exit 1
         fi
-        echo "layer 3 (marker file) passed"
+        echo "layer 3 (marker token) passed"
 
     - name: Dump diagnostics on failure
       if: failure()

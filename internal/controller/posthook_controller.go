@@ -86,7 +86,7 @@ func (r *PostHookReconciler) onChange(ctx context.Context, ph *keziov1alpha2.Pos
 	return r.recordStatus(ctx, ph, metav1.ConditionTrue, "PostHookValid", "spec passes validation and every referenced source resolves")
 }
 
-// missingSources reports, for every script/chrootScript step's
+// missingSources reports, for every script step's
 // configMapRef/secretRef, a description of why it does not resolve in
 // ph's own namespace - PostHookScriptSource carries no namespace field, so
 // a ConfigMap/Secret it names always lives alongside the PostHook
@@ -95,23 +95,15 @@ func (r *PostHookReconciler) onChange(ctx context.Context, ph *keziov1alpha2.Pos
 func (r *PostHookReconciler) missingSources(ctx context.Context, ph *keziov1alpha2.PostHook) ([]string, error) {
 	var missing []string
 	for i, step := range ph.Spec.Steps {
-		for _, kind := range [...]struct {
-			path string
-			src  *keziov1alpha2.PostHookScriptSource
-		}{
-			{fmt.Sprintf("spec.steps[%d].script", i), step.Script},
-			{fmt.Sprintf("spec.steps[%d].chrootScript", i), step.ChrootScript},
-		} {
-			if kind.src == nil {
-				continue
-			}
-			problem, err := r.checkSource(ctx, ph.Namespace, kind.path, *kind.src)
-			if err != nil {
-				return nil, err
-			}
-			if problem != "" {
-				missing = append(missing, problem)
-			}
+		if step.Script == nil {
+			continue
+		}
+		problem, err := r.checkSource(ctx, ph.Namespace, fmt.Sprintf("spec.steps[%d].script", i), *step.Script)
+		if err != nil {
+			return nil, err
+		}
+		if problem != "" {
+			missing = append(missing, problem)
 		}
 	}
 	return missing, nil

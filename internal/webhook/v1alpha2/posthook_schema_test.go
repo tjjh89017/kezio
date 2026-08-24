@@ -23,6 +23,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
@@ -60,7 +61,7 @@ var _ = Describe("PostHook CRD schema", func() {
 		Expect(k8sClient.Create(ctx, ph)).To(HaveOccurred())
 	})
 
-	It("rejects a step with none of builtin, script, or chrootScript set", func() {
+	It("rejects a step with neither builtin nor script set", func() {
 		ph := newPostHook()
 		ph.Spec.Steps = []keziov1alpha2.PostHookStep{{}}
 		Expect(k8sClient.Create(ctx, ph)).To(HaveOccurred())
@@ -115,14 +116,28 @@ var _ = Describe("PostHook CRD schema", func() {
 		Expect(k8sClient.Create(ctx, ph)).To(HaveOccurred())
 	})
 
-	It("admits a chrootScript sourced from a secretRef", func() {
+	It("admits a script sourced from a secretRef", func() {
 		ph := newPostHook()
 		ph.Spec.Steps = []keziov1alpha2.PostHookStep{
-			{ChrootScript: &keziov1alpha2.PostHookScriptSource{
+			{Script: &keziov1alpha2.PostHookScriptSource{
 				SecretRef: &keziov1alpha2.SecretKeyRef{Name: "creds", Key: "token"},
 			}},
 		}
 		Expect(k8sClient.Create(ctx, ph)).To(Succeed())
+	})
+
+	It("rejects a step naming the removed chrootScript kind", func() {
+		ph := newPostHook()
+		obj := &unstructured.Unstructured{Object: map[string]any{
+			"metadata": map[string]any{"name": ph.Name, "namespace": ph.Namespace},
+			"spec": map[string]any{
+				"steps": []any{map[string]any{
+					"chrootScript": map[string]any{"script": "echo hi"},
+				}},
+			},
+		}}
+		obj.SetGroupVersionKind(keziov1alpha2.GroupVersion.WithKind("PostHook"))
+		Expect(k8sClient.Create(ctx, obj)).To(HaveOccurred())
 	})
 
 	It("rejects duplicate param names via the params list-map key", func() {

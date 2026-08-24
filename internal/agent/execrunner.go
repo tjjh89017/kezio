@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 
 	"github.com/tjjh89017/kezio/internal/agent/deploy"
@@ -32,8 +33,19 @@ type ExecRunner struct{}
 var _ deploy.Runner = ExecRunner{}
 
 // Run implements deploy.Runner.
-func (ExecRunner) Run(ctx context.Context, stdin []byte, name string, args ...string) ([]byte, error) {
+func (r ExecRunner) Run(ctx context.Context, stdin []byte, name string, args ...string) ([]byte, error) {
+	return r.RunEnv(ctx, nil, stdin, name, args...)
+}
+
+// RunEnv implements deploy.Runner. env is appended to this process's own
+// environment, so a command still sees PATH and everything else the live
+// environment set up; a name env repeats wins, which is how exec applies
+// duplicate entries.
+func (ExecRunner) RunEnv(ctx context.Context, env []string, stdin []byte, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}

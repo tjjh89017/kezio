@@ -88,10 +88,9 @@ var osFamilyRestrictedBuiltins = map[string]bool{
 }
 
 // ValidateStep validates one step at spec.steps[i]: exactly one kind is
-// set, a script/chrootScript step has exactly one content source, an
-// OS-restricted builtin declares osFamily=Linux, and every template
-// placeholder in an inline script content references a declared param or a
-// reserved name.
+// set, a script step has exactly one content source, an OS-restricted
+// builtin declares osFamily=Linux, and every template placeholder in an
+// inline script content references a declared param or a reserved name.
 //
 // The exactly-one-kind and exactly-one-source rules are also enforced by
 // the CRD schema's CEL rules; re-checking them here keeps this function
@@ -102,7 +101,7 @@ func ValidateStep(i int, step keziov1alpha2.PostHookStep, declared map[string]bo
 
 	switch step.Type() {
 	case keziov1alpha2.PostHookStepTypeUnknown:
-		return fmt.Errorf("%s: exactly one of builtin, script, or chrootScript must be set", path)
+		return fmt.Errorf("%s: exactly one of builtin or script must be set", path)
 	case keziov1alpha2.PostHookStepTypeBuiltin:
 		if err := validateOSFamilyGating(path, step); err != nil {
 			return err
@@ -110,8 +109,6 @@ func ValidateStep(i int, step keziov1alpha2.PostHookStep, declared map[string]bo
 		return validateBuiltinParams(path, *step.Builtin, declared)
 	case keziov1alpha2.PostHookStepTypeScript:
 		return validateScriptSource(path+".script", *step.Script, declared)
-	case keziov1alpha2.PostHookStepTypeChrootScript:
-		return validateScriptSource(path+".chrootScript", *step.ChrootScript, declared)
 	}
 	return nil
 }
@@ -164,8 +161,8 @@ func validateBuiltinParams(path string, step keziov1alpha2.PostHookBuiltinStep, 
 	return nil
 }
 
-// validateScriptSource checks a script/chrootScript step's content source
-// and, for an inline script, its template placeholders.
+// validateScriptSource checks a script step's content source and, for an
+// inline script, its template placeholders.
 func validateScriptSource(path string, src keziov1alpha2.PostHookScriptSource, declared map[string]bool) error {
 	if src.SourceKind() == keziov1alpha2.PostHookScriptSourceUnknown {
 		return fmt.Errorf("%s: exactly one of script, configMapRef, or secretRef must be set", path)
@@ -182,9 +179,7 @@ func validateScriptSource(path string, src keziov1alpha2.PostHookScriptSource, d
 
 // CheckOSFamilyCompatible rejects a step whose explicit osFamily does not
 // match imageOSFamily: a step's own OSFamily doc comment says an absent
-// value applies regardless, so such a step always passes here too,
-// including a chrootScript step - the chroot it mounts is always this
-// image's deployed root, so an unset osFamily never conflicts with it.
+// value applies regardless, so such a step always passes here too.
 // Only an explicit mismatch is rejected, on any step kind: an attached
 // step whose declared osFamily can never match the image it is checked
 // against would simply never run once resolved, which is virtually always

@@ -60,44 +60,42 @@ func ensurePostHookSourceIndexes(mgr ctrl.Manager) error {
 	return posthookSourceIndexesErr
 }
 
-// indexPostHookConfigMapRefs extracts every ConfigMap name obj's
-// script/chrootScript steps reference, for posthookConfigMapRefIndex.
+// indexPostHookConfigMapRefs extracts every ConfigMap name obj's script
+// steps reference, for posthookConfigMapRefIndex.
 func indexPostHookConfigMapRefs(obj client.Object) []string {
 	ph, ok := obj.(*keziov1alpha2.PostHook)
 	if !ok {
 		return nil
 	}
 	seen := make(map[string]bool)
-	var names []string
+	names := make([]string, 0, len(ph.Spec.Steps))
 	for _, step := range ph.Spec.Steps {
-		for _, src := range [...]*keziov1alpha2.PostHookScriptSource{step.Script, step.ChrootScript} {
-			if src == nil || src.ConfigMapRef == nil || seen[src.ConfigMapRef.Name] {
-				continue
-			}
-			seen[src.ConfigMapRef.Name] = true
-			names = append(names, src.ConfigMapRef.Name)
+		src := step.Script
+		if src == nil || src.ConfigMapRef == nil || seen[src.ConfigMapRef.Name] {
+			continue
 		}
+		seen[src.ConfigMapRef.Name] = true
+		names = append(names, src.ConfigMapRef.Name)
 	}
 	return names
 }
 
-// indexPostHookSecretRefs extracts every Secret name obj's
-// script/chrootScript steps reference, for posthookSecretRefIndex.
+// indexPostHookSecretRefs extracts every Secret name obj's script steps
+// reference, for posthookSecretRefIndex.
 func indexPostHookSecretRefs(obj client.Object) []string {
 	ph, ok := obj.(*keziov1alpha2.PostHook)
 	if !ok {
 		return nil
 	}
 	seen := make(map[string]bool)
-	var names []string
+	names := make([]string, 0, len(ph.Spec.Steps))
 	for _, step := range ph.Spec.Steps {
-		for _, src := range [...]*keziov1alpha2.PostHookScriptSource{step.Script, step.ChrootScript} {
-			if src == nil || src.SecretRef == nil || seen[src.SecretRef.Name] {
-				continue
-			}
-			seen[src.SecretRef.Name] = true
-			names = append(names, src.SecretRef.Name)
+		src := step.Script
+		if src == nil || src.SecretRef == nil || seen[src.SecretRef.Name] {
+			continue
 		}
+		seen[src.SecretRef.Name] = true
+		names = append(names, src.SecretRef.Name)
 	}
 	return names
 }

@@ -19,8 +19,8 @@ description: >-
   posthook-names default and the same kezio-default-finalize footgun
   guard - see this action's own doc comment below), waits for that patch
   to produce a real DeployRun, and only then starts watching for
-  WritingContent. Runs strictly before the pre-deploy timestamp capture
-  and deploy-machine: deploy-machine's own merge patch right after this
+  WritingContent. Runs strictly before deploy-machine:
+  deploy-machine's own merge patch right after this
   action re-applies the identical spec.imageRef/postHookRefs values onto
   whatever Machine this action leaves behind, so it is a harmless no-op
   re-patch regardless of which DeployRun (the aborted one's retry) is
@@ -118,17 +118,14 @@ inputs:
   posthook-names:
     description: >-
       Newline-separated PostHook names, written in order to
-      spec.postHookRefs - same contract and default pairing as
-      deploy-machine's own posthook-names input (naming any hook at all
-      opts out of the kezio-default-finalize substitution, so a
-      chrootScript hook here must be paired with it). Kept identical to
-      deploy-machine's own default so the aborted attempt's plan is the
-      same shape deploy-machine's own happy-path attempt builds right
-      after.
+      spec.postHookRefs - same contract as deploy-machine's own
+      posthook-names input (naming any hook at all opts out of the
+      kezio-default-finalize substitution, so a named hook must be paired
+      with it). Kept identical to deploy-machine's own default, empty, so
+      the aborted attempt's plan is the same shape deploy-machine's own
+      happy-path attempt builds right after.
     required: false
-    default: |
-      kezio-e2e-deploy-marker
-      kezio-default-finalize
+    default: ""
   provisioning-timeout:
     description: >-
       Timeout to wait for status.currentRunRef to be set (the deploy

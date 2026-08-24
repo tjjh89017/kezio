@@ -31,15 +31,11 @@ description: >-
   returned success. Boot-from-the-deployed-disk evidence is
   VirtualMachineInstance.status.conditions[type=AgentConnected]
   returning to True (the deployed guest's own qemu-guest-agent
-  reconnecting - see verify-deploy's own layer 2) plus
-  create-deploy-marker-posthook's marker file still present with the
-  EXACT SAME deployedAt nanosecond timestamp read before the cycle, read
-  directly through the guest agent (not through verify-deploy, whose own
-  marker check only asserts "not older than a given point," not
-  "unchanged" - a re-deploy would still pass that weaker check but must
-  fail this one). An unchanged deployedAt rules out the guest having
-  net-booted and re-run the deploy instead of falling through PXE to the
-  already-deployed disk.
+  reconnecting - see verify-deploy's own layer 2) plus the marker file
+  build-deploy-test-image baked into the image still present and
+  byte-identical to the content read before the cycle, read directly
+  through the guest agent. A marker that is still there and unchanged
+  shows the guest came back up on the same deployed disk.
 
   KubeVirtBMC's one-shot-PXE quirk (the override recorded in
   VirtualMachineBMC.status.bootOverride is restored to its pre-override
@@ -80,9 +76,9 @@ inputs:
     required: false
     default: "hard"
   marker-path:
-    description: Guest path the marker file was written to (create-deploy-marker-posthook's own contract).
+    description: Guest path the marker token was written to (build-deploy-test-image's own marker-path output).
     required: false
-    default: "/var/lib/kezio/e2e-deploy-marker"
+    default: "/etc/kezio-build-id"
   annotation-clear-timeout:
     description: >-
       Timeout to wait for the controller to clear the suffixless reboot
@@ -151,14 +147,13 @@ runs:
         kubectl exec -n "${NAMESPACE}" "${launcher_pod}" -c compute -- \
           virsh qemu-agent-command "${domain}" "{\"execute\":\"guest-file-close\",\"arguments\":{\"handle\":${handle}}}" >/dev/null
 
-        marker_content="$(jq -r '.return["buf-b64"]' <<<"${read_reply}" | base64 -d)"
-        pre_deployed_at="$(printf '%s\n' "${marker_content}" | sed -n 's/^deployedAt=//p')"
-        if ! [[ "${pre_deployed_at}" =~ ^[0-9]+$ ]]; then
-          echo "::error::baseline marker deployedAt=${pre_deployed_at:-<empty>} is not a valid unix nanosecond timestamp: ${marker_content}" >&2
+        pre_marker="$(jq -r '.return["buf-b64"]' <<<"${read_reply}" | base64 -d | tr -d '\n')"
+        if [ -z "${pre_marker}" ]; then
+          echo "::error::baseline marker at ${MARKER_PATH} is empty: ${read_reply}" >&2
           exit 1
         fi
-        echo "pre-marker-deployed-at=${pre_deployed_at}" >>"${GITHUB_OUTPUT}"
-        echo "baseline marker deployedAt=${pre_deployed_at}"
+        echo "pre-marker=${pre_marker}" >>"${GITHUB_OUTPUT}"
+        echo "baseline marker=${pre_marker}"
 
     - name: Set the suffixless reboot annotation
       shell: bash
@@ -261,10 +256,9 @@ runs:
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
-        MACHINE_NAME: ${{ inputs.machine-name }}
         VM_NAME: ${{ steps.before.outputs.vm-name }}
         MARKER_PATH: ${{ inputs.marker-path }}
-        PRE_MARKER_DEPLOYED_AT: ${{ steps.before.outputs.pre-marker-deployed-at }}
+        PRE_MARKER: ${{ steps.before.outputs.pre-marker }}
       run: |
         set -euo pipefail
         launcher_pod="$(kubectl get pods -n "${NAMESPACE}" -l "kubevirt.io/vm=${VM_NAME}" -o json \
@@ -286,24 +280,14 @@ runs:
         kubectl exec -n "${NAMESPACE}" "${launcher_pod}" -c compute -- \
           virsh qemu-agent-command "${domain}" "{\"execute\":\"guest-file-close\",\"arguments\":{\"handle\":${handle}}}" >/dev/null
 
-        marker_content="$(jq -r '.return["buf-b64"]' <<<"${read_reply}" | base64 -d)"
-        echo "post-cycle marker content: ${marker_content}"
-        marker_machine="$(printf '%s\n' "${marker_content}" | sed -n 's/^machine=//p')"
-        marker_deployed_at="$(printf '%s\n' "${marker_content}" | sed -n 's/^deployedAt=//p')"
+        marker_content="$(jq -r '.return["buf-b64"]' <<<"${read_reply}" | base64 -d | tr -d '\n')"
+        echo "post-cycle marker: ${marker_content}"
 
-        fail=0
-        if [ "${marker_machine}" != "${MACHINE_NAME}" ]; then
-          echo "::error::post-cycle marker machine=${marker_machine:-<empty>}, want ${MACHINE_NAME}" >&2
-          fail=1
-        fi
-        if [ "${marker_deployed_at}" != "${PRE_MARKER_DEPLOYED_AT}" ]; then
-          echo "::error::post-cycle marker deployedAt=${marker_deployed_at:-<empty>} changed from the pre-cycle baseline ${PRE_MARKER_DEPLOYED_AT} - the guest ran a fresh deploy instead of falling through PXE to the already-deployed disk" >&2
-          fail=1
-        fi
-        if [ "${fail}" -ne 0 ]; then
+        if [ "${marker_content}" != "${PRE_MARKER}" ]; then
+          echo "::error::post-cycle marker '${marker_content}' changed from the pre-cycle baseline '${PRE_MARKER}' - the guest did not come back up on the same deployed disk" >&2
           exit 1
         fi
-        echo "marker unchanged (deployedAt=${marker_deployed_at}): the guest booted the same deployed disk"
+        echo "marker unchanged (${marker_content}): the guest booted the same deployed disk"
 
     - name: Assert the Machine stayed Provisioned/OK across the cycle
       shell: bash

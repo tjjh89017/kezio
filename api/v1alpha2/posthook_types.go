@@ -123,10 +123,7 @@ const (
 
 // PostHookScriptSource holds a script step's content, from exactly one of
 // an inline script, a ConfigMap key, or a Secret key, plus the step's
-// timeout. It backs both the "script" and "chrootScript" step kinds; the
-// two differ only in where the agent runs the script (the live OS versus a
-// chroot of the deployed root file system), not in how the content is
-// sourced.
+// timeout.
 // +kubebuilder:validation:XValidation:rule="(has(self.script) ? 1 : 0) + (has(self.configMapRef) ? 1 : 0) + (has(self.secretRef) ? 1 : 0) == 1",message="exactly one of script, configMapRef, or secretRef must be set"
 type PostHookScriptSource struct {
 	// Script is the inline script content.
@@ -179,18 +176,15 @@ const (
 	// PostHookStepTypeScript means Script is set: the step runs in the live
 	// OS, nothing mounted.
 	PostHookStepTypeScript = "script"
-	// PostHookStepTypeChrootScript means ChrootScript is set: the step runs
-	// inside a chroot of the deployed root file system.
-	PostHookStepTypeChrootScript = "chrootScript"
-	// PostHookStepTypeUnknown means none of Builtin, Script, or
-	// ChrootScript is set. The CRD's validation rejects this; the constant
-	// exists so callers have a defined zero value to check against.
+	// PostHookStepTypeUnknown means neither Builtin nor Script is set. The
+	// CRD's validation rejects this; the constant exists so callers have a
+	// defined zero value to check against.
 	PostHookStepTypeUnknown = ""
 )
 
 // PostHookStep is one ordered step of a PostHook, exactly one of a named
-// builtin, a live-OS script, or a chroot script.
-// +kubebuilder:validation:XValidation:rule="(has(self.builtin) ? 1 : 0) + (has(self.script) ? 1 : 0) + (has(self.chrootScript) ? 1 : 0) == 1",message="exactly one of builtin, script, or chrootScript must be set"
+// builtin or a live-OS script.
+// +kubebuilder:validation:XValidation:rule="(has(self.builtin) ? 1 : 0) + (has(self.script) ? 1 : 0) == 1",message="exactly one of builtin or script must be set"
 type PostHookStep struct {
 	// OSFamily restricts this step to a target OS family. Absent means the
 	// step applies regardless of OSFamily. The webhook rejects a builtin
@@ -202,29 +196,30 @@ type PostHookStep struct {
 	// Builtin runs one of the named steps KEZIO ships.
 	// +optional
 	Builtin *PostHookBuiltinStep `json:"builtin,omitempty"`
-	// Script runs in the live OS; the target disk is available but its
-	// file systems are not mounted.
+	// Script runs in the live environment the agent runs in, never in the
+	// deployed OS: the target disk carries its content, but no file system
+	// on it is mounted. The agent gives the script the device paths of the
+	// plan through the environment - KEZIO_TARGET_DISK, KEZIO_PARTITIONS,
+	// KEZIO_PART_<number>, and KEZIO_DATA_DISKS with its own
+	// KEZIO_DATA_DISK_<index>* set - so a script that must read or change
+	// the deployed content mounts the device it needs itself. A script that
+	// mounts a device must unmount it before the script ends: a mount that
+	// stays can disturb the steps that follow and the reboot into the
+	// deployed disk.
 	// +optional
 	Script *PostHookScriptSource `json:"script,omitempty"`
-	// ChrootScript runs inside a chroot of the deployed root file system.
-	// The agent mounts the root partition (plus /proc, /sys, /dev, and the
-	// ESP on its fstab path), runs the script, and unmounts.
-	// +optional
-	ChrootScript *PostHookScriptSource `json:"chrootScript,omitempty"`
 }
 
-// Type reports which of Builtin, Script, or ChrootScript is set. Returns
-// PostHookStepTypeUnknown when none is set; the CRD's validation rule keeps
-// that case out of a stored object, but a zero-valued PostHookStep can
-// still reach Go code that builds one programmatically.
+// Type reports which of Builtin or Script is set. Returns
+// PostHookStepTypeUnknown when neither is set; the CRD's validation rule
+// keeps that case out of a stored object, but a zero-valued PostHookStep
+// can still reach Go code that builds one programmatically.
 func (s PostHookStep) Type() string {
 	switch {
 	case s.Builtin != nil:
 		return PostHookStepTypeBuiltin
 	case s.Script != nil:
 		return PostHookStepTypeScript
-	case s.ChrootScript != nil:
-		return PostHookStepTypeChrootScript
 	default:
 		return PostHookStepTypeUnknown
 	}
@@ -241,8 +236,8 @@ type PostHookSpec struct {
 	// +listMapKey=name
 	// +optional
 	Params []PostHookParam `json:"params,omitempty"`
-	// Steps run in list order. Each step is exactly one of a builtin, a
-	// live-OS script, or a chroot script.
+	// Steps run in list order. Each step is exactly one of a builtin or a
+	// live-OS script.
 	// +kubebuilder:validation:MinItems=1
 	Steps []PostHookStep `json:"steps"`
 }

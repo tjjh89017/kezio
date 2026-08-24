@@ -78,12 +78,12 @@ spec:
                 x-kubernetes-list-type: map
               steps:
                 description: |-
-                  Steps run in list order. Each step is exactly one of a builtin, a
-                  live-OS script, or a chroot script.
+                  Steps run in list order. Each step is exactly one of a builtin or a
+                  live-OS script.
                 items:
                   description: |-
                     PostHookStep is one ordered step of a PostHook, exactly one of a named
-                    builtin, a live-OS script, or a chroot script.
+                    builtin or a live-OS script.
                   properties:
                     builtin:
                       description: Builtin runs one of the named steps KEZIO ships.
@@ -120,56 +120,6 @@ spec:
                       required:
                       - name
                       type: object
-                    chrootScript:
-                      description: |-
-                        ChrootScript runs inside a chroot of the deployed root file system.
-                        The agent mounts the root partition (plus /proc, /sys, /dev, and the
-                        ESP on its fstab path), runs the script, and unmounts.
-                      properties:
-                        configMapRef:
-                          description: ConfigMapRef names the ConfigMap key holding
-                            the script content.
-                          properties:
-                            key:
-                              minLength: 1
-                              type: string
-                            name:
-                              minLength: 1
-                              type: string
-                          required:
-                          - key
-                          - name
-                          type: object
-                        script:
-                          description: Script is the inline script content.
-                          type: string
-                        secretRef:
-                          description: SecretRef names the Secret key holding the
-                            script content.
-                          properties:
-                            key:
-                              minLength: 1
-                              type: string
-                            name:
-                              minLength: 1
-                              type: string
-                          required:
-                          - key
-                          - name
-                          type: object
-                        timeoutSeconds:
-                          description: |-
-                            TimeoutSeconds bounds how long the script may run before the agent
-                            treats it as failed. Defaults to PostHookDefaultTimeoutSeconds.
-                          format: int32
-                          minimum: 1
-                          type: integer
-                      type: object
-                      x-kubernetes-validations:
-                      - message: exactly one of script, configMapRef, or secretRef
-                          must be set
-                        rule: '(has(self.script) ? 1 : 0) + (has(self.configMapRef)
-                          ? 1 : 0) + (has(self.secretRef) ? 1 : 0) == 1'
                     osFamily:
                       description: |-
                         OSFamily restricts this step to a target OS family. Absent means the
@@ -184,8 +134,16 @@ spec:
                       type: string
                     script:
                       description: |-
-                        Script runs in the live OS; the target disk is available but its
-                        file systems are not mounted.
+                        Script runs in the live environment the agent runs in, never in the
+                        deployed OS: the target disk carries its content, but no file system
+                        on it is mounted. The agent gives the script the device paths of the
+                        plan through the environment - KEZIO_TARGET_DISK, KEZIO_PARTITIONS,
+                        KEZIO_PART_<number>, and KEZIO_DATA_DISKS with its own
+                        KEZIO_DATA_DISK_<index>* set - so a script that must read or change
+                        the deployed content mounts the device it needs itself. A script that
+                        mounts a device must unmount it before the script ends: a mount that
+                        stays can disturb the steps that follow and the reboot into the
+                        deployed disk.
                       properties:
                         configMapRef:
                           description: ConfigMapRef names the ConfigMap key holding
@@ -233,10 +191,9 @@ spec:
                           ? 1 : 0) + (has(self.secretRef) ? 1 : 0) == 1'
                   type: object
                   x-kubernetes-validations:
-                  - message: exactly one of builtin, script, or chrootScript must
-                      be set
+                  - message: exactly one of builtin or script must be set
                     rule: '(has(self.builtin) ? 1 : 0) + (has(self.script) ? 1 : 0)
-                      + (has(self.chrootScript) ? 1 : 0) == 1'
+                      == 1'
                 minItems: 1
                 type: array
             required:

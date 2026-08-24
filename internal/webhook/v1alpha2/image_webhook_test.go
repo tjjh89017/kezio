@@ -263,12 +263,12 @@ var _ = Describe("Image Webhook", func() {
 			Expect(validator.ValidateCreate(ctx, img)).Error().NotTo(HaveOccurred())
 		})
 
-		It("denies an Image whose referenced chrootScript hook step declares a mismatched osFamily, naming the step's field path", func() {
-			hook := newPostHook("hook-chroot-mismatch", keziov1alpha2.PostHookStep{
-				OSFamily:     keziov1alpha2.OSFamilyWindows,
-				ChrootScript: &keziov1alpha2.PostHookScriptSource{Script: "echo hi"},
+		It("denies an Image whose referenced hook step declares a mismatched osFamily, naming the step's field path", func() {
+			hook := newPostHook("hook-osfamily-mismatch", keziov1alpha2.PostHookStep{
+				OSFamily: keziov1alpha2.OSFamilyWindows,
+				Script:   &keziov1alpha2.PostHookScriptSource{Script: "echo hi"},
 			})
-			img := newImageWithHooks("image-posthook-chroot-mismatch", keziov1alpha2.NameRef{Name: hook.Name})
+			img := newImageWithHooks("image-posthook-osfamily-mismatch", keziov1alpha2.NameRef{Name: hook.Name})
 			_, err := validator.ValidateCreate(ctx, img)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("spec.postHookRefs[0]"))
