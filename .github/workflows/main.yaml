@@ -275,11 +275,16 @@ jobs:
         shell: bash
         run: kubectl create namespace scaffold-system --dry-run=client -o yaml | kubectl apply -f -
 
-      - name: Probe A -- Multus honours the default-network annotation's ips field
+      # The pool range mirrors create-provisioning-nads' own
+      # kezio-seeder-network (.101-.116); the requested address sits
+      # outside it, thus the merged pool address is unambiguous.
+      - name: Probe A -- Multus merges the default-network annotation's ips field
         uses: ./.github/actions/probe-multus-pinned-ip
         with:
           bridge-name: kezio-probe-a0
-          nad-default-cidr: 192.0.20.9/24
+          nad-pool-cidr: 192.0.20.0/24
+          nad-pool-range-start: 192.0.20.101
+          nad-pool-range-end: 192.0.20.116
           requested-ip-cidr: 192.0.20.50/24
 
       - name: Probe B -- a single-homed pod reaches another segment through NAD IPAM routes
