@@ -1,0 +1,219 @@
+name: Collect site/tracker/seeder/bootd/runner-network diagnostics
+
+description: >-
+  Gathers the evidence a multi-segment, multi-(tracker, seeder, bootd)
+  lane needs when it fails, into one directory, then uploads that
+  directory (plus any caller-supplied extra paths, e.g. a
+  capture-vm-console logfile) as a single artifact. Covers ground the
+  existing diagnostics actions do not: describe + current/previous logs
+  for every tracker and seeder Deployment/pod (not only bootd), each
+  such pod's `k8s.v1.cni.cncf.io/network-status` annotation (the only
+  place Multus records the address a pod actually got - what
+  address-pinning assertions live or die on), the same treatment for
+  bootd pods per Subnet, and a runner-wide network snapshot (bridges,
+  addresses, routes, neighbor table, nftables/iptables rulesets, sysctl
+  forwarding flags) rather than one bridge's iptables rules alone.
+
+  Every command runs under `set +e` and is best-effort: a label
+  selector that matches nothing, or a tool that is not installed (nft on
+  a runner with only iptables, for example), is recorded as "nothing
+  found" in the output file rather than failing this step - a cluster
+  with no tracker pods yet, or a runner with no nftables, must not lose
+  the rest of the bundle. This action never inspects or changes the
+  calling job's own outcome; the caller decides whether to gate its
+  `uses:` step with `if: always()` or `if: failure()`.
+
+  Does not call capture-vm-console: that action backgrounds a
+  continuous attach loop from the moment a VM is Ready, for the rest of
+  the job, while this action runs once, at the end. A lane that creates
+  VMs calls capture-vm-console itself, early, and passes this action's
+  own logfile path(s) through `extra-artifact-paths` so the console
+  history rides in the same uploaded artifact instead of a separate
+  upload.
+
+inputs:
+  artifact-name-prefix:
+    description: >-
+      Prefix for the uploaded artifact's name, e.g. a lane name or a
+      matrix leg. Required so two lanes, or two legs of one matrix,
+      never collide on one artifact name.
+    required: true
+  output-dir:
+    description: Directory the collected files are written into (created if missing).
+    required: false
+    default: site-diagnostics-bundle
+  namespaces:
+    description: >-
+      Newline-separated namespaces to scan for tracker/seeder/bootd
+      Deployments and pods. Blank lines are skipped.
+    required: false
+    default: "scaffold-system"
+  tracker-label-selector:
+    description: >-
+      Label selector matching every tracker Deployment/pod across
+      `namespaces`. Defaults to the legacy single-tracker opentracker
+      label; a Site-scoped lane passes its own tracker selector once the
+      per-Site tracker exists.
+    required: false
+    default: "app.kubernetes.io/component=opentracker"
+  seeder-label-selector:
+    description: Label selector matching every seeder Deployment/pod across `namespaces`.
+    required: false
+    default: "app.kubernetes.io/name=kezio,app.kubernetes.io/component=partition-content-seeder"
+  bootd-label-selector:
+    description: Label selector matching every bootd pod across `namespaces`.
+    required: false
+    default: "app.kubernetes.io/component=bootd"
+  bridges:
+    description: >-
+      Newline-separated runner Linux bridge names to snapshot in detail
+      (bridge link/fdb, in addition to the generic host-wide address/
+      route/neighbor dump every run collects). Blank lines are skipped;
+      an empty input still collects the host-wide snapshot.
+    required: false
+    default: ""
+  extra-artifact-paths:
+    description: >-
+      Newline-separated file or directory paths already on the runner
+      (e.g. a capture-vm-console logfile under `runner.temp`) to include
+      in the same uploaded artifact. Blank lines are skipped.
+    required: false
+    default: ""
+  retention-days:
+    description: Artifact retention, in days, for the uploaded bundle.
+    required: false
+    default: "7"
+
+runs:
+  using: composite
+  steps:
+    - name: Collect tracker/seeder/bootd/runner-network diagnostics
+      shell: bash
+      env:
+        OUTPUT_DIR: ${{ inputs.output-dir }}
+        NAMESPACES: ${{ inputs.namespaces }}
+        TRACKER_LABEL_SELECTOR: ${{ inputs.tracker-label-selector }}
+        SEEDER_LABEL_SELECTOR: ${{ inputs.seeder-label-selector }}
+        BOOTD_LABEL_SELECTOR: ${{ inputs.bootd-label-selector }}
+        BRIDGES: ${{ inputs.bridges }}
+      run: |
+        set +e
+        mkdir -p "${OUTPUT_DIR}"
+
+        # Describes and logs (current + previous, best-effort) every pod
+        # matching a label selector in a namespace, plus each pod's
+        # network-status/networks annotations, into
+        # "${OUTPUT_DIR}/${role}/${namespace}/${pod}/...". A selector
+        # matching nothing writes one "no pods matched" line instead of
+        # nothing, so an empty section is distinguishable from a
+        # collection that silently failed.
+        collect_role() {
+          role="$1"
+          namespace="$2"
+          selector="$3"
+          role_dir="${OUTPUT_DIR}/${role}/${namespace}"
+          mkdir -p "${role_dir}"
+
+          kubectl -n "${namespace}" get deployment -l "${selector}" -o wide \
+            >"${role_dir}/deployments.txt" 2>&1
+          kubectl -n "${namespace}" describe deployment -l "${selector}" \
+            >"${role_dir}/deployments-describe.txt" 2>&1
+
+          pods="$(kubectl -n "${namespace}" get pods -l "${selector}" -o name 2>/dev/null)"
+          if [ -z "${pods}" ]; then
+            echo "no pods matched selector '${selector}' in namespace ${namespace}" \
+              >"${role_dir}/no-pods-found.txt"
+            return 0
+          fi
+          for p in ${pods}; do
+            pod_name="${p#pod/}"
+            pod_dir="${role_dir}/${pod_name}"
+            mkdir -p "${pod_dir}"
+            kubectl -n "${namespace}" describe pod "${pod_name}" >"${pod_dir}/describe.txt" 2>&1
+            kubectl -n "${namespace}" logs "${pod_name}" --all-containers --tail=1000 \
+              >"${pod_dir}/logs.txt" 2>&1
+            # --previous only has content after a restart; failure is
+            # expected and silenced when no container ever crashed.
+            kubectl -n "${namespace}" logs "${pod_name}" --all-containers --previous --tail=1000 \
+              >"${pod_dir}/logs-previous.txt" 2>&1
+            # The only place Multus records the address a pod actually
+            # got - "requested" (networks) proves what was asked for,
+            # "network-status" (actual) proves what attached.
+            kubectl -n "${namespace}" get pod "${pod_name}" \
+              -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/networks}{"\n"}' \
+              >"${pod_dir}/networks-requested.txt" 2>&1
+            kubectl -n "${namespace}" get pod "${pod_name}" \
+              -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}{"\n"}' \
+              >"${pod_dir}/network-status-actual.txt" 2>&1
+          done
+        }
+
+        while IFS= read -r namespace; do
+          [ -z "${namespace}" ] && continue
+          collect_role tracker "${namespace}" "${TRACKER_LABEL_SELECTOR}"
+          collect_role seeder "${namespace}" "${SEEDER_LABEL_SELECTOR}"
+          collect_role bootd "${namespace}" "${BOOTD_LABEL_SELECTOR}"
+        done <<<"${NAMESPACES}"
+
+        # Runner-wide network snapshot: every command is best-effort and
+        # tolerates a missing tool (nft on an iptables-only runner) or a
+        # bridge that does not exist on this lane.
+        net_dir="${OUTPUT_DIR}/runner-network"
+        mkdir -p "${net_dir}"
+
+        echo "===== all bridges ====="
+        ip -d link show type bridge >"${net_dir}/bridges.txt" 2>&1
+        echo "===== addresses ====="
+        ip -d addr show >"${net_dir}/addresses.txt" 2>&1
+        echo "===== routes (all tables, v4 and v6) ====="
+        { ip route show table all; echo "--- v6 ---"; ip -6 route show table all; } \
+          >"${net_dir}/routes.txt" 2>&1
+        echo "===== neighbor table ====="
+        { ip neigh show; echo "--- v6 ---"; ip -6 neigh show; } >"${net_dir}/neighbors.txt" 2>&1
+        echo "===== nftables ruleset (if installed) ====="
+        if command -v nft >/dev/null 2>&1; then
+          # shellcheck disable=SC2024 # the redirect target is runner-writable; only the listing needs root.
+          sudo nft list ruleset >"${net_dir}/nftables.txt" 2>&1
+        else
+          echo "nft not installed on this runner" >"${net_dir}/nftables.txt"
+        fi
+        echo "===== iptables/ip6tables rulesets ====="
+        # shellcheck disable=SC2024 # the redirect target is runner-writable; only the listing needs root.
+        sudo iptables-save >"${net_dir}/iptables.txt" 2>&1
+        # shellcheck disable=SC2024 # the redirect target is runner-writable; only the listing needs root.
+        sudo ip6tables-save >"${net_dir}/ip6tables.txt" 2>&1
+        echo "===== forwarding-related sysctls ====="
+        sysctl net.ipv4.ip_forward net.ipv4.conf.all.forwarding \
+          net.bridge.bridge-nf-call-iptables net.bridge.bridge-nf-call-ip6tables \
+          >"${net_dir}/sysctl-forwarding.txt" 2>&1
+        sysctl -a --pattern 'net\.ipv4\.conf\..*\.forwarding' >>"${net_dir}/sysctl-forwarding.txt" 2>&1
+
+        while IFS= read -r bridge; do
+          [ -z "${bridge}" ] && continue
+          bridge_file="${net_dir}/bridge-${bridge}.txt"
+          if ip link show "${bridge}" >/dev/null 2>&1; then
+            {
+              echo "===== ${bridge} link ====="
+              ip -d link show "${bridge}"
+              echo "===== ${bridge} bridge link (STP/forwarding state per port) ====="
+              bridge link show dev "${bridge}"
+              echo "===== ${bridge} fdb ====="
+              bridge fdb show dev "${bridge}"
+            } >"${bridge_file}" 2>&1
+          else
+            echo "bridge ${bridge} does not exist on this runner" >"${bridge_file}"
+          fi
+        done <<<"${BRIDGES}"
+
+        exit 0
+
+    - name: Upload site diagnostics bundle
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name-prefix }}-site-diagnostics
+        path: |
+          ${{ inputs.output-dir }}
+          ${{ inputs.extra-artifact-paths }}
+        retention-days: ${{ inputs.retention-days }}
+        if-no-files-found: ignore

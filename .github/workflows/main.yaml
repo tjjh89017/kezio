@@ -957,6 +957,30 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+      # Foundation for the upcoming Site/tracker/seeder-per-Site lanes:
+      # describe + current/previous logs for the tracker and seeder
+      # Deployments/pods above (dump-e2e-diagnostics does not cover
+      # them), each pod's network-status annotation (the only place
+      # Multus records the address a pod actually got - what a future
+      # address-pinning assertion needs), and a runner-wide network
+      # snapshot beyond dump-e2e-diagnostics's single FORWARD/mangle
+      # dump. Augments, not replaces, the steps above: those already
+      # cover controller-manager crash logs and KubeVirtBMC, which this
+      # action does not duplicate. extra-artifact-paths carries the
+      # console-capture logfile (started above) into this same upload
+      # instead of a separate one - this action does not call
+      # capture-vm-console itself, since that backgrounds a continuous
+      # attach loop from VM-Ready onward while this action runs once, at
+      # the end.
+      - name: Collect site/tracker/seeder/bootd/runner-network diagnostics
+        if: always()
+        uses: ./.github/actions/collect-site-diagnostics
+        with:
+          artifact-name-prefix: deploy-${{ matrix.dhcp-scenario }}
+          namespaces: "scaffold-system"
+          bridges: ${{ env.PROVISIONING_BRIDGE }}
+          extra-artifact-paths: ${{ runner.temp }}/console-${{ matrix.dhcp-scenario }}.log
+
   # Stable required-check names for the branch ruleset. The real jobs
   # hang off these through `needs`; the ruleset references "Build" and
   # "E2E" so the graph can grow without ruleset edits.
