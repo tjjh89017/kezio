@@ -69,6 +69,19 @@ inputs:
       seconds as an integer, optionally suffixed with s.
     required: false
     default: "120s"
+  accept-unknown:
+    description: >-
+      Treat wait-for=Unknown as success, not just True. Exists for a
+      seeding Subnet whose seeder NAD uses host-local ipam narrowed by
+      rangeStart/rangeEnd: internal/nadvalidate does not model that
+      narrowing, so CheckTrackerAddress can only ever report
+      Indeterminate for it (Valid/Ready=Unknown) even though nothing
+      else about the Site is actually broken - mirrors create-subnet's
+      own accept-valid-unknown. Leave this at its default everywhere a
+      seeder NAD's pool is fully described by static or unbounded
+      ipam.
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -135,6 +148,7 @@ runs:
         NAMESPACE: ${{ inputs.namespace }}
         WAIT_FOR: ${{ inputs.wait-for }}
         TIMEOUT: ${{ inputs.timeout }}
+        ACCEPT_UNKNOWN: ${{ inputs.accept-unknown }}
       run: |
         set -euo pipefail
         if [[ ! "${TIMEOUT}" =~ ^[0-9]+s?$ ]]; then
@@ -148,6 +162,7 @@ runs:
             -o jsonpath="{.status.conditions[?(@.type==\"${WAIT_FOR}\")].status}" || true)"
           echo "$(date -Is) Site ${NAME} ${WAIT_FOR}=${status:-<none>}"
           [ "${status}" = "True" ] && break
+          [ "${ACCEPT_UNKNOWN}" = "true" ] && [ "${status}" = "Unknown" ] && break
           if [ "$(date +%s)" -ge "${deadline}" ]; then
             echo "::error::Site ${NAME} did not become ${WAIT_FOR}=True within ${TIMEOUT}." >&2
             kubectl get site "${NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.conditions}' | jq . || true

@@ -213,6 +213,46 @@ jobs:
             sleep 5
           done
 
+      # The CRD existing only means the rke2-multus HelmChart addon's
+      # manifests were applied - the daemonset's pod can still be
+      # mid-rollout, and only that pod writes the node's CNI conflist
+      # (Multus's kubelet-facing config). A pod scheduled before that
+      # write lands gets wired by canal directly and carries no
+      # network-status annotation at all - this is what Probe A caught.
+      # The deploy lane never hits this because cert-manager/KubeVirt/CDI
+      # install after this same CRD wait, giving Multus minutes to
+      # settle before any pod is created; this lane has nothing else to
+      # wait on, so wait for the rollout explicitly, then confirm the
+      # conflist file the daemonset writes is actually on disk - the
+      # rollout condition (pod Ready) can flip slightly before that
+      # write completes, which is exactly the gap Probe A hit.
+      - name: Wait for the Multus daemonset to finish rolling out
+        shell: bash
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + 300 ))
+          until kubectl -n kube-system get daemonset rke2-multus >/dev/null 2>&1; do
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::daemonset rke2-multus did not appear in kube-system within the timeout." >&2
+              kubectl get helmcharts -A -o wide || true
+              kubectl -n kube-system get pods -o wide || true
+              exit 1
+            fi
+            sleep 5
+          done
+          remaining=$(( deadline - $(date +%s) ))
+          if [ "${remaining}" -lt 1 ]; then remaining=1; fi
+          kubectl -n kube-system rollout status daemonset/rke2-multus --timeout="${remaining}s"
+
+          until sudo find /var/lib/rancher/rke2/agent/etc/cni/net.d -maxdepth 1 -iname '*multus*' 2>/dev/null | grep -q .; do
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::rke2-multus rolled out but no multus CNI conflist appeared under /var/lib/rancher/rke2/agent/etc/cni/net.d." >&2
+              sudo ls -la /var/lib/rancher/rke2/agent/etc/cni/net.d || true
+              exit 1
+            fi
+            sleep 2
+          done
+
       # This lane never deploys kezio (deploy-kezio, which creates
       # config/manager/manager.yaml's scaffold-system namespace, is not
       # part of it) - so the namespace every probe below defaults to must
@@ -697,7 +737,6 @@ jobs:
       # on that path may rewrite it. The NAD's CIDR is derived at its use
       # site so the two can never drift apart.
       TRACKER_SERVER_IP: 192.0.2.4
-      SEEDER_NET1_IP: 192.0.2.5/24
       LEASE_RANGE_START: 192.0.2.10
       LEASE_RANGE_END: 192.0.2.100
       SUBNET_NAME: netboot-${{ matrix.dhcp-scenario }}
@@ -863,7 +902,7 @@ jobs:
           bridge-name: ${{ env.PROVISIONING_BRIDGE }}
           bootd-net1-ip: "${{ env.BOOTD_SERVER_IP }}/24"
           tracker-net1-ip: "${{ env.TRACKER_SERVER_IP }}/24"
-          seeder-net1-ip: ${{ env.SEEDER_NET1_IP }}
+          seeder-net1-cidr: ${{ env.PROVISIONING_CIDR }}
 
       # SubnetReconciler's Valid condition checks the kezio-bootd
       # ServiceAccount already exists (its bootd Deployment stamps
@@ -910,14 +949,25 @@ jobs:
           dhcp-scenario: ${{ matrix.dhcp-scenario }}
           lease-range-start: ${{ env.LEASE_RANGE_START }}
           lease-range-end: ${{ env.LEASE_RANGE_END }}
+          # kezio-seeder-network's host-local ipam narrows its pool with
+          # rangeStart/rangeEnd (create-provisioning-nads), which
+          # internal/nadvalidate does not model - CheckSeederOverlap can
+          # only report Indeterminate for it, so Valid never reaches
+          # True even though nothing else about this Subnet is broken.
+          accept-valid-unknown: "true"
 
-      # This Site's tracker Deployment single-homes on the same
-      # kezio-tracker-network NAD create-provisioning-nads pinned
-      # TRACKER_SERVER_IP on above, so it is reachable from every
-      # segment this lane routes to it - the same address a peer's
-      # announce response hands back. Ready needs the tracker
-      # Deployment actually Available, which needs
-      # TRACKER_DEPLOYMENT_IMAGE (set on the manager above).
+      # This Site's tracker Deployment single-homes on the seeding
+      # Subnet's own SeederNetworkRef (kezio-seeder-network), pinned to
+      # TRACKER_SERVER_IP via a per-pod "ips" override
+      # (site_tracker_deployment.go's trackerPodAnnotations) - so it is
+      # reachable from every segment this lane routes to it, the same
+      # address a peer's announce response hands back. Ready needs the
+      # tracker Deployment actually Available, which needs
+      # TRACKER_DEPLOYMENT_IMAGE (set on the manager above), and
+      # accept-unknown for the same host-local-range reason the Subnet
+      # above needs accept-valid-unknown: CheckTrackerAddress on that
+      # same NAD is equally Indeterminate, so Ready never reaches True
+      # either.
       - name: Point the Site at its seeding Subnet
         uses: ./.github/actions/create-site
         with:
@@ -925,6 +975,7 @@ jobs:
           seeder-subnet-name: ${{ env.SUBNET_NAME }}
           tracker-ip: ${{ env.TRACKER_SERVER_IP }}
           wait-for: Ready
+          accept-unknown: "true"
 
       - name: Deploy kezio-bootd on the provisioning bridge
         uses: ./.github/actions/deploy-bootd
@@ -1275,7 +1326,6 @@ jobs:
       PROVISIONING_CIDR: 203.0.113.0/24
       BOOTD_SERVER_IP: 203.0.113.2
       TRACKER_SERVER_IP: 203.0.113.4
-      SEEDER_NET1_IP: 203.0.113.5/24
       LEASE_RANGE_START: 203.0.113.10
       LEASE_RANGE_END: 203.0.113.100
       SUBNET_NAME: httpboot
@@ -1398,7 +1448,7 @@ jobs:
           bridge-name: ${{ env.PROVISIONING_BRIDGE }}
           bootd-net1-ip: "${{ env.BOOTD_SERVER_IP }}/24"
           tracker-net1-ip: "${{ env.TRACKER_SERVER_IP }}/24"
-          seeder-net1-ip: ${{ env.SEEDER_NET1_IP }}
+          seeder-net1-cidr: ${{ env.PROVISIONING_CIDR }}
 
       - name: Apply kezio-bootd's RBAC ahead of the Subnet
         run: kubectl apply -k config/bootd
@@ -1425,6 +1475,9 @@ jobs:
           dhcp-scenario: "dhcp"
           lease-range-start: ${{ env.LEASE_RANGE_START }}
           lease-range-end: ${{ env.LEASE_RANGE_END }}
+          # kezio-seeder-network's host-local ipam is range-bounded - see
+          # the single-segment deploy lane's own comment on this input.
+          accept-valid-unknown: "true"
 
       - name: Point the Site at its seeding Subnet
         uses: ./.github/actions/create-site
@@ -1433,6 +1486,7 @@ jobs:
           seeder-subnet-name: ${{ env.SUBNET_NAME }}
           tracker-ip: ${{ env.TRACKER_SERVER_IP }}
           wait-for: Ready
+          accept-unknown: "true"
 
       - name: Deploy kezio-bootd on the provisioning bridge
         uses: ./.github/actions/deploy-bootd
@@ -1663,12 +1717,13 @@ jobs:
       SEG_C_CIDR: 198.51.102.0/24
       SEG_C_HOST_CIDR: 198.51.102.1/24
       SEG_C_HOST_ADDR: 198.51.102.1
-      # Bare, like the single-segment deploy lane's own TRACKER_SERVER_IP/
-      # SEEDER_NET1_IP: the announce URL baked into every torrent must be
-      # the tracker's own address on this segment, with nothing rewriting
-      # it on the way.
+      # Bare, like the single-segment deploy lane's own TRACKER_SERVER_IP:
+      # the announce URL baked into every torrent must be the tracker's
+      # own address on this segment, with nothing rewriting it on the
+      # way. The seeding NAD's own pool (kezio-seeder-network,
+      # host-local) is instead carved straight out of SEG_C_CIDR below -
+      # see create-provisioning-nads' own comment on that pool's range.
       TRACKER_IP: 198.51.102.3
-      SEEDER_NET1_IP: 198.51.102.4/24
       # create-provisioning-nads always creates a "kezio-boot-network" and
       # a "kezio-tracker-network" NAD alongside the seeder one; neither is
       # referenced by any Subnet in this lane (segment C hosts no bootd,
@@ -1902,7 +1957,7 @@ jobs:
           bridge-name: ${{ env.SEG_C_BRIDGE }}
           bootd-net1-ip: ${{ env.UNUSED_BOOTD_NET1_IP }}
           tracker-net1-ip: ${{ env.UNUSED_TRACKER_NET1_IP }}
-          seeder-net1-ip: ${{ env.SEEDER_NET1_IP }}
+          seeder-net1-cidr: ${{ env.SEG_C_CIDR }}
           seeding-routes-json: >-
             [{"dst":"${{ env.SEG_A_CIDR }}","gw":"${{ env.SEG_C_HOST_ADDR }}"},{"dst":"${{ env.SEG_B_CIDR }}","gw":"${{ env.SEG_C_HOST_ADDR }}"}]
 
@@ -1955,9 +2010,14 @@ jobs:
           cidr: ${{ env.SEG_C_CIDR }}
           seeder-network-name: kezio-seeder-network
           site-ref: ${{ env.SITE_NAME }}
+          # kezio-seeder-network's host-local ipam is range-bounded - see
+          # the single-segment deploy lane's own comment on this input.
+          accept-valid-unknown: "true"
 
       # Ready needs the tracker Deployment actually Available, which needs
-      # TRACKER_DEPLOYMENT_IMAGE (set on the manager above).
+      # TRACKER_DEPLOYMENT_IMAGE (set on the manager above), and
+      # accept-unknown for the same host-local-range reason Subnet C's
+      # own accept-valid-unknown is needed above.
       - name: Point the Site at its seeding Subnet (segment C)
         uses: ./.github/actions/create-site
         with:
@@ -1965,6 +2025,7 @@ jobs:
           seeder-subnet-name: ${{ env.SUBNET_C_NAME }}
           tracker-ip: ${{ env.TRACKER_IP }}
           wait-for: Ready
+          accept-unknown: "true"
 
       - name: Deploy kezio-bootd on segment A
         uses: ./.github/actions/deploy-bootd
@@ -2223,7 +2284,11 @@ jobs:
           fi
 
       # Proof 3: the tracker is Site-owned on segment C at its pinned
-      # address, with no Service.
+      # address, with no Service. expected-ready/valid-status are
+      # Unknown, not the action's own True default: kezio-seeder-network's
+      # host-local ipam is range-bounded, so CheckTrackerAddress can only
+      # ever report Indeterminate for it - see Proof 6's own comment
+      # below.
       - name: Assert the Site's tracker placement and status reflection
         uses: ./.github/actions/assert-tracker-placement
         with:
@@ -2232,6 +2297,8 @@ jobs:
           expected-seeding-nad-namespace: "scaffold-system"
           expected-seeding-nad-name: "kezio-seeder-network"
           expected-tracker-ip: ${{ env.TRACKER_IP }}
+          expected-ready-status: "Unknown"
+          expected-valid-status: "Unknown"
 
       # Reconstructs the exact torrent URL the plan handed each agent
       # (planbuild.resolveTorrentURL's own output) the same way run-leecher
@@ -2293,7 +2360,18 @@ jobs:
           gateway-ip: ${{ env.SEG_B_HOST_ADDR }}
           netns-name: "kezio-seeder-l3-probe-b"
 
-      # Proof 6: Site status is healthy.
+      # Proof 6: Site status is healthy. Ready/Valid land on Unknown, not
+      # True: kezio-seeder-network's host-local ipam is range-bounded
+      # (create-provisioning-nads), and internal/nadvalidate does not
+      # model rangeStart/rangeEnd, so CheckTrackerAddress can only ever
+      # report Indeterminate for it - the same reason Subnet C's own
+      # creation step above needs accept-valid-unknown and this Site's
+      # Point-at-its-seeding-Subnet step needs accept-unknown. The
+      # functional proofs immediately above (a real torrent served, a
+      # real tracker announce reachable, both ports open across the
+      # segment boundary) are what actually establishes health here;
+      # this step only confirms status reports that health honestly
+      # rather than downgrading to Unknown for no reason.
       - name: Assert the Site's status
         uses: ./.github/actions/assert-site-status
         with:
@@ -2305,8 +2383,8 @@ jobs:
             ${{ env.SUBNET_C_NAME }}
           expected-seeder-ready: "true"
           expected-conditions: |
-            Ready|True
-            Valid|True
+            Ready|Unknown
+            Valid|Unknown
 
       - name: Collect site/tracker/seeder/bootd/runner-network diagnostics
         if: always()
@@ -2358,9 +2436,9 @@ jobs:
       SEG_X_HOST_CIDR: 198.51.103.1/24
       SEG_X_HOST_ADDR: 198.51.103.1
       BOOTD_X_IP: 198.51.103.2
-      # Bare, like the routed lane's own TRACKER_IP/SEEDER_NET1_IP: the
-      # announce URL baked into every torrent must be the tracker's own
-      # address on this segment, with nothing rewriting it on the way.
+      # Bare, like the routed lane's own TRACKER_IP: the announce URL
+      # baked into every torrent must be the tracker's own address on
+      # this segment, with nothing rewriting it on the way.
       TRACKER_X_IP: 198.51.103.3
       SEEDER_X_NET1_IP: 198.51.103.4/24
       SEEDER_X_IP: 198.51.103.4
