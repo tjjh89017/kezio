@@ -10,7 +10,10 @@ description: >-
   such pod's `k8s.v1.cni.cncf.io/network-status` annotation (the only
   place Multus records the address a pod actually got - what
   address-pinning assertions live or die on), the same treatment for
-  bootd pods per Subnet, every kezio v1alpha2 object in each scanned
+  bootd pods per Subnet, each bootd pod's rendered dnsmasq config plus
+  the DHCP options it handed out (the only record of what a machine
+  received in its lease, and thus of whether a machine can leave its own
+  segment), every kezio v1alpha2 object in each scanned
   namespace (the status a failing assertion read, not only the pods
   behind it), and a runner-wide network snapshot (bridges, addresses,
   routes, neighbor table, nftables/iptables rulesets, sysctl forwarding
@@ -147,7 +150,33 @@ runs:
             kubectl -n "${namespace}" get pod "${pod_name}" \
               -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}{"\n"}' \
               >"${pod_dir}/network-status-actual.txt" 2>&1
+            if [ "${role}" = "bootd" ]; then
+              collect_bootd_dhcp "${namespace}" "${pod_name}" "${pod_dir}"
+            fi
           done
+        }
+
+        # What a machine on this segment receives in its DHCP lease. A
+        # machine gets its address from bootd's dnsmasq, not from a NAD's
+        # ipam, so the lease is the only thing that tells it how to leave
+        # its own segment: a wrong or absent router option leaves a
+        # machine able to reach its own segment and nothing else, which
+        # surfaces far away as a timeout against a seeder or tracker.
+        # The rendered config is what dnsmasq was told to hand out; the
+        # log extract is what it did hand out, per lease, because the
+        # config carries log-dhcp. Both already ride in logs.txt, but as
+        # a few lines among a thousand.
+        # Parameters are named apart from collect_role's own loop
+        # variables: this shell has no locals, and the caller reuses
+        # ${namespace}/${pod_dir} after this returns.
+        collect_bootd_dhcp() {
+          dhcp_ns="$1"
+          dhcp_pod="$2"
+          dhcp_dir="$3"
+          kubectl -n "${dhcp_ns}" exec "${dhcp_pod}" -c bootd -- \
+            cat /run/bootd/dnsmasq.conf >"${dhcp_dir}/dnsmasq.conf" 2>&1
+          grep -E 'DHCPACK|DHCPOFFER|DHCPREQUEST|sent size|next server|bootfile name|tags:' \
+            "${dhcp_dir}/logs.txt" >"${dhcp_dir}/dhcp-options-sent.txt" 2>&1
         }
 
         # kezio's own API objects, per namespace. Without these the bundle
