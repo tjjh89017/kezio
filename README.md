@@ -1,9 +1,8 @@
 # kezio
 
 > **This tree is being rebuilt from scratch.** The description below
-> documents the previous implementation, which now lives on the
+> documents the current rebuild. An earlier implementation lives on the
 > [`legacy`](https://github.com/tjjh89017/kezio/tree/legacy) branch.
-> This README is rewritten when the rebuild completes.
 
 > **Proof of concept. Do not deploy machines you care about.**
 >
@@ -26,59 +25,53 @@ boots it into the network agent, and power-cycles it into the deployed
 disk. A `Machine` requires a BMC address and credentials; kezio has no
 mode that deploys a machine without one.
 
+## Custom resources
+
+kezio defines these CRDs under the `kezio.kojuro.date/v1alpha2` group:
+
+| Kind | Purpose |
+|---|---|
+| `Site` | A maximal routable domain: every `Subnet` in one `Site` can reach every other. Owns this Site's tracker (a pinned IP, or a reference to one the operator already runs). |
+| `Subnet` | One broadcast domain. Carries an optional boot half (bootd's address, its network attachment, and DHCP mode) and an optional seeder network reference. A `Subnet` names its `Site` through `spec.siteRef`. |
+| `Machine` | One bare-metal machine: BMC address and credentials, boot MAC, the `Subnet` it network boots through, the image(s) to deploy, and its own state (Enrolling, Inspecting, Available, Provisioning, Provisioned). |
+| `MachineHardware` | The disk/NIC/CPU/memory inventory a `Machine` reports at inspection. |
+| `Image` | A disk layout: an ordered list of partition slots, each optionally bound to a `PartitionContent`. Immutable once created. |
+| `PartitionContent` | One partition's content-addressed, immutable data set (a partclone data set plus its torrent). Named by its own BitTorrent info hash. |
+| `DeployRun` | The resolved, immutable snapshot of one deployment attempt: which images, which disks, which hooks, and its phase (Partitioning, WritingContent, RunningPostHook, Finalizing, ...). |
+| `PostHook` | A named, reusable, ordered sequence of steps (builtins, live-OS scripts, or chroot scripts) that a `Machine` or `Image` can attach to run after content is written. |
+
 ## How a deploy works
 
-1. An ingest Job reads a source disk image. It writes one PVC per
-   partition, and it writes an `ImageLayout` CR with the disk's
-   `sfdisk` layout.
-2. A publish step builds a `.torrent` file for each partition. Each
-   `.torrent` file lives inside that partition's own content PVC.
-3. When a `Machine` needs an `Image`, the operator starts one
-   `ezio-seeder` Deployment for that `Image` at that site. The seeder
-   stops after a grace period once no machine needs it.
+1. An ingest Job reads a source disk image, writes each partition's
+   content as an immutable `PartitionContent`, and records the disk
+   layout on an `Image`.
+2. A publish step builds a `.torrent` file for each `PartitionContent`.
+3. When a `Machine` needs an `Image`, the operator starts one seeder
+   Deployment for that `Image` at that `Machine`'s `Site` - one process
+   serving every `PartitionContent` the `Image` references. The seeder
+   stops after a grace period once no machine at that `Site` needs it.
 4. The network-booted agent asks the operator for its deploy plan. It
-   fetches each partition's `.torrent` over HTTP from the seeder pod.
-   It leeches the partition content over BitTorrent. It writes each
-   partition with partclone, replays the `sfdisk` layout, runs any
-   `PostHook` steps, and points the UEFI boot entry at the new disk.
+   fetches each partition's `.torrent` over HTTP from the seeder pod,
+   leeches the content over BitTorrent, writes each partition with
+   partclone, replays the disk layout, runs any `PostHook` steps, and
+   points the UEFI boot entry at the new disk.
 5. The operator power-cycles the machine through its BMC. The machine
    boots into the deployed disk.
 
-## Custom resources
-
-kezio defines these CRDs under the `kezio.kojuro.date/v1alpha1` group:
-
-- **Image** — a source disk image to deploy. It tracks ingest state
-  (pending, ingesting, ready, failed), the disk layout, and per-site
-  seeder demand.
-- **Machine** — one bare-metal machine. It holds the BMC address and
-  credentials, the boot MAC address, the image to deploy, and the
-  machine's own state (enrolling, inspecting, available, provisioning,
-  provisioned).
-- **ImageLayout** — the `sfdisk --json` dump for one `Image`, written
-  once by the ingest Job.
-- **PostHook** — a named, reusable sequence of steps (built-in actions,
-  live-OS scripts, or chroot scripts) that a `Machine` or `Image` can
-  reference to run after partclone writes the disk.
-
 ## Network boot
 
-`bootd` runs one Deployment per network segment. It answers PXE
-requests with proxyDHCP, and it serves the boot loader over TFTP.
-The controller manager can serve boot configuration and live boot
-artifacts (kernel, initrd, squashfs) over HTTP; `bootd` can proxy
+`bootd` runs one Deployment per `Subnet` that declares a boot half. It
+answers PXE requests with proxyDHCP (or, on an isolated segment, becomes
+that segment's own DHCP lease authority), and it serves the boot loader
+over TFTP. The controller manager serves boot configuration and live
+boot artifacts (kernel, initrd, squashfs) over HTTP; `bootd` proxies
 these onward to the booting machine.
 
-kezio supports two DHCP setups:
-
-- **On-segment DHCP.** An existing DHCP server on the segment keeps
-  handing out leases. `bootd`'s proxyDHCP answers PXE requests only,
-  beside the existing DHCP server.
-- **bootd-managed leases.** `bootd` becomes the segment's own DHCP
-  server and hands out leases itself.
-
-See [`docs/physical-lab-deployment.md`](docs/physical-lab-deployment.md)
-for the full network setup, including how each scenario is configured.
+See [`docs/network-model.md`](docs/network-model.md) for what a `Site`
+guarantees, how the boot and data planes split across `Subnet` objects,
+and the tracker/seeder connectivity rules. See
+[`docs/physical-lab-deployment.md`](docs/physical-lab-deployment.md) for
+the full operational setup, including both DHCP scenarios.
 
 ## Getting started
 
@@ -109,13 +102,16 @@ See `make help` for the full list of targets.
 
 ## Documentation
 
+- [`docs/network-model.md`](docs/network-model.md): what a `Site`
+  guarantees and does not, data-plane-only `Subnet`s, the no-NAT rule,
+  the address-pool sizing rule, and why the tracker is scoped per `Site`.
 - [`docs/lab-proxmox-rke2.md`](docs/lab-proxmox-rke2.md): a step-by-step
   walkthrough that builds one working lab, from an empty Proxmox VE host
   through RKE2, a Redfish shim in front of the Proxmox API, and a first
   deployed machine.
 - [`docs/physical-lab-deployment.md`](docs/physical-lab-deployment.md):
   the manual guide for building a kezio lab on bare metal, including
-  network and DHCP setup.
+  network and DHCP setup, and the routed multi-subnet case.
 - [`docs/bmc.md`](docs/bmc.md): the `redfish://` and `ipmi://` BMC
   drivers, why both work in the default manager image, and how the
   graceful-then-forced power-off and the reboot annotation each drive
@@ -128,15 +124,17 @@ See `make help` for the full list of targets.
   kezio's KubeVirt BT-transfer e2e steps by calling its composite
   actions under `.github/actions/` directly.
 - [`docs/e2e-scale-multisite-kubevirt.md`](docs/e2e-scale-multisite-kubevirt.md):
-  historical record of the retired multi-site scale e2e lane.
+  what the routed multi-segment and two-site concurrent e2e lanes in
+  `main.yaml` prove, and what they deliberately do not claim.
 
 ## Continuous integration
 
 `main.yaml` builds, lints, tests, and runs e2e checks on every push to
 `main` and on every pull request. `release.yaml` publishes container
-images and boot artifacts on `v*` tags. A KubeVirt-based BMC e2e lane
-verifies the full deploy chain, from ingest through BitTorrent leech
-to a booted disk.
+images and boot artifacts on `v*` tags. Several KubeVirt-based e2e lanes
+verify the deploy chain end to end, from ingest through BitTorrent leech
+to a booted disk, including a routed multi-segment lane and a two-site
+concurrent lane.
 
 ## License
 

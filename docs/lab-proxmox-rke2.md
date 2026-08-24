@@ -583,7 +583,7 @@ the PSA label from section 5.1.
 
 ```sh
 cat <<'EOF' | kubectl apply -f -
-apiVersion: kezio.kojuro.date/v1alpha1
+apiVersion: kezio.kojuro.date/v1alpha2
 kind: Site
 metadata:
   name: lab
@@ -592,7 +592,7 @@ spec:
   seederSubnetRef:
     name: lab-prov
 ---
-apiVersion: kezio.kojuro.date/v1alpha1
+apiVersion: kezio.kojuro.date/v1alpha2
 kind: Subnet
 metadata:
   name: lab-prov
@@ -743,8 +743,9 @@ bin/kezioctl image upload ./ubuntu-24.04-minimal-cloudimg-amd64.img \
   --format qcow2
 ```
 
-The upload starts an ingest Job that converts the image, reads its
-`sfdisk` layout into an `ImageLayout`, writes one PVC per partition, and
+The upload starts an ingest Job that converts the image, records its
+`sfdisk` layout inline on the `Image` (`spec.layout`, not a separate
+kind), writes one immutable `PartitionContent` per partition, and
 builds a `.torrent` inside each one. Watch it:
 
 ```sh
@@ -773,7 +774,7 @@ Then create the Machine:
 
 ```sh
 cat <<'EOF' | kubectl apply -f -
-apiVersion: kezio.kojuro.date/v1alpha1
+apiVersion: kezio.kojuro.date/v1alpha2
 kind: Machine
 metadata:
   name: lab-target-1

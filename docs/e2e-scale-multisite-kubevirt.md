@@ -1,144 +1,143 @@
-# Multi-site scale e2e (historical)
+# Multi-segment and multi-site e2e lanes
 
-> **Status: removed.** `e2e-scale-multisite-kubevirt.yml` is no longer
-> part of kezio's CI. This document is kept as a historical record of
-> what the lane proved and how it worked, for anyone who needs to
-> rebuild an equivalent check later. Do not follow the "Minimal example"
-> or any `uses:` reference below - the workflow file is gone.
->
-> **The mechanism this document describes predates the current network
-> model.** `SeederReconciler` and its "every Ready endpoint of one
-> Service" sync path no longer exist; a seeder today is one Deployment
-> per (Image, Site), created by the Image reconciler in
-> `internal/controller/seeder_deployment.go`
-> (`config/seeder/README.md`, "Per-Image, on-demand seeding"), and a
-> Site is a `Site`/`Subnet` object pair (`docs/physical-lab-deployment.md`,
-> section 2), not an env-var-selected network. Read this document only
-> for what the two-bridge, two-`kezio-bootd` simulation technique
-> proved about isolated broadcast domains - not for how seeders are
-> built or configured today.
+Two jobs in `.github/workflows/main.yaml` prove kezio's Site/Subnet
+network model end to end on real KubeVirt VMs: `e2e-routed-site` (a
+routed, three-segment single Site) and `e2e-two-site-concurrent` (two
+Sites that deliberately cannot route to each other). This document
+describes what each currently proves, what each deliberately does not
+claim, and how to read their output. Read `docs/network-model.md` first
+for the Site/Subnet model both lanes exercise.
 
-A `workflow_dispatch`-only, release-gated GitHub Actions lane that proved
-kezio's per-site seeder topology (`config/seeder/README.md`'s "Per-site
-seeders" section) actually works end to end: two simulated sites, each
-with its own leecher VM, deploying the same Image concurrently through a
-swarm that has more than one seeder endpoint.
+## e2e-routed-site: one Site, three routed segments
 
-## What it proves
+### Topology
 
-- A central `ezio-seeder` replica already holds the full ingested Image
-  (kezio's Option A storage design mounts the store PVC directly - no
-  BitTorrent leech is needed to "warm" it) plus one additional site-local
-  `ezio-seeder` replica per simulated site, all as endpoints of the same
-  Kubernetes Service, all seeding the same content - exercising
-  `SeederReconciler`'s "every Ready endpoint of one Service" sync path
-  (`internal/controller/seeder_controller.go`) with more than one
-  endpoint for real, not as a unit-test fixture.
-- Two target VMs, one per simulated site, each behind its own
-  `kezio-bootd` instance on its own Multus bridge, PXE-boot and deploy
-  the same Image **concurrently** - real ingest (qemu-img/sfdisk/
-  partclone), a real BitTorrent leech, a real in-guest reboot, and a
-  real boot-from-disk check (the same three-layer verification
-  `e2e-kubevirt-reusable.yml` uses: controller status, guest-agent
-  connection, and a byte-for-byte marker-file read back through QGA) -
-  run for both VMs independently.
-- While both leeches are in flight, the workflow samples ezio's own
-  `GetTorrentStatus` gRPC call against all three seeder endpoints and
-  reports the highest peer count observed, as supporting (not gating)
-  evidence that more than one peer was actually connected to the
-  torrent at once.
+Three genuinely separate Linux bridges on the runner, one routed group:
 
-## What it deliberately does NOT claim
+- Segment A and segment B each host one boot-half `Subnet` (their own
+  `bootdServerIP`, DHCP in `proxy` mode) and one target VM.
+- Segment C hosts one data-plane-only `Subnet` (`seederNetworkRef` set,
+  no boot half) carrying the Site's tracker and its one seeder
+  Deployment.
 
-A single GitHub-hosted runner has one flat pod network - every seeder,
-the tracker, and both leecher VMs' BitTorrent traffic cross the same
-loopback/veth fabric, with no real inter-site latency, bandwidth cap, or
-routing hop between them. This lane therefore does **not** claim:
+All three `Subnet`s name the same `Site`. `create-routed-segments` puts
+all three bridges in one forwarding group, so the runner routes between
+every pair of them at L3 - this is a real routed hop, not a shared flat
+network: each boot segment's own NAD carries an IPAM route toward
+segment C, and segment C's seeding NAD carries routes back toward both
+boot segments, matching a real routed multi-subnet Site (see
+`docs/physical-lab-deployment.md`, section 2.7).
 
-- that the WAN carries close to one copy of the image - that needs real
-  per-network traffic accounting, which this topology cannot produce;
-- that same-site peers preferentially exchange pieces over a cheaper
-  local path - BitTorrent's own peer selection has no real cost
-  difference to respond to here;
-- that the two site-local seeder replicas are storage-isolated from the
-  central one - all three mount the identical store PVC, because every
-  pod in this lane runs on one k3s node with one storage backend.
+### What it proves
 
-The workflow's own header comment and its final job-summary step both
-restate this scope explicitly, so a run's own output does not need this
-document to be understood correctly.
+- **Concurrency**: both target VMs' deploy intents are set back-to-back
+  and the workflow polls until both Machines are observed mid-deploy at
+  the same instant that `PartitionContent.status.seeders[]` reports
+  `machineCount: 2` for the shared Site - proving the two deploys
+  actually overlapped, not merely that both eventually succeeded.
+- **One seeder Deployment per `(Image, Site)`, not per machine or per
+  Subnet**: exactly one seeder Deployment exists for the whole lane, and
+  the workflow explicitly asserts no second one appears even though the
+  two machines sit on two different boot `Subnet`s.
+- **The Site-owned tracker with no Service**: the tracker is reachable
+  at its pinned address on segment C, and `Site.status` reflects it.
+- **Real routed reachability**: from each boot segment, a probe
+  namespace with no direct L2 presence on segment C still reaches the
+  seeder's BitTorrent port and torrent HTTP port, and the tracker's
+  announce port, through the routed hop alone.
+- **A full boot-to-disk chain for both machines**: real ingest
+  (qemu-img/sfdisk/partclone), a real BitTorrent leech, a real in-guest
+  reboot, and the same three-layer verification
+  (`docs/e2e-kubevirt-reusable.md`) other lanes use - run for both VMs
+  independently.
+- **`Site.status`**: both boot Subnets and the data Subnet appear in
+  `status.subnetRefs`, and `Ready`/`Valid` are both True.
 
-## The 2-site simulation
+### What it deliberately does NOT claim
 
-"Site" here means a separate boot L2 segment, genuinely (not
-approximately) simulated: two Linux bridges on the runner
-(`kezio-site-a0`, `kezio-site-b0`), two Multus
-`NetworkAttachmentDefinition`s, and two independent `kezio-bootd`
-Deployments - one per bridge. Each target VM's provisioning NIC attaches
-to only one bridge, so each VM's PXE broadcast genuinely only reaches its
-own site's `kezio-bootd` instance; this part is not faked, it is two
-real, disjoint broadcast domains, matching what a physically separate
-site's own L2 segment needs in production
-(`config/bootd/deployment.yaml`'s "one replica per boot segment"
-comment).
+- Nothing about WAN-scale latency or bandwidth: the "routed hop" is
+  Linux kernel routing between bridges on one runner, not a real
+  multi-site link with a latency or bandwidth cap.
+- Nothing about a routed-L3-to-a-cluster-Service tracker/seeder shape
+  (`docs/network-model.md`'s "Option 2" style Multus attachment is the
+  only one exercised) - kezio ships no LoadBalancer/NodePort/hostPort
+  variant of a tracker or seeder Service to exercise instead.
+- Nothing about more than two boot segments or more than one Image
+  deploying at the Site concurrently - the seeder's static-IPAM address
+  is correct for exactly this lane's one-Image-at-a-time shape; see
+  `docs/network-model.md`'s address-pool sizing rule for what changes
+  once that is no longer true.
 
-What is *not* separately simulated is the data plane: BitTorrent/gRPC
-traffic between seeders, the tracker, and both leechers all travels over
-the cluster's ordinary pod network, the same way the single-leecher
-`e2e-kubevirt-reusable.yml` lane already does it. A genuinely isolated
-per-site data network would need either multiple runners or a real
-multi-cluster/multi-network setup, neither of which a single GitHub
-Actions job can provide - see the "does NOT claim" section above.
+## e2e-two-site-concurrent: two Sites that cannot route to each other
 
-## Dependency on a published image (or an in-lane build)
+### Topology
 
-Like `e2e-kubevirt-reusable.yml` (called by `main.yaml`'s `e2e-bmc` job),
-this lane needs a published `kezio-boot-artifacts` image to exist before
-either VM can even reach a live boot (`boot_artifacts_image` selects
-among what is already published; publishing itself is a maintainer
-action) - or set `build_boot_artifacts: true` to build it from this
-checkout instead. It will not pass on a repository with no image
-published yet, unless `build_boot_artifacts` is set.
+Two bridges, two separate forwarding groups: `create-routed-segments`
+gives each Site's segment its own group, so the runner's own routing
+table drops all traffic between them. Each Site is the simplified
+single-segment shape (boot and data plane on the same `Subnet`) - proving
+the routed multi-subnet hop within one Site is `e2e-routed-site`'s job;
+this lane's job is proving concurrency and cross-Site isolation, which a
+second routed hop per Site would not add anything to.
+
+### What it proves
+
+- **Network isolation, both before and during the deploy**: a probe on
+  Site X's segment can reach Site X's tracker and (once it exists)
+  seeder, but never Site Y's - and the same in reverse. This is checked
+  twice: once right after both Sites are created (tracker only), and
+  again once both seeder Deployments exist (tracker and seeder both).
+- **Concurrency across Sites**: both machines' deploy intents are set
+  back-to-back, and the workflow polls until both are observed
+  mid-deploy at the same instant that `PartitionContent.status.seeders[]`
+  reports `machineCount: 1` for each Site separately - proving the two
+  Sites' demand is tracked and served independently, not merged.
+- **One seeder Deployment and one tracker per Site**: exactly two seeder
+  Deployments exist in the whole lane (one per Site), each reachable
+  only from its own Site's segment.
+- **A full boot-to-disk chain for both machines**, concurrently, the
+  same three-layer verification other lanes use.
+- **Fault isolation**: the workflow injects a fault into Site Y's
+  seeding `Subnet` (pointing it at a nonexistent NAD) and asserts that
+  only Site Y's status degrades - Site X's status is unaffected by a
+  fault at a Site it cannot even route to.
+
+### What it deliberately does NOT claim
+
+- Nothing about latency, bandwidth, WAN copy counts, or cross-site
+  leech efficiency - one runner cannot produce those, and two Sites that
+  cannot route to each other could never leech across Sites regardless
+  (leeching across a Site boundary is not supported by the deploy-plan
+  path at all - see `docs/network-model.md`).
+- Nothing about a routed multi-subnet Site - each Site here is the
+  simplified single-segment shape; `e2e-routed-site` covers the routed
+  case.
 
 ## Runner requirements
 
-Needs a KubeVirt-capable runner: `/dev/kvm` must be usable, and the job
-fails fast otherwise. It is the heaviest e2e lane in this repository -
-two full boot+deploy chains (two VMs, two `kezio-bootd` pods, three
-`ezio-seeder` pods, one KubeVirt/CDI/Multus stack) sharing one runner's
-CPU/RAM budget, on top of the five from-source image builds every
-KubeVirt lane already pays for. The default GitHub-hosted runner (4 vCPU,
-16 GiB RAM) is close to its ceiling for the single-leecher lane already;
-this lane may need a larger or self-hosted runner for reliable results.
-Use the `runs_on` input to target one without editing the workflow file.
+Both lanes need a KubeVirt-capable runner: `/dev/kvm` must be usable,
+and each job fails fast otherwise. Both are heavy - two full
+boot-and-deploy chains, two bootd pods (or, in `e2e-routed-site`, two
+bootd pods on separate segments plus one shared seeder/tracker pod pair),
+and the KubeVirt/CDI/Multus stack, concurrently, on one runner. Each
+job's own `check-runner-resources` step fails fast if the runner is
+under-resourced rather than silently running slow or flaky; if a real
+run needs more, the fix is a larger runner class for that job (a
+`runs-on` change), never serializing the two deploys - concurrency is
+each lane's own reason to exist.
 
-## How to dispatch it
+## Dependency on a published or in-lane-built boot image
 
-From the Actions tab, select **E2E Scale (Multi-Site KubeVirt VMs)** and
-run it manually (`workflow_dispatch`). Inputs:
+Like every other KubeVirt lane in this repository, both jobs need the
+`kezio-boot-artifacts` live image, built earlier in the same workflow
+run (the `boot-artifacts` job) and downloaded as a workflow artifact.
+They do not pull a previously published image.
 
-| Input | Type | Default | Purpose |
-|---|---|---|---|
-| `boot_artifacts_image` | string | `ghcr.io/tjjh89017/kezio-boot-artifacts:latest` | `kezio-boot-artifacts` OCI image both site VMs net-boot. Ignored when `build_boot_artifacts` is true. |
-| `build_boot_artifacts` | boolean | `false` | Build the live boot image (including `kezio-agent`) from this checkout instead of pulling `boot_artifacts_image`. |
-| `runs_on` | string | `ubuntu-latest` | Runner label to run the job on - point this at a larger or self-hosted KubeVirt-capable runner if the default hosted runner proves too resource-constrained. |
+## How to read a run's failure
 
-It does **not** run on push or pull request - see the workflow file's own
-header comment for the full gating rationale (shared with the other
-release-gated KubeVirt lanes: PXE over a nested Multus bridge is a real
-risk surface, and this lane is additionally the most resource-hungry one
-in the repository).
-
-## Why a dedicated workflow instead of a `workflow_call` of
-`e2e-kubevirt-reusable.yml`
-
-The single-leecher reusable workflow's inputs describe exactly one boot
-segment and one leecher VM. Expressing "N sites" through `workflow_call`
-inputs would mean turning that reusable workflow itself into a loop over
-a site list, which would also reshape it for the ezio repository's own
-use of it (a single-leecher integration test, not a topology test) for a
-shape only this lane needs. This workflow instead follows the same
-setup steps in spirit (image builds, k3s/KubeVirt/CDI/Multus install,
-ingest) and reuses the same verification technique per site, but stays a
-separate file so the reusable workflow's own contract does not grow a
-site-count parameter it has no other caller for.
+Both jobs collect site/tracker/seeder/bootd/runner-network diagnostics
+on failure (`collect-site-diagnostics`), plus continuous VM console
+capture for every VM they boot. Start there before re-reading this
+document; both jobs' own step comments already label every CI-only
+shortcut in place (which NADs are unused, why a probe network namespace
+is used, and so on).
