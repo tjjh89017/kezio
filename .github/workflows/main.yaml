@@ -354,8 +354,9 @@ jobs:
       # IMAGE_INGEST_SOURCE_FORMAT=raw matches ingest-test-image's fixture
       # disk, which the ingest Job would otherwise reject against the
       # manager's own qcow2 default (ImageIngestConfig.sourceFormat).
-      # PARTITIONCONTENT_TRACKER_URL points at opentracker's Service,
-      # deployed below - every published .torrent's announce URL.
+      # There is no cluster-wide tracker setting: every seeder Deployment
+      # takes its announce URL from its own Site's status.trackerURL
+      # instead - see the Site/Subnet creation steps below.
       # PARTITIONCONTENT_SEEDER_IMAGE names the seeder tarball's local-tag
       # imported above - without it, run-leecher's demand Machine would
       # only ever produce SeederDegraded=SeederImageMissing.
@@ -372,12 +373,59 @@ jobs:
             IMAGE_INGEST_IMAGE=example.com/kezio-ingest:e2e
             IMAGE_INGEST_SOURCE_FORMAT=raw
             PARTITIONCONTENT_PUBLISH_IMAGE=example.com/kezio-ingest:e2e
-            PARTITIONCONTENT_TRACKER_URL=http://opentracker.scaffold-system.svc.cluster.local:6969/announce
             PARTITIONCONTENT_SEEDER_IMAGE=example.com/kezio-seeder:e2e
             PARTITIONCONTENT_SEEDER_GRACE_PERIOD=30s
 
+      # This lane runs with Multus disabled (install-rke2 above), so no
+      # NetworkAttachmentDefinition exists for a Site-managed tracker to
+      # single-home on - deploy-opentracker's plain cluster-network
+      # Deployment/Service is what backs tracker.externalURL instead,
+      # the escape hatch for an operator who already runs a tracker. A
+      # plain ClusterIP Service is fine here because nothing on this
+      # lane's seeder/leecher path is single-homed to begin with, unlike
+      # the deploy lane's real machines.
       - name: Deploy opentracker
         uses: ./.github/actions/deploy-opentracker
+
+      # The seed-demand Machine (run-leecher, below) needs its subnetRef
+      # to resolve to a real Site with a working tracker - kezio-e2e-
+      # leecher-demand-subnet is the exact name run-leecher's own Machine
+      # manifest names. The Site/Subnet cross-reference is cyclic (see
+      # create-site's own doc comment), so the Site is created twice:
+      # bare first, then patched once the Subnet exists and points back.
+      - name: Create the Site (bare)
+        uses: ./.github/actions/create-site
+        with:
+          name: kezio-e2e-image-path-site
+          wait-for: Valid
+
+      # No boot half is exercised by this Subnet (the demand Machine
+      # never PXE-boots - it only carries a fake BMC address), but the
+      # Machine webhook still requires spec.subnetRef to resolve to a
+      # Subnet with a boot half, so one is declared here even though
+      # BOOTD_DEPLOYMENT_IMAGE is never configured in this lane and no
+      # bootd Deployment is ever attempted. seeder-network-name is left
+      # unset: this lane's seeder already runs on the ordinary cluster
+      # network (no Multus), matching its existing behavior.
+      - name: Create the Subnet for the demand Machine
+        uses: ./.github/actions/create-subnet
+        with:
+          name: kezio-e2e-leecher-demand-subnet
+          cidr: "203.0.113.0/24"
+          bootd-server-ip: "203.0.113.2"
+          bootd-network-name: kezio-boot-network
+          site-ref: kezio-e2e-image-path-site
+
+      # tracker.externalURL points at opentracker's Service (deployed
+      # above) rather than Tracker.IP: a Site-managed tracker Deployment
+      # needs a NAD to single-home on, and this lane has none.
+      - name: Point the Site at its seeding Subnet
+        uses: ./.github/actions/create-site
+        with:
+          name: kezio-e2e-image-path-site
+          seeder-subnet-name: kezio-e2e-leecher-demand-subnet
+          tracker-external-url: http://opentracker.scaffold-system.svc.cluster.local:6969/announce
+          wait-for: Ready
 
       - name: Create the image-service bearer token Secret
         uses: ./.github/actions/create-image-service-token-secret
@@ -488,6 +536,7 @@ jobs:
       LEASE_RANGE_START: 192.0.2.10
       LEASE_RANGE_END: 192.0.2.100
       SUBNET_NAME: netboot-${{ matrix.dhcp-scenario }}
+      SITE_NAME: netboot-${{ matrix.dhcp-scenario }}-site
       TARGET_VM_NAME: netboot-vm
       TARGET_VM_MAC: "52:54:00:be:ef:03"
       # Stamped on the target VM's data disk and carried into the
@@ -598,13 +647,17 @@ jobs:
       # net-booting machine can actually reach, not the ClusterIP
       # Services BOOTD_DEPLOYMENT_*_UPSTREAM_URL name.
       #
-      # The IMAGE_INGEST_*/PARTITIONCONTENT_* vars below are the same
-      # ones the image-path lane sets, wiring this one controller-manager
-      # for both halves of the lane at once - there is no second
-      # deploy-kezio call later for the deploy phase. See the image-path
-      # lane's own deploy-kezio step for what each one does;
-      # IMAGE_INGEST_SOURCE_FORMAT=raw matches build-deploy-test-image's
-      # own raw conversion, not only ingest-test-image's fixture.
+      # The IMAGE_INGEST_*/PARTITIONCONTENT_SEEDER_* vars below are the
+      # same ones the image-path lane sets, wiring this one
+      # controller-manager for both halves of the lane at once - there
+      # is no second deploy-kezio call later for the deploy phase. See
+      # the image-path lane's own deploy-kezio step for what each one
+      # does; IMAGE_INGEST_SOURCE_FORMAT=raw matches
+      # build-deploy-test-image's own raw conversion, not only
+      # ingest-test-image's fixture. TRACKER_DEPLOYMENT_IMAGE, unlike
+      # those, is set only here: the image-path lane runs with no Multus
+      # NAD to single-home a Site-managed tracker on and uses
+      # tracker.externalURL instead (see its own Site creation steps).
       - name: Deploy kezio CRDs and controller-manager
         uses: ./.github/actions/deploy-kezio
         with:
@@ -624,12 +677,20 @@ jobs:
             IMAGE_INGEST_IMAGE=example.com/kezio-ingest:e2e
             IMAGE_INGEST_SOURCE_FORMAT=raw
             PARTITIONCONTENT_PUBLISH_IMAGE=example.com/kezio-ingest:e2e
-            # Not the ClusterIP Service the image-path lane uses: a
-            # ClusterIP DNATs, and this lane's leecher runs on a real
-            # machine that has no route to it either way.
-            PARTITIONCONTENT_TRACKER_URL=http://${{ env.TRACKER_SERVER_IP }}:6969/announce
             PARTITIONCONTENT_SEEDER_IMAGE=example.com/kezio-seeder:e2e
             PARTITIONCONTENT_SEEDER_GRACE_PERIOD=30s
+            # There is no cluster-wide tracker setting: the Site created
+            # below owns a real tracker Deployment, single-homed on
+            # kezio-tracker-network and bound to TRACKER_SERVER_IP - not
+            # the ClusterIP Service the image-path lane's externalURL
+            # case uses, since a ClusterIP DNATs and this lane's leecher
+            # runs on a real machine that has no route to one either way.
+            # TRACKER_DEPLOYMENT_IMAGE is the public opentracker build
+            # config/opentracker's own (retired) Deployment used to run;
+            # no local import is needed, the same way this image was
+            # already pulled live by every lane that used to call
+            # deploy-opentracker.
+            TRACKER_DEPLOYMENT_IMAGE=ghcr.io/tunisiano187/opentracker-docker:master
 
       - name: Create the provisioning NetworkAttachmentDefinitions
         uses: ./.github/actions/create-provisioning-nads
@@ -658,6 +719,16 @@ jobs:
           static-cidr: ${{ env.EXISTING_DHCP_NET1_IP }}
           dhcp-range: "192.0.2.10,192.0.2.100,255.255.255.0,12h"
 
+      # The Subnet webhook admits spec.siteRef only against a Site that
+      # already exists, and the Site/Subnet cross-reference is cyclic
+      # (create-site's own doc comment), so the Site is created bare
+      # first and patched below, once the Subnet exists and points back.
+      - name: Create the Site (bare)
+        uses: ./.github/actions/create-site
+        with:
+          name: ${{ env.SITE_NAME }}
+          wait-for: Valid
+
       - name: Create the Subnet
         uses: ./.github/actions/create-subnet
         with:
@@ -670,9 +741,25 @@ jobs:
           # segment cannot reach - so every leecher fails to fetch its
           # torrent and the deploy retries forever.
           seeder-network-name: kezio-seeder-network
+          site-ref: ${{ env.SITE_NAME }}
           dhcp-scenario: ${{ matrix.dhcp-scenario }}
           lease-range-start: ${{ env.LEASE_RANGE_START }}
           lease-range-end: ${{ env.LEASE_RANGE_END }}
+
+      # This Site's tracker Deployment single-homes on the same
+      # kezio-tracker-network NAD create-provisioning-nads pinned
+      # TRACKER_SERVER_IP on above, so it is reachable from every
+      # segment this lane routes to it - the same address a peer's
+      # announce response hands back. Ready needs the tracker
+      # Deployment actually Available, which needs
+      # TRACKER_DEPLOYMENT_IMAGE (set on the manager above).
+      - name: Point the Site at its seeding Subnet
+        uses: ./.github/actions/create-site
+        with:
+          name: ${{ env.SITE_NAME }}
+          seeder-subnet-name: ${{ env.SUBNET_NAME }}
+          tracker-ip: ${{ env.TRACKER_SERVER_IP }}
+          wait-for: Ready
 
       - name: Deploy kezio-bootd on the provisioning bridge
         uses: ./.github/actions/deploy-bootd
@@ -741,17 +828,10 @@ jobs:
 
       # Register phase ends above (carried over from the retired netboot
       # lane, unchanged). Everything below drives the registered Machine
-      # through a real deploy - the image-path lane's own opentracker/
-      # image-service setup, then the deploy-specific prerequisites and
-      # the happy-path deploy itself.
-
-      - name: Deploy opentracker
-        uses: ./.github/actions/deploy-opentracker
-        with:
-          # Unlike the image-path lane, this lane's peers are real
-          # machines on the provisioning segment: the tracker has to be
-          # on it too, or the address it hands back is unreachable.
-          network-name: kezio-tracker-network
+      # through a real deploy - the image-path lane's own image-service
+      # setup (the tracker is already up: the Site created earlier owns
+      # it), then the deploy-specific prerequisites and the happy-path
+      # deploy itself.
 
       - name: Create the image-service bearer token Secret
         uses: ./.github/actions/create-image-service-token-secret
@@ -770,6 +850,11 @@ jobs:
 
       - name: Verify image-path prerequisites
         uses: ./.github/actions/verify-image-path-prerequisites
+        with:
+          # This lane's tracker is the Site-managed Deployment created
+          # above, not a standalone opentracker (the action's own
+          # default label).
+          tracker-label-selector: "app.kubernetes.io/component=tracker"
 
       - name: Build and ingest the full-deploy test image
         id: build-image
@@ -913,12 +998,14 @@ jobs:
           provisioning-bridge: ${{ env.PROVISIONING_BRIDGE }}
           bootd-label-selector: "app.kubernetes.io/component=bootd,kezio.kojuro.date/bootd-subnet=${{ env.SUBNET_NAME }}"
 
-      # opentracker and the ingest/publish Jobs have no other log
-      # channel in this lane: dump-e2e-diagnostics's extra-deployment-logs/
-      # extra-job-label-selectors are unset above, and
-      # build-deploy-test-image/ingest-test-image only dump ingest Job
-      # logs inline if their own step is the one that fails, not a later
-      # one.
+      # The ingest/publish Jobs have no other log channel in this lane:
+      # dump-e2e-diagnostics's extra-deployment-logs/extra-job-label-
+      # selectors are unset above, and build-deploy-test-image/
+      # ingest-test-image only dump ingest Job logs inline if their own
+      # step is the one that fails, not a later one. The tracker
+      # Deployment's logs are not named here - it is Site-managed
+      # (kezio-tracker-<site>, no fixed name) and collect-site-
+      # diagnostics below already covers it by label selector.
       - name: Collect always-on diagnostics bundle
         if: always()
         uses: ./.github/actions/collect-e2e-diagnostics-bundle
@@ -928,10 +1015,10 @@ jobs:
             kezio-bootd-${{ env.SUBNET_NAME }}:bootd.log
             scaffold-controller-manager:controller-manager.log
             kezio-image-service:image-service.log
-            opentracker:opentracker.log
           resources: |
             machine/${{ env.TARGET_VM_NAME }}:machine.yaml
             subnet/${{ env.SUBNET_NAME }}:subnet.yaml
+            site/${{ env.SITE_NAME }}:site.yaml
             machinehardware/${{ env.TARGET_VM_NAME }}:machinehardware.yaml
             image/${{ steps.build-image.outputs.image-name }}:image.yaml
             posthook/${{ steps.marker.outputs.name }}:posthook.yaml
@@ -957,8 +1044,7 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-      # Foundation for the upcoming Site/tracker/seeder-per-Site lanes:
-      # describe + current/previous logs for the tracker and seeder
+      # Describe + current/previous logs for the tracker and seeder
       # Deployments/pods above (dump-e2e-diagnostics does not cover
       # them), each pod's network-status annotation (the only place
       # Multus records the address a pod actually got - what a future
@@ -966,9 +1052,12 @@ jobs:
       # snapshot beyond dump-e2e-diagnostics's single FORWARD/mangle
       # dump. Augments, not replaces, the steps above: those already
       # cover controller-manager crash logs and KubeVirtBMC, which this
-      # action does not duplicate. extra-artifact-paths carries the
-      # console-capture logfile (started above) into this same upload
-      # instead of a separate one - this action does not call
+      # action does not duplicate. tracker-label-selector overrides the
+      # action's own legacy-opentracker default: this lane's tracker is
+      # Site-managed (kezio-tracker-<site>, label component=tracker), not
+      # a standalone opentracker Deployment. extra-artifact-paths carries
+      # the console-capture logfile (started above) into this same
+      # upload instead of a separate one - this action does not call
       # capture-vm-console itself, since that backgrounds a continuous
       # attach loop from VM-Ready onward while this action runs once, at
       # the end.
@@ -978,6 +1067,7 @@ jobs:
         with:
           artifact-name-prefix: deploy-${{ matrix.dhcp-scenario }}
           namespaces: "scaffold-system"
+          tracker-label-selector: "app.kubernetes.io/name=kezio,app.kubernetes.io/component=tracker"
           bridges: ${{ env.PROVISIONING_BRIDGE }}
           extra-artifact-paths: ${{ runner.temp }}/console-${{ matrix.dhcp-scenario }}.log
 

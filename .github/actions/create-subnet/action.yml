@@ -10,6 +10,13 @@ description: >-
   it - Ready reflects the bootd Deployment's own rollout, which is
   deploy-bootd's job to wait on, not this action's.
 
+  The boot half (bootd-server-ip/bootd-network-name/dhcp-*) is optional
+  as a group: leave bootd-server-ip and bootd-network-name both empty
+  for a data-plane-only Subnet that hosts only a seeder
+  (seeder-network-name is then required). The Subnet webhook admits
+  spec.siteRef only against a Site that already exists - create it
+  first with create-site.
+
 inputs:
   name:
     description: Name of the Subnet CR; also the suffix of the bootd Deployment it produces (kezio-bootd-<name>).
@@ -22,21 +29,41 @@ inputs:
     description: 'Subnet.spec.cidr, e.g. "192.0.2.0/24".'
     required: true
   bootd-server-ip:
-    description: 'Subnet.spec.bootdServerIP (bare address, no CIDR suffix), e.g. "192.0.2.2".'
-    required: true
+    description: >-
+      Subnet.spec.bootdServerIP (bare address, no CIDR suffix), e.g.
+      "192.0.2.2". Part of the boot half: set together with
+      bootd-network-name, or leave both empty for a data-plane-only
+      Subnet (seeder-network-name must then be set instead).
+    required: false
+    default: ""
   bootd-network-name:
-    description: Name of the NetworkAttachmentDefinition the bootd Deployment attaches through - must live in the same namespace.
-    required: true
+    description: >-
+      Name of the NetworkAttachmentDefinition the bootd Deployment
+      attaches through - must live in the same namespace. Part of the
+      boot half; see bootd-server-ip.
+    required: false
+    default: ""
   seeder-network-name:
-    description: Name of the NetworkAttachmentDefinition seeder pods attach through, when this Subnet hosts seeders. Empty leaves it unset.
+    description: >-
+      Name of the NetworkAttachmentDefinition seeder pods attach
+      through, when this Subnet hosts seeders. Empty leaves it unset.
+      Required when bootd-server-ip/bootd-network-name are both empty -
+      a Subnet must declare at least one plane.
     required: false
     default: ""
   site-ref:
-    description: Subnet.spec.siteRef.name. The Site kind does not exist yet, so this value is free-form and unvalidated.
-    required: false
-    default: "default"
+    description: >-
+      Subnet.spec.siteRef.name. The Subnet webhook rejects this at
+      admission unless a Site by this name already exists in namespace -
+      create it first (see create-site).
+    required: true
   dhcp-scenario:
-    description: 'DHCP scenario, mapped onto Subnet.spec.dhcp.mode: "proxydhcp" -> proxy (an existing DHCP server stays lease authority), "dhcp" -> lease (bootd''s own dnsmasq becomes lease authority).'
+    description: >-
+      DHCP scenario, mapped onto Subnet.spec.dhcp.mode: "proxydhcp" ->
+      proxy (an existing DHCP server stays lease authority), "dhcp" ->
+      lease (bootd's own dnsmasq becomes lease authority). Ignored for a
+      data-plane-only Subnet (bootd-server-ip/bootd-network-name both
+      empty) - no dhcp block is emitted in that case.
     required: false
     default: "proxydhcp"
   lease-range-start:
@@ -72,17 +99,34 @@ runs:
         LEASE_RANGE_END: ${{ inputs.lease-range-end }}
       run: |
         set -euo pipefail
-        case "${DHCP_SCENARIO}" in
-          proxydhcp) dhcp_mode=proxy ;;
-          dhcp) dhcp_mode=lease ;;
-          *)
-            echo "::error::unknown dhcp-scenario '${DHCP_SCENARIO}' (expected proxydhcp or dhcp)" >&2
-            exit 1
-            ;;
-        esac
-        if [ "${dhcp_mode}" = lease ] && { [ -z "${LEASE_RANGE_START}" ] || [ -z "${LEASE_RANGE_END}" ]; }; then
-          echo "::error::dhcp-scenario 'dhcp' requires both lease-range-start and lease-range-end" >&2
+
+        has_bootd_ip=0
+        [ -n "${BOOTD_SERVER_IP}" ] && has_bootd_ip=1
+        has_bootd_net=0
+        [ -n "${BOOTD_NETWORK_NAME}" ] && has_bootd_net=1
+        if [ "${has_bootd_ip}" -ne "${has_bootd_net}" ]; then
+          echo "::error::bootd-server-ip and bootd-network-name must be set together or both left empty" >&2
           exit 1
+        fi
+        has_boot_plane="${has_bootd_ip}"
+        if [ "${has_boot_plane}" -eq 0 ] && [ -z "${SEEDER_NETWORK_NAME}" ]; then
+          echo "::error::a Subnet must declare a boot half (bootd-server-ip/bootd-network-name) or seeder-network-name; one with neither hosts nothing" >&2
+          exit 1
+        fi
+
+        if [ "${has_boot_plane}" -eq 1 ]; then
+          case "${DHCP_SCENARIO}" in
+            proxydhcp) dhcp_mode=proxy ;;
+            dhcp) dhcp_mode=lease ;;
+            *)
+              echo "::error::unknown dhcp-scenario '${DHCP_SCENARIO}' (expected proxydhcp or dhcp)" >&2
+              exit 1
+              ;;
+          esac
+          if [ "${dhcp_mode}" = lease ] && { [ -z "${LEASE_RANGE_START}" ] || [ -z "${LEASE_RANGE_END}" ]; }; then
+            echo "::error::dhcp-scenario 'dhcp' requires both lease-range-start and lease-range-end" >&2
+            exit 1
+          fi
         fi
 
         subnet_yaml="$(cat <<EOF
@@ -95,18 +139,20 @@ runs:
           siteRef:
             name: ${SITE_REF}
           cidr: "${CIDR}"
-          bootdServerIP: "${BOOTD_SERVER_IP}"
-          bootdNetworkRef:
-            name: ${BOOTD_NETWORK_NAME}
         EOF
         )"
+        if [ "${has_boot_plane}" -eq 1 ]; then
+          subnet_yaml+=$'\n  bootdServerIP: "'"${BOOTD_SERVER_IP}"$'"\n  bootdNetworkRef:\n    name: '"${BOOTD_NETWORK_NAME}"
+        fi
         if [ -n "${SEEDER_NETWORK_NAME}" ]; then
           subnet_yaml+=$'\n  seederNetworkRef:\n    name: '"${SEEDER_NETWORK_NAME}"
         fi
-        subnet_yaml+=$'\n  dhcp:\n    mode: '"${dhcp_mode}"
-        if [ "${dhcp_mode}" = lease ]; then
-          subnet_yaml+=$'\n    leaseRangeStart: '"${LEASE_RANGE_START}"
-          subnet_yaml+=$'\n    leaseRangeEnd: '"${LEASE_RANGE_END}"
+        if [ "${has_boot_plane}" -eq 1 ]; then
+          subnet_yaml+=$'\n  dhcp:\n    mode: '"${dhcp_mode}"
+          if [ "${dhcp_mode}" = lease ]; then
+            subnet_yaml+=$'\n    leaseRangeStart: '"${LEASE_RANGE_START}"
+            subnet_yaml+=$'\n    leaseRangeEnd: '"${LEASE_RANGE_END}"
+          fi
         fi
         echo "${subnet_yaml}" | kubectl apply -f -
 

@@ -5,8 +5,16 @@ description: >-
   opentracker image, applies it, and waits for the Deployment to become
   ready. Split out of legacy's mixed e2e-deploy-path-stack action, which
   bundled opentracker together with image-service/seeder/ingest/boot-agent
-  wiring; this action carries only the opentracker piece - the rest is
-  later items' work.
+  wiring; this action carries only the opentracker piece.
+
+  Retired as the tracker for a Site's own seeding path: SiteReconciler
+  now creates one reconciler-managed tracker Deployment per seeding
+  Site (see create-site), single-homed on that Site's seeding NAD and
+  bound to Site.spec.tracker.ip. This action remains only to back
+  Site.spec.tracker.externalURL - the escape hatch for an operator who
+  already runs a tracker - for a lane whose seeder/leecher swarm has no
+  NetworkAttachmentDefinition of its own to single-home a Site-managed
+  tracker on (the image-path lane, at the time of writing).
 
 inputs:
   opentracker-image:

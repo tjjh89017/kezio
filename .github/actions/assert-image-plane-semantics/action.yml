@@ -215,7 +215,14 @@ runs:
             credentialsSecretRef:
               name: ${demand_bmc_creds_secret}
           subnetRef:
-            name: kezio-e2e-grace-demand-subnet
+            # The exact Subnet main.yaml creates for run-leecher's own
+            # demand Machine (kezio-e2e-leecher-demand-subnet) - seeder
+            # placement now resolves Machine.spec.subnetRef through a
+            # real Subnet/Site chain (sitederive.Resolve), so a
+            # not-actually-created Subnet name here would make this
+            # Machine's demand unresolvable and the seeder Deployment
+            # below would never appear.
+            name: kezio-e2e-leecher-demand-subnet
           imageRef:
             name: ${FIRST_IMAGE_NAME}
         EOF

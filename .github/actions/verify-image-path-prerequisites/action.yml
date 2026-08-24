@@ -2,7 +2,7 @@ name: Verify image-path prerequisites
 
 description: >-
   Asserts the image-path lane's scaffolding is actually healthy: the
-  opentracker and image-service Deployments are Available, a default
+  tracker and image-service Deployments are Available, a default
   StorageClass exists (for the content PVCs later items add), the
   image-service token Secret is present with a non-empty token key, and
   image-service's Service actually answers /healthz from inside the
@@ -12,9 +12,17 @@ description: >-
 
 inputs:
   namespace:
-    description: 'Namespace opentracker, image-service, and the token Secret were deployed into.'
+    description: 'Namespace the tracker, image-service, and the token Secret were deployed into.'
     required: false
     default: "scaffold-system"
+  tracker-label-selector:
+    description: >-
+      Label selector matching the tracker Deployment to wait on.
+      Defaults to the standalone opentracker Deployment
+      (deploy-opentracker); a lane whose tracker is Site-managed passes
+      "app.kubernetes.io/component=tracker" instead.
+    required: false
+    default: "app.kubernetes.io/component=opentracker"
   token-secret-name:
     description: 'Name of the image-service bearer token Secret.'
     required: false
@@ -31,12 +39,13 @@ runs:
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
+        TRACKER_LABEL_SELECTOR: ${{ inputs.tracker-label-selector }}
         TOKEN_SECRET_NAME: ${{ inputs.token-secret-name }}
         IMAGE_SERVICE_SERVICE_NAME: ${{ inputs.image-service-service-name }}
       run: |
         set -euo pipefail
 
-        kubectl wait deployment -n "${NAMESPACE}" -l app.kubernetes.io/component=opentracker \
+        kubectl wait deployment -n "${NAMESPACE}" -l "${TRACKER_LABEL_SELECTOR}" \
           --for=condition=Available --timeout=60s
 
         kubectl wait deployment -n "${NAMESPACE}" -l app.kubernetes.io/component=image-service \
@@ -64,4 +73,4 @@ runs:
           --command -- curl --fail --silent --show-error \
           "http://${IMAGE_SERVICE_SERVICE_NAME}.${NAMESPACE}.svc.cluster.local:8080/healthz"
 
-        echo "image-path prerequisites healthy: opentracker and image-service Available, default StorageClass present, token Secret non-empty, image-service /healthz reachable"
+        echo "image-path prerequisites healthy: tracker and image-service Available, default StorageClass present, token Secret non-empty, image-service /healthz reachable"

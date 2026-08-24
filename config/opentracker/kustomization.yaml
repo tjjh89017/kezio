@@ -1,9 +1,12 @@
-# Standalone kustomization for opentracker, the BitTorrent tracker every
-# per-Image seeder Deployment and leecher will announce to. Deliberately
-# not one of config/default's resources, mirroring legacy's config/seeder
-# split: opentracker has no per-Machine or per-Image identity of its own,
-# so it deploys once, independently of the seeder/ingest pieces that later
-# items add.
+# Standalone kustomization for opentracker, kept for the
+# Site.spec.tracker.externalURL escape hatch only: SiteReconciler now
+# creates its own reconciler-managed tracker Deployment per seeding
+# Site (one per Site, single-homed on that Site's seeding network,
+# bound to Site.spec.tracker.ip - see api/v1alpha2/site_types.go), so
+# this manifest is no longer the deployment path a lane or an operator
+# applies for a Site's own tracker. It stays for an operator who wants
+# a tracker running independently of any Site and points
+# tracker.externalURL at it instead.
 #
 # Deploy as an addition once config/default is applied:
 #
