@@ -78,7 +78,7 @@ runs:
         info_hash="${CONTENT_NAME#pc-}"
         leecher_pod="kezio-e2e-leecher"
         seeder_deployment="kezio-seeder-${info_hash}"
-        seeder_label_selector="app.kubernetes.io/name=kezio,app.kubernetes.io/component=partition-content-seeder"
+        seeder_label_selector="app.kubernetes.io/name=kezio,app.kubernetes.io/component=image-seeder"
         demand_machine="kezio-e2e-leecher-demand"
         demand_bmc_creds_secret="kezio-e2e-leecher-demand-bmc-creds"
 

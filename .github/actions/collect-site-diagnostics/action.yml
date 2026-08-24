@@ -59,7 +59,7 @@ inputs:
   seeder-label-selector:
     description: Label selector matching every seeder Deployment/pod across `namespaces`.
     required: false
-    default: "app.kubernetes.io/name=kezio,app.kubernetes.io/component=partition-content-seeder"
+    default: "app.kubernetes.io/name=kezio,app.kubernetes.io/component=image-seeder"
   bootd-label-selector:
     description: Label selector matching every bootd pod across `namespaces`.
     required: false

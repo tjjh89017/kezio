@@ -154,7 +154,7 @@ dump_content_diagnostics() {
 # dump_seeder_diagnostics dumps deployment_name and its pods/logs.
 dump_seeder_diagnostics() {
   local ns="$1" deployment_name="$2"
-  local selector="app.kubernetes.io/name=kezio,app.kubernetes.io/component=partition-content-seeder"
+  local selector="app.kubernetes.io/name=kezio,app.kubernetes.io/component=image-seeder"
   echo "::group::seeder Deployment ${deployment_name}"
   kubectl get deployment "${deployment_name}" -n "${ns}" -o yaml || true
   echo "::endgroup::"

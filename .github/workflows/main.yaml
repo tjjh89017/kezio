@@ -1161,7 +1161,7 @@ jobs:
           job-label-selectors: |
             app.kubernetes.io/component=image-ingest-job:ingest-job.log
             app.kubernetes.io/component=partition-content-publish:publish-job.log
-            app.kubernetes.io/name=kezio,app.kubernetes.io/component=partition-content-seeder:seeder.log
+            app.kubernetes.io/name=kezio,app.kubernetes.io/component=image-seeder:seeder.log
 
       - name: Upload diagnostics
         if: always()
@@ -1902,12 +1902,6 @@ jobs:
             Ready|True
             Valid|True
 
-      # seeder-label-selector overrides this action's own default
-      # ("...component=partition-content-seeder", which matches no real
-      # object - the seeder Deployment's actual label, per
-      # internal/controller/partitioncontent_labels.go, is
-      # "component=image-seeder", the same value assert-seeder-placement
-      # and this job's own no-second-seeder check already use).
       - name: Collect site/tracker/seeder/bootd/runner-network diagnostics
         if: always()
         uses: ./.github/actions/collect-site-diagnostics
@@ -1915,7 +1909,6 @@ jobs:
           artifact-name-prefix: routed
           namespaces: "scaffold-system"
           tracker-label-selector: "app.kubernetes.io/name=kezio,app.kubernetes.io/component=tracker"
-          seeder-label-selector: "app.kubernetes.io/name=kezio,app.kubernetes.io/component=image-seeder"
           bridges: |
             ${{ env.SEG_A_BRIDGE }}
             ${{ env.SEG_B_BRIDGE }}
@@ -2865,9 +2858,6 @@ jobs:
             sleep 3
           done
 
-      # seeder-label-selector overrides this action's own stale default -
-      # see assert-seeder-placement's own no-second-seeder check, above,
-      # for why "component=image-seeder" is the real label.
       - name: Collect site/tracker/seeder/bootd/runner-network diagnostics
         if: always()
         uses: ./.github/actions/collect-site-diagnostics
@@ -2875,7 +2865,6 @@ jobs:
           artifact-name-prefix: two-site
           namespaces: "scaffold-system"
           tracker-label-selector: "app.kubernetes.io/name=kezio,app.kubernetes.io/component=tracker"
-          seeder-label-selector: "app.kubernetes.io/name=kezio,app.kubernetes.io/component=image-seeder"
           bridges: |
             ${{ env.SEG_X_BRIDGE }}
             ${{ env.SEG_Y_BRIDGE }}
