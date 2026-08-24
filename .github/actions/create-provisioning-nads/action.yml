@@ -22,13 +22,15 @@ description: >-
 
   kezio-seeder-network uses host-local, not static: it is shared by
   every seeder Deployment pod AND, single-homed, by the Site's tracker
-  pod pinning its own address through a per-pod "ips" override (Multus
-  merges that override with whatever the NAD's own ipam plugin hands
-  back - see internal/controller/site_tracker_deployment.go's
+  pod pinning its own address through a per-pod "ips" override (see
+  internal/controller/site_tracker_deployment.go's
   trackerPodAnnotations). A static NAD hands the SAME address to every
   attaching pod, so the tracker and any seeder collide on one address
   the moment both are scheduled; host-local hands out a distinct pool
-  address per pod, so the merge stays harmless. kezio-boot-network and
+  address per pod. The pinned tracker address must itself lie INSIDE
+  that pool: host-local refuses a requested address outside its own
+  range and fails the pod's sandbox with "failed to allocate all
+  requested IPs". kezio-boot-network and
   kezio-tracker-network stay static: bootd is the sole attacher of the
   former, and no Deployment in this repository attaches the latter at
   all (a Site's tracker single-homes on the seeding NAD instead, not a
@@ -57,7 +59,8 @@ inputs:
       and the DHCP lease range every caller places within the same /24
       (.101-.116) - see this action's own inline comment for why that
       range is safe against every other reservation on the same
-      bridge.
+      bridge, and for which address of it the caller must give the
+      Site as tracker.ip.
     required: true
   seeding-routes-json:
     description: >-
@@ -178,10 +181,19 @@ runs:
         # avoid - a real machine's DHCP lease and a pod's host-local
         # address landing on the same IP - just moved to a different
         # pair of holders. .101-.116 sits above every one of those
-        # reservations, leaving 16 addresses for one Site's seeder
-        # Deployment (one pod, replicas: 1) plus its tracker pod, more
-        # than either will ever hold at once, even across a rolling
-        # update.
+        # reservations.
+        #
+        # The Site's tracker pins its own address on this same NAD, and
+        # host-local refuses a requested address outside its range, so
+        # tracker.ip must be one address OF this pool. It belongs at
+        # the top, .116: host-local allocates upward from rangeStart,
+        # so no seeder pod can take .116 before the tracker asks for
+        # it. The pool must therefore hold every seeder pod that can
+        # run at once PLUS that pinned address - here 15 seeder
+        # addresses (.101-.115) for one Site's seeder Deployment (one
+        # pod, replicas: 1), far more than it holds at once even across
+        # a rolling update. A caller that raises seeder concurrency
+        # must widen this range with it.
         seeder_network_addr="${SEEDER_NET1_CIDR%%/*}"
         seeder_prefix="${SEEDER_NET1_CIDR##*/}"
         seeder_base="${seeder_network_addr%.*}"

@@ -275,17 +275,18 @@ jobs:
         shell: bash
         run: kubectl create namespace scaffold-system --dry-run=client -o yaml | kubectl apply -f -
 
-      # The pool range mirrors create-provisioning-nads' own
-      # kezio-seeder-network (.101-.116); the requested address sits
-      # outside it, thus the merged pool address is unambiguous.
-      - name: Probe A -- Multus merges the default-network annotation's ips field
+      # Pool range and pinned address both mirror
+      # create-provisioning-nads' own kezio-seeder-network: the pool is
+      # .101-.116 and the tracker pins the top of it, the one placement
+      # host-local accepts.
+      - name: Probe A -- Multus honours the default-network annotation's ips field
         uses: ./.github/actions/probe-multus-pinned-ip
         with:
           bridge-name: kezio-probe-a0
           nad-pool-cidr: 192.0.20.0/24
           nad-pool-range-start: 192.0.20.101
           nad-pool-range-end: 192.0.20.116
-          requested-ip-cidr: 192.0.20.50/24
+          requested-ip-cidr: 192.0.20.116/24
 
       - name: Probe B -- a single-homed pod reaches another segment through NAD IPAM routes
         uses: ./.github/actions/probe-nad-routes
@@ -752,9 +753,18 @@ jobs:
       # Bare, like BOOTD_SERVER_IP, because the announce URL baked into
       # every torrent must be the tracker's own address on this segment -
       # a peer connects to whatever the tracker hands back, and nothing
-      # on that path may rewrite it. The NAD's CIDR is derived at its use
-      # site so the two can never drift apart.
-      TRACKER_SERVER_IP: 192.0.2.4
+      # on that path may rewrite it. The top of kezio-seeder-network's
+      # host-local pool, not a low fixed address: the tracker pins this
+      # through an "ips" override on that same NAD, and host-local
+      # refuses a requested address outside its own range - see
+      # create-provisioning-nads' own comment on that pool.
+      TRACKER_SERVER_IP: 192.0.2.116
+      # create-provisioning-nads also creates a kezio-tracker-network
+      # NAD; no Deployment in this lane attaches it (the Site's tracker
+      # single-homes on the seeding NAD instead), so this address backs
+      # an inert object only. Distinct from every real address on this
+      # segment so it cannot collide with one.
+      UNUSED_TRACKER_NET1_IP: 192.0.2.7/24
       LEASE_RANGE_START: 192.0.2.10
       LEASE_RANGE_END: 192.0.2.100
       SUBNET_NAME: netboot-${{ matrix.dhcp-scenario }}
@@ -902,8 +912,8 @@ jobs:
             PARTITIONCONTENT_SEEDER_IMAGE=example.com/kezio-seeder:e2e
             PARTITIONCONTENT_SEEDER_GRACE_PERIOD=30s
             # There is no cluster-wide tracker setting: the Site created
-            # below owns a real tracker Deployment, single-homed on
-            # kezio-tracker-network and bound to TRACKER_SERVER_IP - not
+            # below owns a real tracker Deployment, single-homed on the
+            # seeding NAD and bound to TRACKER_SERVER_IP - not
             # the ClusterIP Service the image-path lane's externalURL
             # case uses, since a ClusterIP DNATs and this lane's leecher
             # runs on a real machine that has no route to one either way.
@@ -919,7 +929,7 @@ jobs:
         with:
           bridge-name: ${{ env.PROVISIONING_BRIDGE }}
           bootd-net1-ip: "${{ env.BOOTD_SERVER_IP }}/24"
-          tracker-net1-ip: "${{ env.TRACKER_SERVER_IP }}/24"
+          tracker-net1-ip: ${{ env.UNUSED_TRACKER_NET1_IP }}
           seeder-net1-cidr: ${{ env.PROVISIONING_CIDR }}
 
       # SubnetReconciler's Valid condition checks the kezio-bootd
@@ -1343,7 +1353,10 @@ jobs:
       PROVISIONING_HOST_IP: 203.0.113.1/24
       PROVISIONING_CIDR: 203.0.113.0/24
       BOOTD_SERVER_IP: 203.0.113.2
-      TRACKER_SERVER_IP: 203.0.113.4
+      # Top of kezio-seeder-network's host-local pool, for the reason
+      # the single-segment deploy lane's own TRACKER_SERVER_IP states.
+      TRACKER_SERVER_IP: 203.0.113.116
+      UNUSED_TRACKER_NET1_IP: 203.0.113.7/24
       LEASE_RANGE_START: 203.0.113.10
       LEASE_RANGE_END: 203.0.113.100
       SUBNET_NAME: httpboot
@@ -1465,7 +1478,7 @@ jobs:
         with:
           bridge-name: ${{ env.PROVISIONING_BRIDGE }}
           bootd-net1-ip: "${{ env.BOOTD_SERVER_IP }}/24"
-          tracker-net1-ip: "${{ env.TRACKER_SERVER_IP }}/24"
+          tracker-net1-ip: ${{ env.UNUSED_TRACKER_NET1_IP }}
           seeder-net1-cidr: ${{ env.PROVISIONING_CIDR }}
 
       - name: Apply kezio-bootd's RBAC ahead of the Subnet
@@ -1738,10 +1751,12 @@ jobs:
       # Bare, like the single-segment deploy lane's own TRACKER_SERVER_IP:
       # the announce URL baked into every torrent must be the tracker's
       # own address on this segment, with nothing rewriting it on the
-      # way. The seeding NAD's own pool (kezio-seeder-network,
-      # host-local) is instead carved straight out of SEG_C_CIDR below -
+      # way. The top address of the seeding NAD's own pool
+      # (kezio-seeder-network, host-local, carved out of SEG_C_CIDR
+      # below), because the tracker pins it on that same NAD and
+      # host-local refuses a requested address outside its own range -
       # see create-provisioning-nads' own comment on that pool's range.
-      TRACKER_IP: 198.51.102.3
+      TRACKER_IP: 198.51.102.116
       # create-provisioning-nads always creates a "kezio-boot-network" and
       # a "kezio-tracker-network" NAD alongside the seeder one; neither is
       # referenced by any Subnet in this lane (segment C hosts no bootd,

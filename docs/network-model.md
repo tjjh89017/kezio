@@ -120,6 +120,18 @@ own network attachment could ever hand `bootdServerIP` (or the tracker's
 own pinned IP) to a seeder pod, since that would collide with the
 address bootd itself is bound to, or with the tracker's own address.
 
+**The `host-local` exception.** `host-local` refuses a requested address
+that falls outside its own `rangeStart`/`rangeEnd` and fails the pod's
+sandbox with `failed to allocate all requested IPs`. On a seeding
+attachment of that shape, the tracker's pinned address must therefore
+lie INSIDE the range, not outside it. Put it at the TOP of the range:
+`host-local` allocates upward from `rangeStart`, so no seeder pod takes
+the pinned address before the tracker asks for it. The sizing rule then
+reads: range size >= (max concurrently deploying Images at the Site) +
+1 for the pinned tracker address. `internal/nadvalidate` does not model
+a range-bounded `host-local` pool, so `CheckTrackerAddress` reports
+Indeterminate for this shape instead of a verdict.
+
 ## whereabouts and its ip-reconciler are required, not optional
 
 A seeder network attachment sized for more than one concurrent Image

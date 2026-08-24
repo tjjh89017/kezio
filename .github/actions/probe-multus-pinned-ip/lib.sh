@@ -3,11 +3,14 @@
 # probe-multus-pinned-ip. Each step does
 # `source "${GITHUB_ACTION_PATH}/lib.sh"`; do not execute this file.
 #
-# Multus MERGES the per-pod "ips" override with the address that the
-# NAD's own ipam plugin supplies. It does not replace that address. The
-# interface thus holds two addresses, and their order is not
-# guaranteed. Tests must look for an address in the set, and must not
-# read one position of the set.
+# host-local refuses a requested address that lies outside its own
+# range: it fails the sandbox with "failed to allocate all requested
+# IPs". A pinned address on a host-local NAD must thus sit INSIDE that
+# NAD's pool. What the interface holds after that is not fixed -
+# host-local can hand back the requested address alone, or a second
+# pool address with it - so these assertions look for the requested
+# address in the observed set, never at the size of the set and never
+# at one position of it.
 
 set -euo pipefail
 
@@ -19,11 +22,12 @@ ip_to_int() {
   echo $(( (a << 24) + (b << 16) + (c << 8) + d ))
 }
 
-# assert_merged_addresses fails if the observed addresses do not hold
-# BOTH the requested address and one address from the NAD's own ipam
-# pool. An entry can carry a prefix; the prefix is removed first.
-# usage: assert_merged_addresses <context> <requested-ip> <pool-start> <pool-end> [observed...]
-assert_merged_addresses() {
+# assert_pinned_address fails if the observed addresses do not hold the
+# requested address. An entry can carry a prefix; the prefix is removed
+# first. The whole observed set is printed either way, so a run shows
+# what the ipam plugin actually produced.
+# usage: assert_pinned_address <context> <requested-ip> <pool-start> <pool-end> [observed...]
+assert_pinned_address() {
   local context="$1" requested_ip="$2" pool_start="$3" pool_end="$4"
   shift 4
   local observed=("$@")
@@ -33,14 +37,15 @@ assert_merged_addresses() {
   end_int="$(ip_to_int "${pool_end}")"
   requested_int="$(ip_to_int "${requested_ip}")"
 
-  # A requested address from inside the pool would make the two tests
-  # below satisfy each other, and the probe would show nothing.
-  if [ "${requested_int}" -ge "${start_int}" ] && [ "${requested_int}" -le "${end_int}" ]; then
-    echo "::error::the probe inputs are wrong: the requested address ${requested_ip} is inside the pool ${pool_start}-${pool_end}, thus the merged pool address cannot be told from the requested address" >&2
+  # The probe mirrors the shipped NAD, where the pinned address is
+  # always inside the pool. A request from outside it never reaches the
+  # assertions below - host-local rejects the sandbox instead.
+  if [ "${requested_int}" -lt "${start_int}" ] || [ "${requested_int}" -gt "${end_int}" ]; then
+    echo "::error::the probe inputs are wrong: the requested address ${requested_ip} is outside the pool ${pool_start}-${pool_end}, which host-local rejects with \"failed to allocate all requested IPs\"" >&2
     return 1
   fi
 
-  local found_requested="" found_pool="" entry ip ip_int
+  local found_requested="" others=() entry ip
   for entry in "${observed[@]}"; do
     ip="${entry%%/*}"
     [ -n "${ip}" ] || continue
@@ -48,19 +53,12 @@ assert_merged_addresses() {
       found_requested="${ip}"
       continue
     fi
-    ip_int="$(ip_to_int "${ip}")"
-    if [ "${ip_int}" -ge "${start_int}" ] && [ "${ip_int}" -le "${end_int}" ]; then
-      found_pool="${ip}"
-    fi
+    others+=("${ip}")
   done
 
   if [ -z "${found_requested}" ]; then
     echo "::error::FAIL observed=[${observed[*]}] expected to contain ${requested_ip} -- Multus did not honour the ips field of the default-network annotation, thus the tracker cannot pin its address (${context})" >&2
     return 1
   fi
-  if [ -z "${found_pool}" ]; then
-    echo "::error::FAIL observed=[${observed[*]}] expected to also contain one address from ${pool_start}-${pool_end} -- the ipam address of the NAD is absent, thus this probe no longer shows the merge (${context})" >&2
-    return 1
-  fi
-  echo "PASS observed=[${observed[*]}] requested=${found_requested} pool=${found_pool} (${context})"
+  echo "PASS observed=[${observed[*]}] requested=${found_requested} other=[${others[*]-}] (${context})"
 }

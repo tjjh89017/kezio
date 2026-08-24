@@ -1,13 +1,14 @@
-name: Probe that Multus merges the default-network annotation's ips field
+name: Probe that Multus honours the default-network annotation's ips field
 
 description: >-
   Shows how Multus applies the "ips" field of the
   `v1.multus-cni.io/default-network` annotation (the annotation that
   REPLACES the default network of a pod, not the additive
-  `k8s.v1.cni.cncf.io/networks`). Multus MERGES that per-pod address
-  with the address that the ipam plugin of the NAD supplies. It does
-  not replace that address. The interface of the pod thus holds two
-  addresses, and their order is not guaranteed.
+  `k8s.v1.cni.cncf.io/networks`). Multus passes that per-pod address to
+  the ipam plugin of the NAD. The plugin decides what the interface
+  ends up holding: the requested address alone, or a pool address with
+  it. The order of the set is not guaranteed either, so the probe reads
+  the whole set and looks for the requested address in it.
 
   The placement of the Site tracker depends on this behaviour. Every
   other caller in this repository puts only a bare NAD name on that
@@ -24,24 +25,32 @@ description: >-
   Method: the probe creates a NetworkAttachmentDefinition with
   host-local ipam and a bounded pool. This is the shape that
   create-provisioning-nads gives to kezio-seeder-network, and it exists
-  because of the merge: a static NAD gives the SAME extra address to
-  every attaching pod, thus the tracker and a seeder collide. The probe
-  then creates a pod with EXACTLY the annotation shape that
-  trackerPodAnnotations builds: a JSON array with one element that
-  carries "name", "namespace", and "ips": [requested-ip-cidr]. The
-  CIDR form is necessary, because the ipam of the bridge CNI plugin
-  rejects a bare dotted-quad with "the 'ip' field is expected to be in
-  CIDR notation".
+  so that each attaching pod gets its own address: a static NAD gives
+  the SAME address to every attaching pod, thus the tracker and a
+  seeder collide. The probe then creates a pod with EXACTLY the
+  annotation shape that trackerPodAnnotations builds: a JSON array with
+  one element that carries "name", "namespace", and "ips":
+  [requested-ip-cidr]. The CIDR form is necessary, because the ipam of
+  the bridge CNI plugin rejects a bare dotted-quad with "the 'ip' field
+  is expected to be in CIDR notation".
+
+  The requested address sits INSIDE the pool, at its top. host-local
+  refuses a requested address outside its own range and fails the
+  sandbox with "failed to allocate all requested IPs", so this is the
+  only placement production can use; the top of the range keeps a
+  seeder pod from taking the address first, because host-local
+  allocates upward from rangeStart.
 
   The probe then reads the addresses of the default interface (eth0;
   default-network always attaches as eth0, not net1) in two places: the
   k8s.v1.cni.cncf.io/network-status annotation that Multus writes back,
   and a live `ip addr` from inside the running pod. In both places the
-  probe asserts that the requested address IS PRESENT, and that one
-  address from the pool of the NAD is present with it. The first
-  assertion fails if Multus ignores "ips". The second assertion fails
-  if the merge stops, which is the condition that lets
-  create-provisioning-nads go back to a static NAD.
+  probe asserts that the requested address IS PRESENT, and prints the
+  whole observed set. The assertion fails if Multus ignores "ips",
+  which is the condition that stops the tracker binding
+  Site.spec.tracker.ip. A pool address beside the requested one is
+  reported but never required: with an in-pool request host-local can
+  return the requested address alone.
 
 inputs:
   namespace:
@@ -69,14 +78,13 @@ inputs:
     required: true
   requested-ip-cidr:
     description: >-
-      Address with a CIDR suffix, e.g. "192.0.20.50/24", requested
+      Address with a CIDR suffix, e.g. "192.0.20.116/24", requested
       through the "ips" field of the default-network annotation. This
       mirrors the entry that trackerPodAnnotations builds
       (Site.spec.tracker.ip plus the prefix length of the seeding
-      Subnet, through trackerIPWithPrefix). It must sit OUTSIDE the
-      pool range above; if it does not, the merged pool address cannot
-      be told from the requested address, and the probe fails on its
-      own inputs.
+      Subnet, through trackerIPWithPrefix). It must sit INSIDE the pool
+      range above, and belongs at the top of it - see this action's own
+      description. The probe fails on its own inputs if it does not.
     required: true
   pod-name:
     description: Name of the probe pod.
@@ -187,7 +195,7 @@ runs:
           exit 1
         fi
 
-    - name: PASS/FAIL -- network-status reports the requested address among the merged set
+    - name: PASS/FAIL -- network-status reports the requested address among the observed set
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
@@ -214,10 +222,10 @@ runs:
 
         # Multus marks the default-network entry "default": true. There
         # is no additive network here, thus exactly one entry is
-        # expected, and it carries the whole merged address set.
+        # expected, and it carries the whole observed address set.
         mapfile -t observed_ips < <(jq -r '[.[] | select(.default == true)][0].ips[]?' <<<"${status_json}")
 
-        assert_merged_addresses "network-status" "${requested_ip}" \
+        assert_pinned_address "network-status" "${requested_ip}" \
           "${NAD_POOL_RANGE_START}" "${NAD_POOL_RANGE_END}" "${observed_ips[@]}"
 
     - name: PASS/FAIL -- a live "ip addr" from inside the pod shows the requested address
@@ -239,7 +247,7 @@ runs:
         echo "in-pod ip addr: ${addr_lines}"
         mapfile -t observed_cidrs < <(awk '{for (i=1;i<=NF;i++) if ($i=="inet") print $(i+1)}' <<<"${addr_lines}")
 
-        assert_merged_addresses "in-pod ip addr" "${REQUESTED_IP_CIDR%%/*}" \
+        assert_pinned_address "in-pod ip addr" "${REQUESTED_IP_CIDR%%/*}" \
           "${NAD_POOL_RANGE_START}" "${NAD_POOL_RANGE_END}" "${observed_cidrs[@]}"
 
         # The bridge CNI plugin binds the interface to exactly the
