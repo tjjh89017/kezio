@@ -16,6 +16,18 @@ description: >-
   same arithmetic assert-seeder-placement uses for seederdeploy.Name,
   applied to trackerDeploymentName's own (shorter) prefix.
 
+  The pinned address is asserted as a relationship, not as one literal
+  string: the selection element's ips[0] must name expected-tracker-ip
+  and must carry a prefix length, and that prefix must be the seeding
+  Subnet's own (trackerIPWithPrefix). Multus hands the element to the
+  bridge CNI plugin verbatim and that plugin refuses a bare address
+  ("the 'ip' field is expected to be in CIDR notation"), so a bare
+  ips[0] here is a real misconfiguration, not a formatting difference.
+  The prefix is read from the cluster along the same path the controller
+  uses - Site.spec.seederSubnetRef to that Subnet's spec.cidr - so no
+  caller repeats it, and a tracker pinned with the prefix of some other
+  network still fails.
+
   No-Service is checked by simulating Kubernetes' own selector match
   against the tracker Deployment's pod template labels, not by checking
   for one specific Service name: any Service in the namespace whose
@@ -39,7 +51,10 @@ inputs:
     description: Name of the NAD expected on the tracker's default-network selection element.
     required: true
   expected-tracker-ip:
-    description: Expected pinned address (Site.spec.tracker.ip) the tracker is bound to.
+    description: >-
+      Expected pinned address (Site.spec.tracker.ip) the tracker is bound
+      to. Bare, as the field itself is: the prefix the pod annotation
+      carries is read from the seeding Subnet, not passed in here.
     required: true
   expected-announce-port:
     description: Expected announce port (trackerAnnouncePort).
@@ -103,6 +118,7 @@ runs:
       shell: bash
       env:
         SITE_NAMESPACE: ${{ inputs.site-namespace }}
+        SITE_NAME: ${{ inputs.site-name }}
         COMPUTED_NAME: ${{ steps.name.outputs.name }}
         EXPECTED_SEEDING_NAD_NAMESPACE: ${{ inputs.expected-seeding-nad-namespace }}
         EXPECTED_SEEDING_NAD_NAME: ${{ inputs.expected-seeding-nad-name }}
@@ -127,8 +143,32 @@ runs:
           echo "::error::default-network element names ${got_namespace:-<empty>}/${got_name:-<empty>}, want ${EXPECTED_SEEDING_NAD_NAMESPACE}/${EXPECTED_SEEDING_NAD_NAME}" >&2
           fail=1
         fi
-        if [ "${got_ip}" != "${EXPECTED_TRACKER_IP}" ]; then
-          echo "::error::default-network element requests ips[0]=${got_ip:-<empty>}, want ${EXPECTED_TRACKER_IP}" >&2
+        site_json="$(kubectl get site "${SITE_NAME}" -n "${SITE_NAMESPACE}" -o json)"
+        subnet_name="$(jq -r '.spec.seederSubnetRef.name // ""' <<<"${site_json}")"
+        subnet_namespace="$(jq -r --arg ns "${SITE_NAMESPACE}" '.spec.seederSubnetRef.namespace // $ns' <<<"${site_json}")"
+        if [ -z "${subnet_name}" ]; then
+          echo "::error::Site ${SITE_NAMESPACE}/${SITE_NAME} has no spec.seederSubnetRef, but a tracker Deployment exists for it" >&2
+          exit 1
+        fi
+        subnet_cidr="$(kubectl get subnet "${subnet_name}" -n "${subnet_namespace}" -o jsonpath='{.spec.cidr}')"
+        want_prefix="${subnet_cidr##*/}"
+        echo "seeding Subnet ${subnet_namespace}/${subnet_name} cidr=${subnet_cidr}"
+
+        got_address="${got_ip%%/*}"
+        got_prefix=""
+        case "${got_ip}" in
+          */*) got_prefix="${got_ip#*/}" ;;
+        esac
+
+        if [ "${got_address}" != "${EXPECTED_TRACKER_IP}" ]; then
+          echo "::error::default-network element requests ips[0]=${got_ip:-<empty>}, want the pinned address ${EXPECTED_TRACKER_IP}" >&2
+          fail=1
+        fi
+        if [ -z "${got_prefix}" ]; then
+          echo "::error::default-network element requests ips[0]=${got_ip:-<empty>} as a bare address - the bridge CNI plugin refuses an 'ip' field that is not in CIDR notation" >&2
+          fail=1
+        elif [ "${got_prefix}" != "${want_prefix}" ]; then
+          echo "::error::default-network element requests ips[0]=${got_ip} with prefix /${got_prefix}, want /${want_prefix} from seeding Subnet ${subnet_namespace}/${subnet_name} (cidr ${subnet_cidr})" >&2
           fail=1
         fi
 
