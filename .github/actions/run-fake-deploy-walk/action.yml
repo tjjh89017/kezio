@@ -42,8 +42,10 @@ inputs:
     default: "fake-deploy-walk-bmc-creds"
   subnet-name:
     description: >-
-      spec.subnetRef name. Subnet does not exist as a kind at this stage,
-      so this is never resolved; any name satisfies the schema.
+      spec.subnetRef name. The Machine webhook requires this to name a
+      Subnet that already exists and has a boot half, so the caller must
+      create one (see create-site/create-subnet) before running this
+      action.
     required: false
     default: "fake-deploy-walk-subnet"
   image-name:

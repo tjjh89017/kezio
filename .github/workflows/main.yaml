@@ -308,26 +308,61 @@ jobs:
         with:
           manager-image: example.com/kezio:e2e
 
+      # The Machine webhook now requires spec.subnetRef to resolve to a
+      # Subnet with a boot half, and the Subnet webhook requires
+      # spec.siteRef to resolve to an existing Site - so every walk below
+      # needs both to already exist. One Site and one boot-half Subnet are
+      # created here and shared by every walk: none of them creates a
+      # PartitionContent or a seeder (every Image fixture in this lane is
+      # mkfs-only), so there is no seeder-demand or per-Site placement
+      # assertion for a shared Site identity to cross-contaminate. Both
+      # live in namespace "default", matching every walk's own Machine
+      # namespace, since neither SubnetRef nor SiteRef here carries an
+      # explicit namespace and each defaults to its own object's
+      # namespace. No BOOTD_DEPLOYMENT_IMAGE is configured in this lane
+      # (deploy-kezio above sets none), so the Subnet's bootd Deployment is
+      # never attempted regardless of the boot half declared here - same
+      # as the image-path lane's own demand-Machine Subnet.
+      - name: Create the Site
+        uses: ./.github/actions/create-site
+        with:
+          name: kezio-e2e-fast-lane-site
+          namespace: "default"
+
+      - name: Create the Subnet for the fast lane's Machines
+        uses: ./.github/actions/create-subnet
+        with:
+          name: kezio-e2e-fast-lane-subnet
+          namespace: "default"
+          cidr: "203.0.113.0/24"
+          bootd-server-ip: "203.0.113.2"
+          bootd-network-name: kezio-boot-network
+          site-ref: kezio-e2e-fast-lane-site
+
       - name: Run a fake-deployer Machine walk
         uses: ./.github/actions/run-fake-deploy-walk
         with:
           namespace: "default"
+          subnet-name: kezio-e2e-fast-lane-subnet
 
       - name: Run fake-deployer failure-path scenarios
         uses: ./.github/actions/run-fake-failure-walk
         with:
           namespace: "default"
+          subnet-name: kezio-e2e-fast-lane-subnet
 
       - name: Run a fake-deployer plan-builder walk
         uses: ./.github/actions/run-fake-plan-walk
         with:
           namespace: "default"
           manager-namespace: "scaffold-system"
+          subnet-name: kezio-e2e-fast-lane-subnet
 
       - name: Run a fake-deployer disk-hint matching walk
         uses: ./.github/actions/run-fake-disk-hints-walk
         with:
           namespace: "default"
+          subnet-name: kezio-e2e-fast-lane-subnet
 
       - name: Run the watch-churn check
         uses: ./.github/actions/run-watch-churn-check

@@ -37,6 +37,14 @@ inputs:
     description: 'Name of the placeholder BMC credentials Secret shared by every Machine this action creates.'
     required: false
     default: "fake-plan-walk-bmc-creds"
+  subnet-name:
+    description: >-
+      spec.subnetRef name shared by every Machine this action creates. The
+      Machine webhook requires this to name a Subnet that already exists
+      and has a boot half, so the caller must create one (see
+      create-site/create-subnet) before running this action.
+    required: false
+    default: "fake-plan-walk-subnet"
   default-hook-machine-name:
     description: 'Name of the Machine created with no postHookRefs (resolves the default PostHook).'
     required: false
@@ -123,6 +131,7 @@ runs:
         MACHINE_NAME: ${{ inputs.default-hook-machine-name }}
         IMAGE_NAME: ${{ inputs.image-name }}
         SECRET_NAME: ${{ inputs.credentials-secret-name }}
+        SUBNET_NAME: ${{ inputs.subnet-name }}
       run: |
         set -euo pipefail
         cat <<EOF | kubectl apply -f -
@@ -138,7 +147,7 @@ runs:
               name: ${SECRET_NAME}
           bootMACAddress: "aa:bb:cc:dd:ee:21"
           subnetRef:
-            name: fake-plan-walk-subnet
+            name: ${SUBNET_NAME}
           imageRef:
             name: ${IMAGE_NAME}
         EOF
@@ -227,6 +236,7 @@ runs:
         IMAGE_NAME: ${{ inputs.image-name }}
         SECRET_NAME: ${{ inputs.credentials-secret-name }}
         HOOK_NAME: ${{ inputs.custom-hook-name }}
+        SUBNET_NAME: ${{ inputs.subnet-name }}
       run: |
         set -euo pipefail
         cat <<EOF | kubectl apply -f -
@@ -242,7 +252,7 @@ runs:
               name: ${SECRET_NAME}
           bootMACAddress: "aa:bb:cc:dd:ee:22"
           subnetRef:
-            name: fake-plan-walk-subnet
+            name: ${SUBNET_NAME}
           imageRef:
             name: ${IMAGE_NAME}
           postHookRefs:
@@ -298,6 +308,7 @@ runs:
         MACHINE_NAME: ${{ inputs.missing-hook-machine-name }}
         IMAGE_NAME: ${{ inputs.image-name }}
         SECRET_NAME: ${{ inputs.credentials-secret-name }}
+        SUBNET_NAME: ${{ inputs.subnet-name }}
       run: |
         set -euo pipefail
         cat <<EOF | kubectl apply -f -
@@ -313,7 +324,7 @@ runs:
               name: ${SECRET_NAME}
           bootMACAddress: "aa:bb:cc:dd:ee:23"
           subnetRef:
-            name: fake-plan-walk-subnet
+            name: ${SUBNET_NAME}
           imageRef:
             name: ${IMAGE_NAME}
           postHookRefs:

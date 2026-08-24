@@ -37,6 +37,14 @@ inputs:
     description: 'Name of Machine C: a hint matching neither fabricated disk.'
     required: false
     default: "fake-disk-hints-no-match"
+  subnet-name:
+    description: >-
+      spec.subnetRef name shared by every Machine this action creates. The
+      Machine webhook requires this to name a Subnet that already exists
+      and has a boot half, so the caller must create one (see
+      create-site/create-subnet) before running this action.
+    required: false
+    default: "fake-disk-hints-walk-subnet"
   error-timeout:
     description: 'Timeout for Machine A/C to report status.operationalStatus=error.'
     required: false
@@ -102,6 +110,7 @@ runs:
         MACHINE_NAME: ${{ inputs.ambiguous-machine-name }}
         IMAGE_NAME: ${{ inputs.image-name }}
         SECRET_NAME: ${{ inputs.ambiguous-machine-name }}-bmc-creds
+        SUBNET_NAME: ${{ inputs.subnet-name }}
       run: |
         set -euo pipefail
         cat <<EOF | kubectl apply -f -
@@ -119,7 +128,7 @@ runs:
               name: ${SECRET_NAME}
           bootMACAddress: "aa:bb:cc:dd:ee:31"
           subnetRef:
-            name: fake-disk-hints-walk-subnet
+            name: ${SUBNET_NAME}
           imageRef:
             name: ${IMAGE_NAME}
           targetDisk:
@@ -209,6 +218,7 @@ runs:
         MACHINE_NAME: ${{ inputs.unique-machine-name }}
         IMAGE_NAME: ${{ inputs.image-name }}
         SECRET_NAME: ${{ inputs.unique-machine-name }}-bmc-creds
+        SUBNET_NAME: ${{ inputs.subnet-name }}
       run: |
         set -euo pipefail
         cat <<EOF | kubectl apply -f -
@@ -226,7 +236,7 @@ runs:
               name: ${SECRET_NAME}
           bootMACAddress: "aa:bb:cc:dd:ee:32"
           subnetRef:
-            name: fake-disk-hints-walk-subnet
+            name: ${SUBNET_NAME}
           imageRef:
             name: ${IMAGE_NAME}
           targetDisk:
@@ -295,6 +305,7 @@ runs:
         MACHINE_NAME: ${{ inputs.no-match-machine-name }}
         IMAGE_NAME: ${{ inputs.image-name }}
         SECRET_NAME: ${{ inputs.no-match-machine-name }}-bmc-creds
+        SUBNET_NAME: ${{ inputs.subnet-name }}
       run: |
         set -euo pipefail
         cat <<EOF | kubectl apply -f -
@@ -312,7 +323,7 @@ runs:
               name: ${SECRET_NAME}
           bootMACAddress: "aa:bb:cc:dd:ee:33"
           subnetRef:
-            name: fake-disk-hints-walk-subnet
+            name: ${SUBNET_NAME}
           imageRef:
             name: ${IMAGE_NAME}
           targetDisk:
