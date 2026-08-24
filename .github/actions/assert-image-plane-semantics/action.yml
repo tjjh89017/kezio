@@ -3,7 +3,8 @@ name: Assert Image/PartitionContent plane semantics
 description: >-
   Proves, against the real cluster ingest-test-image and run-leecher just
   walked through, the controller behaviors that are otherwise only
-  envtested: shared-content dedupe, composed (source-less) Images, the
+  envtested: an import that refuses to write over an existing content
+  name, a hand-written Image over content that already exists, the
   PartitionContent deletion finalizer, and seeder grace-period shutdown.
   Runs as four ordered step groups against the one PartitionContent
   ingest-test-image produced (content-name); see each step's own comment
@@ -15,17 +16,17 @@ inputs:
     required: false
     default: "scaffold-system"
   content-name:
-    description: 'PartitionContent object name ("pc-<info hash>") ingest-test-image produced, e.g. its content-ref output.'
+    description: 'PartitionContent object name ingest-test-image produced, e.g. its content-name output.'
+    required: true
+  content-prefix:
+    description: 'Content prefix ingest-test-image''s import used, e.g. its content-prefix output. The conflicting import below names this same prefix, so it asks for content-name itself.'
     required: true
   first-image-name:
     description: 'Name of the Image ingest-test-image created (must match its image-name input).'
     required: false
     default: "kezio-e2e-fixture"
   fixture-disk-path:
-    description: 'Runner-local fixture disk path, e.g. ingest-test-image''s disk-path output - re-uploaded byte-for-byte to exercise ingest-side dedupe.'
-    required: true
-  fixture-layout-path:
-    description: 'Runner-local layout JSON path, e.g. ingest-test-image''s layout-path output - describes the same fixture-disk-path bytes.'
+    description: 'Runner-local fixture disk path, e.g. ingest-test-image''s disk-path output - re-uploaded byte-for-byte to exercise the import''s name-conflict refusal.'
     required: true
   token:
     description: Bearer token kezioctl authenticates the re-upload with.
@@ -38,16 +39,16 @@ inputs:
     description: 'Local port the image-service Service is port-forwarded to. Distinct from ingest-test-image''s own port so a slow-to-exit prior port-forward can never collide.'
     required: false
     default: "18081"
-  second-image-name:
-    description: 'Name given to the re-uploaded (dedupe) Image.'
+  conflicting-import-name:
+    description: 'Name given to the second ImageImport, and to the Image it would have created had it not been refused.'
     required: false
     default: "kezio-e2e-fixture-dup"
   composed-image-name:
-    description: 'Name given to the hand-written, source-less (composed) Image.'
+    description: 'Name given to the hand-written (composed) Image over already-existing content.'
     required: false
     default: "kezio-e2e-fixture-composed"
   wait-timeout-seconds:
-    description: 'How long to poll for an Image to reach Ready before failing.'
+    description: 'How long to poll for an Image to reach Ready, or for the conflicting import to reach Failed, before failing.'
     required: false
     default: "300"
   seeder-wait-timeout-seconds:
@@ -70,26 +71,27 @@ inputs:
 runs:
   using: composite
   steps:
-    # --- Step group 1: shared-content dedupe -----------------------------
+    # --- Step group 1: an import will not write over existing content ---
     #
-    # Re-uploads the *identical* fixture bytes (fixture-disk-path,
-    # fixture-layout-path - built once by ingest-test-image, not rebuilt
-    # here) under a second Image name. Its layout declares the same
-    # contentRef (identical bytes hash identically), so its own ingest Job
-    # runs to completion and then, in ensurePartitionContent
-    # (image_ingest.go), finds content-name already existing and creates
-    # nothing: no second PartitionContent, no second content PVC, no
-    # second publish Job. Only the second Image's own ingest Job is new -
-    # a different object, a different label, not asserted against here.
-    - name: "Dedupe: re-upload the same fixture under a second Image name"
-      id: dedupe
+    # Re-uploads the identical fixture bytes (fixture-disk-path, built
+    # once by ingest-test-image, not rebuilt here) as a second
+    # ImageImport that names the same content prefix, so it asks for
+    # content-name itself. A content name is chosen by its import, not
+    # derived from the bytes, so identical bytes buy this import
+    # nothing: content is immutable, and the import reports the conflict
+    # and stops rather than write over what the first import created.
+    # Its own ingest Job still runs to completion first - the partition
+    # set, and therefore the names, are only known once it has - so what
+    # this asserts is what the refused import did NOT leave behind.
+    - name: "Conflict: a second import naming the same content prefix is refused, not applied"
+      id: conflict
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
         CONTENT_NAME: ${{ inputs.content-name }}
-        SECOND_IMAGE_NAME: ${{ inputs.second-image-name }}
+        CONTENT_PREFIX: ${{ inputs.content-prefix }}
+        IMPORT_NAME: ${{ inputs.conflicting-import-name }}
         DISK_PATH: ${{ inputs.fixture-disk-path }}
-        LAYOUT_PATH: ${{ inputs.fixture-layout-path }}
         TOKEN: ${{ inputs.token }}
         SERVICE_NAME: ${{ inputs.image-service-service-name }}
         LOCAL_PORT: ${{ inputs.local-port }}
@@ -106,30 +108,48 @@ runs:
           sleep 1
         done
 
-        trap 'dump_image_diagnostics "${NAMESPACE}" "${SECOND_IMAGE_NAME}"; kill "${pf_pid}" 2>/dev/null || true' ERR
+        trap 'dump_import_diagnostics "${NAMESPACE}" "${IMPORT_NAME}"; kill "${pf_pid}" 2>/dev/null || true' ERR
         bin/kezioctl image upload "${DISK_PATH}" \
-          --name "${SECOND_IMAGE_NAME}" \
+          --name "${IMPORT_NAME}" \
           --namespace "${NAMESPACE}" \
+          --content-prefix "${CONTENT_PREFIX}" \
           --server "http://127.0.0.1:${LOCAL_PORT}" \
-          --token "${TOKEN}" \
-          --layout "${LAYOUT_PATH}"
+          --token "${TOKEN}"
 
-        wait_for_image_ready "${NAMESPACE}" "${SECOND_IMAGE_NAME}" "${WAIT_TIMEOUT_SECONDS}"
+        wait_for_import_failed "${NAMESPACE}" "${IMPORT_NAME}" "${WAIT_TIMEOUT_SECONDS}"
         trap 'kill "${pf_pid}" 2>/dev/null || true' EXIT
 
-        echo "Asserting content-name ${CONTENT_NAME} was reused, not recreated"
+        failure_message="$(jp "${NAMESPACE}" imageimports.kezio.kojuro.date "${IMPORT_NAME}" \
+          '{.status.conditions[?(@.type=="Ready")].message}')"
+        echo "import failure message: ${failure_message}"
+        case "${failure_message}" in
+          *"${CONTENT_NAME}"*) ;;
+          *) echo "::error::the refused import does not name ${CONTENT_NAME} as the conflict: ${failure_message}" >&2
+             dump_import_diagnostics "${NAMESPACE}" "${IMPORT_NAME}"
+             exit 1 ;;
+        esac
+
+        echo "Asserting the refused import created no Image of its own"
+        if kubectl get images.kezio.kojuro.date "${IMPORT_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1; then
+          echo "::error::refused import ${IMPORT_NAME} created Image ${IMPORT_NAME} anyway" >&2
+          dump_import_diagnostics "${NAMESPACE}" "${IMPORT_NAME}"
+          exit 1
+        fi
+
+        echo "Asserting content-name ${CONTENT_NAME} was left untouched"
         assert_shared_content_singleton "${NAMESPACE}" "${CONTENT_NAME}"
-        echo "dedupe assertions passed: one PartitionContent, one content PVC, one publish Job"
+        echo "conflict assertions passed: import Failed, no second Image, still one PartitionContent, one content PVC, one publish Job"
 
     # --- Step group 2: composed Image -------------------------------------
     #
-    # A hand-written, source-less Image reusing content-name's layout
-    # (fetched off the already-Ready first Image, byte-identical
-    # sfdiskJSON/slots) must reach Ready through pure aggregation
-    # (ImageReconciler.onChange takes the composed branch whenever
-    # spec.source is absent) - no image-ingest-<name> Job is ever created
-    # for it.
-    - name: "Composed: a source-less Image over existing content reaches Ready with no ingest Job"
+    # A hand-written Image reusing content-name's layout (fetched off
+    # the already-Ready first Image, byte-identical sfdiskJSON/slots)
+    # must reach Ready through pure aggregation over content that
+    # already exists - composing an Image from existing content is done
+    # by naming that content. An Image never starts an import: only an
+    # ImageImport owns an ingest Job, so no image-ingest-<name> Job is
+    # ever created for this one.
+    - name: "Composed: an Image over existing content reaches Ready with no ingest Job"
       id: composed
       shell: bash
       env:
@@ -170,7 +190,7 @@ runs:
     # group deletes every Image referencing content-name, which lets
     # content-name's own deletion (and its owned seeder Deployment) proceed
     # - nothing would be left to observe a grace shutdown on afterward. It
-    # also does not reuse run-leecher's own demand cycle: the dedupe/composed
+    # also does not reuse run-leecher's own demand cycle: the conflict/composed
     # steps above run an unbounded amount of wall-clock time after
     # run-leecher deleted its demand Machine, which could already exceed
     # grace-period-seconds by the time this step runs. Driving a fresh
@@ -190,12 +210,11 @@ runs:
         set -euo pipefail
         source "${GITHUB_ACTION_PATH}/lib.sh"
 
-        # The seeder Deployment name is no longer derived from the
-        # content hash (that per-content naming was retired for one
-        # Deployment per (Image, Site) - see seederdeploy.Name); it is
-        # found instead, once it appears, by its component label plus
-        # the owning Image's own controller reference
-        # (listImageSeederDeployments' own lookup, reproduced here).
+        # One seeder Deployment serves one (Image, Site) pair, and its
+        # name is derived from both (see seederdeploy.Name). It is found
+        # here, once it appears, by its component label plus the owning
+        # Image's own controller reference (listImageSeederDeployments'
+        # own lookup, reproduced here).
         seeder_deployment=""
         seeder_label_selector="app.kubernetes.io/name=kezio,app.kubernetes.io/component=image-seeder"
         demand_machine="kezio-e2e-grace-demand"
@@ -284,15 +303,15 @@ runs:
 
     # --- Step group 4: deletion semantics ----------------------------------
     #
-    # Deletes the three Images created above one at a time, observing the
-    # PartitionContentFinalizer's contract at each step: the shared content
-    # survives while any Image still references it; a direct delete against
-    # the content itself while still referenced blocks (DeletionBlocked,
-    # deletionTimestamp set, object persists) rather than either succeeding
-    # or being silently ignored; and once the last referencing Image is
-    # gone, the pending delete completes on its own (the Image-deletion
-    # watch, not a poll) and ordinary garbage collection reclaims the
-    # content PVC.
+    # Deletes the two Images that reference content-name one at a time,
+    # observing the PartitionContentFinalizer's contract at each step:
+    # the shared content survives while any Image still references it; a
+    # direct delete against the content itself while still referenced
+    # blocks (DeletionBlocked, deletionTimestamp set, object persists)
+    # rather than either succeeding or being silently ignored; and once
+    # the last referencing Image is gone, the pending delete completes
+    # on its own (the Image-deletion watch, not a poll) and ordinary
+    # garbage collection reclaims the content PVC.
     - name: "Deletion: content survives partial dereference, blocks under a direct delete, completes once unreferenced"
       id: deletion
       shell: bash
@@ -300,7 +319,6 @@ runs:
         NAMESPACE: ${{ inputs.namespace }}
         CONTENT_NAME: ${{ inputs.content-name }}
         FIRST_IMAGE_NAME: ${{ inputs.first-image-name }}
-        SECOND_IMAGE_NAME: ${{ inputs.second-image-name }}
         COMPOSED_IMAGE_NAME: ${{ inputs.composed-image-name }}
         DELETION_WAIT_TIMEOUT_SECONDS: ${{ inputs.deletion-wait-timeout-seconds }}
       run: |
@@ -309,18 +327,18 @@ runs:
 
         trap 'dump_content_diagnostics "${NAMESPACE}" "${CONTENT_NAME}"' ERR
 
-        echo "Deleting the first Image (${FIRST_IMAGE_NAME}) - two other Images still reference ${CONTENT_NAME}"
+        echo "Deleting the first Image (${FIRST_IMAGE_NAME}) - the composed Image still references ${CONTENT_NAME}"
         kubectl delete images.kezio.kojuro.date "${FIRST_IMAGE_NAME}" -n "${NAMESPACE}" --wait=false
         wait_for_gone "images.kezio.kojuro.date" "${FIRST_IMAGE_NAME}" "${NAMESPACE}" "${DELETION_WAIT_TIMEOUT_SECONDS}"
 
         echo "Asserting ${CONTENT_NAME} survives, still Ready"
         content_state="$(jp "${NAMESPACE}" partitioncontents.kezio.kojuro.date "${CONTENT_NAME}" '{.status.state}')"
         if [ "${content_state}" != "Ready" ]; then
-          echo "::error::PartitionContent ${CONTENT_NAME} is ${content_state:-<gone>} after only one of its three referencing Images was deleted" >&2
+          echo "::error::PartitionContent ${CONTENT_NAME} is ${content_state:-<gone>} after only one of its two referencing Images was deleted" >&2
           exit 1
         fi
 
-        echo "Attempting to delete ${CONTENT_NAME} directly while ${SECOND_IMAGE_NAME}/${COMPOSED_IMAGE_NAME} still reference it"
+        echo "Attempting to delete ${CONTENT_NAME} directly while ${COMPOSED_IMAGE_NAME} still references it"
         kubectl delete partitioncontents.kezio.kojuro.date "${CONTENT_NAME}" -n "${NAMESPACE}" --wait=false
 
         deadline=$(( $(date +%s) + DELETION_WAIT_TIMEOUT_SECONDS ))
@@ -348,8 +366,8 @@ runs:
         kubectl get partitioncontents.kezio.kojuro.date "${CONTENT_NAME}" -n "${NAMESPACE}" >/dev/null
 
         pvc_name="$(jp "${NAMESPACE}" partitioncontents.kezio.kojuro.date "${CONTENT_NAME}" '{.status.pvcRef.name}')"
-        echo "Deleting the two remaining Images (${SECOND_IMAGE_NAME}, ${COMPOSED_IMAGE_NAME})"
-        kubectl delete images.kezio.kojuro.date "${SECOND_IMAGE_NAME}" "${COMPOSED_IMAGE_NAME}" -n "${NAMESPACE}" --wait=false
+        echo "Deleting the last referencing Image (${COMPOSED_IMAGE_NAME})"
+        kubectl delete images.kezio.kojuro.date "${COMPOSED_IMAGE_NAME}" -n "${NAMESPACE}" --wait=false
 
         echo "Asserting the pending PartitionContent delete now completes on its own"
         wait_for_gone "partitioncontents.kezio.kojuro.date" "${CONTENT_NAME}" "${NAMESPACE}" "${DELETION_WAIT_TIMEOUT_SECONDS}"

@@ -4,17 +4,27 @@ description: >-
   Builds a small GPT+ext4 fixture disk directly on the runner (sfdisk +
   loop device + mkfs.ext4, no privileged container needed - the same
   regular-file-based approach internal/ingest itself uses once the Job
-  gets the uploaded bytes), hashes its one real partition locally with the
-  same partclone build the ingest Job runs so the layout's contentRef
-  names the PartitionContent the ingest Job will actually produce, then
-  builds kezioctl and drives it through a port-forwarded image-service to
-  upload the fixture and create the Image. Finally polls the Image until
-  it reaches Ready (or Failed, or the deadline), dumping the Image,
-  PartitionContent, and ingest/publish Job/pod state on either failure.
+  gets the uploaded bytes), then builds kezioctl and drives it through a
+  port-forwarded image-service to upload the fixture and create its
+  ImageImport. Finally polls the import and the Image it creates until
+  the Image reaches Ready (or either reaches Failed, or the deadline),
+  dumping the ImageImport, Image, PartitionContent, and ingest/publish
+  Job/pod state on any failure.
+
+  The runner sends bytes only: the import slices, classifies, and names
+  the fixture's one partition in the cluster. Its content name is
+  therefore known in advance from the content prefix alone
+  ("<content-prefix>-p1"), with no partclone run on the runner. The one
+  raw partition slice this action still cuts is a plain dd, and it
+  serves only the byte-compare reference (partition-sha256) a downstream
+  leecher checks its reconstructed copy against.
 
 inputs:
   image-name:
-    description: 'Name to give the uploaded Image (and image-service upload).'
+    description: >-
+      Name to give the ImageImport, the Image it creates, the content
+      prefix its one partition is named under, and the image-service
+      upload - all four take this one name.
     required: false
     default: "kezio-e2e-fixture"
   namespace:
@@ -45,9 +55,12 @@ outputs:
   image-name:
     description: 'Name of the Image object created (this action''s own image-name input, echoed back for a downstream step that only has this action''s outputs to work from).'
     value: ${{ inputs.image-name }}
-  content-ref:
-    description: 'The PartitionContent object name ("pc-<info hash>") ingest publishes the fixture''s one content partition to.'
-    value: ${{ steps.fixture.outputs.content-ref }}
+  content-prefix:
+    description: 'Prefix the import names its content under. Same as image-name, echoed back for a downstream step that has to name the same prefix.'
+    value: ${{ inputs.image-name }}
+  content-name:
+    description: 'The PartitionContent object name the import gives the fixture''s one partition ("<content-prefix>-p1"). Predictable from the prefix alone - the import chooses it, so nothing has to read it back.'
+    value: ${{ inputs.image-name }}-p1
   partition-sha256:
     description: 'sha256 of the fixture disk''s raw partition slice, for a downstream byte-compare (e.g. run-leecher) against a BT-reconstructed copy.'
     value: ${{ steps.fixture.outputs.partition-sha256 }}
@@ -55,27 +68,17 @@ outputs:
     description: 'Size in bytes of the fixture disk''s one partition.'
     value: ${{ steps.fixture.outputs.partition-size-bytes }}
   disk-path:
-    description: 'Runner-local path to the fixture disk image, for a downstream re-upload of the identical bytes (e.g. assert-image-plane-semantics'' dedupe check) without rebuilding the fixture.'
+    description: 'Runner-local path to the fixture disk image, for a downstream re-upload of the identical bytes (e.g. assert-image-plane-semantics'' name-conflict check) without rebuilding the fixture.'
     value: ${{ steps.fixture.outputs.disk-path }}
-  layout-path:
-    description: 'Runner-local path to the layout JSON file (kezioctl image upload --layout''s input shape) describing the fixture, for reuse the same way as disk-path.'
-    value: ${{ steps.fixture.outputs.layout-path }}
 
 runs:
   using: composite
   steps:
-    - name: Install partclone (not preinstalled on the runner)
-      shell: bash
-      run: |
-        set -euo pipefail
-        sudo apt-get update -qq
-        sudo apt-get install -y --no-install-recommends partclone
-
     - name: Build kezioctl
       shell: bash
       run: go build -o bin/kezioctl ./cmd/kezioctl
 
-    - name: Build a GPT+ext4 fixture disk and compute its partition's content hash
+    - name: Build a GPT+ext4 fixture disk and record its partition's reference digest
       id: fixture
       shell: bash
       env:
@@ -104,8 +107,9 @@ runs:
         # Slice the one partition straight out of the fixture disk by
         # byte offset - a plain file copy, exactly what
         # internal/ingest.extractPartition does server-side - so the
-        # partclone run below sees the identical bytes the ingest Job
-        # will see.
+        # digest below is taken over the identical bytes the ingest Job
+        # will see. This slice is the byte-compare reference only:
+        # nothing here classifies it or gives it a name.
         start_sectors="$(jq -r '.partitiontable.partitions[0].start' "${RUNNER_TEMP}/sfdisk.json")"
         size_sectors="$(jq -r '.partitiontable.partitions[0].size' "${RUNNER_TEMP}/sfdisk.json")"
         sector_size="$(jq -r '.partitiontable.sectorsize // 512' "${RUNNER_TEMP}/sfdisk.json")"
@@ -116,24 +120,7 @@ runs:
         dd if="${disk}" of="${slice}" bs=1M iflag=skip_bytes,count_bytes \
           skip="${start_bytes}" count="${size_bytes}" status=none
 
-        content_dir="${RUNNER_TEMP}/fixture-content"
-        mkdir -p "${content_dir}"
-        # Unprivileged: partclone opens a regular file exactly like a
-        # block device (see internal/ingest's package doc comment) - no
-        # sudo needed here even though mkfs/mount above did need it.
-        partclone.ext4 -c -F -s "${slice}" -o "${content_dir}" -T -L "${RUNNER_TEMP}/partclone.log"
-
-        content_ref="$(bin/kezioctl content hash "${content_dir}")"
-        echo "content-ref=${content_ref}" >>"${GITHUB_OUTPUT}"
-
-        jq -n --arg pt gpt --slurpfile sf "${RUNNER_TEMP}/sfdisk.json" --arg ref "${content_ref}" '{
-          partitionTable: $pt,
-          sfdisk: $sf[0],
-          slots: [{number: 1, role: "data", contentRef: {name: $ref}}]
-        }' >"${RUNNER_TEMP}/layout.json"
-
         echo "disk-path=${disk}" >>"${GITHUB_OUTPUT}"
-        echo "layout-path=${RUNNER_TEMP}/layout.json" >>"${GITHUB_OUTPUT}"
 
         # For run-leecher's byte-compare: the exact reference the
         # leecher's reconstructed-from-BT-extents partition must match.
@@ -141,7 +128,12 @@ runs:
         echo "partition-sha256=${partition_sha256}" >>"${GITHUB_OUTPUT}"
         echo "partition-size-bytes=${size_bytes}" >>"${GITHUB_OUTPUT}"
 
-    - name: Upload the fixture and wait for its Image to reach Ready
+    # One name for all four objects: the ImageImport, the Image it
+    # creates, the content prefix ("<name>-p1" for this one-partition
+    # fixture), and the image-service upload. kezioctl defaults
+    # --image-name and --content-prefix to --name, so only --name is
+    # given below.
+    - name: Upload the fixture, request the import, and wait for its Image to reach Ready
       shell: bash
       env:
         IMAGE_NAME: ${{ inputs.image-name }}
@@ -151,13 +143,15 @@ runs:
         LOCAL_PORT: ${{ inputs.local-port }}
         WAIT_TIMEOUT_SECONDS: ${{ inputs.wait-timeout-seconds }}
         DISK_PATH: ${{ steps.fixture.outputs.disk-path }}
-        LAYOUT_PATH: ${{ steps.fixture.outputs.layout-path }}
       run: |
         set -euo pipefail
 
         dump_diagnostics() {
+          echo "::group::ImageImport ${IMAGE_NAME}"
+          kubectl get imageimports.kezio.kojuro.date "${IMAGE_NAME}" -n "${NAMESPACE}" -o yaml || true
+          echo "::endgroup::"
           echo "::group::Image ${IMAGE_NAME}"
-          kubectl get image "${IMAGE_NAME}" -n "${NAMESPACE}" -o yaml || true
+          kubectl get images.kezio.kojuro.date "${IMAGE_NAME}" -n "${NAMESPACE}" -o yaml || true
           echo "::endgroup::"
           echo "::group::PartitionContents"
           kubectl get partitioncontents.kezio.kojuro.date -n "${NAMESPACE}" -o yaml || true
@@ -195,15 +189,24 @@ runs:
           --name "${IMAGE_NAME}" \
           --namespace "${NAMESPACE}" \
           --server "http://127.0.0.1:${LOCAL_PORT}" \
-          --token "${TOKEN}" \
-          --layout "${LAYOUT_PATH}"
+          --token "${TOKEN}"
 
+        # The import is polled beside the Image: a failed import (a bad
+        # source, or a name it refuses to write over) never creates the
+        # Image at all, so watching the Image alone would only ever
+        # report the timeout.
         deadline=$(( $(date +%s) + WAIT_TIMEOUT_SECONDS ))
         while true; do
-          state="$(kubectl get image "${IMAGE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || true)"
-          echo "image ${IMAGE_NAME} state=${state:-<none>}"
+          import_state="$(kubectl get imageimports.kezio.kojuro.date "${IMAGE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || true)"
+          state="$(kubectl get images.kezio.kojuro.date "${IMAGE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || true)"
+          echo "imageimport ${IMAGE_NAME} state=${import_state:-<none>}, image ${IMAGE_NAME} state=${state:-<none>}"
           if [ "${state}" = "Ready" ]; then
             break
+          fi
+          if [ "${import_state}" = "Failed" ]; then
+            echo "::error::ImageImport ${IMAGE_NAME} reached Failed" >&2
+            dump_diagnostics
+            exit 1
           fi
           if [ "${state}" = "Failed" ]; then
             echo "::error::Image ${IMAGE_NAME} reached Failed" >&2

@@ -1,0 +1,77 @@
+name: Resolve a seeder's torrent URL
+
+description: >-
+  Rebuilds the exact torrent URL the deploy plan handed an agent
+  (planbuild.resolveTorrentURL's own output). No DeployRun field carries
+  it - the plan is never persisted, see agentapi.DeployPlan's own doc
+  comment - so it is rebuilt from the seeder pod's own IP and the info
+  hash of the first content the Image binds.
+
+  The info hash is read from PartitionContent.status.infoHash. It is the
+  torrent's identity, not the object's: a content name is chosen by its
+  import, so the hash only becomes known once the publish Job has run and
+  can never be derived from the name.
+
+  The Image's first content-bearing slot is used, not slot zero: a slot
+  for a swap partition carries no contentRef at all, because the agent
+  runs mkswap instead of restoring bytes.
+
+inputs:
+  namespace:
+    description: 'Namespace the Image, its content, and the seeder Deployment live in.'
+    required: false
+    default: "scaffold-system"
+  image-name:
+    description: 'Name of the Image whose content the seeder serves.'
+    required: true
+  seeder-deployment-name:
+    description: 'Name of the seeder Deployment to read the serving pod IP from.'
+    required: true
+
+outputs:
+  torrent-url:
+    description: 'The torrent URL an agent deploying image-name from this seeder is handed.'
+    value: ${{ steps.resolve.outputs.torrent-url }}
+  content-name:
+    description: 'Name of the PartitionContent the URL serves.'
+    value: ${{ steps.resolve.outputs.content-name }}
+  info-hash:
+    description: 'The content''s BitTorrent info hash, as reported in its status.'
+    value: ${{ steps.resolve.outputs.info-hash }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve the seeder's torrent URL
+      id: resolve
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+        SEEDER_NAME: ${{ inputs.seeder-deployment-name }}
+      run: |
+        set -euo pipefail
+
+        selector="$(kubectl get deployment "${SEEDER_NAME}" -n "${NAMESPACE}" -o json | \
+          jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")')"
+        pod_ip="$(kubectl get pods -n "${NAMESPACE}" -l "${selector}" -o jsonpath='{.items[0].status.podIP}')"
+
+        content_name="$(kubectl get images.kezio.kojuro.date "${IMAGE_NAME}" -n "${NAMESPACE}" -o json | \
+          jq -r '[.spec.slots[] | select(.contentRef != null)][0].contentRef.name // ""')"
+        if [ -z "${content_name}" ]; then
+          echo "::error::Image ${IMAGE_NAME} binds no content in any slot" >&2
+          exit 1
+        fi
+
+        info_hash="$(kubectl get partitioncontents.kezio.kojuro.date "${content_name}" -n "${NAMESPACE}" \
+          -o jsonpath='{.status.infoHash}' 2>/dev/null || true)"
+        if [ -z "${info_hash}" ]; then
+          echo "::error::PartitionContent ${content_name} reports no status.infoHash, so it never published" >&2
+          exit 1
+        fi
+
+        torrent_url="http://${pod_ip}:8080/torrents/${info_hash}"
+        echo "seeder ${SEEDER_NAME} pod ${pod_ip}, content ${content_name}, torrent URL ${torrent_url}"
+        echo "torrent-url=${torrent_url}" >>"${GITHUB_OUTPUT}"
+        echo "content-name=${content_name}" >>"${GITHUB_OUTPUT}"
+        echo "info-hash=${info_hash}" >>"${GITHUB_OUTPUT}"

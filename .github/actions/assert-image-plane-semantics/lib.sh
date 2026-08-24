@@ -54,6 +54,33 @@ wait_for_image_ready() {
   done
 }
 
+# wait_for_import_failed polls name's status.state until Failed, failing
+# if it reaches Ready instead or if timeout_seconds elapses. Ready is a
+# terminal wrong answer here, not something to keep waiting through.
+wait_for_import_failed() {
+  local ns="$1" name="$2" timeout_seconds="$3"
+  local deadline state
+  deadline=$(( $(date +%s) + timeout_seconds ))
+  while true; do
+    state="$(jp "${ns}" imageimports.kezio.kojuro.date "${name}" '{.status.state}')"
+    echo "imageimport ${name} state=${state:-<none>}"
+    if [ "${state}" = "Failed" ]; then
+      return 0
+    fi
+    if [ "${state}" = "Ready" ]; then
+      echo "::error::ImageImport ${name} reached Ready, but it had to be refused" >&2
+      dump_import_diagnostics "${ns}" "${name}"
+      return 1
+    fi
+    if [ "$(date +%s)" -ge "${deadline}" ]; then
+      echo "::error::ImageImport ${name} did not reach Failed within ${timeout_seconds}s" >&2
+      dump_import_diagnostics "${ns}" "${name}"
+      return 1
+    fi
+    sleep 3
+  done
+}
+
 # wait_for_gone polls until kind/name in ns no longer exists, failing after
 # timeout_seconds.
 wait_for_gone() {
@@ -70,9 +97,10 @@ wait_for_gone() {
 }
 
 # assert_shared_content_singleton asserts that content_name is the only
-# PartitionContent in ns, with exactly one content PVC and one publish Job
-# - the dedupe invariant: an Image sharing already-Ready content never
-# grows a second PartitionContent, PVC, or publish Job for it.
+# PartitionContent in ns, with exactly one content PVC and one publish
+# Job - the invariant that content, once captured, is written exactly
+# once: neither an Image that names it nor an import that is refused its
+# name grows a second PartitionContent, PVC, or publish Job for it.
 assert_shared_content_singleton() {
   local ns="$1" content_name="$2"
   local pc_count pvc_count job_count ok=1
@@ -127,8 +155,33 @@ dump_image_diagnostics() {
   echo "::endgroup::"
 }
 
+# dump_import_diagnostics dumps import_name and the objects an import
+# creates or fails to create.
+dump_import_diagnostics() {
+  local ns="$1" import_name="$2"
+  echo "::group::ImageImport ${import_name}"
+  kubectl get imageimports.kezio.kojuro.date "${import_name}" -n "${ns}" -o yaml || true
+  echo "::endgroup::"
+  echo "::group::Images (${ns})"
+  kubectl get images.kezio.kojuro.date -n "${ns}" -o wide || true
+  echo "::endgroup::"
+  echo "::group::PartitionContents (${ns})"
+  kubectl get partitioncontents.kezio.kojuro.date -n "${ns}" -o wide || true
+  echo "::endgroup::"
+  echo "::group::Jobs (${ns})"
+  kubectl get jobs -n "${ns}" -o wide || true
+  echo "::endgroup::"
+  echo "::group::ingest job pods/logs"
+  kubectl describe pods -n "${ns}" -l "app.kubernetes.io/component=image-ingest-job" || true
+  kubectl logs -n "${ns}" -l "app.kubernetes.io/component=image-ingest-job" --all-containers --tail=1000 || true
+  echo "::endgroup::"
+  echo "::group::events (${ns})"
+  kubectl get events -n "${ns}" --sort-by=.lastTimestamp || true
+  echo "::endgroup::"
+}
+
 # dump_content_diagnostics dumps content_name and its owned objects -
-# useful for both the dedupe-singleton and deletion-semantics failures.
+# useful for both the content-singleton and deletion-semantics failures.
 dump_content_diagnostics() {
   local ns="$1" content_name="$2"
   echo "::group::PartitionContent ${content_name}"

@@ -5,9 +5,12 @@ description: >-
   VM's disk over BitTorrent: downloads a pinned Ubuntu minimal cloud
   image (UEFI/GPT bootable, ~250MiB compressed - small enough to keep
   this lane's own surface minimal), injects qemu-guest-agent into it
-  offline, slices and content-hashes every one of its partitions the same
-  way the ingest Job will, then uploads it and waits for the resulting
-  Image to reach Ready.
+  offline, converts it to raw, then uploads it, requests an ImageImport,
+  and waits for the Image that import creates to reach Ready.
+
+  The runner sends bytes only. The import slices, classifies, and names
+  every partition in the cluster, exactly once - so this action does no
+  partclone run, no blkid probe, and no partition-table read of its own.
 
   The same offline virt-customize call also writes a fresh per-run marker
   token to marker-path in the image, and this action reports the token and
@@ -20,14 +23,6 @@ description: >-
   package installation belongs on the runner (which already needs
   network access to fetch the base image) rather than added as a second,
   less reliable network dependency inside the deploy path itself.
-  Ingest itself (internal/ingest) auto-detects partition roles and falls
-  back to a raw sector-for-sector clone for any partition blkid does not
-  recognize (e.g. the image's unformatted BIOS-boot partition) - see
-  internal/ingest/role.go and blkid.go - so this action mirrors that
-  same classification client-side, generalized across however many
-  partitions the source image carries, rather than assuming a fixed
-  count or a single content partition the way ingest-test-image's
-  synthetic fixture does.
 
   Needs a KubeVirt-capable, KVM-usable runner for the guest-agent
   injection step (virt-customize boots a supermin appliance under KVM):
@@ -37,7 +32,10 @@ description: >-
 
 inputs:
   image-name:
-    description: 'Name to give the uploaded Image (and image-service upload).'
+    description: >-
+      Name to give the ImageImport, the Image it creates, the content
+      prefix its partitions are named under, and the image-service
+      upload - all four take this one name.
     required: false
     default: "kezio-e2e-deploy-test"
   marker-path:
@@ -92,12 +90,16 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Install partclone, qemu-utils, and libguestfs-tools (not preinstalled on the runner)
+    # qemu-utils supplies qemu-img for the raw conversion below, and
+    # libguestfs-tools supplies virt-customize for the offline injection.
+    # Nothing here reads the partition table or slices a partition any
+    # more, so partclone is not installed.
+    - name: Install qemu-utils and libguestfs-tools (not preinstalled on the runner)
       shell: bash
       run: |
         set -euo pipefail
         sudo apt-get update -qq
-        sudo apt-get install -y -qq --no-install-recommends partclone qemu-utils libguestfs-tools
+        sudo apt-get install -y -qq --no-install-recommends qemu-utils libguestfs-tools
 
     - name: Build kezioctl
       shell: bash
@@ -226,103 +228,23 @@ runs:
           exit 1
         fi
 
-    - name: Convert the customized image to raw and dump its partition table
+    # raw, not the qcow2 the cloud image ships as: the calling lane sets
+    # IMAGE_INGEST_SOURCE_FORMAT=raw, and ingest rejects a source whose
+    # actual format does not match it.
+    - name: Convert the customized image to raw
       id: disk
       shell: bash
       run: |
         set -euo pipefail
         disk="${RUNNER_TEMP}/deploy-test.raw"
         qemu-img convert -O raw "${RUNNER_TEMP}/base.img" "${disk}"
-        sfdisk --json "${disk}" >"${RUNNER_TEMP}/sfdisk.json"
         echo "disk-path=${disk}" >>"${GITHUB_OUTPUT}"
 
-    - name: Slice, classify, and content-hash every partition
-      # Mirrors internal/ingest/role.go's classifyRole and cmd/ingest's
-      # blkid/partclone selection so the layout this uploads names the
-      # exact PartitionContent objects the ingest Job will independently
-      # produce from the same bytes (kezioctl image upload --layout has
-      # no way to derive this itself - see internal/kezioctl/layout.go's
-      # doc comment). Generalized over however many partitions sfdisk
-      # reports: unlike ingest-test-image's single-partition synthetic
-      # fixture, a real distro image carries several (root, a separate
-      # /boot, an ESP, and - on this Ubuntu layout - an unformatted
-      # BIOS-boot partition with no recognizable file system, which
-      # falls back to partclone.dd exactly as ingest itself would).
-      id: fixture
-      shell: bash
-      env:
-        DISK_PATH: ${{ steps.disk.outputs.disk-path }}
-      run: |
-        set -euo pipefail
-
-        sector_size="$(jq -r '.partitiontable.sectorsize // 512' "${RUNNER_TEMP}/sfdisk.json")"
-        n="$(jq '.partitiontable.partitions | length' "${RUNNER_TEMP}/sfdisk.json")"
-
-        slots="[]"
-        for i in $(seq 0 $((n - 1))); do
-          # Number partitions the way internal/ingest's partitionNumber
-          # does - trailing digits of the sfdisk node path, falling back
-          # to 1-based list position - because the Image's slot numbers
-          # must line up with the numbers ingest reports. A cloud image's
-          # table is not contiguous (Ubuntu ships 1, 14, 15, 16), so
-          # list position would declare slots ingest never produces.
-          node="$(jq -r ".partitiontable.partitions[$i].node // \"\"" "${RUNNER_TEMP}/sfdisk.json")"
-          num="${node##*[!0-9]}"
-          [ -n "${num}" ] || num=$((i + 1))
-          start_sectors="$(jq -r ".partitiontable.partitions[$i].start" "${RUNNER_TEMP}/sfdisk.json")"
-          size_sectors="$(jq -r ".partitiontable.partitions[$i].size" "${RUNNER_TEMP}/sfdisk.json")"
-          type_guid="$(jq -r ".partitiontable.partitions[$i].type" "${RUNNER_TEMP}/sfdisk.json")"
-          start_bytes=$((start_sectors * sector_size))
-          size_bytes=$((size_sectors * sector_size))
-
-          slice="${RUNNER_TEMP}/part${num}.raw"
-          dd if="${DISK_PATH}" of="${slice}" bs=1M iflag=skip_bytes,count_bytes \
-            skip="${start_bytes}" count="${size_bytes}" status=none
-
-          fstype="$(blkid -o value -s TYPE "${slice}" || true)"
-
-          # Same rule as internal/ingest/role.go's classifyRole: ESP and
-          # MSR are identified by GPT type GUID (or the legacy MBR "ef"
-          # code for ESP); everything else is "data" unless blkid itself
-          # reports a Linux swap signature.
-          lc_type="$(echo "${type_guid}" | tr 'A-Z' 'a-z')"
-          role="data"
-          case "${lc_type}" in
-          c12a7328-f81f-11d2-ba4b-00a0c93ec93b | ef) role="esp" ;;
-          e3c9e316-0b5c-4db8-817d-f92df00215ae) role="msr" ;;
-          *) [ "${fstype}" = "swap" ] && role="swap" ;;
-          esac
-
-          # cmd/ingest's blkidToPartcloneFSType alias: every other blkid
-          # TYPE matches its partclone binary suffix one-for-one.
-          partclone_suffix="${fstype}"
-          [ "${fstype}" = "msdos" ] && partclone_suffix="fat"
-
-          content_dir="${RUNNER_TEMP}/content${num}"
-          mkdir -p "${content_dir}"
-          if [ -n "${fstype}" ] && command -v "partclone.${partclone_suffix}" >/dev/null 2>&1; then
-            partclone."${partclone_suffix}" -c -F -s "${slice}" -o "${content_dir}" -T -L "${RUNNER_TEMP}/partclone${num}.log"
-          else
-            partclone.dd -F -s "${slice}" -o "${content_dir}" -T -L "${RUNNER_TEMP}/partclone${num}.log"
-          fi
-          rm -f "${slice}"
-
-          content_ref="$(bin/kezioctl content hash "${content_dir}")"
-          echo "partition ${num}: role=${role} fstype='${fstype}' contentRef=${content_ref}"
-
-          slots="$(echo "${slots}" | jq --argjson num "${num}" --arg role "${role}" --arg ref "${content_ref}" \
-            '. + [{number: $num, role: $role, contentRef: {name: $ref}}]')"
-        done
-
-        jq -n --arg pt gpt --slurpfile sf "${RUNNER_TEMP}/sfdisk.json" --argjson slots "${slots}" '{
-          partitionTable: $pt,
-          sfdisk: $sf[0],
-          slots: $slots
-        }' >"${RUNNER_TEMP}/layout.json"
-
-        echo "layout-path=${RUNNER_TEMP}/layout.json" >>"${GITHUB_OUTPUT}"
-
-    - name: Upload the deploy test image and wait for its Image to reach Ready
+    # One name for all three objects: the ImageImport, the Image it
+    # creates, and the prefix its content is named under
+    # ("<image-name>-p<partition number>"). kezioctl defaults the last
+    # two to --name, so only --name is given here.
+    - name: Upload the deploy test image, request the import, and wait for its Image to reach Ready
       shell: bash
       env:
         IMAGE_NAME: ${{ inputs.image-name }}
@@ -332,17 +254,24 @@ runs:
         LOCAL_PORT: ${{ inputs.local-port }}
         WAIT_TIMEOUT_SECONDS: ${{ inputs.wait-timeout-seconds }}
         DISK_PATH: ${{ steps.disk.outputs.disk-path }}
-        LAYOUT_PATH: ${{ steps.fixture.outputs.layout-path }}
       run: |
         set -euo pipefail
 
         dump_diagnostics() {
-          echo "::group::Image ${IMAGE_NAME}"
-          kubectl get image "${IMAGE_NAME}" -n "${NAMESPACE}" -o yaml || true
+          echo "::group::ImageImport ${IMAGE_NAME}"
+          kubectl get imageimports.kezio.kojuro.date "${IMAGE_NAME}" -n "${NAMESPACE}" -o yaml || true
           echo "::endgroup::"
-          echo "::group::ingest Job/pod"
+          echo "::group::Image ${IMAGE_NAME}"
+          kubectl get images.kezio.kojuro.date "${IMAGE_NAME}" -n "${NAMESPACE}" -o yaml || true
+          echo "::endgroup::"
+          echo "::group::PartitionContents"
+          kubectl get partitioncontents.kezio.kojuro.date -n "${NAMESPACE}" -o yaml || true
+          echo "::endgroup::"
+          echo "::group::ingest/publish Jobs/pods"
           kubectl describe jobs -n "${NAMESPACE}" -l "app.kubernetes.io/component=image-ingest-job" || true
+          kubectl describe jobs -n "${NAMESPACE}" -l "app.kubernetes.io/component=partition-content-publish" || true
           kubectl logs -n "${NAMESPACE}" -l "app.kubernetes.io/component=image-ingest-job" --all-containers --tail=1000 || true
+          kubectl logs -n "${NAMESPACE}" -l "app.kubernetes.io/component=partition-content-publish" --all-containers --tail=1000 || true
           echo "::endgroup::"
         }
 
@@ -360,15 +289,24 @@ runs:
           --name "${IMAGE_NAME}" \
           --namespace "${NAMESPACE}" \
           --server "http://127.0.0.1:${LOCAL_PORT}" \
-          --token "${TOKEN}" \
-          --layout "${LAYOUT_PATH}"
+          --token "${TOKEN}"
 
+        # The import is polled beside the Image: a failed import (a bad
+        # source, or a name it refuses to write over) never creates the
+        # Image at all, so watching the Image alone would only ever
+        # report the timeout.
         deadline=$(( $(date +%s) + WAIT_TIMEOUT_SECONDS ))
         while true; do
-          state="$(kubectl get image "${IMAGE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || true)"
-          echo "image ${IMAGE_NAME} state=${state:-<none>}"
+          import_state="$(kubectl get imageimports.kezio.kojuro.date "${IMAGE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || true)"
+          state="$(kubectl get images.kezio.kojuro.date "${IMAGE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.state}' 2>/dev/null || true)"
+          echo "imageimport ${IMAGE_NAME} state=${import_state:-<none>}, image ${IMAGE_NAME} state=${state:-<none>}"
           if [ "${state}" = "Ready" ]; then
             break
+          fi
+          if [ "${import_state}" = "Failed" ]; then
+            echo "::error::ImageImport ${IMAGE_NAME} reached Failed" >&2
+            dump_diagnostics
+            exit 1
           fi
           if [ "${state}" = "Failed" ]; then
             echo "::error::Image ${IMAGE_NAME} reached Failed" >&2

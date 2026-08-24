@@ -568,9 +568,10 @@ jobs:
       # in the same lane.
       #
       # IMAGE_INGEST_IMAGE and PARTITIONCONTENT_PUBLISH_IMAGE both name
-      # the ingest tarball's local-tag: the Image controller's ingest Job
-      # and the PartitionContent controller's publish Job run the same
-      # kezio-ingest binary, selected by INGEST_MODE (ingest vs publish).
+      # the ingest tarball's local-tag: the ImageImport controller's
+      # ingest Job and the PartitionContent controller's publish Job run
+      # the same kezio-ingest binary, selected by INGEST_MODE (ingest vs
+      # publish).
       # IMAGE_INGEST_SOURCE_FORMAT=raw matches ingest-test-image's fixture
       # disk, which the ingest Job would otherwise reject against the
       # manager's own qcow2 default (ImageIngestConfig.sourceFormat).
@@ -686,22 +687,22 @@ jobs:
       - name: Seed, leech, and byte-compare the ingested content
         uses: ./.github/actions/run-leecher
         with:
-          content-name: ${{ steps.ingest.outputs.content-ref }}
+          content-name: ${{ steps.ingest.outputs.content-name }}
           image-name: ${{ steps.ingest.outputs.image-name }}
           partition-sha256: ${{ steps.ingest.outputs.partition-sha256 }}
           partition-size-bytes: ${{ steps.ingest.outputs.partition-size-bytes }}
 
-      # Closes out the lane: dedupe (a second Image sharing
-      # ingest-test-image's content), a composed (source-less) Image,
-      # seeder grace-period shutdown, and the PartitionContent deletion
-      # finalizer - see the action's own step-group comments for why the
-      # order among them is load-bearing.
+      # Closes out the lane: a second import refused the content name
+      # ingest-test-image already holds, a composed Image over that same
+      # content, seeder grace-period shutdown, and the PartitionContent
+      # deletion finalizer - see the action's own step-group comments
+      # for why the order among them is load-bearing.
       - name: Assert Image/PartitionContent plane semantics
         uses: ./.github/actions/assert-image-plane-semantics
         with:
-          content-name: ${{ steps.ingest.outputs.content-ref }}
+          content-name: ${{ steps.ingest.outputs.content-name }}
+          content-prefix: ${{ steps.ingest.outputs.content-prefix }}
           fixture-disk-path: ${{ steps.ingest.outputs.disk-path }}
-          fixture-layout-path: ${{ steps.ingest.outputs.layout-path }}
           token: ${{ env.IMAGE_SERVICE_TOKEN }}
 
       - name: Collect diagnostics
@@ -1267,6 +1268,7 @@ jobs:
             site/${{ env.SITE_NAME }}:site.yaml
             machinehardware/${{ env.TARGET_VM_NAME }}:machinehardware.yaml
             image/${{ steps.build-image.outputs.image-name }}:image.yaml
+            imageimport/${{ steps.build-image.outputs.image-name }}:imageimport.yaml
             deployrun/${{ steps.deploy.outputs.deploy-run-name }}:deployrun.yaml
             image/${{ steps.build-data-image.outputs.image-name }}:data-image.yaml
             deployrun/${{ steps.poweroff.outputs.deploy-run-name }}:poweroff-deployrun.yaml
@@ -1942,18 +1944,15 @@ jobs:
           expected-ready-status: "Unknown"
           expected-valid-status: "Unknown"
 
-      # Reconstructs the exact torrent URL the plan handed each agent
-      # (planbuild.resolveTorrentURL's own output) the same way run-leecher
-      # does: no DeployRun field carries it (the plan is never persisted -
-      # see agentapi.DeployPlan's own doc comment), so it is rebuilt from
-      # the shared seeder's own pod IP and the Image's own content hash.
-      # Both machines were handed this identical URL, since they share the
-      # one seeder Deployment.
-      - name: Resolve the shared seeder's torrent URL
-        id: torrent
+      # Both machines were handed one identical torrent URL, since they
+      # share the one seeder Deployment. That Deployment serves one
+      # (Image, Site) pair and is named from both (seederdeploy.Name),
+      # so its name is derived here and the URL itself is resolved by
+      # resolve-seeder-torrent-url.
+      - name: Resolve the shared seeder Deployment's name
+        id: seeder
         shell: bash
         env:
-          NAMESPACE: "scaffold-system"
           IMAGE_NAME: ${{ steps.build-image.outputs.image-name }}
           SITE_IDENTITY: "scaffold-system/${{ env.SITE_NAME }}"
         run: |
@@ -1966,15 +1965,14 @@ jobs:
           if [ "${#base}" -gt "${max_base_len}" ]; then
             base="${base:0:${max_base_len}}"
           fi
-          seeder_name="${prefix}${base}${suffix}"
-          selector="$(kubectl get deployment "${seeder_name}" -n "${NAMESPACE}" -o json | \
-            jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")')"
-          pod_ip="$(kubectl get pods -n "${NAMESPACE}" -l "${selector}" -o jsonpath='{.items[0].status.podIP}')"
-          content_name="$(kubectl get image "${IMAGE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.spec.slots[0].contentRef.name}')"
-          info_hash="${content_name#pc-}"
-          torrent_url="http://${pod_ip}:8080/torrents/${info_hash}"
-          echo "seeder ${seeder_name} pod ${pod_ip}, torrent URL ${torrent_url}"
-          echo "torrent-url=${torrent_url}" >>"${GITHUB_OUTPUT}"
+          echo "seeder-name=${prefix}${base}${suffix}" >>"${GITHUB_OUTPUT}"
+
+      - name: Resolve the shared seeder's torrent URL
+        id: torrent
+        uses: ./.github/actions/resolve-seeder-torrent-url
+        with:
+          image-name: ${{ steps.build-image.outputs.image-name }}
+          seeder-deployment-name: ${{ steps.seeder.outputs.seeder-name }}
 
       # Proof 4: each agent's torrent URL lies outside its own machine's
       # subnet, the served torrent announces the Site's tracker, and both
@@ -2798,46 +2796,21 @@ jobs:
           expected-seeding-nad-name: ${{ env.SEEDER_NAD_Y_NAME }}
           expected-tracker-ip: ${{ env.TRACKER_Y_IP }}
 
-      # Reconstructs the exact torrent URL each machine's agent was
-      # handed (planbuild.resolveTorrentURL's own output), the same way
-      # the routed lane does: no DeployRun field carries it, so it is
-      # rebuilt from each Site's own seeder pod IP and the shared Image's
-      # own content hash.
+      # Each machine's agent was handed its own Site's seeder URL, over
+      # the one shared Image.
       - name: Resolve Site X's seeder torrent URL
         id: torrent-x
-        shell: bash
-        env:
-          NAMESPACE: "scaffold-system"
-          IMAGE_NAME: ${{ steps.build-image.outputs.image-name }}
-          SEEDER_NAME: ${{ steps.wait-seeders.outputs.seeder-x-name }}
-        run: |
-          set -euo pipefail
-          selector="$(kubectl get deployment "${SEEDER_NAME}" -n "${NAMESPACE}" -o json | \
-            jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")')"
-          pod_ip="$(kubectl get pods -n "${NAMESPACE}" -l "${selector}" -o jsonpath='{.items[0].status.podIP}')"
-          content_name="$(kubectl get image "${IMAGE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.spec.slots[0].contentRef.name}')"
-          info_hash="${content_name#pc-}"
-          torrent_url="http://${pod_ip}:8080/torrents/${info_hash}"
-          echo "seeder ${SEEDER_NAME} pod ${pod_ip}, torrent URL ${torrent_url}"
-          echo "torrent-url=${torrent_url}" >>"${GITHUB_OUTPUT}"
+        uses: ./.github/actions/resolve-seeder-torrent-url
+        with:
+          image-name: ${{ steps.build-image.outputs.image-name }}
+          seeder-deployment-name: ${{ steps.wait-seeders.outputs.seeder-x-name }}
 
       - name: Resolve Site Y's seeder torrent URL
         id: torrent-y
-        shell: bash
-        env:
-          NAMESPACE: "scaffold-system"
-          IMAGE_NAME: ${{ steps.build-image.outputs.image-name }}
-          SEEDER_NAME: ${{ steps.wait-seeders.outputs.seeder-y-name }}
-        run: |
-          set -euo pipefail
-          selector="$(kubectl get deployment "${SEEDER_NAME}" -n "${NAMESPACE}" -o json | \
-            jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")')"
-          pod_ip="$(kubectl get pods -n "${NAMESPACE}" -l "${selector}" -o jsonpath='{.items[0].status.podIP}')"
-          content_name="$(kubectl get image "${IMAGE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.spec.slots[0].contentRef.name}')"
-          info_hash="${content_name#pc-}"
-          torrent_url="http://${pod_ip}:8080/torrents/${info_hash}"
-          echo "seeder ${SEEDER_NAME} pod ${pod_ip}, torrent URL ${torrent_url}"
-          echo "torrent-url=${torrent_url}" >>"${GITHUB_OUTPUT}"
+        uses: ./.github/actions/resolve-seeder-torrent-url
+        with:
+          image-name: ${{ steps.build-image.outputs.image-name }}
+          seeder-deployment-name: ${{ steps.wait-seeders.outputs.seeder-y-name }}
 
       # Proof 3: each machine's torrent URL lies outside its own subnet,
       # the served torrent announces ITS OWN Site's tracker (never the

@@ -3,12 +3,12 @@ name: Verify image-path prerequisites
 description: >-
   Asserts the image-path lane's scaffolding is actually healthy: the
   tracker and image-service Deployments are Available, a default
-  StorageClass exists (for the content PVCs later items add), the
-  image-service token Secret is present with a non-empty token key, and
-  image-service's Service actually answers /healthz from inside the
-  cluster. This is the lane's placeholder final step -
-  ingest-test-image/run-leecher (separate items) slot in after this once
-  the ingest containers exist.
+  StorageClass exists (for the PVC each PartitionContent an import
+  creates gets), the image-service token Secret is present with a
+  non-empty token key, and image-service's Service actually answers
+  /healthz from inside the cluster. It asserts nothing about any Image,
+  import, or content: it runs before the first import, and it is what
+  tells an ingest failure that follows apart from broken scaffolding.
 
 inputs:
   namespace:

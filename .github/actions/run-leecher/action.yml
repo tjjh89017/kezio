@@ -20,7 +20,7 @@ description: >-
 
 inputs:
   content-name:
-    description: 'PartitionContent object name ("pc-<info hash>"), e.g. ingest-test-image''s content-ref output.'
+    description: 'PartitionContent object name, e.g. ingest-test-image''s content-name output. Its info hash is read back from status.infoHash: a content name says nothing about its bytes.'
     required: true
   image-name:
     description: 'Name of the Image whose slots reference content-name, e.g. ingest-test-image''s image-name output - named by the Machine created here as its seed-demand source.'
@@ -75,14 +75,12 @@ runs:
       run: |
         set -euo pipefail
 
-        info_hash="${CONTENT_NAME#pc-}"
         leecher_pod="kezio-e2e-leecher"
-        # The seeder Deployment name is no longer derived from the
-        # content hash (that per-content naming was retired for one
-        # Deployment per (Image, Site) - see seederdeploy.Name); it is
-        # found instead, once it appears, by its component label plus
-        # the owning Image's own controller reference
-        # (listImageSeederDeployments' own lookup, reproduced here).
+        # One seeder Deployment serves one (Image, Site) pair, and its
+        # name is derived from both (see seederdeploy.Name). It is found
+        # here, once it appears, by its component label plus the owning
+        # Image's own controller reference (listImageSeederDeployments'
+        # own lookup, reproduced here).
         seeder_deployment=""
         seeder_label_selector="app.kubernetes.io/name=kezio,app.kubernetes.io/component=image-seeder"
         demand_machine="kezio-e2e-leecher-demand"
@@ -171,6 +169,18 @@ runs:
           -o jsonpath='{.items[0].metadata.name}')"
         seeder_pod_ip="$(kubectl get pod "${seeder_pod}" -n "${NAMESPACE}" -o jsonpath='{.status.podIP}')"
         echo "seeder pod ${seeder_pod} at ${seeder_pod_ip}"
+
+        # The info hash is status, not identity: it only exists once the
+        # publish Job has run, so it is read off the object rather than
+        # taken from its name.
+        info_hash="$(kubectl get partitioncontents.kezio.kojuro.date "${CONTENT_NAME}" -n "${NAMESPACE}" \
+          -o jsonpath='{.status.infoHash}' 2>/dev/null || true)"
+        if [ -z "${info_hash}" ]; then
+          echo "::error::PartitionContent ${CONTENT_NAME} reports no status.infoHash, so it never published" >&2
+          dump_diagnostics
+          cleanup
+          exit 1
+        fi
 
         echo "Starting the leecher Pod"
         cat <<EOF | kubectl apply -f -
