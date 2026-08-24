@@ -721,12 +721,15 @@ sudo -E virt-ls -a ./ubuntu-24.04-minimal-cloudimg-amd64.img -m /dev/sda15 /EFI/
 A lab root password is acceptable. Never build a production image this
 way - give it an account through your own image pipeline instead.
 
-The image must also already carry its own fallback bootloader at
+The image should also carry its own fallback bootloader at
 `\EFI\BOOT\BOOTX64.EFI` on its EFI System Partition. kezio-agent writes
-a UEFI NVRAM entry after the deploy, and firmware falls back to that
-fixed path whenever the NVRAM entry does not survive. Ubuntu cloud
-images ship it. For an image that does not, use the
-`install-removable-fallback` builtin `PostHook` step.
+a UEFI NVRAM entry naming that path after the deploy, and firmware falls
+back to the same path whenever the NVRAM entry does not survive.
+
+Ubuntu cloud images ship a shim there but no GRUB beside it, which
+cannot start on its own. The `install-removable-fallback` builtin step
+in the shipped `kezio-default-finalize` `PostHook` completes the pair at
+deploy time, so this needs no action here.
 
 ### 7.2 Upload it
 

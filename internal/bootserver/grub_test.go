@@ -117,6 +117,29 @@ func TestBootLocalConfig_ChainloadsTheImageContractLoader(t *testing.T) {
 	}
 }
 
+// TestBootLocalConfig_EveryOutcomeNamesItself: a machine that fails to
+// boot locally lands in the firmware's setup application, where the only
+// other symptom is kezio's agent-connect timeout expiring in silence.
+// Each of the three outcomes must say which one it was.
+func TestBootLocalConfig_EveryOutcomeNamesItself(t *testing.T) {
+	after := strings.Index(bootLocalConfig, "  boot\n")
+	if after < 0 {
+		t.Fatalf("bootLocalConfig has no boot command:\n%s", bootLocalConfig)
+	}
+
+	if !strings.Contains(bootLocalConfig[:after], "echo ") {
+		t.Errorf("bootLocalConfig says nothing before handing control to the local loader:\n%s", bootLocalConfig)
+	}
+	// "boot" returning at all means the loader never took over. GRUB's own
+	// report for that is "error: unknown error."
+	if !strings.Contains(bootLocalConfig[after:], "echo ") {
+		t.Errorf("bootLocalConfig says nothing when the local loader fails to start:\n%s", bootLocalConfig)
+	}
+	if !strings.Contains(bootLocalConfig, "else\n  echo ") {
+		t.Errorf("bootLocalConfig says nothing when no disk carries the fallback loader:\n%s", bootLocalConfig)
+	}
+}
+
 // TestSubnetBootBaseURL pins the derivation subnetBootBaseURL performs -
 // bootd.DefaultProxyPort on the Subnet's own BootdServerIP - and every
 // case that must fall back instead (no boot half, nil Subnet).

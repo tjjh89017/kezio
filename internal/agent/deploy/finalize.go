@@ -26,6 +26,7 @@ package deploy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -192,17 +193,33 @@ func parseEFIBootEntries(listing, label string) []string {
 	return nums
 }
 
-// removableFallbackCandidates are the file names
-// installRemovableFallback looks for under any other EFI/<name>/
-// directory on the ESP - shim first (so a secure-boot image keeps
-// chaining through it to grub), grub itself as the fallback for a
-// non-shim image.
-var removableFallbackCandidates = []string{"shimx64.efi", "grubx64.efi"}
+// espLoaders holds, per architecture, the two EFI binary names a distro
+// puts under its own EFI/<name>/ directory on the ESP: the shim, and the
+// GRUB that shim loads as its second stage.
+var espLoaders = map[string]struct{ shim, grub string }{
+	"amd64": {shim: "shimx64.efi", grub: "grubx64.efi"},
+	"arm64": {shim: "shimaa64.efi", grub: "grubaa64.efi"},
+}
+
+// espLoaderNames looks goarch up in espLoaders, refusing any other
+// architecture the same way efiRemovableLoaderPathForArch does.
+func espLoaderNames(goarch string) (shim, grub string, err error) {
+	names, ok := espLoaders[goarch]
+	if !ok {
+		return "", "", fmt.Errorf("unsupported architecture %q for UEFI boot entries; kezio supports x86_64 and aarch64 only", goarch)
+	}
+	return names.shim, names.grub, nil
+}
+
+// errNoESPBootloader reports that no EFI/<name>/ directory on an ESP
+// carries any of the wanted binaries. Whether that is fatal depends on
+// which binary was being looked for, so findESPBootloader's callers match
+// on it rather than treating every miss the same way.
+var errNoESPBootloader = errors.New("no bootloader found under any EFI/<name>/ directory")
 
 // runBuiltinInstallRemovableFallback mounts the ESP named by params and
-// makes sure it carries a bootloader at the image contract's fallback
-// path (efiRemovableLoaderPath), copying one in from
-// removableFallbackCandidates when it is missing.
+// makes sure it carries a bootable removable-media chain at the image
+// contract's fallback path (efiRemovableLoaderPath).
 func runBuiltinInstallRemovableFallback(ctx context.Context, e *Executor, plan *agentapi.DeployPlan, params map[string]string) error {
 	part, err := requirePartition(params)
 	if err != nil {
@@ -213,12 +230,22 @@ func runBuiltinInstallRemovableFallback(ctx context.Context, e *Executor, plan *
 }
 
 // installRemovableFallback mounts espDevice (an ESP partition of disk)
-// and makes sure it carries a bootloader at the deploying machine's own
-// architecture's fallback path (efiRemovableLoaderPathForArch of
-// runtime.GOARCH), installing one from whichever EFI/<name>/ directory
-// holds a removableFallbackCandidates match when it does not already.
+// and makes sure it carries a complete boot chain at the deploying
+// machine's own architecture's fallback path
+// (efiRemovableLoaderPathForArch of runtime.GOARCH) - see
+// ensureRemovableFallbackChain for what "complete" means and why a file
+// at the fallback path alone is not enough.
+//
+// It always logs what the fallback directory holds when it finishes.
+// Nothing later in a deploy can observe a boot chain: the machine reboots
+// into it after kezio has already reported the deploy done, so a chain
+// that cannot start shows up only as a machine that never comes back.
 func (e *Executor) installRemovableFallback(ctx context.Context, disk, espDevice string) error {
 	loaderPath, err := efiRemovableLoaderPathForArch(runtime.GOARCH)
+	if err != nil {
+		return err
+	}
+	shimName, grubName, err := espLoaderNames(runtime.GOARCH)
 	if err != nil {
 		return err
 	}
@@ -250,48 +277,121 @@ func (e *Executor) installRemovableFallback(ctx context.Context, disk, espDevice
 		return fmt.Errorf("mounting ESP %s (disk %s) at %s: %w", espDevice, disk, mountpoint, err)
 	}
 
-	installed, source, err := ensureRemovableFallbackFile(mountpoint, relPath)
+	bootDir := filepath.Dir(relPath)
+	installed, err := ensureRemovableFallbackChain(mountpoint, relPath, shimName, grubName)
+	for _, name := range installed {
+		e.log("installed %s on ESP %s (disk %s)", name, espDevice, disk)
+	}
 	if err != nil {
 		return fmt.Errorf("ensuring removable fallback bootloader: %w", err)
 	}
-	if installed {
-		e.log("installed removable fallback bootloader on %s from %s", espDevice, source)
+
+	listing, err := espBootDirListing(mountpoint, bootDir)
+	if err != nil {
+		return fmt.Errorf("reading the fallback directory back: %w", err)
+	}
+	e.log("ESP %s %s now holds: %s", espDevice, bootDir, strings.Join(listing, " "))
+	return nil
+}
+
+// ensureRemovableFallbackChain is installRemovableFallback's pure part:
+// given root (an already-mounted ESP) and relPath (the ESP-relative
+// fallback path to ensure), it makes the fallback directory hold a chain
+// that can actually start, and returns the ESP-relative name of every
+// file it had to install.
+//
+// Two files, not one. A shim never searches for its second stage: it
+// opens grubName from its own directory and nothing else, so a shim
+// copied to the fallback path with no grubName beside it starts and dies
+// immediately - which is what an image that ships EFI/BOOT/<fallback> as
+// a bare shim copy does, with no help from this step at all. That is why
+// the second stage is ensured even when the fallback path was already
+// occupied.
+//
+// A GRUB at the fallback path needs no second stage (it carries its own
+// baked-in prefix and reads its config from there), so a missing grubName
+// is only fatal when this call is the one that put a shim in place, and
+// therefore knows the chain it just created cannot start.
+func ensureRemovableFallbackChain(root, relPath, shimName, grubName string) (installed []string, err error) {
+	bootDir := filepath.Dir(relPath)
+
+	installedShim := false
+	present, err := fileExists(filepath.Join(root, relPath))
+	if err != nil {
+		return nil, err
+	}
+	if !present {
+		src, err := findESPBootloader(root, shimName, grubName)
+		if err != nil {
+			return nil, err
+		}
+		if err := installESPFile(root, relPath, src); err != nil {
+			return nil, err
+		}
+		installed = append(installed, relPath)
+		installedShim = strings.EqualFold(filepath.Base(src), shimName)
+		if !installedShim {
+			// The file just installed is grubName itself, which loads no
+			// second stage. A pre-existing fallback file gets no such
+			// exemption: this package cannot tell a shim from a GRUB by
+			// reading it, and the shim case is the one that fails.
+			return installed, nil
+		}
+	}
+
+	secondStage := filepath.Join(bootDir, grubName)
+	present, err = fileExists(filepath.Join(root, secondStage))
+	if err != nil {
+		return installed, err
+	}
+	if present {
+		return installed, nil
+	}
+
+	src, err := findESPBootloader(root, grubName)
+	if err != nil {
+		if errors.Is(err, errNoESPBootloader) && !installedShim {
+			return installed, nil
+		}
+		return installed, fmt.Errorf("%s needs %s beside it to start: %w", relPath, grubName, err)
+	}
+	if err := installESPFile(root, secondStage, src); err != nil {
+		return installed, err
+	}
+	return append(installed, secondStage), nil
+}
+
+// installESPFile copies src to root's relPath, creating the directories
+// above it.
+func installESPFile(root, relPath, src string) error {
+	dst := filepath.Join(root, relPath)
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("creating %s: %w", filepath.Dir(dst), err)
+	}
+	if err := copyFile(src, dst); err != nil {
+		return fmt.Errorf("copying %s to %s: %w", src, dst, err)
 	}
 	return nil
 }
 
-// ensureRemovableFallbackFile is installRemovableFallback's pure part:
-// given root (an already-mounted ESP) and relPath (the ESP-relative
-// fallback path to ensure), it reports whether relPath is already
-// present, installing a copy from the first removableFallbackCandidates
-// match under any other EFI/<name>/ directory when it is not. source
-// names whichever file it copied from ("" when nothing needed copying).
-func ensureRemovableFallbackFile(root, relPath string) (installed bool, source string, err error) {
-	fallback := filepath.Join(root, relPath)
-	if _, statErr := os.Stat(fallback); statErr == nil {
-		return false, "", nil
-	} else if !os.IsNotExist(statErr) {
-		return false, "", fmt.Errorf("checking %s: %w", fallback, statErr)
+// fileExists reports whether name is an existing file, separating a plain
+// absence from a stat error this package must not swallow.
+func fileExists(name string) (bool, error) {
+	if _, err := os.Stat(name); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("checking %s: %w", name, err)
 	}
-
-	src, err := findESPBootloader(root)
-	if err != nil {
-		return false, "", err
-	}
-	if err := os.MkdirAll(filepath.Dir(fallback), 0o755); err != nil {
-		return false, "", fmt.Errorf("creating %s: %w", filepath.Dir(fallback), err)
-	}
-	if err := copyFile(src, fallback); err != nil {
-		return false, "", fmt.Errorf("copying %s to %s: %w", src, fallback, err)
-	}
-	return true, src, nil
+	return true, nil
 }
 
-// findESPBootloader looks for removableFallbackCandidates under every
-// EFI/<name>/ directory of root other than EFI/BOOT itself (that is the
-// fallback's destination, never a source), returning the first match in
-// directory-then-candidate order.
-func findESPBootloader(root string) (string, error) {
+// findESPBootloader looks for candidates under every EFI/<name>/
+// directory of root other than EFI/BOOT itself (that is the fallback's
+// destination, never a source), returning the first match in
+// directory-then-candidate order and errNoESPBootloader when there is
+// none.
+func findESPBootloader(root string, candidates ...string) (string, error) {
 	efiDir := filepath.Join(root, "EFI")
 	entries, err := os.ReadDir(efiDir)
 	if err != nil {
@@ -301,14 +401,29 @@ func findESPBootloader(root string) (string, error) {
 		if !entry.IsDir() || strings.EqualFold(entry.Name(), "BOOT") {
 			continue
 		}
-		for _, candidate := range removableFallbackCandidates {
+		for _, candidate := range candidates {
 			path := filepath.Join(efiDir, entry.Name(), candidate)
 			if _, err := os.Stat(path); err == nil {
 				return path, nil
 			}
 		}
 	}
-	return "", fmt.Errorf("no bootloader (%s) found under any EFI/<name>/ directory in %s", strings.Join(removableFallbackCandidates, ", "), efiDir)
+	return "", fmt.Errorf("%w in %s (looked for %s)", errNoESPBootloader, efiDir, strings.Join(candidates, ", "))
+}
+
+// espBootDirListing returns the file names in root's bootDir, sorted by
+// os.ReadDir. It is the record of what firmware will find at the fallback
+// path, written to the deploy log while the machine is still reachable.
+func espBootDirListing(root, bootDir string) ([]string, error) {
+	entries, err := os.ReadDir(filepath.Join(root, bootDir))
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", bootDir, err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	return names, nil
 }
 
 // copyFile copies src to dst, creating dst world-readable - firmware does

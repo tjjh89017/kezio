@@ -28,15 +28,28 @@ import (
 // DefaultFinalizeHookName is the name of the shipped default PostHook.
 const DefaultFinalizeHookName = "kezio-default-finalize"
 
-// Spec returns the shipped kezio-default-finalize PostHook spec: mkswap
-// then efibootmgr, both Linux-only builtins. Every call returns an
-// independent value safe for a caller to mutate.
+// Spec returns the shipped kezio-default-finalize PostHook spec: mkswap,
+// install-removable-fallback, then efibootmgr, all Linux-only builtins.
+// Every call returns an independent value safe for a caller to mutate.
+//
+// install-removable-fallback is not optional here even though an image is
+// expected to ship its own fallback bootloader: efibootmgr writes an
+// NVRAM entry naming the removable-media fallback path and no other, so
+// this hook already bets the machine's bootability on that one path.
+// Making the path start something is the same decision, and images that
+// ship a bare shim there (Ubuntu and Debian cloud images both do) leave
+// it unable to start anything on its own. The step is a no-op on an ESP
+// that already boots.
 func Spec() keziov1alpha2.PostHookSpec {
 	return keziov1alpha2.PostHookSpec{
 		Steps: []keziov1alpha2.PostHookStep{
 			{
 				OSFamily: keziov1alpha2.OSFamilyLinux,
 				Builtin:  &keziov1alpha2.PostHookBuiltinStep{Name: keziov1alpha2.BuiltinStepMkswap},
+			},
+			{
+				OSFamily: keziov1alpha2.OSFamilyLinux,
+				Builtin:  &keziov1alpha2.PostHookBuiltinStep{Name: keziov1alpha2.BuiltinStepInstallRemovableFallback},
 			},
 			{
 				OSFamily: keziov1alpha2.OSFamilyLinux,

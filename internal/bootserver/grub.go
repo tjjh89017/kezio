@@ -55,13 +55,25 @@ const grubContentType = "text/plain; charset=utf-8"
 // "search" writes kezio_esp, not $root: a search that matches nothing
 // leaves $root at the net boot device it already holds, so $root cannot
 // report whether the ESP was found.
+//
+// Every outcome names itself on the console. A machine that fails here
+// ends in the firmware's setup application, where the only other symptom
+// is kezio waiting out its whole agent-connect timeout with nothing to
+// say about what the firmware tried; GRUB's own diagnostic for a failed
+// "boot" is the bare "error: unknown error." The echo lines carry no
+// per-machine data, so this config stays the one fixed string every
+// "not netbooting right now" answer returns.
 const bootLocalConfig = `# kezio: this machine does not need the live boot environment right now.
 set timeout=0
 search --no-floppy --file --set=kezio_esp /EFI/BOOT/BOOTX64.EFI
 if [ -n "${kezio_esp}" ]; then
+  echo "kezio: starting the local system from (${kezio_esp})/EFI/BOOT/BOOTX64.EFI"
   set root=${kezio_esp}
   chainloader /EFI/BOOT/BOOTX64.EFI
   boot
+  echo "kezio: that loader did not start the local system; its EFI/BOOT directory is incomplete"
+else
+  echo "kezio: no disk on this machine carries /EFI/BOOT/BOOTX64.EFI"
 fi
 exit
 `

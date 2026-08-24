@@ -219,37 +219,166 @@ func TestInstallRemovableFallback_MountFailurePropagates(t *testing.T) {
 	}
 }
 
-func TestEnsureRemovableFallbackFile(t *testing.T) {
-	root := t.TempDir()
-	mustMkdirAll(t, filepath.Join(root, "EFI", "debian"))
-	mustWriteFile(t, filepath.Join(root, "EFI", "debian", "shimx64.efi"), "shim-bytes")
-
-	installed, source, err := ensureRemovableFallbackFile(root, "EFI/BOOT/BOOTX64.EFI")
-	if err != nil {
-		t.Fatalf("ensureRemovableFallbackFile: %v", err)
+func TestEspLoaderNames(t *testing.T) {
+	cases := []struct {
+		arch      string
+		wantShim  string
+		wantGrub  string
+		wantError bool
+	}{
+		{arch: "amd64", wantShim: "shimx64.efi", wantGrub: "grubx64.efi"},
+		{arch: "arm64", wantShim: "shimaa64.efi", wantGrub: "grubaa64.efi"},
+		{arch: "riscv64", wantError: true},
 	}
-	if !installed {
-		t.Fatal("ensureRemovableFallbackFile: want installed=true when the fallback path is missing")
-	}
-	if !strings.HasSuffix(source, "shimx64.efi") {
-		t.Errorf("source = %q, want it to name shimx64.efi", source)
-	}
-
-	// A second call finds the file already in place and does nothing.
-	installed, _, err = ensureRemovableFallbackFile(root, "EFI/BOOT/BOOTX64.EFI")
-	if err != nil {
-		t.Fatalf("ensureRemovableFallbackFile (second call): %v", err)
-	}
-	if installed {
-		t.Error("ensureRemovableFallbackFile: want installed=false once the fallback path already exists")
+	for _, c := range cases {
+		shim, grub, err := espLoaderNames(c.arch)
+		if c.wantError {
+			if err == nil {
+				t.Errorf("espLoaderNames(%q) = %q, %q, nil; want an error", c.arch, shim, grub)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("espLoaderNames(%q): %v", c.arch, err)
+			continue
+		}
+		if shim != c.wantShim || grub != c.wantGrub {
+			t.Errorf("espLoaderNames(%q) = %q, %q; want %q, %q", c.arch, shim, grub, c.wantShim, c.wantGrub)
+		}
 	}
 }
 
-func TestEnsureRemovableFallbackFile_NoCandidateIsAnError(t *testing.T) {
+// TestEnsureRemovableFallbackChain_InstallsShimAndItsSecondStage: a shim
+// alone at the fallback path cannot boot anything. shim only ever opens
+// its second stage from its own directory, so both files must land in
+// EFI/BOOT together.
+func TestEnsureRemovableFallbackChain_InstallsShimAndItsSecondStage(t *testing.T) {
 	root := t.TempDir()
-	mustMkdirAll(t, filepath.Join(root, "EFI", "debian"))
-	if _, _, err := ensureRemovableFallbackFile(root, "EFI/BOOT/BOOTX64.EFI"); err == nil {
-		t.Fatal("ensureRemovableFallbackFile: want an error when no candidate bootloader exists")
+	mustMkdirAll(t, filepath.Join(root, "EFI", "ubuntu"))
+	mustWriteFile(t, filepath.Join(root, "EFI", "ubuntu", "shimx64.efi"), "shim-bytes")
+	mustWriteFile(t, filepath.Join(root, "EFI", "ubuntu", "grubx64.efi"), "grub-bytes")
+
+	installed, err := ensureRemovableFallbackChain(root, "EFI/BOOT/BOOTX64.EFI", "shimx64.efi", "grubx64.efi")
+	if err != nil {
+		t.Fatalf("ensureRemovableFallbackChain: %v", err)
+	}
+	wantInstalled := []string{"EFI/BOOT/BOOTX64.EFI", "EFI/BOOT/grubx64.efi"}
+	if strings.Join(installed, ",") != strings.Join(wantInstalled, ",") {
+		t.Errorf("installed = %v, want %v", installed, wantInstalled)
+	}
+	mustHaveContent(t, filepath.Join(root, "EFI", "BOOT", "BOOTX64.EFI"), "shim-bytes")
+	mustHaveContent(t, filepath.Join(root, "EFI", "BOOT", "grubx64.efi"), "grub-bytes")
+}
+
+// TestEnsureRemovableFallbackChain_CompletesAnImageShippedShim is the case
+// every Ubuntu and Debian cloud image lands in: the ESP already carries a
+// shim copy at the fallback path, but no second stage beside it, so the
+// firmware (or a chainloader) starts a shim that immediately fails to open
+// EFI/BOOT/grubx64.efi. Finding the fallback path occupied must not end
+// the step.
+func TestEnsureRemovableFallbackChain_CompletesAnImageShippedShim(t *testing.T) {
+	root := t.TempDir()
+	mustMkdirAll(t, filepath.Join(root, "EFI", "BOOT"))
+	mustWriteFile(t, filepath.Join(root, "EFI", "BOOT", "BOOTX64.EFI"), "shim-bytes")
+	mustMkdirAll(t, filepath.Join(root, "EFI", "ubuntu"))
+	mustWriteFile(t, filepath.Join(root, "EFI", "ubuntu", "grubx64.efi"), "grub-bytes")
+
+	installed, err := ensureRemovableFallbackChain(root, "EFI/BOOT/BOOTX64.EFI", "shimx64.efi", "grubx64.efi")
+	if err != nil {
+		t.Fatalf("ensureRemovableFallbackChain: %v", err)
+	}
+	if strings.Join(installed, ",") != "EFI/BOOT/grubx64.efi" {
+		t.Errorf("installed = %v, want only the second stage", installed)
+	}
+	mustHaveContent(t, filepath.Join(root, "EFI", "BOOT", "grubx64.efi"), "grub-bytes")
+}
+
+// TestEnsureRemovableFallbackChain_AlreadyCompleteChangesNothing keeps the
+// step a no-op on an ESP that already boots.
+func TestEnsureRemovableFallbackChain_AlreadyCompleteChangesNothing(t *testing.T) {
+	root := t.TempDir()
+	mustMkdirAll(t, filepath.Join(root, "EFI", "BOOT"))
+	mustWriteFile(t, filepath.Join(root, "EFI", "BOOT", "BOOTX64.EFI"), "shim-bytes")
+	mustWriteFile(t, filepath.Join(root, "EFI", "BOOT", "grubx64.efi"), "grub-bytes")
+
+	installed, err := ensureRemovableFallbackChain(root, "EFI/BOOT/BOOTX64.EFI", "shimx64.efi", "grubx64.efi")
+	if err != nil {
+		t.Fatalf("ensureRemovableFallbackChain: %v", err)
+	}
+	if len(installed) != 0 {
+		t.Errorf("installed = %v, want nothing on an already complete chain", installed)
+	}
+}
+
+// TestEnsureRemovableFallbackChain_GrubFallbackNeedsNoSecondStage: a GRUB
+// copied to the fallback path loads its own config, so a missing
+// grubx64.efi beside it is not a defect.
+func TestEnsureRemovableFallbackChain_GrubFallbackNeedsNoSecondStage(t *testing.T) {
+	root := t.TempDir()
+	mustMkdirAll(t, filepath.Join(root, "EFI", "ubuntu"))
+	mustWriteFile(t, filepath.Join(root, "EFI", "ubuntu", "grubx64.efi"), "grub-bytes")
+
+	installed, err := ensureRemovableFallbackChain(root, "EFI/BOOT/BOOTX64.EFI", "shimx64.efi", "grubx64.efi")
+	if err != nil {
+		t.Fatalf("ensureRemovableFallbackChain: %v", err)
+	}
+	if strings.Join(installed, ",") != "EFI/BOOT/BOOTX64.EFI" {
+		t.Errorf("installed = %v, want only the fallback loader", installed)
+	}
+}
+
+// TestEnsureRemovableFallbackChain_ShimWithoutGrubIsAnError: installing a
+// shim this step knows has no second stage anywhere on the ESP would leave
+// a machine that fails in firmware minutes later with no explanation. Say
+// so while the deploy can still report it.
+func TestEnsureRemovableFallbackChain_ShimWithoutGrubIsAnError(t *testing.T) {
+	root := t.TempDir()
+	mustMkdirAll(t, filepath.Join(root, "EFI", "ubuntu"))
+	mustWriteFile(t, filepath.Join(root, "EFI", "ubuntu", "shimx64.efi"), "shim-bytes")
+
+	_, err := ensureRemovableFallbackChain(root, "EFI/BOOT/BOOTX64.EFI", "shimx64.efi", "grubx64.efi")
+	if err == nil {
+		t.Fatal("ensureRemovableFallbackChain: want an error when the installed shim has no second stage to load")
+	}
+	if !strings.Contains(err.Error(), "grubx64.efi") {
+		t.Errorf("error = %v, want it to name the missing second stage", err)
+	}
+}
+
+func TestEnsureRemovableFallbackChain_NoCandidateIsAnError(t *testing.T) {
+	root := t.TempDir()
+	mustMkdirAll(t, filepath.Join(root, "EFI", "ubuntu"))
+	if _, err := ensureRemovableFallbackChain(root, "EFI/BOOT/BOOTX64.EFI", "shimx64.efi", "grubx64.efi"); err == nil {
+		t.Fatal("ensureRemovableFallbackChain: want an error when no candidate bootloader exists")
+	}
+}
+
+// TestEspBootDirListing reports what the firmware will actually find at
+// the fallback path, so a deploy record states it instead of leaving a
+// later boot failure with nothing to read.
+func TestEspBootDirListing(t *testing.T) {
+	root := t.TempDir()
+	mustMkdirAll(t, filepath.Join(root, "EFI", "BOOT"))
+	mustWriteFile(t, filepath.Join(root, "EFI", "BOOT", "BOOTX64.EFI"), "shim-bytes")
+	mustWriteFile(t, filepath.Join(root, "EFI", "BOOT", "grubx64.efi"), "grub-bytes")
+
+	got, err := espBootDirListing(root, "EFI/BOOT")
+	if err != nil {
+		t.Fatalf("espBootDirListing: %v", err)
+	}
+	if strings.Join(got, ",") != "BOOTX64.EFI,grubx64.efi" {
+		t.Errorf("espBootDirListing = %v, want the EFI/BOOT file names in order", got)
+	}
+}
+
+func mustHaveContent(t *testing.T, path, want string) {
+	t.Helper()
+	got, err := os.ReadFile(path) //nolint:gosec // test-controlled path
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", path, err)
+	}
+	if string(got) != want {
+		t.Errorf("%s content = %q, want %q", path, got, want)
 	}
 }
 

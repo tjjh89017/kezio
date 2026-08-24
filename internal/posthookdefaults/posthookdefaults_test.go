@@ -30,13 +30,22 @@ func TestSpecPassesValidation(t *testing.T) {
 	}
 }
 
-func TestSpecStepsAreMkswapThenEfibootmgr(t *testing.T) {
+// TestSpecCompletesTheFallbackPathItPointsNVRAMAt: efibootmgr writes an
+// NVRAM entry naming the removable-media fallback path and nothing else,
+// so the shipped hook stakes a machine's whole bootability on that path.
+// install-removable-fallback is what makes the path bootable, and must
+// run before the entry that names it.
+func TestSpecCompletesTheFallbackPathItPointsNVRAMAt(t *testing.T) {
 	spec := Spec()
-	if len(spec.Steps) != 2 {
-		t.Fatalf("got %d steps, want 2", len(spec.Steps))
+	if len(spec.Steps) != 3 {
+		t.Fatalf("got %d steps, want 3", len(spec.Steps))
 	}
 
-	wantNames := []string{keziov1alpha2.BuiltinStepMkswap, keziov1alpha2.BuiltinStepEfibootmgr}
+	wantNames := []string{
+		keziov1alpha2.BuiltinStepMkswap,
+		keziov1alpha2.BuiltinStepInstallRemovableFallback,
+		keziov1alpha2.BuiltinStepEfibootmgr,
+	}
 	for i, want := range wantNames {
 		step := spec.Steps[i]
 		if step.Type() != keziov1alpha2.PostHookStepTypeBuiltin {

@@ -430,19 +430,28 @@ reboot. When that happens, firmware falls back to the fixed path above
 with no NVRAM entry involved at all. The contract exists so that
 fallback still finds a working bootloader.
 
-kezio adds no check for this contract anywhere: no ingest-time check on
-an uploaded Image, no Image status warning, no deploy-time gate. The
-operator who builds or picks a golden image carries the responsibility
-to make sure it already ships the fallback bootloader for its
-architecture; this guide and the contract table above are the whole of
-the documentation for it.
+kezio adds no ingest-time check on an uploaded Image and no Image status
+warning. The operator who builds or picks a golden image carries the
+responsibility to make sure it ships a fallback bootloader for its
+architecture.
 
-A golden image that does not already carry the fallback file can use
-the `install-removable-fallback` builtin PostHook step instead of
-carrying one by hand. That step copies a shim or GRUB binary it finds
-under another `EFI/<name>/` directory on the ESP into the fallback path.
-It is opt-in - a `PostHook` must name it explicitly - and it is scoped
-to the same two architectures as the table above.
+The shipped `kezio-default-finalize` PostHook does repair the common
+case at deploy time. Its `install-removable-fallback` builtin step runs
+before `efibootmgr` and makes the fallback directory hold a chain that
+can start: it copies a shim or GRUB binary it finds under another
+`EFI/<name>/` directory on the ESP into the fallback path, and it copies
+GRUB in beside a shim. That second file is what an image which ships a
+bare shim copy at the fallback path is missing - Ubuntu and Debian cloud
+images both do. A shim never searches for its second stage; it opens
+GRUB from its own directory only, so a lone shim starts and stops there.
+
+The step is a no-op on an ESP that already boots, and it is scoped to
+the same two architectures as the table above. It fails the deploy when
+it installs a shim and finds no GRUB anywhere on the ESP to pair with
+it, rather than reporting the deploy done and leaving the machine to
+stop in its firmware minutes later. The agent also logs the fallback
+directory's contents after every run, so a deploy record states what the
+firmware will find.
 
 ## 6. Full port table
 
