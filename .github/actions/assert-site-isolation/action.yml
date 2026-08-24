@@ -1,0 +1,190 @@
+name: Assert one Site's segment cannot reach another Site's addresses
+
+description: >-
+  Guards the two-site lane against silently degrading into one flat
+  network if a create-routed-segments rule leaks: from a probe that
+  genuinely sits ON one Site's segment, asserts that a list of
+  supposedly-unreachable endpoints (the other Site's tracker and
+  seeder) never receive a single packet, and that a second list of
+  supposedly-reachable endpoints (this Site's own tracker and seeder)
+  do.
+
+  Probe placement, and why it is honest: the probe runs from a
+  dedicated network namespace joined to the target bridge with its own
+  veth pair and its own address (not the runner host's own address on
+  that bridge). This matters because the runner host itself already
+  holds an address on every segment create-routed-segments creates - a
+  check run directly from the host would have its own traffic
+  originate on the host and go out through the OUTPUT hook, never
+  FORWARD, so a probe run that way could pass even with an isolation
+  rule that only ever matched FORWARD-hook traffic and never touched
+  OUTPUT. A helper netns with its own address, reached only through the
+  bridge (a veth, not loopback) and routed off-segment only through the
+  host's own forwarding path (its default route is the segment's own
+  host-cidr address, exactly like a real Multus-attached pod's route to
+  its gateway), makes every probe packet a genuinely forwarded packet -
+  the same path a real tracker/seeder pod's traffic takes.
+
+  Unreachability is verified as "no packets arrive", not "TCP connect
+  refused": a refused connection (immediate RST) proves the destination
+  DID receive and answer the SYN, which is evidence of reachability, not
+  its absence. Each probe measures wall-clock elapsed time on a bounded
+  connect attempt: a fast failure (at or under fast-threshold-ms) means
+  something answered (connected, or refused) and counts as
+  "reachable"; an attempt that runs the full timeout with no response at
+  all counts as "unreachable". Endpoints in unreachable-endpoints must
+  land in the second bucket; endpoints in reachable-endpoints must land
+  in either of the first two.
+
+  This is a host-level TCP probe, not a BitTorrent handshake - it proves
+  the network path is open or closed, not that the peer on the other
+  end speaks the expected protocol. Whether the actual isolation rules
+  create-routed-segments installs hold up under this probe can only be
+  proven on a real runner.
+
+inputs:
+  bridge-name:
+    description: The bridge to probe from - this Site's own segment, as created by create-routed-segments.
+    required: true
+  probe-cidr:
+    description: >-
+      Address (with prefix) to assign to the helper netns on this
+      segment, e.g. "192.0.2.250/24" - must be unused by anything else
+      on that segment.
+    required: true
+  gateway-ip:
+    description: >-
+      Bare address (no prefix) of this segment's own host-cidr, the
+      address create-routed-segments gave the runner on bridge-name -
+      the helper netns' default route, exactly like a real pod's route
+      to its gateway.
+    required: true
+  unreachable-endpoints:
+    description: Newline-separated "ip:port" endpoints expected to be unreachable (no packets arrive). Blank lines are skipped.
+    required: true
+  reachable-endpoints:
+    description: Newline-separated "ip:port" endpoints expected to be reachable. Blank lines are skipped.
+    required: true
+  timeout-seconds:
+    description: Bounded connect timeout per probe, in whole seconds. Short on purpose - this only needs to distinguish "answered" from "never answered".
+    required: false
+    default: "3"
+  fast-threshold-ms:
+    description: >-
+      A completed connect attempt finishing at or under this many
+      milliseconds is treated as "something answered" (reachable
+      evidence); at or over it is treated as a silent drop
+      (unreachable evidence). Must stay well under timeout-seconds*1000
+      to leave a clear gap between the two outcomes.
+    required: false
+    default: "800"
+  netns-name:
+    description: Name of the helper network namespace this action creates and removes.
+    required: false
+    default: "kezio-isolation-probe"
+
+runs:
+  using: composite
+  steps:
+    - name: Create the helper probe namespace on the segment
+      shell: bash
+      env:
+        BRIDGE_NAME: ${{ inputs.bridge-name }}
+        PROBE_CIDR: ${{ inputs.probe-cidr }}
+        GATEWAY_IP: ${{ inputs.gateway-ip }}
+        NETNS_NAME: ${{ inputs.netns-name }}
+      run: |
+        set -euo pipefail
+        veth_host="kzprobe-h"
+        veth_ns="kzprobe-n"
+
+        sudo ip netns add "${NETNS_NAME}"
+        sudo ip link add "${veth_host}" type veth peer name "${veth_ns}"
+        sudo ip link set "${veth_host}" master "${BRIDGE_NAME}"
+        sudo ip link set "${veth_host}" up
+        sudo ip link set "${veth_ns}" netns "${NETNS_NAME}"
+        sudo ip netns exec "${NETNS_NAME}" ip link set lo up
+        sudo ip netns exec "${NETNS_NAME}" ip link set "${veth_ns}" up
+        sudo ip netns exec "${NETNS_NAME}" ip addr add "${PROBE_CIDR}" dev "${veth_ns}"
+        sudo ip netns exec "${NETNS_NAME}" ip route add default via "${GATEWAY_IP}"
+
+    - name: Assert reachability from inside the segment
+      shell: bash
+      env:
+        NETNS_NAME: ${{ inputs.netns-name }}
+        UNREACHABLE_ENDPOINTS: ${{ inputs.unreachable-endpoints }}
+        REACHABLE_ENDPOINTS: ${{ inputs.reachable-endpoints }}
+        TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
+        FAST_THRESHOLD_MS: ${{ inputs.fast-threshold-ms }}
+      run: |
+        set -euo pipefail
+
+        # Prints "connected"/"refused"/"timed-out" and the elapsed
+        # milliseconds for one bounded connect attempt. "connected" and
+        # "refused" both mean a packet came back from the destination;
+        # "timed-out" means the connect attempt ran the full timeout
+        # with no response at all.
+        probe() {
+          endpoint="$1"
+          ip="${endpoint%:*}"
+          port="${endpoint##*:}"
+          start_ms=$(($(date +%s%N) / 1000000))
+          if sudo ip netns exec "${NETNS_NAME}" \
+              timeout "${TIMEOUT_SECONDS}" bash -c "exec 3<>/dev/tcp/${ip}/${port}" 2>/dev/null; then
+            outcome=connected
+          else
+            rc=$?
+            end_ms=$(($(date +%s%N) / 1000000))
+            elapsed=$((end_ms - start_ms))
+            if [ "${rc}" -eq 124 ] || [ "${elapsed}" -ge "${FAST_THRESHOLD_MS}" ]; then
+              outcome=timed-out
+            else
+              outcome=refused
+            fi
+            echo "${outcome} elapsed=${elapsed}ms"
+            return 0
+          fi
+          end_ms=$(($(date +%s%N) / 1000000))
+          echo "${outcome} elapsed=$((end_ms - start_ms))ms"
+        }
+
+        fail=0
+
+        while IFS= read -r endpoint; do
+          [ -z "${endpoint}" ] && continue
+          result="$(probe "${endpoint}")"
+          outcome="${result%% *}"
+          echo "unreachable-endpoints: ${endpoint} -> ${result}"
+          if [ "${outcome}" != "timed-out" ]; then
+            echo "::error::${endpoint} was expected UNREACHABLE from this segment but outcome was '${outcome}' (packets arrived) - isolation leak" >&2
+            fail=1
+          fi
+        done <<<"${UNREACHABLE_ENDPOINTS}"
+
+        while IFS= read -r endpoint; do
+          [ -z "${endpoint}" ] && continue
+          result="$(probe "${endpoint}")"
+          outcome="${result%% *}"
+          echo "reachable-endpoints: ${endpoint} -> ${result}"
+          if [ "${outcome}" = "timed-out" ]; then
+            echo "::error::${endpoint} was expected REACHABLE from this segment but no packets arrived within ${TIMEOUT_SECONDS}s" >&2
+            fail=1
+          fi
+        done <<<"${REACHABLE_ENDPOINTS}"
+
+        if [ "${fail}" -ne 0 ]; then
+          exit 1
+        fi
+        echo "site isolation assertion passed"
+
+    - name: Remove the helper probe namespace
+      if: always()
+      shell: bash
+      env:
+        NETNS_NAME: ${{ inputs.netns-name }}
+      run: |
+        set +e
+        sudo ip netns del "${NETNS_NAME}" 2>/dev/null
+        # The host-side veth end is destroyed automatically with its
+        # peer once the netns is removed; nothing else to clean up.
+        exit 0

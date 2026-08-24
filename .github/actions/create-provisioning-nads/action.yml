@@ -8,6 +8,23 @@ description: >-
   belonging to a deploy-existing-dhcp pod, is created separately by that
   action, travelling with the pod it belongs to instead of living here.
 
+  The tracker/seeder NADs' ipam accepts an optional route list
+  (seeding-routes-json). A single-homed tracker or seeder pod
+  (v1.multus-cni.io/default-network, no cluster network at all) has no
+  path to a machine on a different segment of the same Site unless its
+  one interface carries a route there - this is that route, placed at
+  the ipam object's own "routes" key. That is the documented location
+  for both variants of this NAD's ipam: the CNI static plugin
+  (https://www.cni.dev/plugins/current/ipam/static/) and whereabouts
+  (https://github.com/k8snetworkplumbingwg/whereabouts) both read a
+  "routes" array of {"dst", "gw"} objects directly under ipam - this
+  action only implements the static variant today, but the key sits at
+  the same place a whereabouts-typed ipam block would use, matching the
+  historical config/seeder/networkattachmentdefinition*.example.yaml
+  shape this repository carried before its ipam type became
+  configurable per site. Defaults to no routes, so every existing
+  caller's NADs come out byte-identical.
+
 inputs:
   namespace:
     description: Namespace the NetworkAttachmentDefinitions are created in - must match the Subnet's own namespace, since bootdNetworkRef/seederNetworkRef resolve unqualified names there.
@@ -25,6 +42,17 @@ inputs:
   seeder-net1-ip:
     description: 'Fixed net1 CIDR address for the ezio-seeder pod, e.g. "192.0.2.4/24".'
     required: true
+  seeding-routes-json:
+    description: >-
+      JSON array of CNI ipam route objects ({"dst": "<cidr>", "gw":
+      "<optional next-hop>"}), applied identically to both
+      kezio-tracker-network's and kezio-seeder-network's ipam.routes -
+      the Site's other segments a single-homed tracker/seeder pod needs
+      a route to reach. Empty (the default) omits the "routes" key
+      entirely, leaving both NADs unchanged from before this input
+      existed.
+    required: false
+    default: "[]"
 
 runs:
   using: composite
@@ -53,8 +81,18 @@ runs:
         BOOTD_NET1_IP: ${{ inputs.bootd-net1-ip }}
         TRACKER_NET1_IP: ${{ inputs.tracker-net1-ip }}
         SEEDER_NET1_IP: ${{ inputs.seeder-net1-ip }}
+        SEEDING_ROUTES_JSON: ${{ inputs.seeding-routes-json }}
       run: |
         set -euo pipefail
+        # Empty input becomes an empty-string append (unchanged NAD
+        # output, matching every existing caller); a non-empty list
+        # becomes the ipam-level "routes" key both variants of this
+        # NAD's ipam read - see this action's own description.
+        if [ "$(jq -c '.' <<<"${SEEDING_ROUTES_JSON}" | jq 'length')" -gt 0 ]; then
+          ipam_routes=",\"routes\": $(jq -c '.' <<<"${SEEDING_ROUTES_JSON}")"
+        else
+          ipam_routes=""
+        fi
         cat <<EOF | kubectl apply -f -
         apiVersion: k8s.cni.cncf.io/v1
         kind: NetworkAttachmentDefinition
@@ -106,7 +144,7 @@ runs:
                     "type": "static",
                     "addresses": [
                       {"address": "${nad_addr}"}
-                    ]
+                    ]${ipam_routes}
                   }
                 }
               ]

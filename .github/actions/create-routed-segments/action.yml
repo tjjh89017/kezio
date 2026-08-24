@@ -1,0 +1,226 @@
+name: Create routed, group-isolated segments
+
+description: >-
+  Creates N host Linux bridges (one per named segment), gives the runner
+  its own address on each, enables IPv4 forwarding, and installs a
+  forwarding policy that allows traffic only between segments that share
+  a group label (a Site) and drops it between segments of different
+  groups. This is what turns "N bridges on one runner" into "N routed
+  hops that stay routable only inside one Site" - the routed lane's
+  three segments are one group; the two-site lane's segments are two
+  groups that must never reach each other.
+
+  Supersedes create-provisioning-bridge for this multi-segment case
+  rather than calling it once per segment: composite actions have no
+  loop-based `uses:` step, so driving create-provisioning-bridge from a
+  data-driven segment list would need one static step per segment
+  declared in the caller, which defeats the point of a data-driven
+  input. The bridge-creation commands below are the same three
+  create-provisioning-bridge runs, so a lane with exactly one segment
+  ends up with identical bridge state either way.
+
+  Isolation technique, and why it is two different mechanisms rather
+  than one nftables table: a "drop" verdict in ANY chain that a
+  forwarded packet's hook (forward) traverses is absolute - the packet
+  is discarded right there, before any later chain (by priority) gets a
+  turn. An "accept" verdict is NOT absolute the same way - it only ends
+  rule evaluation in that one chain and hands the packet to the next
+  base chain registered at the same hook; if that next chain's own
+  policy is DROP (which is exactly what harden-provisioning-bridge's own
+  comment says canal's "inet filter" FORWARD chain becomes once RKE2/
+  canal is up), the packet still dies there even though this action's
+  own chain already said accept. Consequently:
+    - cross-group traffic is blocked by DROP rules in this action's own
+      dedicated nftables table (and, in parallel, an iptables INSERT at
+      the front of FORWARD) - correct regardless of what canal is
+      doing, because drop needs no cooperation from any other chain.
+    - intra-group traffic is allowed by inserting ACCEPT rules directly
+      into the SAME chain that would otherwise drop it as unrecognized
+      traffic (canal's "inet filter" FORWARD chain via nft, or the
+      plain FORWARD chain via iptables) - the identical technique
+      harden-provisioning-bridge already uses for its own single-bridge
+      case, generalized here to every intra-group bridge pair.
+  Both paths (iptables and nft) are attempted, exactly as
+  harden-provisioning-bridge does, since which one actually mediates
+  the runner's forwarding path depends on how RKE2/canal was installed;
+  neither existing (a bare runner with no CNI up yet) is tolerated too -
+  the DROP side still gets installed (an nftables table, or an iptables
+  rule, whichever binary exists), so isolation holds even before any
+  cluster component has touched netfilter.
+
+  Isolation is default-deny, not merely the absence of a route: the
+  runner hosts an address on every bridge this action creates, so
+  without an explicit drop rule the kernel would happily forward
+  cross-group traffic using its normal routing table. Every ordered
+  pair of segments whose groups differ gets an explicit drop rule;
+  every ordered pair whose groups match gets an explicit accept rule.
+  Self-pairs are skipped (intra-bridge traffic is switched at L2, never
+  forwarded).
+
+  Whether the installed rules actually take effect against real
+  forwarded traffic - as opposed to parsing correctly - can only be
+  proven on a real runner; assert-site-isolation is that proof.
+
+inputs:
+  segments:
+    description: >-
+      Newline-separated segment list, one per line, each line four
+      whitespace-separated fields: "<name> <cidr> <host-cidr> <group>".
+      <name> is the bridge device name (e.g. "kezio-site-a-1"); <cidr> is
+      the segment's network in CIDR form, informational only (recorded in
+      logs, not applied to any device); <host-cidr> is the address (with
+      prefix) the runner itself gets on that bridge, e.g.
+      "192.0.2.1/24"; <group> is the Site label two-or-more segments
+      share to be allowed to route to each other. Blank lines are
+      skipped. At least one non-blank line is required.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Create one bridge per segment and enable IPv4 forwarding
+      shell: bash
+      env:
+        SEGMENTS: ${{ inputs.segments }}
+      run: |
+        set -euo pipefail
+
+        segment_count=0
+        while IFS= read -r line; do
+          [ -z "${line}" ] && continue
+          # shellcheck disable=SC2086 # intentional word-splitting: line is "name cidr host-cidr group".
+          read -r name cidr host_cidr group <<<"${line}"
+          if [ -z "${name}" ] || [ -z "${cidr}" ] || [ -z "${host_cidr}" ] || [ -z "${group}" ]; then
+            echo "::error::malformed segments line (want 4 fields): '${line}'" >&2
+            exit 1
+          fi
+          echo "segment ${name}: cidr=${cidr} host=${host_cidr} group=${group}"
+          sudo ip link add "${name}" type bridge
+          sudo ip addr add "${host_cidr}" dev "${name}"
+          sudo ip link set "${name}" up
+          segment_count=$((segment_count + 1))
+        done <<<"${SEGMENTS}"
+
+        if [ "${segment_count}" -eq 0 ]; then
+          echo "::error::no non-blank lines in 'segments' input - at least one segment is required" >&2
+          exit 1
+        fi
+
+        # ip_forward is the master switch; conf.all.forwarding covers
+        # interfaces (these new bridges included) that inherit their
+        # per-interface forwarding flag from "all" rather than a
+        # per-interface default already set to 1.
+        sudo sysctl -w net.ipv4.ip_forward=1
+        sudo sysctl -w net.ipv4.conf.all.forwarding=1
+
+    - name: Block forwarding between segments of different groups
+      # Drop is authoritative wherever it is evaluated (see this
+      # action's own description), so this step needs no coordination
+      # with canal's chain - only "does a rule matching this pair exist
+      # somewhere on the forward hook" - and installs one on whichever
+      # backend(s) are present.
+      shell: bash
+      env:
+        SEGMENTS: ${{ inputs.segments }}
+      run: |
+        set -euo pipefail
+
+        names=()
+        groups=()
+        while IFS= read -r line; do
+          [ -z "${line}" ] && continue
+          # shellcheck disable=SC2086 # intentional word-splitting: line is "name cidr host-cidr group".
+          read -r name _cidr _host_cidr group <<<"${line}"
+          names+=("${name}")
+          groups+=("${group}")
+        done <<<"${SEGMENTS}"
+
+        if command -v nft >/dev/null 2>&1; then
+          ruleset="table inet kezio_routed_segments_deny {
+        chain forward {
+          type filter hook forward priority -10;
+          policy accept;
+        "
+          for i in "${!names[@]}"; do
+            for j in "${!names[@]}"; do
+              [ "${i}" -eq "${j}" ] && continue
+              [ "${groups[$i]}" = "${groups[$j]}" ] && continue
+              ruleset+="    iifname \"${names[$i]}\" oifname \"${names[$j]}\" drop
+        "
+            done
+          done
+          ruleset+="  }
+        }
+        "
+          # Delete-then-add makes this idempotent and avoids stacking
+          # duplicate rules on a rerun; "no such file" on first run is
+          # expected and silenced.
+          sudo nft delete table inet kezio_routed_segments_deny 2>/dev/null || true
+          echo "${ruleset}" | sudo nft -f -
+          echo "kezio_routed_segments_deny ruleset installed:"
+          sudo nft list table inet kezio_routed_segments_deny
+        fi
+
+        if command -v iptables >/dev/null 2>&1; then
+          for i in "${!names[@]}"; do
+            for j in "${!names[@]}"; do
+              [ "${i}" -eq "${j}" ] && continue
+              [ "${groups[$i]}" = "${groups[$j]}" ] && continue
+              sudo iptables -C FORWARD -i "${names[$i]}" -o "${names[$j]}" -j DROP 2>/dev/null || \
+                sudo iptables -I FORWARD 1 -i "${names[$i]}" -o "${names[$j]}" -j DROP
+            done
+          done
+        fi
+
+        if ! command -v nft >/dev/null 2>&1 && ! command -v iptables >/dev/null 2>&1; then
+          echo "::error::neither nft nor iptables found - cannot install the default-deny isolation policy" >&2
+          exit 1
+        fi
+
+    - name: Allow forwarding within each group
+      # Mirrors harden-provisioning-bridge's own single-bridge fixup,
+      # generalized to every intra-group bridge pair: inserted directly
+      # into the chain that would otherwise drop this traffic as
+      # unrecognized (canal's "inet filter" FORWARD via nft, or the
+      # plain FORWARD chain via iptables), because an ACCEPT verdict
+      # from a separate, earlier-priority chain does not survive a later
+      # chain's own DROP policy - see this action's own description.
+      shell: bash
+      env:
+        SEGMENTS: ${{ inputs.segments }}
+      run: |
+        set -euo pipefail
+
+        names=()
+        groups=()
+        while IFS= read -r line; do
+          [ -z "${line}" ] && continue
+          # shellcheck disable=SC2086 # intentional word-splitting: line is "name cidr host-cidr group".
+          read -r name _cidr _host_cidr group <<<"${line}"
+          names+=("${name}")
+          groups+=("${group}")
+        done <<<"${SEGMENTS}"
+
+        if command -v iptables >/dev/null 2>&1; then
+          for i in "${!names[@]}"; do
+            for j in "${!names[@]}"; do
+              [ "${i}" -eq "${j}" ] && continue
+              [ "${groups[$i]}" != "${groups[$j]}" ] && continue
+              sudo iptables -C FORWARD -i "${names[$i]}" -o "${names[$j]}" -j ACCEPT 2>/dev/null || \
+                sudo iptables -A FORWARD -i "${names[$i]}" -o "${names[$j]}" -j ACCEPT
+            done
+          done
+        fi
+
+        if command -v nft >/dev/null 2>&1 && sudo nft list table inet filter >/dev/null 2>&1; then
+          for i in "${!names[@]}"; do
+            for j in "${!names[@]}"; do
+              [ "${i}" -eq "${j}" ] && continue
+              [ "${groups[$i]}" != "${groups[$j]}" ] && continue
+              sudo nft list chain inet filter FORWARD 2>/dev/null | \
+                grep -q "iifname \"${names[$i]}\" oifname \"${names[$j]}\" accept" || \
+                sudo nft add rule inet filter FORWARD \
+                  iifname "${names[$i]}" oifname "${names[$j]}" accept
+            done
+          done
+        fi

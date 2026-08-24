@@ -1,0 +1,158 @@
+name: Create a Site
+
+description: >-
+  Applies a `Site` CR (api/v1alpha2/site_types.go) that SiteReconciler
+  watches to place a per-Site tracker Deployment, and waits for a
+  caller-selectable status condition. Follows create-subnet's own
+  conventions: kubectl apply, a poll loop against
+  status.conditions[type=<X>].status, and a dump of the object on
+  timeout so a failure is diagnosable from the job log alone.
+
+  Handles the Site/Subnet creation-order cycle (a Site's
+  seederSubnetRef must name a Subnet whose own siteRef points back at
+  this Site, per the Site webhook's own cross-reference rule - so
+  neither can be created first with both references already filled in)
+  by staying purely
+  declarative rather than adding a separate patch mode: `kubectl apply`
+  is already an upsert, so a lane calls this action twice with the same
+  `name` - once with `seeder-subnet-name` left empty to create the Site
+  bare (before its Subnet exists, so the Subnet's own siteRef has
+  something to point at), and again after create-subnet has created
+  that Subnet, this time with `seeder-subnet-name` set - and the second
+  call's apply reconciles the difference in place. No dedicated
+  patch-only input is needed for this, and the action never has to
+  guess which of the two calls it is.
+
+inputs:
+  name:
+    description: Name of the Site CR.
+    required: true
+  namespace:
+    description: Namespace the Site is created in.
+    required: false
+    default: "scaffold-system"
+  seeder-subnet-name:
+    description: >-
+      Site.spec.seederSubnetRef.name. Empty omits seederSubnetRef
+      entirely (a Site with no seeding subnet runs no seeder and no
+      tracker) - pass empty on the first, bare-creation call of the
+      create-then-patch cycle described above, and the Subnet's own
+      name on the second call.
+    required: false
+    default: ""
+  tracker-ip:
+    description: >-
+      Site.spec.tracker.ip (bare address, no CIDR suffix). Mutually
+      exclusive with tracker-external-url; leave both empty for a Site
+      with no seeder-subnet-name.
+    required: false
+    default: ""
+  tracker-external-url:
+    description: Site.spec.tracker.externalURL. Mutually exclusive with tracker-ip.
+    required: false
+    default: ""
+  wait-for:
+    description: >-
+      Status condition type to wait on: "Valid" (schema plus
+      cross-reference checks against seeder-subnet-name - true as soon
+      as the Subnet exists and back-references this Site, well before
+      any tracker Deployment can start) or "Ready" (the additional,
+      slower condition that also needs the tracker Deployment - backed
+      by the manager image config - to become available). A lane
+      creating the Site early, before that config exists, must pass
+      "Valid" here.
+    required: false
+    default: "Valid"
+  timeout:
+    description: >-
+      Timeout to wait for the wait-for condition to become True, in
+      seconds as an integer, optionally suffixed with s.
+    required: false
+    default: "120s"
+
+runs:
+  using: composite
+  steps:
+    - name: Validate inputs
+      shell: bash
+      env:
+        SEEDER_SUBNET_NAME: ${{ inputs.seeder-subnet-name }}
+        TRACKER_IP: ${{ inputs.tracker-ip }}
+        TRACKER_EXTERNAL_URL: ${{ inputs.tracker-external-url }}
+        WAIT_FOR: ${{ inputs.wait-for }}
+      run: |
+        set -euo pipefail
+        if [ -n "${TRACKER_IP}" ] && [ -n "${TRACKER_EXTERNAL_URL}" ]; then
+          echo "::error::tracker-ip and tracker-external-url are mutually exclusive" >&2
+          exit 1
+        fi
+        if [ -z "${SEEDER_SUBNET_NAME}" ] && { [ -n "${TRACKER_IP}" ] || [ -n "${TRACKER_EXTERNAL_URL}" ]; }; then
+          echo "::error::tracker-ip/tracker-external-url require seeder-subnet-name to be set (a Site with no seeder-subnet-name must carry neither)" >&2
+          exit 1
+        fi
+        case "${WAIT_FOR}" in
+          Valid|Ready) ;;
+          *)
+            echo "::error::unknown wait-for '${WAIT_FOR}' (expected Valid or Ready)" >&2
+            exit 1
+            ;;
+        esac
+
+    - name: Create the Site
+      shell: bash
+      env:
+        NAME: ${{ inputs.name }}
+        NAMESPACE: ${{ inputs.namespace }}
+        SEEDER_SUBNET_NAME: ${{ inputs.seeder-subnet-name }}
+        TRACKER_IP: ${{ inputs.tracker-ip }}
+        TRACKER_EXTERNAL_URL: ${{ inputs.tracker-external-url }}
+      run: |
+        set -euo pipefail
+        site_yaml="$(cat <<EOF
+        apiVersion: kezio.kojuro.date/v1alpha2
+        kind: Site
+        metadata:
+          name: ${NAME}
+          namespace: ${NAMESPACE}
+        EOF
+        )"
+        if [ -n "${SEEDER_SUBNET_NAME}" ]; then
+          site_yaml+=$'\nspec:\n  seederSubnetRef:\n    name: '"${SEEDER_SUBNET_NAME}"
+          if [ -n "${TRACKER_IP}" ]; then
+            site_yaml+=$'\n  tracker:\n    ip: '"${TRACKER_IP}"
+          elif [ -n "${TRACKER_EXTERNAL_URL}" ]; then
+            site_yaml+=$'\n  tracker:\n    externalURL: '"${TRACKER_EXTERNAL_URL}"
+          fi
+        else
+          site_yaml+=$'\nspec: {}'
+        fi
+        echo "${site_yaml}" | kubectl apply -f -
+
+    - name: Wait for the Site's condition
+      shell: bash
+      env:
+        NAME: ${{ inputs.name }}
+        NAMESPACE: ${{ inputs.namespace }}
+        WAIT_FOR: ${{ inputs.wait-for }}
+        TIMEOUT: ${{ inputs.timeout }}
+      run: |
+        set -euo pipefail
+        if [[ ! "${TIMEOUT}" =~ ^[0-9]+s?$ ]]; then
+          echo "::error::invalid timeout '${TIMEOUT}': want seconds like 120 or 120s" >&2
+          exit 1
+        fi
+        deadline_seconds="${TIMEOUT%s}"
+        deadline=$(( $(date +%s) + deadline_seconds ))
+        while true; do
+          status="$(kubectl get site "${NAME}" -n "${NAMESPACE}" \
+            -o jsonpath="{.status.conditions[?(@.type==\"${WAIT_FOR}\")].status}" || true)"
+          echo "$(date -Is) Site ${NAME} ${WAIT_FOR}=${status:-<none>}"
+          [ "${status}" = "True" ] && break
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            echo "::error::Site ${NAME} did not become ${WAIT_FOR}=True within ${TIMEOUT}." >&2
+            kubectl get site "${NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.conditions}' | jq . || true
+            kubectl get site "${NAME}" -n "${NAMESPACE}" -o yaml
+            exit 1
+          fi
+          sleep 5
+        done
