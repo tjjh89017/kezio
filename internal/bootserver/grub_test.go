@@ -16,7 +16,13 @@ limitations under the License.
 
 package bootserver
 
-import "testing"
+import (
+	"testing"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+)
 
 // TestGrubNetPath pins the one syntax GRUB's network stack resolves:
 // "(http,host:port)/path" - a bare URL like "http://host/path" is instead
@@ -75,6 +81,44 @@ func TestGrubNetPath(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSubnetBootBaseURL pins the derivation subnetBootBaseURL performs -
+// bootd.DefaultProxyPort on the Subnet's own BootdServerIP - and every
+// case that must fall back instead (no boot half, nil Subnet).
+func TestSubnetBootBaseURL(t *testing.T) {
+	t.Run("boot plane present", func(t *testing.T) {
+		subnet := &keziov1alpha2.Subnet{
+			ObjectMeta: metav1.ObjectMeta{Name: "s"},
+			Spec: keziov1alpha2.SubnetSpec{
+				DHCP:          &keziov1alpha2.SubnetDHCP{Mode: keziov1alpha2.SubnetDHCPModeProxy},
+				BootdServerIP: "192.0.2.2",
+			},
+		}
+		got, ok := subnetBootBaseURL(subnet)
+		if !ok {
+			t.Fatalf("subnetBootBaseURL() ok = false, want true")
+		}
+		if want := "http://192.0.2.2:80"; got != want {
+			t.Fatalf("subnetBootBaseURL() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("no boot half", func(t *testing.T) {
+		subnet := &keziov1alpha2.Subnet{
+			ObjectMeta: metav1.ObjectMeta{Name: "s"},
+			Spec:       keziov1alpha2.SubnetSpec{},
+		}
+		if _, ok := subnetBootBaseURL(subnet); ok {
+			t.Fatalf("subnetBootBaseURL() ok = true for a Subnet with no boot half, want false")
+		}
+	})
+
+	t.Run("nil Subnet", func(t *testing.T) {
+		if _, ok := subnetBootBaseURL(nil); ok {
+			t.Fatalf("subnetBootBaseURL(nil) ok = true, want false")
+		}
+	})
 }
 
 // TestRenderNetBootConfig_FetchParam pins the live-boot cmdline contract:

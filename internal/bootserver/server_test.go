@@ -90,6 +90,38 @@ func newTestMachine(state string) *keziov1alpha2.Machine {
 	}
 }
 
+// newTestSubnetWithBootPlane builds the Subnet newTestMachine's SubnetRef
+// names, with a boot half (BootdServerIP set) at bootdIP.
+func newTestSubnetWithBootPlane(bootdIP string) *keziov1alpha2.Subnet {
+	return &keziov1alpha2.Subnet{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-01-subnet"},
+		Spec: keziov1alpha2.SubnetSpec{
+			SiteRef:       keziov1alpha2.NameRef{Name: "site"},
+			CIDR:          "192.0.2.0/24",
+			BootdServerIP: bootdIP,
+			BootdNetworkRef: &keziov1alpha2.NameRef{
+				Name: "kezio-boot-network",
+			},
+			DHCP: &keziov1alpha2.SubnetDHCP{Mode: keziov1alpha2.SubnetDHCPModeProxy},
+		},
+	}
+}
+
+// newTestSubnetNoBootPlane builds the same Subnet name with only a seeder
+// half declared - HasBootPlane() is false.
+func newTestSubnetNoBootPlane() *keziov1alpha2.Subnet {
+	return &keziov1alpha2.Subnet{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-01-subnet"},
+		Spec: keziov1alpha2.SubnetSpec{
+			SiteRef: keziov1alpha2.NameRef{Name: "site"},
+			CIDR:    "192.0.2.0/24",
+			SeederNetworkRef: &keziov1alpha2.NameRef{
+				Name: "kezio-seeder-network",
+			},
+		},
+	}
+}
+
 // TestServer_NeedLeaderElectionIsFalse guards against a regression that
 // broke boot config serving during a rolling update: since config/manager
 // never releases a lease on termination, a Server gated on leader
@@ -236,6 +268,77 @@ func TestHandleGrubConfig_NetBootNeededMintsAndRotatesToken(t *testing.T) {
 	}
 	if stored2.Status.NetBoot.TokenHash == stored.Status.NetBoot.TokenHash {
 		t.Fatalf("stored token hash did not change across fetches")
+	}
+}
+
+// TestHandleGrubConfig_SubnetWithBootPlaneOverridesBaseURL proves the
+// two-Site fix: a machine whose Subnet declares its own bootd address
+// gets that address embedded for kernel/initrd/squashfs and kezio.server=
+// instead of the manager-wide Config.ServerURL/AgentServerURL - the
+// address a machine on an isolated Site can actually reach.
+func TestHandleGrubConfig_SubnetWithBootPlaneOverridesBaseURL(t *testing.T) {
+	machine := newTestMachine(keziov1alpha2.MachineStateInspecting)
+	subnet := newTestSubnetWithBootPlane("192.0.2.2")
+	s, _ := newTestServer(t, t.TempDir(), machine)
+	if err := s.Client.Create(context.Background(), subnet); err != nil {
+		t.Fatalf("Create Subnet: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/boot/grub.cfg-"+testMAC, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !containsAll(body,
+		"linux (http,192.0.2.2:80)/boot/artifacts/vmlinuz",
+		"fetch=http://192.0.2.2:80/boot/artifacts/filesystem.squashfs",
+		"kezio.server=http://192.0.2.2:80") {
+		t.Fatalf("net-boot config did not use the Subnet's own bootd address: %q", body)
+	}
+	if containsAll(body, "boot.example.test") {
+		t.Fatalf("net-boot config still carries the manager-wide ServerURL: %q", body)
+	}
+}
+
+// TestHandleGrubConfig_SubnetWithoutBootPlaneFallsBackToManagerWideURL
+// covers a Subnet that exists but declares no boot half (seeder-only): the
+// override must not fire, and the manager-wide Config.ServerURL/
+// AgentServerURL still apply, same as an unresolved SubnetRef.
+func TestHandleGrubConfig_SubnetWithoutBootPlaneFallsBackToManagerWideURL(t *testing.T) {
+	machine := newTestMachine(keziov1alpha2.MachineStateInspecting)
+	subnet := newTestSubnetNoBootPlane()
+	s, _ := newTestServer(t, t.TempDir(), machine)
+	if err := s.Client.Create(context.Background(), subnet); err != nil {
+		t.Fatalf("Create Subnet: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/boot/grub.cfg-"+testMAC, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if body := rec.Body.String(); !containsAll(body, "kezio.server=http://boot.example.test:8090") {
+		t.Fatalf("net-boot config did not fall back to the manager-wide AgentServerURL: %q", body)
+	}
+}
+
+// TestHandleGrubConfig_DanglingSubnetRefFallsBackToManagerWideURL pins the
+// pre-existing behavior every other test in this file already relies on
+// (newTestMachine's SubnetRef never resolves unless a test creates the
+// Subnet): a Machine referencing a Subnet that does not exist must still
+// net boot, using the manager-wide URL, not fail the request.
+func TestHandleGrubConfig_DanglingSubnetRefFallsBackToManagerWideURL(t *testing.T) {
+	machine := newTestMachine(keziov1alpha2.MachineStateInspecting)
+	s, _ := newTestServer(t, t.TempDir(), machine)
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/boot/grub.cfg-"+testMAC, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if body := rec.Body.String(); !containsAll(body, "kezio.server=http://boot.example.test:8090") {
+		t.Fatalf("net-boot config did not fall back to the manager-wide AgentServerURL: %q", body)
 	}
 }
 

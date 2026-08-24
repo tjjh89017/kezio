@@ -35,6 +35,7 @@ import (
 
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines,verbs=get;list;watch
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=kezio.kojuro.date,resources=subnets,verbs=get
 
 // Server is the HTTP handler for the boot config service: GRUB's
 // unauthenticated grub.cfg fetch, and the live boot artifacts it points
@@ -249,7 +250,22 @@ func (s *Server) handleGrubConfig(w http.ResponseWriter, r *http.Request, rawMAC
 		return
 	}
 
-	config, err := renderNetBootConfig(s.Config, token)
+	renderCfg := s.Config
+	subnet, err := s.resolveSubnet(ctx, machine)
+	if err != nil {
+		// Not fail-secure territory: the Subnet only selects which base
+		// URL to embed, never whether to net boot at all. Falling back to
+		// the manager-wide Config.ServerURL/AgentServerURL keeps a
+		// dangling or absent SubnetRef working exactly as before this
+		// override existed.
+		log.Info("resolving machine's Subnet failed; using the manager-wide boot server URL",
+			"machine", machine.Name, "subnetRef", machine.Spec.SubnetRef, "error", err.Error())
+	} else if base, ok := subnetBootBaseURL(subnet); ok {
+		renderCfg.ServerURL = base
+		renderCfg.AgentServerURL = base
+	}
+
+	config, err := renderNetBootConfig(renderCfg, token)
 	if err != nil {
 		// Fail secure: must not leak a half-rendered config with a live
 		// token.
@@ -279,6 +295,21 @@ func (s *Server) lookupMachine(ctx context.Context, mac string) (*keziov1alpha2.
 	default:
 		return nil, fmt.Errorf("%d machines share boot MAC address %s", len(list.Items), mac)
 	}
+}
+
+// resolveSubnet resolves machine's SubnetRef to the Subnet object,
+// defaulting to machine's own namespace the same way every other NameRef
+// in this API resolves an empty Namespace.
+func (s *Server) resolveSubnet(ctx context.Context, machine *keziov1alpha2.Machine) (*keziov1alpha2.Subnet, error) {
+	ns := machine.Spec.SubnetRef.Namespace
+	if ns == "" {
+		ns = machine.Namespace
+	}
+	var subnet keziov1alpha2.Subnet
+	if err := s.Client.Get(ctx, client.ObjectKey{Name: machine.Spec.SubnetRef.Name, Namespace: ns}, &subnet); err != nil {
+		return nil, fmt.Errorf("getting Subnet %s/%s: %w", ns, machine.Spec.SubnetRef.Name, err)
+	}
+	return &subnet, nil
 }
 
 // needsNetBoot maps Machine.status.state onto a boot decision:

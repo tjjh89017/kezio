@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strings"
 
+	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 	"github.com/tjjh89017/kezio/internal/bootd"
 )
 
@@ -73,6 +74,25 @@ configfile ${prefix}/grub.cfg-01-${net_default_mac}
 // import back without a cycle, so the definition lives there.
 func GrubNetPath(serverURL, filePath string) (string, error) {
 	return bootd.GrubNetPath(serverURL, filePath)
+}
+
+// subnetBootBaseURL returns the base URL a machine on subnet's own
+// segment already reaches: subnet's BootdServerIP on
+// bootd.DefaultProxyPort, the exact value bootdEnv derives for
+// BOOTD_BOOT_CONFIG_URL (internal/controller/subnet_bootd_config.go). A
+// machine that fetched this grub.cfg through that address can reach the
+// same address for its kernel/initrd/squashfs and agent registration,
+// since bootd's reverse proxy already fronts both internal/bootserver and
+// internal/agentserver there - this is what makes two Sites, whose
+// Subnets cannot route to each other, each resolve to their own reachable
+// address instead of one manager-wide default. ok is false when subnet is
+// nil or declares no boot half (SubnetSpec.HasBootPlane), the caller's
+// signal to keep the manager-wide Config.ServerURL/AgentServerURL.
+func subnetBootBaseURL(subnet *keziov1alpha2.Subnet) (baseURL string, ok bool) {
+	if subnet == nil || !subnet.Spec.HasBootPlane() {
+		return "", false
+	}
+	return fmt.Sprintf("http://%s:%d", subnet.Spec.BootdServerIP, bootd.DefaultProxyPort), true
 }
 
 // renderNetBootConfig builds the GRUB config for a machine that needs the
