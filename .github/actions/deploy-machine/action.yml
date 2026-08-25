@@ -29,7 +29,16 @@ description: >-
   errorMessage) but is never by itself a hard failure - ErrorCount exists
   precisely so the controller can back off and retry a step in place, and
   a CI wait loop second-guessing that would just race the controller's
-  own recovery. A timeout is the only hard failure this action raises.
+  own recovery.
+
+  One thing short of the timeout is a hard failure: a DeployRun that
+  enters Finalizing more than once. One DeployRun is one attempt, and its
+  phases run in order to a terminal phase, so a second Finalizing means
+  the attempt began again from the start. status.phase alone never says
+  so - a restarted run reads as WritingContent, exactly like a healthy
+  one - and status.phaseTimings is the only record that it happened.
+  Without this check such a run spends the whole timeout looking busy and
+  fails with nothing to point at.
 
 inputs:
   machine-name:
@@ -132,10 +141,14 @@ runs:
           operational_status="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.operationalStatus}' || true)"
           run_name="$(kubectl get machine "${MACHINE_NAME}" -n "${NAMESPACE}" -o jsonpath='{.status.currentRunRef.name}' || true)"
           run_phase=""
+          finalizing_count=0
           if [ -n "${run_name}" ]; then
             run_phase="$(kubectl get deployrun "${run_name}" -n "${NAMESPACE}" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+            finalizing_count="$(kubectl get deployrun "${run_name}" -n "${NAMESPACE}" \
+              -o jsonpath='{.status.phaseTimings[?(@.phase=="Finalizing")].phase}' 2>/dev/null \
+              | wc -w | tr -d '[:space:]')"
           fi
-          echo "$(date -Is) Machine status.state=${state:-<empty>} operationalStatus=${operational_status:-<empty>} currentRunRef=${run_name:-<none>} deployRun.phase=${run_phase:-<none>}"
+          echo "$(date -Is) Machine status.state=${state:-<empty>} operationalStatus=${operational_status:-<empty>} currentRunRef=${run_name:-<none>} deployRun.phase=${run_phase:-<none>} deployRun.finalizingCount=${finalizing_count}"
 
           if [ "${operational_status}" = "error" ]; then
             # Logged, not fatal - see this action's own description: the
@@ -147,6 +160,11 @@ runs:
           fi
 
           [ "${state}" = "Provisioned" ] && break
+
+          if [ "${finalizing_count}" -gt 1 ]; then
+            dump_and_fail "DeployRun ${run_name} entered Finalizing ${finalizing_count} times: the attempt restarted from the beginning instead of reaching a terminal phase. status.phaseTimings below has the times."
+          fi
+
           if [ "$(date +%s)" -ge "${deadline}" ]; then
             dump_and_fail "Machine ${MACHINE_NAME} did not reach state Provisioned within ${TIMEOUT}"
           fi

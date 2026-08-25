@@ -9,7 +9,11 @@ description: >-
   for every tracker and seeder Deployment/pod (not only bootd), each
   such pod's `k8s.v1.cni.cncf.io/network-status` annotation (the only
   place Multus records the address a pod actually got - what
-  address-pinning assertions live or die on), the same treatment for
+  address-pinning assertions live or die on), the machine plane a lane
+  that boots machines fails in (VirtualMachine/VirtualMachineInstance
+  YAML, the launcher pod behind each one, node conditions and
+  allocation, and the namespace's events), the BMC objects that drive
+  those machines' power and boot device, the same treatment for
   bootd pods per Subnet, each bootd pod's rendered dnsmasq config plus
   the DHCP options it handed out (the only record of what a machine
   received in its lease, and thus of whether a machine can leave its own
@@ -69,6 +73,13 @@ inputs:
     description: Label selector matching every bootd pod across `namespaces`.
     required: false
     default: "app.kubernetes.io/component=bootd"
+  bmc-namespace:
+    description: >-
+      Namespace the BMC controller runs in. Its controller logs are the
+      only record of what the BMC did to a machine's power state and boot
+      device. Blank skips that collection, for a lane with no BMC.
+    required: false
+    default: "kubevirtbmc-system"
   bridges:
     description: >-
       Newline-separated runner Linux bridge names to snapshot in detail
@@ -100,6 +111,7 @@ runs:
         TRACKER_LABEL_SELECTOR: ${{ inputs.tracker-label-selector }}
         SEEDER_LABEL_SELECTOR: ${{ inputs.seeder-label-selector }}
         BOOTD_LABEL_SELECTOR: ${{ inputs.bootd-label-selector }}
+        BMC_NAMESPACE: ${{ inputs.bmc-namespace }}
         BRIDGES: ${{ inputs.bridges }}
       run: |
         set +e
@@ -202,13 +214,65 @@ runs:
             -n "${namespace}" -o wide >"${kezio_dir}/${namespace}-summary.txt" 2>&1
         }
 
+        # The machine plane: what the machines themselves were doing.
+        # Without this a lane whose machine stops making progress uploads
+        # the whole seeder plane and every kezio object and still cannot
+        # say whether that machine was ever running - a
+        # VirtualMachineInstance that failed seconds after it started
+        # looks, from the kezio objects alone, exactly like one that is
+        # working. The launcher pod carries the termination reason
+        # (OOMKilled, evicted) the VMI phase does not, the node carries
+        # the pressure conditions and the allocated-vs-capacity numbers
+        # that explain a machine dying on a runner hosting more machines
+        # than it can hold, and events carry both with their times.
+        # Parameters are named apart from the caller's loop variable, the
+        # same reason collect_bootd_dhcp does: this shell has no locals.
+        collect_machine_plane() {
+          mp_ns="$1"
+          mp_dir="${OUTPUT_DIR}/machine-plane/${mp_ns}"
+          mkdir -p "${mp_dir}"
+          kubectl -n "${mp_ns}" get vm,vmi -o wide >"${mp_dir}/summary.txt" 2>&1
+          kubectl -n "${mp_ns}" get vm,vmi -o yaml >"${mp_dir}/vm-vmi.yaml" 2>&1
+          # By the label KubeVirt puts on every launcher pod, so a
+          # launcher whose VMI is already gone is still collected.
+          kubectl -n "${mp_ns}" get pods -l kubevirt.io=virt-launcher -o wide \
+            >"${mp_dir}/launcher-pods.txt" 2>&1
+          kubectl -n "${mp_ns}" describe pod -l kubevirt.io=virt-launcher \
+            >"${mp_dir}/launcher-pods-describe.txt" 2>&1
+          kubectl -n "${mp_ns}" get pods -o wide >"${mp_dir}/all-pods.txt" 2>&1
+          kubectl -n "${mp_ns}" get events --sort-by=.lastTimestamp \
+            >"${mp_dir}/events.txt" 2>&1
+          kubectl get nodes -o wide >"${mp_dir}/nodes.txt" 2>&1
+          kubectl describe nodes >"${mp_dir}/nodes-describe.txt" 2>&1
+          # The BMC objects a lane drives power and boot device through.
+          # status.bootOverride on each says whether a one-shot boot
+          # request is still pending, which no other object records.
+          kubectl -n "${mp_ns}" get virtualmachinebmc -o yaml \
+            >"${mp_dir}/machine-bmc.yaml" 2>&1
+        }
+
+        # The BMC controller's own logs, once per run rather than per
+        # namespace: it is a single cluster-wide controller.
+        collect_bmc_controller() {
+          [ -z "${BMC_NAMESPACE}" ] && return 0
+          bmc_dir="${OUTPUT_DIR}/machine-plane/bmc-controller"
+          mkdir -p "${bmc_dir}"
+          kubectl -n "${BMC_NAMESPACE}" get pods -o wide >"${bmc_dir}/pods.txt" 2>&1
+          kubectl -n "${BMC_NAMESPACE}" logs deployment/kubevirtbmc-controller-manager \
+            --all-containers --tail=2000 >"${bmc_dir}/logs.txt" 2>&1
+          kubectl -n "${BMC_NAMESPACE}" get events --sort-by=.lastTimestamp \
+            >"${bmc_dir}/events.txt" 2>&1
+        }
+
         while IFS= read -r namespace; do
           [ -z "${namespace}" ] && continue
           collect_role tracker "${namespace}" "${TRACKER_LABEL_SELECTOR}"
           collect_role seeder "${namespace}" "${SEEDER_LABEL_SELECTOR}"
           collect_role bootd "${namespace}" "${BOOTD_LABEL_SELECTOR}"
           collect_kezio_resources "${namespace}"
+          collect_machine_plane "${namespace}"
         done <<<"${NAMESPACES}"
+        collect_bmc_controller
 
         # Runner-wide network snapshot: every command is best-effort and
         # tolerates a missing tool (nft on an iptables-only runner) or a

@@ -15,6 +15,10 @@ description: >-
   raw mode to relay guest input) and errors outright on a plain pipe or
   file redirect; `script` supplies a fake pty and records everything
   written to it, byte for byte, without needing a real terminal itself.
+  `script` runs with --flush: without it the record is block-buffered
+  and reaches the file only when the attach ends, so the one attach that
+  is still live when the job uploads its artifact - the attach covering
+  the failure - is the one that arrives empty.
 
   Call once per VM - a multi-VM lane calls this action once per VM, each
   with its own logfile.
@@ -53,7 +57,7 @@ runs:
         logfile="$3"
         while true; do
         echo "===== console-capture: (re)attaching to ${vm_name} at $(date -Is) =====" >>"${logfile}"
-        script -qec "virtctl console '${vm_name}' -n '${namespace}'" -a "${logfile}"
+        script -qefc "virtctl console '${vm_name}' -n '${namespace}'" -a "${logfile}"
         echo "===== console-capture: disconnected from ${vm_name} at $(date -Is); reattaching in 2s (a VMI recreation or a transient drop, not necessarily a failure) =====" >>"${logfile}"
         sleep 2
         done
