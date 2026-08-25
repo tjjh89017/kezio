@@ -27,8 +27,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - run: make lint
@@ -38,8 +38,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - run: make test
@@ -89,16 +89,16 @@ jobs:
             platforms: linux/amd64,linux/arm64
             local-tag: example.com/kezio-bootd:e2e
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v4
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       # load:true cannot hold a multi-platform manifest - amd64 only, for
       # the tarball hand-off downstream e2e jobs consume.
       - name: Build (amd64, loaded locally)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ${{ matrix.dockerfile }}
@@ -112,7 +112,7 @@ jobs:
         run: docker save ${{ matrix.local-tag }} -o /tmp/${{ matrix.name }}.tar
 
       - name: Upload the image tarball
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: image-tar-${{ matrix.name }}
           path: /tmp/${{ matrix.name }}.tar
@@ -141,7 +141,7 @@ jobs:
     # chroot into a squashfs - budget generously.
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build the live boot image
         uses: ./.github/actions/build-live-image
@@ -150,7 +150,7 @@ jobs:
         uses: ./.github/actions/assert-boot-artifacts-present
 
       - name: Upload the live image artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: kezio-live-image
           retention-days: 1
@@ -180,7 +180,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install RKE2
         uses: ./.github/actions/install-rke2
@@ -359,8 +359,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
 
@@ -372,7 +372,7 @@ jobs:
           context-label: "the kezio fast e2e lane"
 
       - name: Download the manager image tarball
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: image-tar-manager
           path: /tmp/images
@@ -474,7 +474,7 @@ jobs:
 
       - name: Upload diagnostics
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fast-lane-diagnostics
           path: diagnostics
@@ -510,13 +510,13 @@ jobs:
           context-label: "the kezio image-path e2e lane"
 
       - name: Download the manager image tarball
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: image-tar-manager
           path: /tmp/images
 
       - name: Download the image-service image tarball
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: image-tar-image-service
           path: /tmp/images
@@ -525,7 +525,7 @@ jobs:
       # run, selected by INGEST_MODE - see IMAGE_INGEST_IMAGE and
       # PARTITIONCONTENT_PUBLISH_IMAGE below.
       - name: Download the ingest image tarball
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: image-tar-ingest
           path: /tmp/images
@@ -534,7 +534,7 @@ jobs:
       # below) runs this - amd64-only, matching the images job's seeder
       # matrix entry.
       - name: Download the seeder image tarball
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: image-tar-seeder
           path: /tmp/images
@@ -723,7 +723,7 @@ jobs:
 
       - name: Upload diagnostics
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: image-path-lane-diagnostics
           path: diagnostics
@@ -791,10 +791,10 @@ jobs:
       UNKNOWN_VM_MAC: "52:54:00:be:ef:99"
       BOOT_ARTIFACTS_IMG: "example.com/kezio-boot-artifacts:e2e"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download the live boot image artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: kezio-live-image
           path: dist/live
@@ -830,7 +830,7 @@ jobs:
       # deploy phase this lane adds, the same trio the image-path lane
       # imports.
       - name: Download the manager, bootd, image-service, ingest, and seeder image tarballs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: "image-tar-@(manager|bootd|image-service|ingest|seeder)"
           path: /tmp/images
@@ -1295,7 +1295,7 @@ jobs:
 
       - name: Upload diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: deploy-${{ matrix.dhcp-scenario }}-diagnostics
           path: |
@@ -1418,10 +1418,10 @@ jobs:
       DISK_B_SERIAL: KEZIOROUTEDDISKB01
       BOOT_ARTIFACTS_IMG: "example.com/kezio-boot-artifacts:e2e"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download the live boot image artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: kezio-live-image
           path: dist/live
@@ -1458,7 +1458,7 @@ jobs:
             ${{ env.SEG_C_BRIDGE }} ${{ env.SEG_C_CIDR }} ${{ env.SEG_C_HOST_CIDR }} kezio-routed-site-group
 
       - name: Download the manager, bootd, image-service, ingest, and seeder image tarballs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: "image-tar-@(manager|bootd|image-service|ingest|seeder)"
           path: /tmp/images
@@ -2096,10 +2096,10 @@ jobs:
       DISK_Y_SERIAL: KEZIO2SITEDISKY01
       BOOT_ARTIFACTS_IMG: "example.com/kezio-boot-artifacts:e2e"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download the live boot image artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: kezio-live-image
           path: dist/live
@@ -2134,7 +2134,7 @@ jobs:
             ${{ env.SEG_Y_BRIDGE }} ${{ env.SEG_Y_CIDR }} ${{ env.SEG_Y_HOST_CIDR }} kezio-2site-y-group
 
       - name: Download the manager, bootd, image-service, ingest, and seeder image tarballs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: "image-tar-@(manager|bootd|image-service|ingest|seeder)"
           path: /tmp/images

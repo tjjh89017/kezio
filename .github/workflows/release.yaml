@@ -55,11 +55,11 @@ jobs:
             dockerfile: docker/bootd/Dockerfile
             platforms: linux/amd64,linux/arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v4
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Push to ghcr.io
         uses: ./.github/actions/push-image-to-ghcr
@@ -91,7 +91,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build the live boot image
         uses: ./.github/actions/build-live-image
@@ -99,7 +99,7 @@ jobs:
       - name: Fail fast if the built boot artifacts are empty
         uses: ./.github/actions/assert-boot-artifacts-present
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Push to ghcr.io
         uses: ./.github/actions/push-image-to-ghcr
