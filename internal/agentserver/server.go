@@ -402,7 +402,13 @@ func (s *Server) resolveDeployPlan(ctx context.Context, machine *keziov1alpha3.M
 		return nil
 	}
 
-	plan, _, err := s.PlanBuilder.Build(ctx, machine, run)
+	claim, err := resolveClaimIntent(ctx, s.Client, machine)
+	if err != nil {
+		log.Error(err, "resolving MachineClaim for /agent/next failed; answering wait", "machine", machine.Name)
+		return nil
+	}
+
+	plan, _, err := s.PlanBuilder.Build(ctx, machine, claim, run)
 	if err != nil {
 		log.Error(err, "building deploy plan for /agent/next failed; answering wait", "machine", machine.Name, "run", run.Name)
 		return nil

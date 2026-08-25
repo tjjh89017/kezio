@@ -25,30 +25,30 @@ import (
 
 func int32ptr(v int32) *int32 { return &v }
 
-func TestMachineEzioOverrides_NilWhenEzioUnset(t *testing.T) {
-	m := &keziov1alpha3.Machine{}
-	if got := machineEzioMaxUploads(m); got != nil {
-		t.Errorf("machineEzioMaxUploads = %v, want nil", got)
+func TestClaimEzioOverrides_NilWhenEzioUnset(t *testing.T) {
+	c := &keziov1alpha3.MachineClaim{}
+	if got := claimEzioMaxUploads(c); got != nil {
+		t.Errorf("claimEzioMaxUploads = %v, want nil", got)
 	}
-	if got := machineEzioMaxConnections(m); got != nil {
-		t.Errorf("machineEzioMaxConnections = %v, want nil", got)
+	if got := claimEzioMaxConnections(c); got != nil {
+		t.Errorf("claimEzioMaxConnections = %v, want nil", got)
 	}
 }
 
-func TestMachineEzioOverrides_PartialOverrideLeavesOtherFieldNil(t *testing.T) {
-	// Only maxUploads is set on the Machine: maxConnections must still
+func TestClaimEzioOverrides_PartialOverrideLeavesOtherFieldNil(t *testing.T) {
+	// Only maxUploads is set on the claim: maxConnections must still
 	// report nil so ResolveMaxConnections falls back to the layer above,
 	// rather than the merge accidentally forcing an override.
-	m := &keziov1alpha3.Machine{
-		Spec: keziov1alpha3.MachineSpec{
+	c := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{
 			Ezio: &keziov1alpha3.MachineEzioTuning{MaxUploads: int32ptr(42)},
 		},
 	}
-	if got := machineEzioMaxUploads(m); got == nil || *got != 42 {
-		t.Errorf("machineEzioMaxUploads = %v, want 42", got)
+	if got := claimEzioMaxUploads(c); got == nil || *got != 42 {
+		t.Errorf("claimEzioMaxUploads = %v, want 42", got)
 	}
-	if got := machineEzioMaxConnections(m); got != nil {
-		t.Errorf("machineEzioMaxConnections = %v, want nil (falls back to the layer above)", got)
+	if got := claimEzioMaxConnections(c); got != nil {
+		t.Errorf("claimEzioMaxConnections = %v, want nil (falls back to the layer above)", got)
 	}
 }
 
@@ -57,9 +57,9 @@ func TestMachineEzioOverrides_PartialOverrideLeavesOtherFieldNil(t *testing.T) {
 // Builder.Build wires it, without needing a full envtest Machine/DeployRun
 // round trip.
 func TestLeecherTuningChain_ThreeLayers(t *testing.T) {
-	plain := &keziov1alpha3.Machine{}
-	overridden := &keziov1alpha3.Machine{
-		Spec: keziov1alpha3.MachineSpec{
+	plain := &keziov1alpha3.MachineClaim{}
+	overridden := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{
 			Ezio: &keziov1alpha3.MachineEzioTuning{
 				MaxUploads:     int32ptr(5),
 				MaxConnections: int32ptr(50),
@@ -70,28 +70,28 @@ func TestLeecherTuningChain_ThreeLayers(t *testing.T) {
 	cases := []struct {
 		name               string
 		leecherCfg         LeecherEzioConfig
-		machine            *keziov1alpha3.Machine
+		claim              *keziov1alpha3.MachineClaim
 		wantMaxUploads     int32
 		wantMaxConnections int32
 	}{
 		{
 			name:               "built-in default alone",
 			leecherCfg:         LeecherEzioConfig{},
-			machine:            plain,
+			claim:              plain,
 			wantMaxUploads:     seeder.DefaultMaxUploads,
 			wantMaxConnections: seeder.DefaultMaxConnections,
 		},
 		{
 			name:               "operator cluster default overrides built-in",
 			leecherCfg:         LeecherEzioConfig{MaxUploads: 8, MaxConnections: 80},
-			machine:            plain,
+			claim:              plain,
 			wantMaxUploads:     8,
 			wantMaxConnections: 80,
 		},
 		{
-			name:               "per-Machine override wins over the cluster default",
+			name:               "per-claim override wins over the cluster default",
 			leecherCfg:         LeecherEzioConfig{MaxUploads: 8, MaxConnections: 80},
-			machine:            overridden,
+			claim:              overridden,
 			wantMaxUploads:     5,
 			wantMaxConnections: 50,
 		},
@@ -99,8 +99,8 @@ func TestLeecherTuningChain_ThreeLayers(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			gotUploads := seeder.ResolveMaxUploads(c.leecherCfg.MaxUploads, machineEzioMaxUploads(c.machine))
-			gotConnections := seeder.ResolveMaxConnections(c.leecherCfg.MaxConnections, machineEzioMaxConnections(c.machine))
+			gotUploads := seeder.ResolveMaxUploads(c.leecherCfg.MaxUploads, claimEzioMaxUploads(c.claim))
+			gotConnections := seeder.ResolveMaxConnections(c.leecherCfg.MaxConnections, claimEzioMaxConnections(c.claim))
 			if gotUploads != c.wantMaxUploads {
 				t.Errorf("MaxUploads = %d, want %d", gotUploads, c.wantMaxUploads)
 			}

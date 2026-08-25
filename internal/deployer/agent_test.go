@@ -28,6 +28,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apimachineryruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -94,6 +95,26 @@ func agentTestMachine(t *testing.T) *keziov1alpha3.Machine {
 		CredentialsSecretRef: keziov1alpha3.SecretReference{Name: agentTestBMCSecretName},
 	}
 	return m
+}
+
+// agentTestClaimWithImage builds a MachineClaim naming imageName as its
+// OS image and wires machine.spec.claimRef to it, the deploy intent's
+// only home since it moved off Machine.spec. Include the returned claim
+// in newAgentTestClient's objs so resolveClaimIntent can read it back.
+func agentTestClaimWithImage(machine *keziov1alpha3.Machine, imageName string) *keziov1alpha3.MachineClaim {
+	claim := &keziov1alpha3.MachineClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: machine.Name + "-claim", Namespace: machine.Namespace, UID: types.UID(machine.Name + "-claim-uid")},
+		Spec: keziov1alpha3.MachineClaimSpec{
+			MachineName: machine.Name,
+			ImageRef:    &keziov1alpha3.NameRef{Name: imageName},
+		},
+	}
+	machine.Spec.ClaimRef = &keziov1alpha3.MachineClaimReference{
+		Name:      claim.Name,
+		Namespace: claim.Namespace,
+		UID:       claim.UID,
+	}
+	return claim
 }
 
 func TestAgentDeployerInspectFirstPassArmsPXEAndPowersOn(t *testing.T) {
@@ -724,9 +745,9 @@ func TestAgentDeployerProvisionNetworkUnreachableReportsDelayed(t *testing.T) {
 
 func TestAgentDeployerProvisionAgentBootedNotReadyReportsDelayed(t *testing.T) {
 	machine := agentTestMachine(t)
-	machine.Spec.ImageRef = &keziov1alpha3.NameRef{Name: "img1"}
+	claim := agentTestClaimWithImage(machine, "img1")
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
-	c := newAgentTestClient(t, machine, agentTestBMCSecret())
+	c := newAgentTestClient(t, machine, claim, agentTestBMCSecret())
 	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
 
 	if _, err := d.Provision(context.Background(), machine, run, false); err != nil {
@@ -777,13 +798,13 @@ func TestAgentDeployerProvisionAgentBootedValidationErrorReportsFailed(t *testin
 
 func TestAgentDeployerProvisionAgentBootedSuccessRecordsPendingAndContinues(t *testing.T) {
 	machine := agentTestMachine(t)
-	machine.Spec.ImageRef = &keziov1alpha3.NameRef{Name: "img1"}
+	claim := agentTestClaimWithImage(machine, "img1")
 	hw := &keziov1alpha3.MachineHardware{
 		ObjectMeta: metav1.ObjectMeta{Name: machine.Name, Namespace: machine.Namespace},
 		Spec:       keziov1alpha3.MachineHardwareSpec{Disks: []keziov1alpha3.MachineHardwareDisk{{DeviceName: "/dev/vda", SizeBytes: 32 << 30}}},
 	}
 	img := blankDataImage("img1", machine.Namespace)
-	c := newAgentTestClient(t, machine, agentTestBMCSecret(), hw, img)
+	c := newAgentTestClient(t, machine, claim, agentTestBMCSecret(), hw, img)
 	mustCreateDefaultPostHook(t, c)
 	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
 	run := newTestDeployRun(t, c, machine)

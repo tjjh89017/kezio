@@ -611,21 +611,17 @@ func TestFakeDeployerFuncOverrideTakesPriorityOverFakeFailAnnotation(t *testing.
 }
 
 // TestFakeDeployerInspectIgnoresUnresolvedReferences proves the fake path
-// skips reference resolution: subnetRef, postHookRefs, and imageRef name
-// objects of kinds that do not exist yet, and Inspect must complete without
-// ever trying to read them.
+// skips reference resolution: subnetRef names an object that does not
+// exist yet, and Inspect must complete without ever trying to read it.
 func TestFakeDeployerInspectIgnoresUnresolvedReferences(t *testing.T) {
 	c := newFakeClient(t)
 	machine := newTestMachine()
 	machine.Spec.SubnetRef = keziov1alpha3.NameRef{Name: "no-such-subnet"}
-	machine.Spec.PostHookRefs = []keziov1alpha3.NameRef{{Name: "no-such-hook"}}
-	imageRef := keziov1alpha3.NameRef{Name: "no-such-image"}
-	machine.Spec.ImageRef = &imageRef
 	f := &FakeDeployer{Client: c}
 
 	result, err := f.Inspect(context.Background(), machine, false)
 	if err != nil {
-		t.Fatalf("Inspect() error = %v, want nil: the fake deployer must not resolve subnetRef/postHookRefs/imageRef", err)
+		t.Fatalf("Inspect() error = %v, want nil: the fake deployer must not resolve subnetRef", err)
 	}
 	if result.Outcome != Complete {
 		t.Fatalf("Inspect() outcome = %v, want Complete", result.Outcome)

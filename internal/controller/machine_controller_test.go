@@ -37,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
@@ -124,32 +125,32 @@ func TestShouldProvision(t *testing.T) {
 
 	cases := []struct {
 		name      string
-		spec      keziov1alpha3.MachineSpec
+		spec      keziov1alpha3.MachineClaimSpec
 		lastRun   *keziov1alpha3.DeployRun
 		hooksHash string
 		want      bool
 	}{
 		{
 			name:    "empty payload, no last run, never triggers",
-			spec:    keziov1alpha3.MachineSpec{},
+			spec:    keziov1alpha3.MachineClaimSpec{},
 			lastRun: nil,
 			want:    false,
 		},
 		{
 			name:    "non-empty payload, no last run, triggers once",
-			spec:    keziov1alpha3.MachineSpec{ImageRef: &image1},
+			spec:    keziov1alpha3.MachineClaimSpec{ImageRef: &image1},
 			lastRun: nil,
 			want:    true,
 		},
 		{
 			name:    "dataImages-only payload, no last run, triggers",
-			spec:    keziov1alpha3.MachineSpec{DataImages: data1},
+			spec:    keziov1alpha3.MachineClaimSpec{DataImages: data1},
 			lastRun: nil,
 			want:    true,
 		},
 		{
 			name: "identical subset does not trigger",
-			spec: keziov1alpha3.MachineSpec{ImageRef: &image1, DataImages: data1},
+			spec: keziov1alpha3.MachineClaimSpec{ImageRef: &image1, DataImages: data1},
 			lastRun: &keziov1alpha3.DeployRun{Spec: keziov1alpha3.DeployRunSpec{
 				ImageRef:   &image1,
 				DataImages: data1,
@@ -158,7 +159,7 @@ func TestShouldProvision(t *testing.T) {
 		},
 		{
 			name: "imageRef change triggers",
-			spec: keziov1alpha3.MachineSpec{ImageRef: &image2, DataImages: data1},
+			spec: keziov1alpha3.MachineClaimSpec{ImageRef: &image2, DataImages: data1},
 			lastRun: &keziov1alpha3.DeployRun{Spec: keziov1alpha3.DeployRunSpec{
 				ImageRef:   &image1,
 				DataImages: data1,
@@ -167,7 +168,7 @@ func TestShouldProvision(t *testing.T) {
 		},
 		{
 			name: "dataImages addition triggers",
-			spec: keziov1alpha3.MachineSpec{ImageRef: &image1, DataImages: data2},
+			spec: keziov1alpha3.MachineClaimSpec{ImageRef: &image1, DataImages: data2},
 			lastRun: &keziov1alpha3.DeployRun{Spec: keziov1alpha3.DeployRunSpec{
 				ImageRef:   &image1,
 				DataImages: data1,
@@ -176,7 +177,7 @@ func TestShouldProvision(t *testing.T) {
 		},
 		{
 			name: "dataImages removal triggers",
-			spec: keziov1alpha3.MachineSpec{ImageRef: &image1, DataImages: data1},
+			spec: keziov1alpha3.MachineClaimSpec{ImageRef: &image1, DataImages: data1},
 			lastRun: &keziov1alpha3.DeployRun{Spec: keziov1alpha3.DeployRunSpec{
 				ImageRef:   &image1,
 				DataImages: data2,
@@ -185,7 +186,7 @@ func TestShouldProvision(t *testing.T) {
 		},
 		{
 			name: "resolvedDisks-only difference does not trigger",
-			spec: keziov1alpha3.MachineSpec{ImageRef: &image1, DataImages: data1},
+			spec: keziov1alpha3.MachineClaimSpec{ImageRef: &image1, DataImages: data1},
 			lastRun: &keziov1alpha3.DeployRun{Spec: keziov1alpha3.DeployRunSpec{
 				ImageRef:   &image1,
 				DataImages: data1,
@@ -197,13 +198,13 @@ func TestShouldProvision(t *testing.T) {
 		},
 		{
 			name:    "empty payload never triggers even against a non-empty last run",
-			spec:    keziov1alpha3.MachineSpec{},
+			spec:    keziov1alpha3.MachineClaimSpec{},
 			lastRun: &keziov1alpha3.DeployRun{Spec: keziov1alpha3.DeployRunSpec{ImageRef: &image1, DataImages: data1}},
 			want:    false,
 		},
 		{
 			name: "hooksHash change alone triggers, imageRef/dataImages unchanged",
-			spec: keziov1alpha3.MachineSpec{ImageRef: &image1, DataImages: data1},
+			spec: keziov1alpha3.MachineClaimSpec{ImageRef: &image1, DataImages: data1},
 			lastRun: &keziov1alpha3.DeployRun{Spec: keziov1alpha3.DeployRunSpec{
 				ImageRef:   &image1,
 				DataImages: data1,
@@ -214,7 +215,7 @@ func TestShouldProvision(t *testing.T) {
 		},
 		{
 			name: "identical hooksHash does not trigger",
-			spec: keziov1alpha3.MachineSpec{ImageRef: &image1, DataImages: data1},
+			spec: keziov1alpha3.MachineClaimSpec{ImageRef: &image1, DataImages: data1},
 			lastRun: &keziov1alpha3.DeployRun{Spec: keziov1alpha3.DeployRunSpec{
 				ImageRef:   &image1,
 				DataImages: data1,
@@ -226,8 +227,8 @@ func TestShouldProvision(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			machine := &keziov1alpha3.Machine{Spec: tc.spec}
-			if got := shouldProvision(machine, tc.lastRun, tc.hooksHash); got != tc.want {
+			claim := &keziov1alpha3.MachineClaim{Spec: tc.spec}
+			if got := shouldProvision(claim, tc.lastRun, tc.hooksHash); got != tc.want {
 				t.Errorf("shouldProvision() = %v, want %v", got, tc.want)
 			}
 		})
@@ -236,8 +237,6 @@ func TestShouldProvision(t *testing.T) {
 
 func TestReInspectAcceptable(t *testing.T) {
 	image := keziov1alpha3.NameRef{Name: "test-image"}
-	emptyPayload := keziov1alpha3.MachineSpec{}
-	setPayload := keziov1alpha3.MachineSpec{ImageRef: &image}
 
 	states := []string{
 		"",
@@ -251,19 +250,36 @@ func TestReInspectAcceptable(t *testing.T) {
 	for _, state := range states {
 		for _, tc := range []struct {
 			payloadName string
-			spec        keziov1alpha3.MachineSpec
+			claimSpec   *keziov1alpha3.MachineClaimSpec
 		}{
-			{"empty payload", emptyPayload},
-			{"set payload", setPayload},
+			{"empty payload", nil},
+			{"set payload", &keziov1alpha3.MachineClaimSpec{ImageRef: &image}},
 		} {
 			want := state == keziov1alpha3.MachineStateAvailable ||
 				(state == keziov1alpha3.MachineStateProvisioned && tc.payloadName == "empty payload")
 			t.Run(fmt.Sprintf("state=%q/%s", state, tc.payloadName), func(t *testing.T) {
+				s := newMachineStatusWriteScheme(t)
 				machine := &keziov1alpha3.Machine{
-					Spec:   tc.spec,
-					Status: keziov1alpha3.MachineStatus{State: state},
+					ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: "default"},
+					Status:     keziov1alpha3.MachineStatus{State: state},
 				}
-				if got := reInspectAcceptable(machine); got != want {
+				var objs []client.Object
+				if tc.claimSpec != nil {
+					claim := &keziov1alpha3.MachineClaim{
+						ObjectMeta: metav1.ObjectMeta{Name: "m1-claim", Namespace: "default", UID: "m1-claim-uid"},
+						Spec:       *tc.claimSpec,
+					}
+					machine.Spec.ClaimRef = &keziov1alpha3.MachineClaimReference{Name: claim.Name, Namespace: claim.Namespace, UID: claim.UID}
+					objs = append(objs, claim)
+				}
+				objs = append(objs, machine)
+				c := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build()
+				r := &MachineReconciler{Client: c, Scheme: s}
+				got, err := r.reInspectAcceptable(context.Background(), machine)
+				if err != nil {
+					t.Fatalf("reInspectAcceptable() error = %v", err)
+				}
+				if got != want {
 					t.Errorf("reInspectAcceptable() = %v, want %v", got, want)
 				}
 			})
@@ -419,10 +435,20 @@ var _ = Describe("Machine Controller", func() {
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:02",
 					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
-					ImageRef:       &imageRef,
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			claim := &keziov1alpha3.MachineClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName + "-claim", Namespace: "default"},
+				Spec: keziov1alpha3.MachineClaimSpec{
+					MachineName: machineName,
+					ImageRef:    &imageRef,
+				},
+			}
+			Expect(k8sClient.Create(ctx, claim)).To(Succeed())
+			resource.Spec.ClaimRef = &keziov1alpha3.MachineClaimReference{Name: claim.Name, Namespace: claim.Namespace, UID: claim.UID}
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
 		})
 
 		AfterEach(func() {
@@ -430,6 +456,11 @@ var _ = Describe("Machine Controller", func() {
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
 			if err := k8sClient.Get(ctx, name, resource); err == nil {
 				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			}
+			claim := &keziov1alpha3.MachineClaim{}
+			claimName := types.NamespacedName{Name: machineName + "-claim", Namespace: "default"}
+			if err := k8sClient.Get(ctx, claimName, claim); err == nil {
+				Expect(k8sClient.Delete(ctx, claim)).To(Succeed())
 			}
 		})
 
@@ -471,9 +502,12 @@ var _ = Describe("Machine Controller", func() {
 			Expect(run.Spec.ImageRef.Name).To(Equal("test-image"))
 
 			By("changing spec.imageRef and confirming a second DeployRun is created")
+			var claim keziov1alpha3.MachineClaim
+			claimName := types.NamespacedName{Name: machineName + "-claim", Namespace: "default"}
+			Expect(k8sClient.Get(ctx, claimName, &claim)).To(Succeed())
 			newImageRef := keziov1alpha3.NameRef{Name: "other-image"}
-			machine.Spec.ImageRef = &newImageRef
-			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
+			claim.Spec.ImageRef = &newImageRef
+			Expect(k8sClient.Update(ctx, &claim)).To(Succeed())
 
 			reconcileUntilStable(reconciler, name)
 
@@ -488,10 +522,11 @@ var _ = Describe("Machine Controller", func() {
 			By("adding a dataImages entry and confirming a third DeployRun is created")
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 			thirdRunPredecessor := machine.Status.LastSuccessfulRunRef.Name
-			machine.Spec.DataImages = []keziov1alpha3.MachineDataImage{
+			Expect(k8sClient.Get(ctx, claimName, &claim)).To(Succeed())
+			claim.Spec.DataImages = []keziov1alpha3.MachineDataImage{
 				{ImageRef: keziov1alpha3.NameRef{Name: "data-image-1"}},
 			}
-			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
+			Expect(k8sClient.Update(ctx, &claim)).To(Succeed())
 
 			reconcileUntilStable(reconciler, name)
 
@@ -505,8 +540,9 @@ var _ = Describe("Machine Controller", func() {
 
 			By("removing the dataImages entry and confirming a fourth DeployRun is created")
 			fourthRunPredecessor := machine.Status.LastSuccessfulRunRef.Name
-			machine.Spec.DataImages = nil
-			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
+			Expect(k8sClient.Get(ctx, claimName, &claim)).To(Succeed())
+			claim.Spec.DataImages = nil
+			Expect(k8sClient.Update(ctx, &claim)).To(Succeed())
 
 			reconcileUntilStable(reconciler, name)
 
@@ -553,10 +589,20 @@ var _ = Describe("Machine Controller", func() {
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:0d",
 					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
-					ImageRef:       &imageRef,
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+
+			claim := &keziov1alpha3.MachineClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName + "-claim", Namespace: "default"},
+				Spec: keziov1alpha3.MachineClaimSpec{
+					MachineName: machineName,
+					ImageRef:    &imageRef,
+				},
+			}
+			Expect(k8sClient.Create(ctx, claim)).To(Succeed())
+			resource.Spec.ClaimRef = &keziov1alpha3.MachineClaimReference{Name: claim.Name, Namespace: claim.Namespace, UID: claim.UID}
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
 		})
 
 		AfterEach(func() {
@@ -564,6 +610,11 @@ var _ = Describe("Machine Controller", func() {
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
 			if err := k8sClient.Get(ctx, name, resource); err == nil {
 				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			}
+			claim := &keziov1alpha3.MachineClaim{}
+			claimName := types.NamespacedName{Name: machineName + "-claim", Namespace: "default"}
+			if err := k8sClient.Get(ctx, claimName, claim); err == nil {
+				Expect(k8sClient.Delete(ctx, claim)).To(Succeed())
 			}
 		})
 
@@ -593,8 +644,11 @@ var _ = Describe("Machine Controller", func() {
 			Expect(machine.Status.CurrentRunRef.Name).To(Equal(firstRunName))
 
 			By("clearing spec.imageRef to the empty payload: still no new run")
-			machine.Spec.ImageRef = nil
-			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
+			var claim keziov1alpha3.MachineClaim
+			claimName := types.NamespacedName{Name: machineName + "-claim", Namespace: "default"}
+			Expect(k8sClient.Get(ctx, claimName, &claim)).To(Succeed())
+			claim.Spec.ImageRef = nil
+			Expect(k8sClient.Update(ctx, &claim)).To(Succeed())
 
 			result, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 			Expect(err).NotTo(HaveOccurred())
@@ -837,7 +891,18 @@ var _ = Describe("Machine Controller", func() {
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:04",
 					SubnetRef:      keziov1alpha3.NameRef{Name: "no-such-subnet"},
-					PostHookRefs:   []keziov1alpha3.NameRef{{Name: "no-such-hook"}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			})
+
+			claim := &keziov1alpha3.MachineClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName + "-claim", Namespace: "default"},
+				Spec: keziov1alpha3.MachineClaimSpec{
+					MachineName:  machineName,
+					PostHookRefs: []keziov1alpha3.NameRef{{Name: "no-such-hook"}},
 					// DataImages, unlike ImageRef, is not gated on any
 					// referenced Image's readiness in this stage - it keeps
 					// the deploy payload non-empty (so shouldProvision fires)
@@ -846,10 +911,12 @@ var _ = Describe("Machine Controller", func() {
 					DataImages: []keziov1alpha3.MachineDataImage{{ImageRef: keziov1alpha3.NameRef{Name: "no-such-data-image"}}},
 				},
 			}
-			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			Expect(k8sClient.Create(ctx, claim)).To(Succeed())
 			DeferCleanup(func() {
-				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+				Expect(k8sClient.Delete(ctx, claim)).To(Succeed())
 			})
+			resource.Spec.ClaimRef = &keziov1alpha3.MachineClaimReference{Name: claim.Name, Namespace: claim.Namespace, UID: claim.UID}
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
 
 			reconciler := &MachineReconciler{
 				Client:   k8sClient,
@@ -915,7 +982,16 @@ var _ = Describe("Machine Controller", func() {
 			}
 			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateAvailable))
 
-			machine.Spec.ImageRef = &keziov1alpha3.NameRef{Name: imageName}
+			claim := &keziov1alpha3.MachineClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName + "-claim", Namespace: "default"},
+				Spec: keziov1alpha3.MachineClaimSpec{
+					MachineName: machineName,
+					ImageRef:    &keziov1alpha3.NameRef{Name: imageName},
+				},
+			}
+			Expect(k8sClient.Create(ctx, claim)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, claim)).To(Succeed()) })
+			machine.Spec.ClaimRef = &keziov1alpha3.MachineClaimReference{Name: claim.Name, Namespace: claim.Namespace, UID: claim.UID}
 			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
 			return name
 		}
@@ -1073,12 +1149,23 @@ var _ = Describe("Machine Controller", func() {
 					},
 					BootMACAddress: fmt.Sprintf("aa:bb:cc:dd:90:%02x", GinkgoRandomSeed()%256),
 					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
-					ImageRef:       &imageRef,
-					PostHookRefs:   []keziov1alpha3.NameRef{{Name: hookName}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, resource)).To(Succeed()) })
+
+			claim := &keziov1alpha3.MachineClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName + "-claim", Namespace: "default"},
+				Spec: keziov1alpha3.MachineClaimSpec{
+					MachineName:  machineName,
+					ImageRef:     &imageRef,
+					PostHookRefs: []keziov1alpha3.NameRef{{Name: hookName}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, claim)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, claim)).To(Succeed()) })
+			resource.Spec.ClaimRef = &keziov1alpha3.MachineClaimReference{Name: claim.Name, Namespace: claim.Namespace, UID: claim.UID}
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
 
 			reconciler := &MachineReconciler{
 				Client:   k8sClient,
@@ -1139,13 +1226,24 @@ var _ = Describe("Machine Controller", func() {
 					},
 					BootMACAddress: fmt.Sprintf("aa:bb:cc:dd:91:%02x", GinkgoRandomSeed()%256),
 					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, resource)).To(Succeed()) })
+
+			claim := &keziov1alpha3.MachineClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName + "-claim", Namespace: "default"},
+				Spec: keziov1alpha3.MachineClaimSpec{
+					MachineName: machineName,
 					DataImages: []keziov1alpha3.MachineDataImage{
 						{ImageRef: keziov1alpha3.NameRef{Name: "no-such-data-image"}},
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, resource)).To(Succeed()) })
+			Expect(k8sClient.Create(ctx, claim)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, claim)).To(Succeed()) })
+			resource.Spec.ClaimRef = &keziov1alpha3.MachineClaimReference{Name: claim.Name, Namespace: claim.Namespace, UID: claim.UID}
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
 
 			reconciler := &MachineReconciler{
 				Client:   k8sClient,
@@ -1596,13 +1694,21 @@ var _ = Describe("Machine Controller", func() {
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:0f",
 					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
-					ImageRef:       &imageRef,
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			DeferCleanup(func() {
 				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 			})
+
+			claim := &keziov1alpha3.MachineClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName + "-claim", Namespace: "default"},
+				Spec:       keziov1alpha3.MachineClaimSpec{MachineName: machineName, ImageRef: &imageRef},
+			}
+			Expect(k8sClient.Create(ctx, claim)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, claim)).To(Succeed()) })
+			resource.Spec.ClaimRef = &keziov1alpha3.MachineClaimReference{Name: claim.Name, Namespace: claim.Namespace, UID: claim.UID}
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
 
 			fakeDeployer := &deployer.FakeDeployer{Client: k8sClient}
 			// Never completes on its own: keeps the machine parked in
@@ -1687,13 +1793,21 @@ var _ = Describe("Machine Controller", func() {
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:0e",
 					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
-					ImageRef:       &imageRef,
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			DeferCleanup(func() {
 				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 			})
+
+			claim := &keziov1alpha3.MachineClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName + "-claim", Namespace: "default"},
+				Spec:       keziov1alpha3.MachineClaimSpec{MachineName: machineName, ImageRef: &imageRef},
+			}
+			Expect(k8sClient.Create(ctx, claim)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, claim)).To(Succeed()) })
+			resource.Spec.ClaimRef = &keziov1alpha3.MachineClaimReference{Name: claim.Name, Namespace: claim.Namespace, UID: claim.UID}
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
 
 			fakeDeployer := &deployer.FakeDeployer{Client: k8sClient}
 			// Never completes on its own: keeps the machine parked in
@@ -1770,11 +1884,19 @@ var _ = Describe("Machine Controller", func() {
 					},
 					BootMACAddress: fmt.Sprintf("aa:bb:cc:dd:93:%02x", GinkgoRandomSeed()%256),
 					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
-					ImageRef:       &imageRef,
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, resource)).To(Succeed()) })
+
+			claim := &keziov1alpha3.MachineClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName + "-claim", Namespace: "default"},
+				Spec:       keziov1alpha3.MachineClaimSpec{MachineName: machineName, ImageRef: &imageRef},
+			}
+			Expect(k8sClient.Create(ctx, claim)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, claim)).To(Succeed()) })
+			resource.Spec.ClaimRef = &keziov1alpha3.MachineClaimReference{Name: claim.Name, Namespace: claim.Namespace, UID: claim.UID}
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
 
 			failNextProvision := true
 			parkProvision := false
@@ -1829,10 +1951,11 @@ var _ = Describe("Machine Controller", func() {
 
 			By("starting a second run and holding it in flight")
 			parkProvision = true
-			Expect(k8sClient.Get(ctx, name, machine)).To(Succeed())
+			var runningClaim keziov1alpha3.MachineClaim
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, &runningClaim)).To(Succeed())
 			newImageRef := keziov1alpha3.NameRef{Name: "other-image"}
-			machine.Spec.ImageRef = &newImageRef
-			Expect(k8sClient.Update(ctx, machine)).To(Succeed())
+			runningClaim.Spec.ImageRef = &newImageRef
+			Expect(k8sClient.Update(ctx, &runningClaim)).To(Succeed())
 
 			machine = reconcileUntil("a second run in flight", func(m *keziov1alpha3.Machine) bool {
 				return m.Status.CurrentRunRef != nil && m.Status.CurrentRunRef.Name != firstRun
@@ -1953,11 +2076,19 @@ var _ = Describe("Machine Controller", func() {
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:11",
 					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
-					ImageRef:       &imageRef,
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, resource)).To(Succeed()) })
+
+			claim := &keziov1alpha3.MachineClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName + "-claim", Namespace: "default"},
+				Spec:       keziov1alpha3.MachineClaimSpec{MachineName: machineName, ImageRef: &imageRef},
+			}
+			Expect(k8sClient.Create(ctx, claim)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, claim)).To(Succeed()) })
+			resource.Spec.ClaimRef = &keziov1alpha3.MachineClaimReference{Name: claim.Name, Namespace: claim.Namespace, UID: claim.UID}
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
 
 			var provisionCalls int
 			var blockProvisioning bool
@@ -2849,13 +2980,21 @@ var _ = Describe("Machine Controller", func() {
 					},
 					BootMACAddress: bootMAC,
 					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
-					ImageRef:       &imageRef,
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			DeferCleanup(func() {
 				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 			})
+
+			claim := &keziov1alpha3.MachineClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName + "-claim", Namespace: "default"},
+				Spec:       keziov1alpha3.MachineClaimSpec{MachineName: machineName, ImageRef: &imageRef},
+			}
+			Expect(k8sClient.Create(ctx, claim)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, claim)).To(Succeed()) })
+			resource.Spec.ClaimRef = &keziov1alpha3.MachineClaimReference{Name: claim.Name, Namespace: claim.Namespace, UID: claim.UID}
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
 			return name
 		}
 
@@ -2957,7 +3096,10 @@ var _ = Describe("Machine Controller", func() {
 			Expect(k8sClient.Get(ctx, name, &firstHW)).To(Succeed())
 
 			By("clearing the deploy payload and setting the re-inspect annotation")
-			machine.Spec.ImageRef = nil
+			var payloadClaim keziov1alpha3.MachineClaim
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: machineName + "-claim", Namespace: "default"}, &payloadClaim)).To(Succeed())
+			payloadClaim.Spec.ImageRef = nil
+			Expect(k8sClient.Update(ctx, &payloadClaim)).To(Succeed())
 			machine.Annotations = map[string]string{keziov1alpha3.MachineAnnotationReInspect: ""}
 			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
 
@@ -3122,13 +3264,21 @@ var _ = Describe("Machine Controller", func() {
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:60",
 					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
-					ImageRef:       &imageRef,
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			DeferCleanup(func() {
 				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 			})
+
+			claim := &keziov1alpha3.MachineClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName + "-claim", Namespace: "default"},
+				Spec:       keziov1alpha3.MachineClaimSpec{MachineName: machineName, ImageRef: &imageRef},
+			}
+			Expect(k8sClient.Create(ctx, claim)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, claim)).To(Succeed()) })
+			resource.Spec.ClaimRef = &keziov1alpha3.MachineClaimReference{Name: claim.Name, Namespace: claim.Namespace, UID: claim.UID}
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
 
 			recorder := record.NewFakeRecorder(10)
 			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}, Recorder: recorder}
@@ -3155,13 +3305,21 @@ var _ = Describe("Machine Controller", func() {
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:61",
 					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
-					ImageRef:       &imageRef,
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			DeferCleanup(func() {
 				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 			})
+
+			claim := &keziov1alpha3.MachineClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName + "-claim", Namespace: "default"},
+				Spec:       keziov1alpha3.MachineClaimSpec{MachineName: machineName, ImageRef: &imageRef},
+			}
+			Expect(k8sClient.Create(ctx, claim)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, claim)).To(Succeed()) })
+			resource.Spec.ClaimRef = &keziov1alpha3.MachineClaimReference{Name: claim.Name, Namespace: claim.Namespace, UID: claim.UID}
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
 
 			recorder := record.NewFakeRecorder(10)
 			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}, Recorder: recorder}
@@ -3227,11 +3385,19 @@ var _ = Describe("Machine Controller", func() {
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:70",
 					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
-					ImageRef:       &imageRef,
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, resource)).To(Succeed()) })
+
+			claim := &keziov1alpha3.MachineClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName + "-claim", Namespace: "default"},
+				Spec:       keziov1alpha3.MachineClaimSpec{MachineName: machineName, ImageRef: &imageRef},
+			}
+			Expect(k8sClient.Create(ctx, claim)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, claim)).To(Succeed()) })
+			resource.Spec.ClaimRef = &keziov1alpha3.MachineClaimReference{Name: claim.Name, Namespace: claim.Namespace, UID: claim.UID}
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
 
 			oneShotDeployer := &deployer.FakeDeployer{
 				Client: k8sClient,

@@ -29,7 +29,7 @@ import (
 	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
-var _ = Describe("PartitionContent Controller seed demand from Machines and DeployRuns", func() {
+var _ = Describe("PartitionContent Controller seed demand from MachineClaims and DeployRuns", func() {
 	var ctx context.Context
 
 	BeforeEach(func() {
@@ -55,7 +55,7 @@ var _ = Describe("PartitionContent Controller seed demand from Machines and Depl
 		Expect(err).NotTo(HaveOccurred())
 	}
 
-	It("holds SeederDegraded=True for a Machine's referenced Image while no seeder is available, and clears it once the Machine is deleted", func() {
+	It("holds SeederDegraded=True for a MachineClaim's referenced Image while no seeder is available, and clears it once the MachineClaim is deleted", func() {
 		hashHex := partitionContentTestHash(500)
 		name := partitionContentTestName(500)
 		nn := types.NamespacedName{Name: name, Namespace: "default"}
@@ -67,8 +67,8 @@ var _ = Describe("PartitionContent Controller seed demand from Machines and Depl
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
-		machine := newTestMachine("machine-demand-500", img.Name)
-		Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+		claim := newTestClaim("machine-demand-500", img.Name)
+		Expect(k8sClient.Create(ctx, claim)).To(Succeed())
 
 		r, cancel := newDemandReconciler()
 		DeferCleanup(cancel)
@@ -87,7 +87,7 @@ var _ = Describe("PartitionContent Controller seed demand from Machines and Depl
 		Expect(degraded.Status).To(Equal(metav1.ConditionTrue))
 		Expect(got.Status.Seeders).To(BeEmpty())
 
-		Expect(k8sClient.Delete(ctx, machine)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, claim)).To(Succeed())
 
 		Eventually(func(g Gomega) {
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
@@ -139,17 +139,17 @@ var _ = Describe("PartitionContent Controller seed demand from Machines and Depl
 		Expect(degraded).To(BeNil(), "no demand must clear SeederDegraded rather than leave it True")
 	})
 
-	It("maps a Machine event to every PartitionContent its referenced Image's slots name", func() {
+	It("maps a MachineClaim event to every PartitionContent its referenced Image's slots name", func() {
 		img := newTestImage("image-demand-map", "pc-"+partitionContentTestHash(502))
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
-		machine := newTestMachine("machine-demand-map", img.Name)
+		claim := newTestClaim("machine-demand-map", img.Name)
 
 		r, cancel := newDemandReconciler()
 		DeferCleanup(cancel)
 
-		requests := r.mapMachineToPartitionContents(ctx, machine)
+		requests := r.mapMachineClaimToPartitionContents(ctx, claim)
 		Expect(requests).To(ContainElement(reconcile.Request{
 			NamespacedName: types.NamespacedName{Namespace: "default", Name: "pc-" + partitionContentTestHash(502)},
 		}))

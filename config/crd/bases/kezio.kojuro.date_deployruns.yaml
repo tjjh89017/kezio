@@ -53,10 +53,35 @@ spec:
               afterward (see the type-level XValidation rule) since it is the historical
               record of what this attempt was resolved to run.
             properties:
+              claimRef:
+                description: |-
+                  ClaimRef names the MachineClaim this run serves. The run outlives
+                  the claim: this field is a record of who asked for it, not a
+                  dependency the run needs to keep existing.
+                properties:
+                  name:
+                    description: Name is the MachineClaim's name.
+                    maxLength: 253
+                    type: string
+                  namespace:
+                    description: Namespace is the MachineClaim's namespace.
+                    maxLength: 253
+                    type: string
+                  uid:
+                    description: |-
+                      UID is the MachineClaim's UID at the time of binding. A claim
+                      deleted and remade with the same name is a different claim, and
+                      UID is what tells the two apart.
+                    type: string
+                required:
+                - name
+                - namespace
+                - uid
+                type: object
               dataImages:
                 description: |-
                   DataImages is the resolved non-OS image list, copied from
-                  Machine.spec.dataImages.
+                  MachineClaim.spec.dataImages.
                 items:
                   description: |-
                     MachineDataImage is one additional, non-OS image deployed alongside (or
@@ -163,7 +188,7 @@ spec:
               hooksHash:
                 description: |-
                   HooksHash is a content hash of every resolved PostHook step for this
-                  run (Machine.spec.postHookRefs plus the OS Image's own
+                  run (MachineClaim.spec.postHookRefs plus the OS Image's own
                   postHookRefs), used by the provisioning trigger to detect a hook
                   change without storing the resolved hook content itself.
                 maxLength: 64
@@ -171,7 +196,7 @@ spec:
               imageRef:
                 description: |-
                   ImageRef names the OS Image resolved for this run, copied from
-                  Machine.spec.imageRef. Absent for a dataImages-only run.
+                  MachineClaim.spec.imageRef. Absent for a dataImages-only run.
                 properties:
                   name:
                     description: |-

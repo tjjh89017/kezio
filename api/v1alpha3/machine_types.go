@@ -17,8 +17,8 @@ limitations under the License.
 package v1alpha3
 
 import (
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // MachineBMC identifies the board management controller that powers and
@@ -164,52 +164,30 @@ type MachineSpec struct {
 	// +kubebuilder:validation:Pattern=`^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$`
 	// +optional
 	BootMACAddress string `json:"bootMACAddress,omitempty"`
-	// ImageRef names the Image to deploy as this machine's OS. It must be
-	// a bootable image. May be absent when the machine deploys only
-	// DataImages and keeps its existing OS.
-	// +optional
-	ImageRef *NameRef `json:"imageRef,omitempty"`
-	// DataImages is an ordered list of additional, non-OS images deployed
-	// alongside the OS image in the same live session (or by themselves,
-	// when ImageRef is absent).
-	// +kubebuilder:validation:MaxItems=32
-	// +optional
-	DataImages []MachineDataImage `json:"dataImages,omitempty"`
-	// TargetDisk selects the disk the OS image deploys to. Ignored when
-	// ImageRef is absent.
-	// +optional
-	TargetDisk *TargetDiskHints `json:"targetDisk,omitempty"`
 	// SubnetRef names the Subnet this machine network boots through -
 	// the broadcast domain whose bootd instance answers this machine's
 	// PXE boot. Required: a Machine with no Subnet cannot be
 	// network-booted.
 	SubnetRef NameRef `json:"subnetRef"`
-	// PostHookRefs is an ordered list of PostHook resources attached to
-	// this machine. Execution order: the attached Image's own
-	// postHookRefs (ImageSpec.PostHookRefs) run first, then this list;
-	// within this list, the given order holds. The shipped default hook
-	// (kezio-default-finalize) is substituted only when both lists are
-	// empty and this machine deploys an OS image.
-	// +kubebuilder:validation:MaxItems=64
+	// ClaimRef binds this machine to exactly one MachineClaim. The claim
+	// controller is its only writer.
 	// +optional
-	PostHookRefs []NameRef `json:"postHookRefs,omitempty"`
-	// Params is schemaless input for the attached hooks' templating.
-	// Merge order: the deployed Image's own params first, then this
-	// field; later entries override earlier ones.
-	// +kubebuilder:pruning:PreserveUnknownFields
-	// +kubebuilder:validation:Schemaless
-	// +optional
-	Params *apiextensionsv1.JSON `json:"params,omitempty"`
-	// Ezio overrides the operator's cluster-wide default EZIO tuning for
-	// this machine's leecher.
-	// +optional
-	Ezio *MachineEzioTuning `json:"ezio,omitempty"`
-	// AfterDeploy selects what happens when a deployment finishes without
-	// an OS image to reboot into. Defaults to Reboot.
-	// +kubebuilder:validation:Enum=Reboot;PowerOff
-	// +kubebuilder:default=Reboot
-	// +optional
-	AfterDeploy string `json:"afterDeploy,omitempty"`
+	ClaimRef *MachineClaimReference `json:"claimRef,omitempty"`
+}
+
+// MachineClaimReference binds a Machine to the MachineClaim that holds
+// its deployment intent.
+type MachineClaimReference struct {
+	// Name is the MachineClaim's name.
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+	// Namespace is the MachineClaim's namespace.
+	// +kubebuilder:validation:MaxLength=253
+	Namespace string `json:"namespace"`
+	// UID is the MachineClaim's UID at the time of binding. A claim
+	// deleted and remade with the same name is a different claim, and
+	// UID is what tells the two apart.
+	UID types.UID `json:"uid"`
 }
 
 // MachineFinalizer blocks Machine deletion until the controller's cleanup
@@ -340,6 +318,11 @@ const (
 	// deprovisioning finished (or gave up), and the controller is powering
 	// the machine off before releasing it.
 	MachineStatePoweringOff = "PoweringOff"
+	// MachineStateReleased means the machine's claim is gone and its
+	// disks still hold that claim's data. kezio erases nothing. An
+	// operator returns the machine to Available with the re-inspect
+	// annotation.
+	MachineStateReleased = "Released"
 )
 
 // MachineOperationalStatus enum values for MachineStatus.OperationalStatus,
@@ -459,7 +442,7 @@ type MachineStatus struct {
 	// Deprovisioning/PoweringOff are the delete-only states: the
 	// controller enters them only once a deletion timestamp is set, and
 	// they never appear on the forward walk.
-	// +kubebuilder:validation:Enum=Enrolling;Inspecting;Available;Provisioning;Provisioned;Deprovisioning;PoweringOff
+	// +kubebuilder:validation:Enum=Enrolling;Inspecting;Available;Provisioning;Provisioned;Deprovisioning;PoweringOff;Released
 	// +optional
 	State string `json:"state,omitempty"`
 	// OperationalStatus is the axis orthogonal to State: it reports an

@@ -38,12 +38,17 @@ type DeployRunResolvedDisk struct {
 type DeployRunSpec struct {
 	// MachineRef names the Machine this run deploys to.
 	MachineRef NameRef `json:"machineRef"`
+	// ClaimRef names the MachineClaim this run serves. The run outlives
+	// the claim: this field is a record of who asked for it, not a
+	// dependency the run needs to keep existing.
+	// +optional
+	ClaimRef *MachineClaimReference `json:"claimRef,omitempty"`
 	// ImageRef names the OS Image resolved for this run, copied from
-	// Machine.spec.imageRef. Absent for a dataImages-only run.
+	// MachineClaim.spec.imageRef. Absent for a dataImages-only run.
 	// +optional
 	ImageRef *NameRef `json:"imageRef,omitempty"`
 	// DataImages is the resolved non-OS image list, copied from
-	// Machine.spec.dataImages.
+	// MachineClaim.spec.dataImages.
 	// +kubebuilder:validation:MaxItems=32
 	// +optional
 	DataImages []MachineDataImage `json:"dataImages,omitempty"`
@@ -55,7 +60,7 @@ type DeployRunSpec struct {
 	// +optional
 	ResolvedDisks []DeployRunResolvedDisk `json:"resolvedDisks,omitempty"`
 	// HooksHash is a content hash of every resolved PostHook step for this
-	// run (Machine.spec.postHookRefs plus the OS Image's own
+	// run (MachineClaim.spec.postHookRefs plus the OS Image's own
 	// postHookRefs), used by the provisioning trigger to detect a hook
 	// change without storing the resolved hook content itself.
 	// +kubebuilder:validation:MaxLength=64

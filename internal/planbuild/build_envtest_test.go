@@ -199,14 +199,16 @@ func testImageHooksResolveBeforeMachineHooks(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha3.MachineSpec{
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{
 			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
 			PostHookRefs: []keziov1alpha3.NameRef{{Name: "machine-hook"}},
 		},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	plan, _, err := b.Build(context.Background(), machine, run)
+	plan, _, err := b.Build(context.Background(), machine, claim, run)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -230,11 +232,13 @@ func testDefaultHookNotAttachedWhenImageHasHooks(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client, ManagerNamespace: mgrNS}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec:       keziov1alpha3.MachineSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}},
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	plan, _, err := b.Build(context.Background(), machine, run)
+	plan, _, err := b.Build(context.Background(), machine, claim, run)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -257,14 +261,16 @@ func testMachineHookIncompatibleOSFamilyIsValidationError(t *testing.T, fx *fixt
 	b := &Builder{Client: fx.client}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha3.MachineSpec{
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{
 			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
 			PostHookRefs: []keziov1alpha3.NameRef{{Name: "windows-hook"}},
 		},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	_, _, err := b.Build(context.Background(), machine, run)
+	_, _, err := b.Build(context.Background(), machine, claim, run)
 	var valErr *ValidationError
 	if !errors.As(err, &valErr) {
 		t.Fatalf("Build err = %v, want a *ValidationError", err)
@@ -289,11 +295,13 @@ func testHooksHashChangesWithImageHooks(t *testing.T, fx *fixtures) {
 	buildFor := func(image *keziov1alpha3.Image, machineName string) string {
 		machine := &keziov1alpha3.Machine{
 			ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: ns},
-			Spec:       keziov1alpha3.MachineSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}},
+		}
+		claim := &keziov1alpha3.MachineClaim{
+			Spec: keziov1alpha3.MachineClaimSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}},
 		}
 		fx.mustCreateMachineHardwareNamed(ns, machineName, oneDisk("/dev/vda"))
 		run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run-" + machineName, UID: types.UID("uid-" + machineName)}}
-		_, snap, err := b.Build(context.Background(), machine, run)
+		_, snap, err := b.Build(context.Background(), machine, claim, run)
 		if err != nil {
 			t.Fatalf("Build(%s): %v", machineName, err)
 		}
@@ -322,14 +330,16 @@ func testConfigMapScriptSourceResolvesAndTemplates(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha3.MachineSpec{
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{
 			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
 			PostHookRefs: []keziov1alpha3.NameRef{{Name: "cm-hook"}},
 		},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	plan, _, err := b.Build(context.Background(), machine, run)
+	plan, _, err := b.Build(context.Background(), machine, claim, run)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -354,14 +364,16 @@ func testSecretScriptSourceResolvesAndTemplates(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha3.MachineSpec{
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{
 			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
 			PostHookRefs: []keziov1alpha3.NameRef{{Name: "secret-hook"}},
 		},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	plan, _, err := b.Build(context.Background(), machine, run)
+	plan, _, err := b.Build(context.Background(), machine, claim, run)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -385,14 +397,16 @@ func testConfigMapScriptSourceMissingConfigMapIsNotReady(t *testing.T, fx *fixtu
 	b := &Builder{Client: fx.client}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha3.MachineSpec{
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{
 			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
 			PostHookRefs: []keziov1alpha3.NameRef{{Name: "cm-hook"}},
 		},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	_, _, err := b.Build(context.Background(), machine, run)
+	_, _, err := b.Build(context.Background(), machine, claim, run)
 	var notReady *NotReadyError
 	if !errors.As(err, &notReady) {
 		t.Fatalf("Build err = %v, want a *NotReadyError", err)
@@ -414,14 +428,16 @@ func testConfigMapScriptSourceMissingKeyIsNotReady(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha3.MachineSpec{
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{
 			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
 			PostHookRefs: []keziov1alpha3.NameRef{{Name: "cm-hook"}},
 		},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	_, _, err := b.Build(context.Background(), machine, run)
+	_, _, err := b.Build(context.Background(), machine, claim, run)
 	var notReady *NotReadyError
 	if !errors.As(err, &notReady) {
 		t.Fatalf("Build err = %v, want a *NotReadyError", err)
@@ -442,14 +458,16 @@ func testSecretScriptSourceMissingSecretIsNotReady(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha3.MachineSpec{
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{
 			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
 			PostHookRefs: []keziov1alpha3.NameRef{{Name: "secret-hook"}},
 		},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	_, _, err := b.Build(context.Background(), machine, run)
+	_, _, err := b.Build(context.Background(), machine, claim, run)
 	var notReady *NotReadyError
 	if !errors.As(err, &notReady) {
 		t.Fatalf("Build err = %v, want a *NotReadyError", err)
@@ -471,14 +489,16 @@ func testSecretScriptSourceMissingKeyIsNotReady(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha3.MachineSpec{
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{
 			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
 			PostHookRefs: []keziov1alpha3.NameRef{{Name: "secret-hook"}},
 		},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	_, _, err := b.Build(context.Background(), machine, run)
+	_, _, err := b.Build(context.Background(), machine, claim, run)
 	var notReady *NotReadyError
 	if !errors.As(err, &notReady) {
 		t.Fatalf("Build err = %v, want a *NotReadyError", err)
@@ -508,11 +528,14 @@ func testSeederDeploymentMissingIsNotReady(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec:       keziov1alpha3.MachineSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}, SubnetRef: subnetRef},
+		Spec:       keziov1alpha3.MachineSpec{SubnetRef: subnetRef},
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	_, _, err := b.Build(context.Background(), machine, run)
+	_, _, err := b.Build(context.Background(), machine, claim, run)
 	var notReady *NotReadyError
 	if !errors.As(err, &notReady) {
 		t.Fatalf("Build err = %v, want a *NotReadyError", err)
@@ -543,11 +566,14 @@ func testSeederPodNoIPIsNotReady(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec:       keziov1alpha3.MachineSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}, SubnetRef: subnetRef},
+		Spec:       keziov1alpha3.MachineSpec{SubnetRef: subnetRef},
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	_, _, err := b.Build(context.Background(), machine, run)
+	_, _, err := b.Build(context.Background(), machine, claim, run)
 	var notReady *NotReadyError
 	if !errors.As(err, &notReady) {
 		t.Fatalf("Build err = %v, want a *NotReadyError", err)
@@ -563,11 +589,13 @@ func testMachineHardwareMissingIsNotReady(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec:       keziov1alpha3.MachineSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}},
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	_, _, err := b.Build(context.Background(), machine, run)
+	_, _, err := b.Build(context.Background(), machine, claim, run)
 	var notReady *NotReadyError
 	if !errors.As(err, &notReady) {
 		t.Fatalf("Build err = %v, want a *NotReadyError", err)
@@ -582,11 +610,13 @@ func testImageMissingIsNotReady(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec:       keziov1alpha3.MachineSpec{ImageRef: &keziov1alpha3.NameRef{Name: "does-not-exist"}},
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{ImageRef: &keziov1alpha3.NameRef{Name: "does-not-exist"}},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	_, _, err := b.Build(context.Background(), machine, run)
+	_, _, err := b.Build(context.Background(), machine, claim, run)
 	var notReady *NotReadyError
 	if !errors.As(err, &notReady) {
 		t.Fatalf("Build err = %v, want a *NotReadyError", err)
@@ -604,11 +634,13 @@ func testImageNotReadyYetIsNotReady(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec:       keziov1alpha3.MachineSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}},
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	_, _, err := b.Build(context.Background(), machine, run)
+	_, _, err := b.Build(context.Background(), machine, claim, run)
 	var notReady *NotReadyError
 	if !errors.As(err, &notReady) {
 		t.Fatalf("Build err = %v, want a *NotReadyError", err)
@@ -625,14 +657,16 @@ func testPostHookMissingIsNotReady(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha3.MachineSpec{
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{
 			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
 			PostHookRefs: []keziov1alpha3.NameRef{{Name: "does-not-exist"}},
 		},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	_, _, err := b.Build(context.Background(), machine, run)
+	_, _, err := b.Build(context.Background(), machine, claim, run)
 	var notReady *NotReadyError
 	if !errors.As(err, &notReady) {
 		t.Fatalf("Build err = %v, want a *NotReadyError", err)
@@ -651,14 +685,16 @@ func testPostHookNotValidYetIsNotReady(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha3.MachineSpec{
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{
 			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
 			PostHookRefs: []keziov1alpha3.NameRef{{Name: "pending-hook"}},
 		},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	_, _, err := b.Build(context.Background(), machine, run)
+	_, _, err := b.Build(context.Background(), machine, claim, run)
 	var notReady *NotReadyError
 	if !errors.As(err, &notReady) {
 		t.Fatalf("Build err = %v, want a *NotReadyError", err)
@@ -677,14 +713,16 @@ func testOSAndDataImageSameDiskIsDiskSelectionError(t *testing.T, fx *fixtures) 
 	b := &Builder{Client: fx.client}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha3.MachineSpec{
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{
 			ImageRef:   &keziov1alpha3.NameRef{Name: image.Name},
 			DataImages: []keziov1alpha3.MachineDataImage{{ImageRef: keziov1alpha3.NameRef{Name: image.Name}}},
 		},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	_, _, err := b.Build(context.Background(), machine, run)
+	_, _, err := b.Build(context.Background(), machine, claim, run)
 	var diskErr *DiskSelectionError
 	if !errors.As(err, &diskErr) {
 		t.Fatalf("Build err = %v, want a *DiskSelectionError", err)
@@ -703,20 +741,23 @@ func testEzioTuningChain(t *testing.T, fx *fixtures) {
 	ns := fx.mustCreateNamespace()
 	image := fx.mustCreateImage(ns, blankDataLayout())
 
-	newMachine := func(name string, ezio *keziov1alpha3.MachineEzioTuning) *keziov1alpha3.Machine {
+	newMachine := func(name string, ezio *keziov1alpha3.MachineEzioTuning) (*keziov1alpha3.Machine, *keziov1alpha3.MachineClaim) {
 		fx.mustCreateMachineHardwareNamed(ns, name, oneDisk("/dev/vda"))
-		return &keziov1alpha3.Machine{
+		m := &keziov1alpha3.Machine{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-			Spec: keziov1alpha3.MachineSpec{
+		}
+		claim := &keziov1alpha3.MachineClaim{
+			Spec: keziov1alpha3.MachineClaimSpec{
 				DataImages: []keziov1alpha3.MachineDataImage{{ImageRef: keziov1alpha3.NameRef{Name: image.Name}}},
 				Ezio:       ezio,
 			},
 		}
+		return m, claim
 	}
-	build := func(b *Builder, m *keziov1alpha3.Machine) *agentapi.DeployPlan {
+	build := func(b *Builder, m *keziov1alpha3.Machine, claim *keziov1alpha3.MachineClaim) *agentapi.DeployPlan {
 		t.Helper()
 		run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run-" + m.Name, UID: types.UID("uid-" + m.Name)}}
-		plan, _, err := b.Build(context.Background(), m, run)
+		plan, _, err := b.Build(context.Background(), m, claim, run)
 		if err != nil {
 			t.Fatalf("Build(%s): %v", m.Name, err)
 		}
@@ -727,7 +768,8 @@ func testEzioTuningChain(t *testing.T, fx *fixtures) {
 
 	// Built-in default alone: no LeecherEzio configured, no per-Machine
 	// override.
-	plain := build(&Builder{Client: fx.client}, newMachine("ezio-plain", nil))
+	plainMachine, plainClaim := newMachine("ezio-plain", nil)
+	plain := build(&Builder{Client: fx.client}, plainMachine, plainClaim)
 	if plain.MaxUploads != seeder.DefaultMaxUploads || plain.MaxConnections != seeder.DefaultMaxConnections {
 		t.Fatalf("plain plan tuning = %d/%d, want built-in defaults %d/%d",
 			plain.MaxUploads, plain.MaxConnections, seeder.DefaultMaxUploads, seeder.DefaultMaxConnections)
@@ -735,25 +777,28 @@ func testEzioTuningChain(t *testing.T, fx *fixtures) {
 
 	// Operator cluster-wide default overrides the built-in default.
 	clusterCfg := LeecherEzioConfig{MaxUploads: 7, MaxConnections: 70}
-	clustered := build(&Builder{Client: fx.client, LeecherEzio: clusterCfg}, newMachine("ezio-cluster", nil))
+	clusterMachine, clusterClaim := newMachine("ezio-cluster", nil)
+	clustered := build(&Builder{Client: fx.client, LeecherEzio: clusterCfg}, clusterMachine, clusterClaim)
 	if clustered.MaxUploads != 7 || clustered.MaxConnections != 70 {
 		t.Fatalf("clustered plan tuning = %d/%d, want 7/70", clustered.MaxUploads, clustered.MaxConnections)
 	}
 
 	// Per-Machine override wins over the cluster default, fully set.
-	full := build(&Builder{Client: fx.client, LeecherEzio: clusterCfg}, newMachine("ezio-full-override", &keziov1alpha3.MachineEzioTuning{
+	fullMachine, fullClaim := newMachine("ezio-full-override", &keziov1alpha3.MachineEzioTuning{
 		MaxUploads:     &uploadsOverride,
 		MaxConnections: int32ptr(90),
-	}))
+	})
+	full := build(&Builder{Client: fx.client, LeecherEzio: clusterCfg}, fullMachine, fullClaim)
 	if full.MaxUploads != 5 || full.MaxConnections != 90 {
 		t.Fatalf("fully overridden plan tuning = %d/%d, want 5/90", full.MaxUploads, full.MaxConnections)
 	}
 
 	// Partial per-Machine override: only MaxUploads is set, so
 	// MaxConnections must still fall back to the cluster default.
-	partial := build(&Builder{Client: fx.client, LeecherEzio: clusterCfg}, newMachine("ezio-partial-override", &keziov1alpha3.MachineEzioTuning{
+	partialMachine, partialClaim := newMachine("ezio-partial-override", &keziov1alpha3.MachineEzioTuning{
 		MaxUploads: &uploadsOverride,
-	}))
+	})
+	partial := build(&Builder{Client: fx.client, LeecherEzio: clusterCfg}, partialMachine, partialClaim)
 	if partial.MaxUploads != 5 {
 		t.Fatalf("partially overridden plan MaxUploads = %d, want 5", partial.MaxUploads)
 	}
@@ -778,13 +823,15 @@ func testDataImagesOnlyNoDefaultHook(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client, ManagerNamespace: mgrNS}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha3.MachineSpec{
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{
 			DataImages: []keziov1alpha3.MachineDataImage{{ImageRef: keziov1alpha3.NameRef{Name: image.Name}}},
 		},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	plan, _, err := b.Build(context.Background(), machine, run)
+	plan, _, err := b.Build(context.Background(), machine, claim, run)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -811,14 +858,16 @@ func testDataImagesOnlyExplicitEfibootmgrIsValidationError(t *testing.T, fx *fix
 	b := &Builder{Client: fx.client}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha3.MachineSpec{
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{
 			DataImages:   []keziov1alpha3.MachineDataImage{{ImageRef: keziov1alpha3.NameRef{Name: image.Name}}},
 			PostHookRefs: []keziov1alpha3.NameRef{{Name: "hook"}},
 		},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	_, _, err := b.Build(context.Background(), machine, run)
+	_, _, err := b.Build(context.Background(), machine, claim, run)
 	var valErr *ValidationError
 	if !errors.As(err, &valErr) {
 		t.Fatalf("Build err = %v, want a *ValidationError", err)
@@ -843,11 +892,13 @@ func testDefaultHookDerivesBuiltinParams(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client, ManagerNamespace: mgrNS}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec:       keziov1alpha3.MachineSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}},
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	plan, _, err := b.Build(context.Background(), machine, run)
+	plan, _, err := b.Build(context.Background(), machine, claim, run)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -895,14 +946,16 @@ func testBuiltinParamOverride(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha3.MachineSpec{
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{
 			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
 			PostHookRefs: []keziov1alpha3.NameRef{{Name: "hook"}},
 		},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	plan, _, err := b.Build(context.Background(), machine, run)
+	plan, _, err := b.Build(context.Background(), machine, claim, run)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -941,14 +994,16 @@ func testBuiltinMissingESPIsValidationError(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha3.MachineSpec{
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{
 			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
 			PostHookRefs: []keziov1alpha3.NameRef{{Name: "hook"}},
 		},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	_, _, err := b.Build(context.Background(), machine, run)
+	_, _, err := b.Build(context.Background(), machine, claim, run)
 	var valErr *ValidationError
 	if !errors.As(err, &valErr) {
 		t.Fatalf("Build err = %v, want a *ValidationError", err)
@@ -965,13 +1020,15 @@ func testDefaultHookAttached(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client, ManagerNamespace: mgrNS}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha3.MachineSpec{
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{
 			ImageRef: &keziov1alpha3.NameRef{Name: image.Name},
 		},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	plan, _, err := b.Build(context.Background(), machine, run)
+	plan, _, err := b.Build(context.Background(), machine, claim, run)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -995,14 +1052,16 @@ func testExplicitHookRefsHonored(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client, ManagerNamespace: mgrNS}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha3.MachineSpec{
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{
 			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
 			PostHookRefs: []keziov1alpha3.NameRef{{Name: "hook-a"}, {Name: "hook-b"}},
 		},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	plan, _, err := b.Build(context.Background(), machine, run)
+	plan, _, err := b.Build(context.Background(), machine, claim, run)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -1026,7 +1085,9 @@ func testParamsMergeOrder(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha3.MachineSpec{
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{
 			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
 			PostHookRefs: []keziov1alpha3.NameRef{{Name: "hook"}},
 			Params:       rawJSON(t, map[string]string{"greeting": "from-machine"}),
@@ -1035,7 +1096,7 @@ func testParamsMergeOrder(t *testing.T, fx *fixtures) {
 	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	plan, _, err := b.Build(context.Background(), machine, run)
+	plan, _, err := b.Build(context.Background(), machine, claim, run)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -1056,15 +1117,15 @@ func testAmbiguousDiskHints(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha3.MachineSpec{
-			ImageRef: &keziov1alpha3.NameRef{Name: image.Name},
-			// No hints: two disks are present, so "the only disk" fallback
-			// is ambiguous.
-		},
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		// No hints: two disks are present, so "the only disk" fallback
+		// is ambiguous.
+		Spec: keziov1alpha3.MachineClaimSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	_, _, err := b.Build(context.Background(), machine, run)
+	_, _, err := b.Build(context.Background(), machine, claim, run)
 	var diskErr *DiskSelectionError
 	if !errors.As(err, &diskErr) {
 		t.Fatalf("Build err = %v, want a *DiskSelectionError", err)
@@ -1083,14 +1144,16 @@ func testUnambiguousDiskHints(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client, ManagerNamespace: ns}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha3.MachineSpec{
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{
 			ImageRef:   &keziov1alpha3.NameRef{Name: image.Name},
 			TargetDisk: &keziov1alpha3.TargetDiskHints{SerialNumber: "SN-B"},
 		},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	plan, snap, err := b.Build(context.Background(), machine, run)
+	plan, snap, err := b.Build(context.Background(), machine, claim, run)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -1126,11 +1189,14 @@ func testSlotClassification(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client, ManagerNamespace: ns}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec:       keziov1alpha3.MachineSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}, SubnetRef: subnetRef},
+		Spec:       keziov1alpha3.MachineSpec{SubnetRef: subnetRef},
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	plan, _, err := b.Build(context.Background(), machine, run)
+	plan, _, err := b.Build(context.Background(), machine, claim, run)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -1171,11 +1237,13 @@ func testPartitionContentNotReady(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec:       keziov1alpha3.MachineSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}},
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	_, _, err := b.Build(context.Background(), machine, run)
+	_, _, err := b.Build(context.Background(), machine, claim, run)
 	var notReady *NotReadyError
 	if !errors.As(err, &notReady) {
 		t.Fatalf("Build err = %v, want a *NotReadyError", err)
@@ -1196,14 +1264,16 @@ func testUnresolvedPlaceholder(t *testing.T, fx *fixtures) {
 	b := &Builder{Client: fx.client}
 	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha3.MachineSpec{
+	}
+	claim := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{
 			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
 			PostHookRefs: []keziov1alpha3.NameRef{{Name: "hook"}},
 		},
 	}
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
-	_, _, err := b.Build(context.Background(), machine, run)
+	_, _, err := b.Build(context.Background(), machine, claim, run)
 	var valErr *ValidationError
 	if !errors.As(err, &valErr) {
 		t.Fatalf("Build err = %v, want a *ValidationError", err)

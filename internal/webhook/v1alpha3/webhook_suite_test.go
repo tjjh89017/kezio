@@ -118,6 +118,9 @@ var _ = BeforeSuite(func() {
 	err = SetupMachineWebhookWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
+	err = SetupMachineClaimWebhookWithManager(mgr)
+	Expect(err).NotTo(HaveOccurred())
+
 	err = SetupImageWebhookWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 

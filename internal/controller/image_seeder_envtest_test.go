@@ -96,11 +96,23 @@ func mustCreateMachineSubnet(ctx context.Context, subnetName, siteName string) {
 	Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
 }
 
-// newTestMachineOnSubnet builds an (uncreated) Machine naming imageName
-// and subnetName - the minimal shape sitederive.Resolve needs, mirroring
-// newTestMachine but with a caller-chosen subnetRef instead of a
-// never-resolved placeholder.
+// newTestMachineOnSubnet builds an (uncreated) Machine naming subnetName -
+// the minimal shape sitederive.Resolve needs, mirroring newTestMachine but
+// with a caller-chosen subnetRef instead of a never-resolved placeholder.
+// The deploy intent (imageName) no longer lives on Machine.spec, so this
+// also creates - as a side effect, with the real client, not returned -
+// the MachineClaim that carries it, and wires the returned Machine's
+// spec.claimRef to it.
 func newTestMachineOnSubnet(name, imageName, subnetName string) *keziov1alpha3.Machine {
+	claim := &keziov1alpha3.MachineClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: name + "-claim", Namespace: "default"},
+		Spec: keziov1alpha3.MachineClaimSpec{
+			MachineName: name,
+			ImageRef:    &keziov1alpha3.NameRef{Name: imageName},
+		},
+	}
+	Expect(k8sClient.Create(context.Background(), claim)).To(Succeed())
+
 	return &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec: keziov1alpha3.MachineSpec{
@@ -108,8 +120,12 @@ func newTestMachineOnSubnet(name, imageName, subnetName string) *keziov1alpha3.M
 				Address:              "redfish://198.51.100.10/redfish/v1/Systems/1",
 				CredentialsSecretRef: keziov1alpha3.SecretReference{Name: name + "-bmc-creds"},
 			},
-			ImageRef:  &keziov1alpha3.NameRef{Name: imageName},
 			SubnetRef: keziov1alpha3.NameRef{Name: subnetName},
+			ClaimRef: &keziov1alpha3.MachineClaimReference{
+				Name:      claim.Name,
+				Namespace: claim.Namespace,
+				UID:       claim.UID,
+			},
 		},
 	}
 }
@@ -314,12 +330,17 @@ var _ = Describe("Image Controller seeder placement", func() {
 		machineForA := &keziov1alpha3.Machine{
 			ObjectMeta: metav1.ObjectMeta{Name: mhA.Name, Namespace: "default"},
 			Spec: keziov1alpha3.MachineSpec{
+				SubnetRef: keziov1alpha3.NameRef{Name: "machine-subnet-703"},
+			},
+		}
+		claimForA := &keziov1alpha3.MachineClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "claim-703a", Namespace: "default"},
+			Spec: keziov1alpha3.MachineClaimSpec{
 				DataImages: []keziov1alpha3.MachineDataImage{{ImageRef: keziov1alpha3.NameRef{Name: imgA.Name}}},
-				SubnetRef:  keziov1alpha3.NameRef{Name: "machine-subnet-703"},
 			},
 		}
 		runA := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run-703a", UID: types.UID("run-703a")}}
-		planA, _, err := builder.Build(ctx, machineForA, runA)
+		planA, _, err := builder.Build(ctx, machineForA, claimForA, runA)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(planA.DataImages).To(HaveLen(1))
 		Expect(planA.DataImages[0].Slots).To(HaveLen(1))
@@ -331,12 +352,17 @@ var _ = Describe("Image Controller seeder placement", func() {
 		machineForB := &keziov1alpha3.Machine{
 			ObjectMeta: metav1.ObjectMeta{Name: mhB.Name, Namespace: "default"},
 			Spec: keziov1alpha3.MachineSpec{
+				SubnetRef: keziov1alpha3.NameRef{Name: "machine-subnet-703"},
+			},
+		}
+		claimForB := &keziov1alpha3.MachineClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "claim-703b", Namespace: "default"},
+			Spec: keziov1alpha3.MachineClaimSpec{
 				DataImages: []keziov1alpha3.MachineDataImage{{ImageRef: keziov1alpha3.NameRef{Name: imgB.Name}}},
-				SubnetRef:  keziov1alpha3.NameRef{Name: "machine-subnet-703"},
 			},
 		}
 		runB := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run-703b", UID: types.UID("run-703b")}}
-		planB, _, err := builder.Build(ctx, machineForB, runB)
+		planB, _, err := builder.Build(ctx, machineForB, claimForB, runB)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(planB.DataImages).To(HaveLen(1))
 		Expect(planB.DataImages[0].Slots).To(HaveLen(1))

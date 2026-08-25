@@ -132,8 +132,23 @@ var _ = Describe("Machine error detail clearing", func() {
 				},
 				BootMACAddress: fmt.Sprintf("aa:bb:cc:e1:%02x:%02x", mac, GinkgoRandomSeed()%256),
 				SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
-				ImageRef:       imageRef,
 			},
+		}
+		if imageRef != nil {
+			claim := &keziov1alpha3.MachineClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName + "-claim", Namespace: "default"},
+				Spec: keziov1alpha3.MachineClaimSpec{
+					MachineName: machineName,
+					ImageRef:    imageRef,
+				},
+			}
+			Expect(k8sClient.Create(ctx, claim)).To(Succeed())
+			resource.Spec.ClaimRef = &keziov1alpha3.MachineClaimReference{
+				Name:      claim.Name,
+				Namespace: claim.Namespace,
+				UID:       claim.UID,
+			}
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, claim) })
 		}
 		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 		name := types.NamespacedName{Name: machineName, Namespace: "default"}

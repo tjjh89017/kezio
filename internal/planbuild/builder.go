@@ -86,13 +86,15 @@ type resolvedImage struct {
 	slots      []agentapi.DeploySlot
 }
 
-// Build resolves machine's deploy intent against current cluster state
-// into a DeployPlan for run, plus the Snapshot run's spec must record.
-// See the package doc comment for how Build's error types map to a
-// deployer Outcome.
-func (b *Builder) Build(ctx context.Context, machine *keziov1alpha3.Machine, run *keziov1alpha3.DeployRun) (*agentapi.DeployPlan, Snapshot, error) {
-	if machine.Spec.ImageRef == nil && len(machine.Spec.DataImages) == 0 {
-		return nil, Snapshot{}, &ValidationError{Reason: "machine has neither an OS image nor data images to deploy"}
+// Build resolves claim's deploy intent, for machine, against current
+// cluster state into a DeployPlan for run, plus the Snapshot run's spec
+// must record. See the package doc comment for how Build's error types
+// map to a deployer Outcome. claim nil is the same as one with neither
+// ImageRef nor DataImages set: a Machine with no bound claim has nothing
+// to deploy.
+func (b *Builder) Build(ctx context.Context, machine *keziov1alpha3.Machine, claim *keziov1alpha3.MachineClaim, run *keziov1alpha3.DeployRun) (*agentapi.DeployPlan, Snapshot, error) {
+	if claim == nil || (claim.Spec.ImageRef == nil && len(claim.Spec.DataImages) == 0) {
+		return nil, Snapshot{}, &ValidationError{Reason: "machine has no bound claim with an OS image or data images to deploy"}
 	}
 
 	site := &lazySiteResolution{client: b.Client, machine: machine}
@@ -102,18 +104,18 @@ func (b *Builder) Build(ctx context.Context, machine *keziov1alpha3.Machine, run
 		return nil, Snapshot{}, err
 	}
 
-	selections := make([]diskmatch.Selection, 0, 1+len(machine.Spec.DataImages))
+	selections := make([]diskmatch.Selection, 0, 1+len(claim.Spec.DataImages))
 	var osImage *resolvedImage
-	if machine.Spec.ImageRef != nil {
-		osImage, err = b.resolveImage(ctx, machine.Namespace, *machine.Spec.ImageRef, machine.Spec.TargetDisk, hardware.Spec.Disks, "OS image", site)
+	if claim.Spec.ImageRef != nil {
+		osImage, err = b.resolveImage(ctx, machine.Namespace, *claim.Spec.ImageRef, claim.Spec.TargetDisk, hardware.Spec.Disks, "OS image", site)
 		if err != nil {
 			return nil, Snapshot{}, err
 		}
 		selections = append(selections, diskmatch.Selection{Label: "OS image", Disk: diskForSelection(hardware.Spec.Disks, osImage.targetDisk)})
 	}
 
-	dataImages := make([]*resolvedImage, len(machine.Spec.DataImages))
-	for i, di := range machine.Spec.DataImages {
+	dataImages := make([]*resolvedImage, len(claim.Spec.DataImages))
+	for i, di := range claim.Spec.DataImages {
 		label := fmt.Sprintf("dataImages[%d]", i)
 		resolved, err := b.resolveImage(ctx, machine.Namespace, di.ImageRef, di.TargetDisk, hardware.Spec.Disks, label, site)
 		if err != nil {
@@ -127,7 +129,7 @@ func (b *Builder) Build(ctx context.Context, machine *keziov1alpha3.Machine, run
 		return nil, Snapshot{}, err
 	}
 
-	hooks, err := b.resolveMachineHooks(ctx, machine, osImage)
+	hooks, err := b.resolveMachineHooks(ctx, machine, claim, osImage)
 	if err != nil {
 		return nil, Snapshot{}, err
 	}
@@ -138,16 +140,16 @@ func (b *Builder) Build(ctx context.Context, machine *keziov1alpha3.Machine, run
 		RunUID:         string(run.UID),
 		MachineName:    machine.Name,
 		Hooks:          hooks,
-		AfterDeploy:    effectiveAfterDeploy(machine),
-		MaxUploads:     seeder.ResolveMaxUploads(b.LeecherEzio.MaxUploads, machineEzioMaxUploads(machine)),
-		MaxConnections: seeder.ResolveMaxConnections(b.LeecherEzio.MaxConnections, machineEzioMaxConnections(machine)),
+		AfterDeploy:    effectiveAfterDeploy(claim),
+		MaxUploads:     seeder.ResolveMaxUploads(b.LeecherEzio.MaxUploads, claimEzioMaxUploads(claim)),
+		MaxConnections: seeder.ResolveMaxConnections(b.LeecherEzio.MaxConnections, claimEzioMaxConnections(claim)),
 	}
 	if osImage != nil {
 		plan.TargetDisk = osImage.targetDisk
 		plan.SfdiskScript = osImage.image.Spec.Layout.SfdiskJSON
 		plan.Slots = osImage.slots
 	}
-	for i, di := range machine.Spec.DataImages {
+	for i, di := range claim.Spec.DataImages {
 		plan.DataImages = append(plan.DataImages, agentapi.DeployDataImagePlan{
 			ImageRef:     di.ImageRef,
 			TargetDisk:   dataImages[i].targetDisk,
@@ -228,11 +230,11 @@ func diskForSelection(disks []keziov1alpha3.MachineHardwareDisk, deviceName stri
 
 // resolveMachineHooks resolves every hook attached to this deploy, image
 // hooks first: osImage's own Spec.PostHookRefs (resolved in the image's
-// own namespace), then machine's own postHookRefs when set, or the
-// shipped default hook otherwise - but the default substitutes only when
-// BOTH lists are empty and machine deploys an OS image (never all three -
-// see MachineSpec.PostHookRefs's doc comment). osImage is the resolved OS
-// image, nil for a dataImages-only run: its name, target disk, and
+// own namespace), then claim's own postHookRefs when set, or the shipped
+// default hook otherwise - but the default substitutes only when BOTH
+// lists are empty and machine deploys an OS image (never all three - see
+// MachineClaimSpec.PostHookRefs's doc comment). osImage is the resolved
+// OS image, nil for a dataImages-only run: its name, target disk, and
 // OSFamily feed the imageName/targetDisk reserved template values and the
 // osFamily compatibility check (resolveHook), all left empty/skipped when
 // there is no OS image. A dataImages-only run with no postHookRefs on
@@ -240,8 +242,8 @@ func diskForSelection(disks []keziov1alpha3.MachineHardwareDisk, deviceName stri
 // contract it completes at its after-deploy power state with no OS to
 // boot, so the shipped default hook's boot-entry builtins (mkswap,
 // efibootmgr) would have no OS ESP to act on.
-func (b *Builder) resolveMachineHooks(ctx context.Context, machine *keziov1alpha3.Machine, osImage *resolvedImage) ([]agentapi.ResolvedHook, error) {
-	shared, err := mergeParams(imageParamsOf(osImage), machine.Spec.Params)
+func (b *Builder) resolveMachineHooks(ctx context.Context, machine *keziov1alpha3.Machine, claim *keziov1alpha3.MachineClaim, osImage *resolvedImage) ([]agentapi.ResolvedHook, error) {
+	shared, err := mergeParams(imageParamsOf(osImage), claim.Spec.Params)
 	if err != nil {
 		return nil, &ValidationError{Reason: fmt.Sprintf("merging posthook params: %v", err)}
 	}
@@ -270,8 +272,8 @@ func (b *Builder) resolveMachineHooks(ctx context.Context, machine *keziov1alpha
 
 	var machineHooks []agentapi.ResolvedHook
 	switch {
-	case len(machine.Spec.PostHookRefs) > 0:
-		machineHooks, err = b.resolveHooks(ctx, machine.Namespace, machine.Spec.PostHookRefs, shared, defaults, imageOSFamily)
+	case len(claim.Spec.PostHookRefs) > 0:
+		machineHooks, err = b.resolveHooks(ctx, machine.Namespace, claim.Spec.PostHookRefs, shared, defaults, imageOSFamily)
 	case len(imageRefs) == 0 && osImage != nil:
 		defaultRef := keziov1alpha3.NameRef{Name: posthookdefaults.DefaultFinalizeHookName}
 		machineHooks, err = b.resolveHooks(ctx, b.ManagerNamespace, []keziov1alpha3.NameRef{defaultRef}, shared, defaults, imageOSFamily)
@@ -324,36 +326,35 @@ func imageParamsOf(osImage *resolvedImage) *apiextensionsv1.JSON {
 	return osImage.image.Spec.Params
 }
 
-// machineEzioMaxUploads returns machine's per-Machine max_uploads
-// override (machine.spec.ezio.maxUploads), or nil when either
-// machine.spec.ezio or that field itself is unset - the "only the fields
-// actually set override the layer above" contract seeder.ResolveMaxUploads
-// implements.
-func machineEzioMaxUploads(machine *keziov1alpha3.Machine) *int32 {
-	if machine.Spec.Ezio == nil {
+// claimEzioMaxUploads returns claim's per-claim max_uploads override
+// (claim.spec.ezio.maxUploads), or nil when either claim.spec.ezio or
+// that field itself is unset - the "only the fields actually set override
+// the layer above" contract seeder.ResolveMaxUploads implements.
+func claimEzioMaxUploads(claim *keziov1alpha3.MachineClaim) *int32 {
+	if claim.Spec.Ezio == nil {
 		return nil
 	}
-	return machine.Spec.Ezio.MaxUploads
+	return claim.Spec.Ezio.MaxUploads
 }
 
-// machineEzioMaxConnections is machineEzioMaxUploads's max_connections
+// claimEzioMaxConnections is claimEzioMaxUploads's max_connections
 // counterpart.
-func machineEzioMaxConnections(machine *keziov1alpha3.Machine) *int32 {
-	if machine.Spec.Ezio == nil {
+func claimEzioMaxConnections(claim *keziov1alpha3.MachineClaim) *int32 {
+	if claim.Spec.Ezio == nil {
 		return nil
 	}
-	return machine.Spec.Ezio.MaxConnections
+	return claim.Spec.Ezio.MaxConnections
 }
 
-// effectiveAfterDeploy returns machine's AfterDeploy, treating an unset
+// effectiveAfterDeploy returns claim's AfterDeploy, treating an unset
 // value as keziov1alpha3.AfterDeployReboot (the CRD schema's own
 // default, which a fake or unit-test client that skips defaulting webhooks
 // may not have applied).
-func effectiveAfterDeploy(machine *keziov1alpha3.Machine) string {
-	if machine.Spec.AfterDeploy == "" {
+func effectiveAfterDeploy(claim *keziov1alpha3.MachineClaim) string {
+	if claim.Spec.AfterDeploy == "" {
 		return keziov1alpha3.AfterDeployReboot
 	}
-	return machine.Spec.AfterDeploy
+	return claim.Spec.AfterDeploy
 }
 
 // buildSnapshot assembles the Snapshot Build returns alongside the plan:

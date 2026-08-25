@@ -465,13 +465,19 @@ func (r *MachineReconciler) reconcileEmptyStatus(ctx context.Context, machine *k
 		return r.reconcileStatusLossHold(ctx, machine)
 	}
 
-	if machine.Status.LastUpdated == nil && !isEmptyDeployPayload(machine) {
-		suspect, err := r.hasPriorDeployRuns(ctx, machine)
+	if machine.Status.LastUpdated == nil {
+		claim, err := resolveClaimIntent(ctx, r.Client, machine)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		if suspect {
-			return r.enterStatusLossHold(ctx, machine)
+		if !isEmptyDeployPayload(claim) {
+			suspect, err := r.hasPriorDeployRuns(ctx, machine)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if suspect {
+				return r.enterStatusLossHold(ctx, machine)
+			}
 		}
 	}
 
@@ -591,14 +597,18 @@ func (r *MachineReconciler) reconcileInspecting(ctx context.Context, machine *ke
 // Provisioned -> Available path, and it is what lets a released machine
 // re-enter service. A Provisioned machine with a set deploy payload always
 // refuses, and every other state refuses.
-func reInspectAcceptable(machine *keziov1alpha3.Machine) bool {
+func (r *MachineReconciler) reInspectAcceptable(ctx context.Context, machine *keziov1alpha3.Machine) (bool, error) {
 	switch machine.Status.State {
 	case keziov1alpha3.MachineStateAvailable:
-		return true
+		return true, nil
 	case keziov1alpha3.MachineStateProvisioned:
-		return isEmptyDeployPayload(machine)
+		claim, err := resolveClaimIntent(ctx, r.Client, machine)
+		if err != nil {
+			return false, err
+		}
+		return isEmptyDeployPayload(claim), nil
 	default:
-		return false
+		return false, nil
 	}
 }
 
@@ -610,7 +620,10 @@ func reInspectAcceptable(machine *keziov1alpha3.Machine) bool {
 // patched) and the machine moves to Inspecting, where the normal inspection
 // walk creates a fresh one.
 func (r *MachineReconciler) reconcileReInspect(ctx context.Context, machine *keziov1alpha3.Machine) (ctrl.Result, error) {
-	accepted := reInspectAcceptable(machine)
+	accepted, err := r.reInspectAcceptable(ctx, machine)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	if err := r.consumeReInspectAnnotation(ctx, machine); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -667,11 +680,15 @@ func (r *MachineReconciler) reconcileIdle(ctx context.Context, machine *keziov1a
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: reading last successful DeployRun: %w", machine.Name, err)
 	}
-	if isEmptyDeployPayload(machine) {
+	claim, err := resolveClaimIntent(ctx, r.Client, machine)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("machine %q: resolving MachineClaim: %w", machine.Name, err)
+	}
+	if isEmptyDeployPayload(claim) {
 		return ctrl.Result{}, nil
 	}
 
-	ready, reason, message, err := r.imageReadyForProvisioning(ctx, machine)
+	ready, reason, message, err := r.imageReadyForProvisioning(ctx, claim)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -679,35 +696,39 @@ func (r *MachineReconciler) reconcileIdle(ctx context.Context, machine *keziov1a
 		return r.markDelayedNotReady(ctx, machine, reason, message)
 	}
 
-	hooksHash, ok, result, err := r.currentHooksHash(ctx, machine)
+	hooksHash, ok, result, err := r.currentHooksHash(ctx, machine, claim)
 	if !ok {
 		return result, err
 	}
-	if !shouldProvision(machine, lastRun, hooksHash) {
+	if !shouldProvision(claim, lastRun, hooksHash) {
 		return ctrl.Result{}, nil
 	}
 
 	meta.RemoveStatusCondition(&machine.Status.Conditions, keziov1alpha3.MachineConditionProgressing)
-	return r.startProvisioningRun(ctx, machine)
+	return r.startProvisioningRun(ctx, machine, claim)
 }
 
-// imageReadyForProvisioning gates the provisioning trigger on
+// imageReadyForProvisioning gates the provisioning trigger on claim's
 // spec.imageRef's referenced Image, applying the cross-reference contract
 // aggregateSlotContents documents (see conditionObservedGenerationStale):
 // a missing Image, one with no or non-True Ready condition, or one whose
 // Ready condition is stale all report not-ready, naming why in reason and
-// message. A nil ImageRef reports ready unconditionally with no lookup at
-// all - the fast lane (no OS image, or a dataImages-only deploy) never
-// depended on an Image existing and must keep working exactly as before.
-func (r *MachineReconciler) imageReadyForProvisioning(ctx context.Context, machine *keziov1alpha3.Machine) (ready bool, reason, message string, err error) {
-	ref := machine.Spec.ImageRef
+// message. A nil claim or a nil ImageRef reports ready unconditionally
+// with no lookup at all - the fast lane (no OS image, or a dataImages-only
+// deploy) never depended on an Image existing and must keep working
+// exactly as before.
+func (r *MachineReconciler) imageReadyForProvisioning(ctx context.Context, claim *keziov1alpha3.MachineClaim) (ready bool, reason, message string, err error) {
+	if claim == nil {
+		return true, "", "", nil
+	}
+	ref := claim.Spec.ImageRef
 	if ref == nil {
 		return true, "", "", nil
 	}
 
 	namespace := ref.Namespace
 	if namespace == "" {
-		namespace = machine.Namespace
+		namespace = claim.Namespace
 	}
 	var image keziov1alpha3.Image
 	key := client.ObjectKey{Namespace: namespace, Name: ref.Name}
@@ -715,7 +736,7 @@ func (r *MachineReconciler) imageReadyForProvisioning(ctx context.Context, machi
 		if apierrors.IsNotFound(err) {
 			return false, "ImageNotFound", fmt.Sprintf("Image %q not found", ref.Name), nil
 		}
-		return false, "", "", fmt.Errorf("machine %q: getting Image %q: %w", machine.Name, ref.Name, err)
+		return false, "", "", fmt.Errorf("machineclaim %q: getting Image %q: %w", claim.Name, ref.Name, err)
 	}
 
 	cond := meta.FindStatusCondition(image.Status.Conditions, keziov1alpha3.ImageConditionReady)
@@ -761,12 +782,12 @@ func classifyPlanBuildError(err error) (notReady, failed bool) {
 // error is transient and returned unchanged. The DeployRun passed to
 // Build is a throwaway (never created): only its resolved Snapshot is
 // used here, not the DeployPlan Build also returns.
-func (r *MachineReconciler) currentHooksHash(ctx context.Context, machine *keziov1alpha3.Machine) (hooksHash string, ok bool, result ctrl.Result, err error) {
+func (r *MachineReconciler) currentHooksHash(ctx context.Context, machine *keziov1alpha3.Machine, claim *keziov1alpha3.MachineClaim) (hooksHash string, ok bool, result ctrl.Result, err error) {
 	if r.Builder == nil {
 		return "", true, ctrl.Result{}, nil
 	}
 
-	_, snapshot, buildErr := r.Builder.Build(ctx, machine, &keziov1alpha3.DeployRun{})
+	_, snapshot, buildErr := r.Builder.Build(ctx, machine, claim, &keziov1alpha3.DeployRun{})
 	if buildErr == nil {
 		return snapshot.HooksHash, true, ctrl.Result{}, nil
 	}
@@ -820,8 +841,8 @@ func (r *MachineReconciler) markDelayedNotReady(ctx context.Context, machine *ke
 // touching error state, a DiskSelectionError/ValidationError records a
 // Failed provision step, and anything else is a transient error returned
 // unchanged.
-func (r *MachineReconciler) startProvisioningRun(ctx context.Context, machine *keziov1alpha3.Machine) (ctrl.Result, error) {
-	run, err := r.createDeployRun(ctx, machine)
+func (r *MachineReconciler) startProvisioningRun(ctx context.Context, machine *keziov1alpha3.Machine, claim *keziov1alpha3.MachineClaim) (ctrl.Result, error) {
+	run, err := r.createDeployRun(ctx, machine, claim)
 	if err != nil {
 		notReady, failed := classifyPlanBuildError(err)
 		switch {
@@ -855,7 +876,11 @@ func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *
 	// disappears out from under an in-progress deployment, and this is
 	// where the retry-in-place picks it back up with a fresh run.
 	if machine.Status.CurrentRunRef == nil {
-		return r.startProvisioningRun(ctx, machine)
+		claim, err := resolveClaimIntent(ctx, r.Client, machine)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("machine %q: resolving MachineClaim: %w", machine.Name, err)
+		}
+		return r.startProvisioningRun(ctx, machine, claim)
 	}
 
 	run, err := r.getRun(ctx, machine, machine.Status.CurrentRunRef)
@@ -1135,19 +1160,19 @@ func (r *MachineReconciler) recordCurrentRunDeleted(ctx context.Context, machine
 }
 
 // createDeployRun creates the DeployRun for one provisioning pass, copying
-// imageRef and dataImages from machine.spec. When r.Builder is set, it
-// also resolves machine's full deploy plan through it and writes the
-// resulting Snapshot (ResolvedDisks, HooksHash) into the run's spec before
-// Create - DeployRunSpec is immutable once the object exists, so this must
-// happen before the create call. A Build failure is returned unchanged
-// (the caller, startProvisioningRun, maps it through
-// classifyPlanBuildError); no DeployRun is created in that case.
+// imageRef and dataImages from claim.spec. When r.Builder is set, it also
+// resolves machine's full deploy plan through it and writes the resulting
+// Snapshot (ResolvedDisks, HooksHash) into the run's spec before Create -
+// DeployRunSpec is immutable once the object exists, so this must happen
+// before the create call. A Build failure is returned unchanged (the
+// caller, startProvisioningRun, maps it through classifyPlanBuildError);
+// no DeployRun is created in that case.
 //
 // r.Builder nil keeps the pre-snapshot fast lane: ResolvedDisks/HooksHash
 // stay empty, exactly as before this field existed. See Builder's own doc
 // comment for why the existing envtest/FakeDeployer suites rely on this
 // (their fixture Machines/Images are not shaped for a real plan build).
-func (r *MachineReconciler) createDeployRun(ctx context.Context, machine *keziov1alpha3.Machine) (*keziov1alpha3.DeployRun, error) {
+func (r *MachineReconciler) createDeployRun(ctx context.Context, machine *keziov1alpha3.Machine, claim *keziov1alpha3.MachineClaim) (*keziov1alpha3.DeployRun, error) {
 	run := &keziov1alpha3.DeployRun{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: machine.Name + "-",
@@ -1155,12 +1180,13 @@ func (r *MachineReconciler) createDeployRun(ctx context.Context, machine *keziov
 		},
 		Spec: keziov1alpha3.DeployRunSpec{
 			MachineRef: keziov1alpha3.NameRef{Name: machine.Name},
-			ImageRef:   machine.Spec.ImageRef.DeepCopy(),
-			DataImages: append([]keziov1alpha3.MachineDataImage(nil), machine.Spec.DataImages...),
+			ClaimRef:   machine.Spec.ClaimRef.DeepCopy(),
+			ImageRef:   claim.Spec.ImageRef.DeepCopy(),
+			DataImages: append([]keziov1alpha3.MachineDataImage(nil), claim.Spec.DataImages...),
 		},
 	}
 	if r.Builder != nil {
-		_, snapshot, err := r.Builder.Build(ctx, machine, run)
+		_, snapshot, err := r.Builder.Build(ctx, machine, claim, run)
 		if err != nil {
 			return nil, err
 		}
@@ -1202,7 +1228,7 @@ func (r *MachineReconciler) getRun(ctx context.Context, machine *keziov1alpha3.M
 	return &run, nil
 }
 
-// shouldProvision is the provisioning trigger. It fires only when
+// shouldProvision is the provisioning trigger. It fires only when claim's
 // spec.imageRef/spec.dataImages describe some deploy intent and that
 // intent's subset - including hooksHash - differs from the last
 // successful run's recorded snapshot. A missing lastRun - no
@@ -1214,21 +1240,22 @@ func (r *MachineReconciler) getRun(ctx context.Context, machine *keziov1alpha3.M
 // empty string when hook resolution is not wired in (no Builder), which
 // only ever compares equal to a lastRun that itself carries no
 // HooksHash.
-func shouldProvision(machine *keziov1alpha3.Machine, lastRun *keziov1alpha3.DeployRun, hooksHash string) bool {
-	if isEmptyDeployPayload(machine) {
+func shouldProvision(claim *keziov1alpha3.MachineClaim, lastRun *keziov1alpha3.DeployRun, hooksHash string) bool {
+	if isEmptyDeployPayload(claim) {
 		return false
 	}
 	if lastRun == nil {
 		return true
 	}
-	return !intentSubsetEqual(machine, lastRun, hooksHash)
+	return !intentSubsetEqual(claim, lastRun, hooksHash)
 }
 
-// isEmptyDeployPayload reports whether machine.spec carries no deploy
-// intent at all: no OS image and no data images. An empty payload never
-// triggers a run - clearing intent means "nothing to do", not "wipe".
-func isEmptyDeployPayload(machine *keziov1alpha3.Machine) bool {
-	return machine.Spec.ImageRef == nil && len(machine.Spec.DataImages) == 0
+// isEmptyDeployPayload reports whether claim.spec carries no deploy
+// intent at all: no claim, no OS image, and no data images. An empty
+// payload never triggers a run - clearing intent means "nothing to do",
+// not "wipe".
+func isEmptyDeployPayload(claim *keziov1alpha3.MachineClaim) bool {
+	return claim == nil || (claim.Spec.ImageRef == nil && len(claim.Spec.DataImages) == 0)
 }
 
 // intentSubsetEqual compares the provisioning trigger's intent subset -
@@ -1237,9 +1264,9 @@ func isEmptyDeployPayload(machine *keziov1alpha3.Machine) bool {
 // a dataImages entry triggers correctly. resolvedDisks is deliberately
 // excluded: device names are not stable across boots, and a
 // re-resolution must never diff into a disk-wiping redeploy.
-func intentSubsetEqual(machine *keziov1alpha3.Machine, lastRun *keziov1alpha3.DeployRun, hooksHash string) bool {
-	return nameRefEqual(machine.Spec.ImageRef, lastRun.Spec.ImageRef) &&
-		reflect.DeepEqual(machine.Spec.DataImages, lastRun.Spec.DataImages) &&
+func intentSubsetEqual(claim *keziov1alpha3.MachineClaim, lastRun *keziov1alpha3.DeployRun, hooksHash string) bool {
+	return nameRefEqual(claim.Spec.ImageRef, lastRun.Spec.ImageRef) &&
+		reflect.DeepEqual(claim.Spec.DataImages, lastRun.Spec.DataImages) &&
 		hooksHash == lastRun.Spec.HooksHash
 }
 

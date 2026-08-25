@@ -51,7 +51,7 @@ func newIndexedReconcilerWithSeeder(ctx context.Context, seeder ImageSeederConfi
 	c, err := cache.New(cfg, cache.Options{Scheme: k8sClient.Scheme()})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(c.IndexField(ctx, &keziov1alpha3.Image{}, imageContentRefIndex, indexImageContentRefs)).To(Succeed())
-	Expect(c.IndexField(ctx, &keziov1alpha3.Machine{}, machineImageRefIndex, indexMachineImageRefs)).To(Succeed())
+	Expect(c.IndexField(ctx, &keziov1alpha3.MachineClaim{}, claimImageRefIndex, indexClaimImageRefs)).To(Succeed())
 
 	cacheCtx, cancel := context.WithCancel(ctx)
 	go func() { _ = c.Start(cacheCtx) }()

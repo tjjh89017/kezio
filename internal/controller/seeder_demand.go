@@ -38,13 +38,17 @@ type seederSiteDemand struct {
 }
 
 // machinesReferencingImage returns the live (not being deleted) Machines
-// in image's own namespace whose spec.imageRef/dataImages names image,
-// via a client-side filter (machineImageRefs) rather than
-// machineImageRefIndex: unlike PartitionContentReconciler's own
-// resolveSeedDemand path, this is reachable from an ImageReconciler built
-// directly against a plain, uncached client with no field indexer
-// registered (see image_controller_test.go/image_ingest_test.go), so it
-// must not depend on one being present.
+// in image's own namespace whose bound MachineClaim's
+// spec.imageRef/dataImages names image, via a client-side filter
+// (resolveClaimIntent, claimImageRefs) rather than claimImageRefIndex:
+// unlike PartitionContentReconciler's own resolveSeedDemand path, this is
+// reachable from an ImageReconciler built directly against a plain,
+// uncached client with no field indexer registered (see
+// image_controller_test.go/image_ingest_test.go), so it must not depend
+// on one being present. A Machine with no claimRef, or one whose claim
+// cannot be resolved, contributes no demand: seeder placement is a
+// property of a bound machine's Site, and an unbound machine names no
+// intent at all.
 func machinesReferencingImage(ctx context.Context, c client.Client, image client.ObjectKey) ([]keziov1alpha3.Machine, error) {
 	var list keziov1alpha3.MachineList
 	if err := c.List(ctx, &list, client.InNamespace(image.Namespace)); err != nil {
@@ -56,7 +60,14 @@ func machinesReferencingImage(ctx context.Context, c client.Client, image client
 		if !m.DeletionTimestamp.IsZero() {
 			continue
 		}
-		for _, ref := range machineImageRefs(m) {
+		claim, err := resolveClaimIntent(ctx, c, m)
+		if err != nil {
+			return nil, err
+		}
+		if claim == nil {
+			continue
+		}
+		for _, ref := range claimImageRefs(claim) {
 			if ref == image {
 				live = append(live, *m)
 				break

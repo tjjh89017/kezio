@@ -23,7 +23,6 @@ import (
 	. "github.com/onsi/gomega"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 
 	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
@@ -73,50 +72,6 @@ var _ = Describe("Machine CRD schema", func() {
 		m := newMachine()
 		m.Spec.BMC.Address = "unregistered-scheme://10.0.0.10"
 		Expect(k8sClient.Create(ctx, m)).To(HaveOccurred())
-	})
-
-	It("rejects targetDisk hints where minSizeGigabytes exceeds maxSizeGigabytes", func() {
-		m := newMachine()
-		m.Spec.TargetDisk = &keziov1alpha3.TargetDiskHints{
-			MinSizeGigabytes: ptr.To(int64(500)),
-			MaxSizeGigabytes: ptr.To(int64(100)),
-		}
-		Expect(k8sClient.Create(ctx, m)).To(HaveOccurred())
-	})
-
-	It("admits targetDisk hints where minSizeGigabytes is at most maxSizeGigabytes", func() {
-		m := newMachine()
-		m.Spec.TargetDisk = &keziov1alpha3.TargetDiskHints{
-			MinSizeGigabytes: ptr.To(int64(100)),
-			MaxSizeGigabytes: ptr.To(int64(500)),
-		}
-		Expect(k8sClient.Create(ctx, m)).To(Succeed())
-	})
-
-	It("rejects a dataImages entry whose targetDisk hints violate the min/max CEL rule", func() {
-		m := newMachine()
-		m.Spec.DataImages = []keziov1alpha3.MachineDataImage{
-			{
-				ImageRef: keziov1alpha3.NameRef{Name: "data-image"},
-				TargetDisk: &keziov1alpha3.TargetDiskHints{
-					MinSizeGigabytes: ptr.To(int64(200)),
-					MaxSizeGigabytes: ptr.To(int64(50)),
-				},
-			},
-		}
-		Expect(k8sClient.Create(ctx, m)).To(HaveOccurred())
-	})
-
-	It("rejects an afterDeploy value outside the enum", func() {
-		m := newMachine()
-		m.Spec.AfterDeploy = "Suspend"
-		Expect(k8sClient.Create(ctx, m)).To(HaveOccurred())
-	})
-
-	It("defaults afterDeploy to Reboot when absent", func() {
-		m := newMachine()
-		Expect(k8sClient.Create(ctx, m)).To(Succeed())
-		Expect(m.Spec.AfterDeploy).To(Equal(keziov1alpha3.AfterDeployReboot))
 	})
 
 	It("admits an absent bootMACAddress when inspect-disable is absent", func() {

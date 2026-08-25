@@ -41,12 +41,15 @@ func TestDeploy_SetsImageRef(t *testing.T) {
 		t.Fatalf("Deploy() error = %v", err)
 	}
 
-	stored := &keziov1alpha3.Machine{}
-	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "node-1"}, stored); err != nil {
-		t.Fatalf("get Machine: %v", err)
+	stored := &keziov1alpha3.MachineClaim{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "node-1-claim"}, stored); err != nil {
+		t.Fatalf("get MachineClaim: %v", err)
 	}
 	if stored.Spec.ImageRef == nil || stored.Spec.ImageRef.Name != "ubuntu-2404" {
 		t.Errorf("Spec.ImageRef = %+v, want name ubuntu-2404", stored.Spec.ImageRef)
+	}
+	if stored.Spec.MachineName != "node-1" {
+		t.Errorf("Spec.MachineName = %q, want node-1", stored.Spec.MachineName)
 	}
 }
 
@@ -65,9 +68,9 @@ func TestDeploy_SetsDataImagesPostHooksAndParams(t *testing.T) {
 		t.Fatalf("Deploy() error = %v", err)
 	}
 
-	stored := &keziov1alpha3.Machine{}
-	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "node-1"}, stored); err != nil {
-		t.Fatalf("get Machine: %v", err)
+	stored := &keziov1alpha3.MachineClaim{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "node-1-claim"}, stored); err != nil {
+		t.Fatalf("get MachineClaim: %v", err)
 	}
 	if len(stored.Spec.DataImages) != 1 || stored.Spec.DataImages[0].ImageRef.Name != "scratch" {
 		t.Errorf("Spec.DataImages = %+v, want one entry named scratch", stored.Spec.DataImages)
@@ -81,13 +84,15 @@ func TestDeploy_SetsDataImagesPostHooksAndParams(t *testing.T) {
 }
 
 func TestDeploy_LeavesUnsetFieldsUntouched(t *testing.T) {
-	machine := &keziov1alpha3.Machine{
-		ObjectMeta: metav1.ObjectMeta{Name: "node-1", Namespace: "default"},
-		Spec: keziov1alpha3.MachineSpec{
-			DataImages: []keziov1alpha3.MachineDataImage{{ImageRef: keziov1alpha3.NameRef{Name: "kept"}}},
+	machine := &keziov1alpha3.Machine{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Namespace: "default"}}
+	claim := &keziov1alpha3.MachineClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1-claim", Namespace: "default"},
+		Spec: keziov1alpha3.MachineClaimSpec{
+			MachineName: "node-1",
+			DataImages:  []keziov1alpha3.MachineDataImage{{ImageRef: keziov1alpha3.NameRef{Name: "kept"}}},
 		},
 	}
-	c := fake.NewClientBuilder().WithScheme(Scheme).WithObjects(machine).Build()
+	c := fake.NewClientBuilder().WithScheme(Scheme).WithObjects(machine, claim).Build()
 
 	// Only --image was given: DataImages/PostHookRefs/Params were never
 	// set on DeployOptions (all nil), and must survive unchanged.
@@ -99,9 +104,9 @@ func TestDeploy_LeavesUnsetFieldsUntouched(t *testing.T) {
 		t.Fatalf("Deploy() error = %v", err)
 	}
 
-	stored := &keziov1alpha3.Machine{}
-	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "node-1"}, stored); err != nil {
-		t.Fatalf("get Machine: %v", err)
+	stored := &keziov1alpha3.MachineClaim{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "node-1-claim"}, stored); err != nil {
+		t.Fatalf("get MachineClaim: %v", err)
 	}
 	if len(stored.Spec.DataImages) != 1 || stored.Spec.DataImages[0].ImageRef.Name != "kept" {
 		t.Errorf("Spec.DataImages = %+v, want the pre-existing entry left untouched", stored.Spec.DataImages)

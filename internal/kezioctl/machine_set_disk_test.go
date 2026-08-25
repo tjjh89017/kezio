@@ -30,7 +30,11 @@ import (
 
 func TestMachineSetDisk_SetsTargetDisk(t *testing.T) {
 	machine := &keziov1alpha3.Machine{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Namespace: "default"}}
-	c := fake.NewClientBuilder().WithScheme(Scheme).WithObjects(machine).Build()
+	claim := &keziov1alpha3.MachineClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1-claim", Namespace: "default"},
+		Spec:       keziov1alpha3.MachineClaimSpec{MachineName: "node-1"},
+	}
+	c := fake.NewClientBuilder().WithScheme(Scheme).WithObjects(machine, claim).Build()
 
 	minSize := int64(100)
 	err := MachineSetDisk(context.Background(), c, MachineSetDiskOptions{
@@ -45,9 +49,9 @@ func TestMachineSetDisk_SetsTargetDisk(t *testing.T) {
 		t.Fatalf("MachineSetDisk() error = %v", err)
 	}
 
-	stored := &keziov1alpha3.Machine{}
-	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "node-1"}, stored); err != nil {
-		t.Fatalf("get Machine: %v", err)
+	stored := &keziov1alpha3.MachineClaim{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "node-1-claim"}, stored); err != nil {
+		t.Fatalf("get MachineClaim: %v", err)
 	}
 	if stored.Spec.TargetDisk == nil {
 		t.Fatal("Spec.TargetDisk is nil, want it set")
@@ -61,13 +65,15 @@ func TestMachineSetDisk_SetsTargetDisk(t *testing.T) {
 }
 
 func TestMachineSetDisk_ReplacesExistingHints(t *testing.T) {
-	machine := &keziov1alpha3.Machine{
-		ObjectMeta: metav1.ObjectMeta{Name: "node-1", Namespace: "default"},
-		Spec: keziov1alpha3.MachineSpec{
-			TargetDisk: &keziov1alpha3.TargetDiskHints{SerialNumber: "OLD"},
+	machine := &keziov1alpha3.Machine{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Namespace: "default"}}
+	claim := &keziov1alpha3.MachineClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1-claim", Namespace: "default"},
+		Spec: keziov1alpha3.MachineClaimSpec{
+			MachineName: "node-1",
+			TargetDisk:  &keziov1alpha3.TargetDiskHints{SerialNumber: "OLD"},
 		},
 	}
-	c := fake.NewClientBuilder().WithScheme(Scheme).WithObjects(machine).Build()
+	c := fake.NewClientBuilder().WithScheme(Scheme).WithObjects(machine, claim).Build()
 
 	err := MachineSetDisk(context.Background(), c, MachineSetDiskOptions{
 		Name:       "node-1",
@@ -78,9 +84,9 @@ func TestMachineSetDisk_ReplacesExistingHints(t *testing.T) {
 		t.Fatalf("MachineSetDisk() error = %v", err)
 	}
 
-	stored := &keziov1alpha3.Machine{}
-	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "node-1"}, stored); err != nil {
-		t.Fatalf("get Machine: %v", err)
+	stored := &keziov1alpha3.MachineClaim{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "node-1-claim"}, stored); err != nil {
+		t.Fatalf("get MachineClaim: %v", err)
 	}
 	if stored.Spec.TargetDisk.SerialNumber != "" {
 		t.Errorf("TargetDisk.SerialNumber = %q, want cleared by the replacing set-disk call", stored.Spec.TargetDisk.SerialNumber)

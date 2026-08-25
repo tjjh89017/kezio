@@ -25,38 +25,38 @@ import (
 	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
-func TestMachineImageRefs(t *testing.T) {
+func TestClaimImageRefs(t *testing.T) {
 	cases := []struct {
-		name    string
-		machine *keziov1alpha3.Machine
-		want    []client.ObjectKey
+		name  string
+		claim *keziov1alpha3.MachineClaim
+		want  []client.ObjectKey
 	}{
 		{
-			name:    "no imageRef and no dataImages returns nothing",
-			machine: &keziov1alpha3.Machine{ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "ns"}},
-			want:    nil,
+			name:  "no imageRef and no dataImages returns nothing",
+			claim: &keziov1alpha3.MachineClaim{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns"}},
+			want:  nil,
 		},
 		{
-			name: "imageRef with no namespace defaults to the machine's own",
-			machine: &keziov1alpha3.Machine{
-				ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "ns"},
-				Spec:       keziov1alpha3.MachineSpec{ImageRef: &keziov1alpha3.NameRef{Name: "os-image"}},
+			name: "imageRef with no namespace defaults to the claim's own",
+			claim: &keziov1alpha3.MachineClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns"},
+				Spec:       keziov1alpha3.MachineClaimSpec{ImageRef: &keziov1alpha3.NameRef{Name: "os-image"}},
 			},
 			want: []client.ObjectKey{{Namespace: "ns", Name: "os-image"}},
 		},
 		{
 			name: "imageRef with an explicit namespace is respected",
-			machine: &keziov1alpha3.Machine{
-				ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "ns"},
-				Spec:       keziov1alpha3.MachineSpec{ImageRef: &keziov1alpha3.NameRef{Namespace: "other", Name: "os-image"}},
+			claim: &keziov1alpha3.MachineClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns"},
+				Spec:       keziov1alpha3.MachineClaimSpec{ImageRef: &keziov1alpha3.NameRef{Namespace: "other", Name: "os-image"}},
 			},
 			want: []client.ObjectKey{{Namespace: "other", Name: "os-image"}},
 		},
 		{
 			name: "imageRef plus dataImages, deduplicated",
-			machine: &keziov1alpha3.Machine{
-				ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "ns"},
-				Spec: keziov1alpha3.MachineSpec{
+			claim: &keziov1alpha3.MachineClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns"},
+				Spec: keziov1alpha3.MachineClaimSpec{
 					ImageRef: &keziov1alpha3.NameRef{Name: "os-image"},
 					DataImages: []keziov1alpha3.MachineDataImage{
 						{ImageRef: keziov1alpha3.NameRef{Name: "data-image"}},
@@ -73,44 +73,44 @@ func TestMachineImageRefs(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := machineImageRefs(tc.machine)
+			got := claimImageRefs(tc.claim)
 			if len(got) != len(tc.want) {
-				t.Fatalf("machineImageRefs() = %v, want %v", got, tc.want)
+				t.Fatalf("claimImageRefs() = %v, want %v", got, tc.want)
 			}
 			for i := range got {
 				if got[i] != tc.want[i] {
-					t.Errorf("machineImageRefs()[%d] = %v, want %v", i, got[i], tc.want[i])
+					t.Errorf("claimImageRefs()[%d] = %v, want %v", i, got[i], tc.want[i])
 				}
 			}
 		})
 	}
 }
 
-func TestAnyLiveMachine(t *testing.T) {
-	live := func(name string) keziov1alpha3.Machine {
-		return keziov1alpha3.Machine{ObjectMeta: metav1.ObjectMeta{Name: name}}
+func TestAnyLiveClaim(t *testing.T) {
+	live := func(name string) keziov1alpha3.MachineClaim {
+		return keziov1alpha3.MachineClaim{ObjectMeta: metav1.ObjectMeta{Name: name}}
 	}
-	deleting := func(name string) keziov1alpha3.Machine {
+	deleting := func(name string) keziov1alpha3.MachineClaim {
 		now := metav1.Now()
-		return keziov1alpha3.Machine{ObjectMeta: metav1.ObjectMeta{Name: name, DeletionTimestamp: &now}}
+		return keziov1alpha3.MachineClaim{ObjectMeta: metav1.ObjectMeta{Name: name, DeletionTimestamp: &now}}
 	}
 
 	cases := []struct {
-		name     string
-		machines []keziov1alpha3.Machine
-		want     bool
+		name   string
+		claims []keziov1alpha3.MachineClaim
+		want   bool
 	}{
-		{name: "no machines", machines: nil, want: false},
-		{name: "one live machine", machines: []keziov1alpha3.Machine{live("a")}, want: true},
-		{name: "one deleting machine", machines: []keziov1alpha3.Machine{deleting("a")}, want: false},
-		{name: "a deleting machine alongside a live one", machines: []keziov1alpha3.Machine{deleting("a"), live("b")}, want: true},
-		{name: "every machine deleting", machines: []keziov1alpha3.Machine{deleting("a"), deleting("b")}, want: false},
+		{name: "no claims", claims: nil, want: false},
+		{name: "one live claim", claims: []keziov1alpha3.MachineClaim{live("a")}, want: true},
+		{name: "one deleting claim", claims: []keziov1alpha3.MachineClaim{deleting("a")}, want: false},
+		{name: "a deleting claim alongside a live one", claims: []keziov1alpha3.MachineClaim{deleting("a"), live("b")}, want: true},
+		{name: "every claim deleting", claims: []keziov1alpha3.MachineClaim{deleting("a"), deleting("b")}, want: false},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := anyLiveMachine(tc.machines); got != tc.want {
-				t.Errorf("anyLiveMachine() = %v, want %v", got, tc.want)
+			if got := anyLiveClaim(tc.claims); got != tc.want {
+				t.Errorf("anyLiveClaim() = %v, want %v", got, tc.want)
 			}
 		})
 	}

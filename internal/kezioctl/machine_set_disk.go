@@ -30,32 +30,43 @@ import (
 type MachineSetDiskOptions struct {
 	Name      string
 	Namespace string
-	// TargetDisk replaces the Machine's spec.targetDisk wholesale - this
-	// command sets the hint set, it does not merge into whatever was
-	// there before.
+	// TargetDisk replaces the target MachineClaim's spec.targetDisk
+	// wholesale - this command sets the hint set, it does not merge into
+	// whatever was there before.
 	TargetDisk keziov1alpha3.TargetDiskHints
 }
 
-// MachineSetDisk implements `kezioctl machine set-disk`: it replaces the
-// named Machine's spec.targetDisk with opts.TargetDisk. The controller
-// matches these hints against the agent-reported disk inventory at deploy
-// time and requires exactly one match before any write; this command does
-// not resolve or validate hints against real hardware itself.
+// MachineSetDisk implements `kezioctl machine set-disk`: it replaces
+// spec.targetDisk on the MachineClaim named after the target Machine
+// (Name + "-claim") with opts.TargetDisk. The controller matches these
+// hints against the agent-reported disk inventory at deploy time and
+// requires exactly one match before any write; this command does not
+// resolve or validate hints against real hardware itself.
 func MachineSetDisk(ctx context.Context, c client.Client, opts MachineSetDiskOptions) error {
 	machine := &keziov1alpha3.Machine{}
-	key := client.ObjectKey{Namespace: opts.Namespace, Name: opts.Name}
-	if err := c.Get(ctx, key, machine); err != nil {
+	machineKey := client.ObjectKey{Namespace: opts.Namespace, Name: opts.Name}
+	if err := c.Get(ctx, machineKey, machine); err != nil {
 		if apierrors.IsNotFound(err) {
 			return fmt.Errorf("machine %s/%s not found", opts.Namespace, opts.Name)
 		}
 		return fmt.Errorf("get Machine %s/%s: %w", opts.Namespace, opts.Name, err)
 	}
 
-	hints := opts.TargetDisk
-	machine.Spec.TargetDisk = &hints
+	claimName := opts.Name + "-claim"
+	claim := &keziov1alpha3.MachineClaim{}
+	claimKey := client.ObjectKey{Namespace: opts.Namespace, Name: claimName}
+	if err := c.Get(ctx, claimKey, claim); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("machineclaim %s/%s not found", opts.Namespace, claimName)
+		}
+		return fmt.Errorf("get MachineClaim %s/%s: %w", opts.Namespace, claimName, err)
+	}
 
-	if err := c.Update(ctx, machine); err != nil {
-		return fmt.Errorf("update Machine %s/%s: %w", opts.Namespace, opts.Name, err)
+	hints := opts.TargetDisk
+	claim.Spec.TargetDisk = &hints
+
+	if err := c.Update(ctx, claim); err != nil {
+		return fmt.Errorf("update MachineClaim %s/%s: %w", opts.Namespace, claimName, err)
 	}
 	return nil
 }

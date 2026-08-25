@@ -193,16 +193,17 @@ func (r *ImageReconciler) mapPartitionContentToImages(ctx context.Context, obj c
 	return requests
 }
 
-// mapMachineToImages maps a Machine event to a reconcile request per
-// Image it (or, for a Delete event, it used to) demand-source, directly
-// via its own spec.imageRef/dataImages - no PartitionContent indirection
-// needed, since seeder demand is now grouped at the Image level.
-func (r *ImageReconciler) mapMachineToImages(_ context.Context, obj client.Object) []reconcile.Request {
-	machine, ok := obj.(*keziov1alpha3.Machine)
+// mapMachineClaimToImages maps a MachineClaim event to a reconcile
+// request per Image it (or, for a Delete event, it used to) demand-source,
+// directly via its own spec.imageRef/dataImages - no PartitionContent
+// indirection needed, since seeder demand is now grouped at the Image
+// level.
+func (r *ImageReconciler) mapMachineClaimToImages(_ context.Context, obj client.Object) []reconcile.Request {
+	claim, ok := obj.(*keziov1alpha3.MachineClaim)
 	if !ok {
 		return nil
 	}
-	refs := machineImageRefs(machine)
+	refs := claimImageRefs(claim)
 	requests := make([]reconcile.Request, 0, len(refs))
 	for _, ref := range refs {
 		requests = append(requests, reconcile.Request{NamespacedName: ref})
@@ -236,7 +237,7 @@ func (r *ImageReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&appsv1.Deployment{}).
 		Watches(&keziov1alpha3.PartitionContent{}, handler.EnqueueRequestsFromMapFunc(r.mapPartitionContentToImages), builder.WithPredicates(partitionContentStatusChangedPredicate)).
-		Watches(&keziov1alpha3.Machine{}, handler.EnqueueRequestsFromMapFunc(r.mapMachineToImages), builder.WithPredicates(machineDemandPredicate)).
+		Watches(&keziov1alpha3.MachineClaim{}, handler.EnqueueRequestsFromMapFunc(r.mapMachineClaimToImages), builder.WithPredicates(claimDemandPredicate)).
 		Watches(&keziov1alpha3.DeployRun{}, handler.EnqueueRequestsFromMapFunc(r.mapDeployRunToImages), builder.WithPredicates(deployRunDemandPredicate)).
 		Named("image").
 		Complete(r)

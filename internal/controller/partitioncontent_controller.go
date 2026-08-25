@@ -278,10 +278,11 @@ var partitionContentUpdatePredicate = predicate.Or(
 // XValidation rule), so only an Image's creation or removal can ever
 // change what it references. Removal is what can unblock a
 // PartitionContent's pending delete (see onDelete); creation is what can
-// complete a Machine's already-set imageRef into seed demand for content
-// the new Image's slots reference (see resolveSeedDemand) - a Machine
-// created before its intended Image exists must still pick up demand once
-// that Image shows up. Mirrors machine_controller's deployRunDeletionOnly.
+// complete a MachineClaim's already-set imageRef into seed demand for
+// content the new Image's slots reference (see resolveSeedDemand) - a
+// claim created before its intended Image exists must still pick up
+// demand once that Image shows up. Mirrors machine_controller's
+// deployRunDeletionOnly.
 var imageCreateOrDeleteOnly = predicate.Funcs{
 	CreateFunc:  func(event.CreateEvent) bool { return true },
 	UpdateFunc:  func(event.UpdateEvent) bool { return false },
@@ -289,24 +290,24 @@ var imageCreateOrDeleteOnly = predicate.Funcs{
 	GenericFunc: func(event.GenericEvent) bool { return false },
 }
 
-// machineDeletionTimestampSetPredicate reports true only on an Update
-// event where obj newly acquired a deletion timestamp: setting one does
-// not change metadata.generation, so predicate.GenerationChangedPredicate
-// alone never notices a Machine demand source disappearing this way.
-var machineDeletionTimestampSetPredicate = predicate.Funcs{
+// claimDeletionTimestampSetPredicate reports true only on an Update event
+// where obj newly acquired a deletion timestamp: setting one does not
+// change metadata.generation, so predicate.GenerationChangedPredicate
+// alone never notices a MachineClaim demand source disappearing this way.
+var claimDeletionTimestampSetPredicate = predicate.Funcs{
 	UpdateFunc: func(e event.UpdateEvent) bool {
 		return e.ObjectOld.GetDeletionTimestamp().IsZero() && !e.ObjectNew.GetDeletionTimestamp().IsZero()
 	},
 }
 
-// machineDemandPredicate restricts the Machine watch's Update events to a
-// spec change (imageRef/dataImages, via generation) or a newly-set
-// deletion timestamp - the two ways a Machine's contribution to seed
+// claimDemandPredicate restricts the MachineClaim watch's Update events to
+// a spec change (imageRef/dataImages, via generation) or a newly-set
+// deletion timestamp - the two ways a MachineClaim's contribution to seed
 // demand can change. Create/Delete/Generic events stay unfiltered:
 // predicate.Or keeps each branch predicate's default (true) for them.
-var machineDemandPredicate = predicate.Or(
+var claimDemandPredicate = predicate.Or(
 	predicate.GenerationChangedPredicate{},
-	machineDeletionTimestampSetPredicate,
+	claimDeletionTimestampSetPredicate,
 )
 
 // deployRunDemandPredicate restricts the DeployRun watch's Update events
@@ -334,7 +335,7 @@ func (r *PartitionContentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := ensureImageContentRefIndex(mgr); err != nil {
 		return err
 	}
-	if err := ensureMachineImageRefIndex(mgr); err != nil {
+	if err := ensureClaimImageRefIndex(mgr); err != nil {
 		return err
 	}
 	return ctrl.NewControllerManagedBy(mgr).
@@ -342,7 +343,7 @@ func (r *PartitionContentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&batchv1.Job{}).
 		Watches(&keziov1alpha3.Image{}, handler.EnqueueRequestsFromMapFunc(r.mapImageToPartitionContents), builder.WithPredicates(imageCreateOrDeleteOnly)).
-		Watches(&keziov1alpha3.Machine{}, handler.EnqueueRequestsFromMapFunc(r.mapMachineToPartitionContents), builder.WithPredicates(machineDemandPredicate)).
+		Watches(&keziov1alpha3.MachineClaim{}, handler.EnqueueRequestsFromMapFunc(r.mapMachineClaimToPartitionContents), builder.WithPredicates(claimDemandPredicate)).
 		Watches(&keziov1alpha3.DeployRun{}, handler.EnqueueRequestsFromMapFunc(r.mapDeployRunToPartitionContents), builder.WithPredicates(deployRunDemandPredicate)).
 		Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(r.mapSeederDeploymentToPartitionContents)).
 		Named("partitioncontent").

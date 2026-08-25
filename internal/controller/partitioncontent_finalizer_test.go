@@ -54,22 +54,17 @@ func newTestImage(name, contentName string) *keziov1alpha3.Image {
 	}
 }
 
-// newTestMachine builds an (uncreated) Machine whose spec.imageRef names
-// imageName, in the "default" namespace - a minimal seed-demand source
-// for resolveSeedDemand. The BMC address, credentials Secret, and Subnet
-// it names are all placeholders: nothing in this suite runs
-// MachineReconciler or the Machine webhook, so none of them need to
-// actually exist or resolve.
-func newTestMachine(name, imageName string) *keziov1alpha3.Machine {
-	return &keziov1alpha3.Machine{
+// newTestClaim builds an (uncreated) MachineClaim whose spec.imageRef
+// names imageName, in the "default" namespace - a minimal seed-demand
+// source for resolveSeedDemand. Nothing in this suite runs
+// MachineReconciler or the MachineClaim webhook, so machineName need not
+// resolve to a real Machine.
+func newTestClaim(name, imageName string) *keziov1alpha3.MachineClaim {
+	return &keziov1alpha3.MachineClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-		Spec: keziov1alpha3.MachineSpec{
-			BMC: keziov1alpha3.MachineBMC{
-				Address:              "redfish://198.51.100.10/redfish/v1/Systems/1",
-				CredentialsSecretRef: keziov1alpha3.SecretReference{Name: name + "-bmc-creds"},
-			},
-			ImageRef:  &keziov1alpha3.NameRef{Name: imageName},
-			SubnetRef: keziov1alpha3.NameRef{Name: name + "-subnet"},
+		Spec: keziov1alpha3.MachineClaimSpec{
+			MachineName: name + "-machine",
+			ImageRef:    &keziov1alpha3.NameRef{Name: imageName},
 		},
 	}
 }
@@ -101,7 +96,7 @@ func newIndexedReconciler(ctx context.Context, publish PartitionContentPublishCo
 	c, err := cache.New(cfg, cache.Options{Scheme: k8sClient.Scheme()})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(c.IndexField(ctx, &keziov1alpha3.Image{}, imageContentRefIndex, indexImageContentRefs)).To(Succeed())
-	Expect(c.IndexField(ctx, &keziov1alpha3.Machine{}, machineImageRefIndex, indexMachineImageRefs)).To(Succeed())
+	Expect(c.IndexField(ctx, &keziov1alpha3.MachineClaim{}, claimImageRefIndex, indexClaimImageRefs)).To(Succeed())
 
 	cacheCtx, cancel := context.WithCancel(ctx)
 	go func() { _ = c.Start(cacheCtx) }()
@@ -319,15 +314,15 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 		reconcileAddsFinalizer(ctx, r, nn)
 
 		// image-blocks-seeded-content both blocks pc's deletion below and,
-		// through the Machine created next, is the seed-demand source that
-		// must outlive that block.
+		// through the MachineClaim created next, is the seed-demand source
+		// that must outlive that block.
 		img := newTestImage("image-blocks-seeded-content", name)
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
-		machine := newTestMachine("machine-demands-"+hashHex, img.Name)
-		Expect(k8sClient.Create(ctx, machine)).To(Succeed())
-		DeferCleanup(func() { _ = k8sClient.Delete(ctx, machine) })
+		claim := newTestClaim("machine-demands-"+hashHex, img.Name)
+		Expect(k8sClient.Create(ctx, claim)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, claim) })
 
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())

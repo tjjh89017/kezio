@@ -549,7 +549,11 @@ func (d *AgentDeployer) armProvisionBootAndPowerOn(ctx context.Context, machine 
 // run at all, then records run at DeployRunPhasePending: see Provision's
 // doc comment.
 func (d *AgentDeployer) commitProvisionPending(ctx context.Context, machine *keziov1alpha3.Machine, run *keziov1alpha3.DeployRun) (Result, error) {
-	if _, _, err := d.PlanBuilder.Build(ctx, machine, run); err != nil {
+	claim, err := resolveClaimIntent(ctx, d.Client, machine)
+	if err != nil {
+		return Result{}, fmt.Errorf("agent deployer: resolving MachineClaim for %q: %w", machine.Name, err)
+	}
+	if _, _, err := d.PlanBuilder.Build(ctx, machine, claim, run); err != nil {
 		result, ok := planBuildErrorResult(err)
 		if !ok {
 			return Result{}, fmt.Errorf("agent deployer: resolving deploy plan for %q: %w", run.Name, err)
