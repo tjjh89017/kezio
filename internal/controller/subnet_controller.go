@@ -534,8 +534,8 @@ func indeterminateFromFetchErr(reasonPrefix, what string, err error) nadvalidate
 	}
 }
 
-// concurrentSeederDeployments counts the seeder Deployments
-// PartitionContentReconciler placed on subnet's own seeder network
+// concurrentSeederDeployments counts the per-(Image, Site) seeder
+// Deployments ImageReconciler placed on subnet's own seeder network
 // (partitionContentSeederSubnetLabel, scoped to subnet's namespace since
 // that label carries a bare Subnet name) that currently have an available
 // replica. It is CheckSeederStaticMultiImage's concurrentImages input:

@@ -271,12 +271,12 @@ func (r *SiteReconciler) resolveSeedingSubnet(ctx context.Context, site *keziov1
 }
 
 // seederPlacementReady reports whether a seeder Deployment currently
-// targets subnet (PartitionContentReconciler's own placement labels,
+// targets subnet (partitionContentSeederSubnetLabel and its siblings,
 // scoped to subnet's namespace and name, mirroring
 // SubnetReconciler.concurrentSeederDeployments) and has at least one
 // Available replica. This is SiteStatus.SeederReady's data source: it
-// reads the seeder Deployment PartitionContentReconciler already builds,
-// rather than building one of its own.
+// reads the per-(Image, Site) seeder Deployment ImageReconciler already
+// builds, rather than building one of its own.
 func (r *SiteReconciler) seederPlacementReady(ctx context.Context, subnet *keziov1alpha2.Subnet) (bool, error) {
 	var deployments appsv1.DeploymentList
 	if err := r.List(ctx, &deployments, client.InNamespace(subnet.Namespace), client.MatchingLabels{
