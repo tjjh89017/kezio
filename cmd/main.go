@@ -244,6 +244,14 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "DeployRun")
 		os.Exit(1)
 	}
+	if err := (&controller.MachineClaimReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("machineclaim-controller"),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "MachineClaim")
+		os.Exit(1)
+	}
 	// nolint:goconst
 	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
 		if err := webhookv1alpha3.SetupMachineWebhookWithManager(mgr); err != nil {

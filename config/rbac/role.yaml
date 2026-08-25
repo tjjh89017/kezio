@@ -102,6 +102,7 @@ rules:
   - deployruns/finalizers
   - imageimports/finalizers
   - images/finalizers
+  - machineclaims/finalizers
   - machines/finalizers
   - partitioncontents/finalizers
   - posthooks/finalizers
@@ -115,6 +116,7 @@ rules:
   - deployruns/status
   - imageimports/status
   - images/status
+  - machineclaims/status
   - machines/status
   - partitioncontents/status
   - posthooks/status
@@ -124,3 +126,13 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - kezio.kojuro.date
+  resources:
+  - machineclaims
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
