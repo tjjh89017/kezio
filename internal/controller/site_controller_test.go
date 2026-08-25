@@ -82,6 +82,23 @@ func findTrackerDeployment(ctx context.Context, ns, siteName string) *appsv1.Dep
 	return &deployments.Items[0]
 }
 
+// markTrackerDeploymentAvailable writes the Available condition on the
+// Site's tracker Deployment: no Deployment controller runs in envtest, so
+// deploymentAvailable reads a missing condition as false unless a test
+// writes it.
+func markTrackerDeploymentAvailable(ctx context.Context, ns, siteName string) {
+	dep := findTrackerDeployment(ctx, ns, siteName)
+	dep.Status.Replicas = 1
+	dep.Status.ReadyReplicas = 1
+	dep.Status.AvailableReplicas = 1
+	dep.Status.Conditions = []appsv1.DeploymentCondition{{
+		Type:   appsv1.DeploymentAvailable,
+		Status: corev1.ConditionTrue,
+		Reason: "MinimumReplicasAvailable",
+	}}
+	ExpectWithOffset(1, k8sClient.Status().Update(ctx, dep)).To(Succeed())
+}
+
 var _ = Describe("Site Controller", func() {
 	ctx := context.Background()
 
@@ -375,6 +392,64 @@ var _ = Describe("Site Controller", func() {
 		Expect(readyCond).NotTo(BeNil())
 		Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(readyCond.Reason).To(Equal("SiteTrackerDeploymentImageUnconfigured"))
+	})
+
+	It("reports Valid=Unknown but Ready=False when the seeding Subnet names a NAD that does not exist and the tracker Deployment cannot become available", func() {
+		ns := createSubnetTestNamespace(ctx)
+		site := testSite(ctx, ns, "site-j")
+
+		subnet := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
+			s.Spec.SiteRef = keziov1alpha2.NameRef{Name: "site-j"}
+			s.Spec.SeederNetworkRef = &keziov1alpha2.NameRef{Name: "seeder-nad-absent"}
+		})
+		Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
+		// No createTestNAD: the NAD the Subnet names never exists.
+		setSeederSubnetRef(ctx, site, subnet.Name, keziov1alpha2.SiteTracker{IP: "192.0.2.60"})
+
+		r := newSiteTestReconciler()
+		key := types.NamespacedName{Name: site.Name, Namespace: ns}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		var updated keziov1alpha2.Site
+		Expect(k8sClient.Get(ctx, key, &updated)).To(Succeed())
+		validCond := findCondition(updated.Status.Conditions, keziov1alpha2.SiteConditionValid)
+		Expect(validCond).NotTo(BeNil())
+		Expect(validCond.Status).To(Equal(metav1.ConditionUnknown), "kezio cannot validate the tracker address against a NAD it cannot read")
+		Expect(validCond.Reason).To(Equal("SeederNADNotFound"))
+
+		readyCond := findCondition(updated.Status.Conditions, keziov1alpha2.SiteConditionReady)
+		Expect(readyCond).NotTo(BeNil())
+		Expect(readyCond.Status).To(Equal(metav1.ConditionFalse), "an unavailable tracker Deployment is an observed fact, not an uncertainty")
+		Expect(readyCond.Reason).To(Equal("TrackerDeploymentUnavailable"))
+	})
+
+	It("reports Ready=Unknown when the seeder NAD cannot be read but the tracker Deployment is available", func() {
+		ns := createSubnetTestNamespace(ctx)
+		site := testSite(ctx, ns, "site-k")
+
+		subnet := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
+			s.Spec.SiteRef = keziov1alpha2.NameRef{Name: "site-k"}
+			s.Spec.SeederNetworkRef = &keziov1alpha2.NameRef{Name: "seeder-nad-absent"}
+		})
+		Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
+		setSeederSubnetRef(ctx, site, subnet.Name, keziov1alpha2.SiteTracker{IP: "192.0.2.60"})
+
+		r := newSiteTestReconciler()
+		key := types.NamespacedName{Name: site.Name, Namespace: ns}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		markTrackerDeploymentAvailable(ctx, ns, "site-k")
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		var updated keziov1alpha2.Site
+		Expect(k8sClient.Get(ctx, key, &updated)).To(Succeed())
+		readyCond := findCondition(updated.Status.Conditions, keziov1alpha2.SiteConditionReady)
+		Expect(readyCond).NotTo(BeNil())
+		Expect(readyCond.Status).To(Equal(metav1.ConditionUnknown), "a serving tracker plus an unreadable NAD leaves Ready undecided, not failed")
+		Expect(readyCond.Reason).To(Equal("SeederNADNotFound"))
 	})
 
 	It("passes Valid when tracker.ip falls inside the seeding Subnet's cidr and outside the seeder NAD's pool", func() {

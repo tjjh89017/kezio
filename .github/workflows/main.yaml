@@ -2842,6 +2842,17 @@ jobs:
       # so both Subnet Y and Site Y report Valid=Unknown with
       # reason SeederNADNotFound - never False - and the same patch,
       # reverted, is what proves recovery below.
+      #
+      # Ready reads False, not Unknown, and the two conditions do not
+      # carry the same claim. Valid asks whether the Site's configuration
+      # passes validation, and the answer is honestly unknown: kezio
+      # cannot check tracker.ip against a NAD it cannot read. Ready asks
+      # whether this Site serves announces, and the answer is a measured
+      # no: the tracker Deployment's pod template names the NAD, so the
+      # patch rolls it (Recreate: the serving pod goes first), and the
+      # replacement pod cannot get a sandbox while the NAD is absent.
+      # Ready therefore reports the Deployment's own unavailability,
+      # which outranks an Indeterminate check.
       - name: Inject a fault at Site Y - point its seeding Subnet at a nonexistent NAD
         shell: bash
         run: |
@@ -2849,31 +2860,45 @@ jobs:
           kubectl patch subnet "${{ env.SUBNET_Y_NAME }}" -n scaffold-system --type=merge \
             -p '{"spec":{"seederNetworkRef":{"name":"kezio-seeder-network-y-does-not-exist"}}}'
 
+      # Waits for both halves of the degraded shape, not only Valid: the
+      # tracker pod needs a moment to go away after the Subnet patch, so
+      # a Site whose Valid already names the missing NAD can still carry
+      # the previous Ready for a reconcile or two. The step below then
+      # asserts a settled state, which is what assert-site-status's
+      # no-poll design expects of its caller.
       - name: Wait for the fault to reconcile onto Site Y's status
         shell: bash
         run: |
           set -euo pipefail
-          deadline=$(( $(date +%s) + 60 ))
+          deadline=$(( $(date +%s) + 120 ))
           while true; do
-            reason="$(kubectl get site "${{ env.SITE_Y_NAME }}" -n scaffold-system \
+            valid_reason="$(kubectl get site "${{ env.SITE_Y_NAME }}" -n scaffold-system \
               -o jsonpath='{.status.conditions[?(@.type=="Valid")].reason}' || true)"
-            echo "$(date -Is) Site Y Valid.reason=${reason:-<empty>}"
-            [ "${reason}" = "SeederNADNotFound" ] && break
+            ready_status="$(kubectl get site "${{ env.SITE_Y_NAME }}" -n scaffold-system \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' || true)"
+            echo "$(date -Is) Site Y Valid.reason=${valid_reason:-<empty>} Ready=${ready_status:-<empty>}"
+            if [ "${valid_reason}" = "SeederNADNotFound" ] && [ "${ready_status}" = "False" ]; then
+              break
+            fi
             if [ "$(date +%s)" -ge "${deadline}" ]; then
-              echo "::error::Site Y's Valid condition never reported SeederNADNotFound after the fault" >&2
+              echo "::error::Site Y never reported Valid=SeederNADNotFound with Ready=False after the fault" >&2
               kubectl get site "${{ env.SITE_Y_NAME }}" -n scaffold-system -o yaml
               exit 1
             fi
             sleep 3
           done
 
+      # Valid carries the cause (kezio cannot read the NAD the seeding
+      # Subnet names); Ready carries the consequence (this Site's tracker
+      # no longer serves). The lane asserts both, because "Site Y
+      # degrades" means exactly the pair.
       - name: Assert Site Y degrades from the injected fault
         uses: ./.github/actions/assert-site-status
         with:
           site-name: ${{ env.SITE_Y_NAME }}
           expected-conditions: |
             Valid|Unknown|SeederNADNotFound
-            Ready|Unknown
+            Ready|False|TrackerDeploymentUnavailable
 
       - name: Assert Site X's status is unaffected by Site Y's fault
         uses: ./.github/actions/assert-site-status
