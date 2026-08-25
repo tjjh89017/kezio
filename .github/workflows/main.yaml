@@ -115,6 +115,11 @@ jobs:
     # `lb build` compiles ezio from source and assembles a full Debian sid
     # chroot into a squashfs - budget generously.
     timeout-minutes: 90
+    env:
+      # The tag inside the tarball this job hands off. Every VM lane sets
+      # the same literal as its own BOOT_ARTIFACTS_IMG and names it in the
+      # bootd Deployment, so the two must stay identical.
+      BOOT_ARTIFACTS_IMG: "example.com/kezio-boot-artifacts:e2e"
     steps:
       - uses: actions/checkout@v7
 
@@ -138,6 +143,46 @@ jobs:
             dist/live/kernel.config
             dist/live/manifest.json
             dist/live/sha256sums
+          if-no-files-found: error
+
+      - uses: docker/setup-buildx-action@v4
+
+      # Labels are derived here, not at push time: publish-boot-artifacts
+      # loads this tarball instead of rebuilding it, and no docker command
+      # can add OCI labels to an image that is already built. The five
+      # service images get theirs from their own publish-time build.
+      - name: Derive image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/kezio-boot-artifacts
+
+      # Packages dist/live/ into an OCI image once, for every VM lane and
+      # for the published tag: the bytes e2e boots are the bytes that ship.
+      # amd64 only - the packaged live environment is an amd64 kernel,
+      # initrd and squashfs, and there is no arm64 variant. No GHA cache
+      # either: the layers are the same already-compressed files this job
+      # just built, and nothing downstream rebuilds this image, so a cache
+      # would only pay to store bytes no build ever reads back.
+      - name: Build the boot-artifacts image (amd64, loaded locally)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/boot-artifacts/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: ${{ env.BOOT_ARTIFACTS_IMG }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Save the boot-artifacts image to a tarball
+        run: docker save "${{ env.BOOT_ARTIFACTS_IMG }}" -o /tmp/boot-artifacts.tar
+
+      - name: Upload the boot-artifacts image tarball
+        uses: actions/upload-artifact@v7
+        with:
+          name: image-tar-boot-artifacts
+          path: /tmp/boot-artifacts.tar
+          retention-days: 1
           if-no-files-found: error
 
   # Gates the Site/tracker/seeder lanes on three mechanisms this repo
@@ -768,15 +813,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Download the live boot image artifacts
-        uses: actions/download-artifact@v8
-        with:
-          name: kezio-live-image
-          path: dist/live
-
-      - name: Fail fast if the downloaded boot artifacts are empty
-        uses: ./.github/actions/assert-boot-artifacts-present
-
       - name: Prepare the KVM host
         uses: ./.github/actions/prepare-kvm-host
 
@@ -800,14 +836,14 @@ jobs:
           bridge-name: ${{ env.PROVISIONING_BRIDGE }}
           host-ip: ${{ env.PROVISIONING_HOST_IP }}
 
-      # manager and bootd feed the register phase (unchanged from the
-      # retired netboot lane); image-service, ingest, and seeder feed the
-      # deploy phase this lane adds, the same trio the image-path lane
-      # imports.
-      - name: Download the manager, bootd, image-service, ingest, and seeder image tarballs
+      # manager, bootd and boot-artifacts feed the register phase
+      # (unchanged from the retired netboot lane); image-service, ingest,
+      # and seeder feed the deploy phase this lane adds, the same trio the
+      # image-path lane imports.
+      - name: Download the manager, bootd, boot-artifacts, image-service, ingest, and seeder image tarballs
         uses: actions/download-artifact@v8
         with:
-          pattern: "image-tar-@(manager|bootd|image-service|ingest|seeder)"
+          pattern: "image-tar-@(manager|bootd|boot-artifacts|image-service|ingest|seeder)"
           path: /tmp/images
           merge-multiple: true
 
@@ -836,14 +872,6 @@ jobs:
       # same pairing the image-path lane uses.
       - name: Install csi-driver-nfs and mark it the default StorageClass
         uses: ./.github/actions/install-nfs-storage
-
-      # Packages the downloaded dist/live/ artifacts into an OCI image -
-      # cheap local repackaging, not a from-source live-image rebuild.
-      - name: Build the boot-artifacts image
-        run: make docker-build-boot-artifacts BOOT_ARTIFACTS_IMG="${{ env.BOOT_ARTIFACTS_IMG }}"
-
-      - name: Save the boot-artifacts image to a tarball
-        run: docker save "${{ env.BOOT_ARTIFACTS_IMG }}" -o /tmp/images/boot-artifacts.tar
 
       - name: Import the manager, bootd, boot-artifacts, image-service, ingest, and seeder images into RKE2 containerd
         uses: ./.github/actions/import-image-tarballs
@@ -1395,15 +1423,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Download the live boot image artifacts
-        uses: actions/download-artifact@v8
-        with:
-          name: kezio-live-image
-          path: dist/live
-
-      - name: Fail fast if the downloaded boot artifacts are empty
-        uses: ./.github/actions/assert-boot-artifacts-present
-
       - name: Prepare the KVM host
         uses: ./.github/actions/prepare-kvm-host
 
@@ -1432,10 +1451,10 @@ jobs:
             ${{ env.SEG_B_BRIDGE }} ${{ env.SEG_B_CIDR }} ${{ env.SEG_B_HOST_CIDR }} kezio-routed-site-group
             ${{ env.SEG_C_BRIDGE }} ${{ env.SEG_C_CIDR }} ${{ env.SEG_C_HOST_CIDR }} kezio-routed-site-group
 
-      - name: Download the manager, bootd, image-service, ingest, and seeder image tarballs
+      - name: Download the manager, bootd, boot-artifacts, image-service, ingest, and seeder image tarballs
         uses: actions/download-artifact@v8
         with:
-          pattern: "image-tar-@(manager|bootd|image-service|ingest|seeder)"
+          pattern: "image-tar-@(manager|bootd|boot-artifacts|image-service|ingest|seeder)"
           path: /tmp/images
           merge-multiple: true
 
@@ -1471,12 +1490,6 @@ jobs:
 
       - name: Install csi-driver-nfs and mark it the default StorageClass
         uses: ./.github/actions/install-nfs-storage
-
-      - name: Build the boot-artifacts image
-        run: make docker-build-boot-artifacts BOOT_ARTIFACTS_IMG="${{ env.BOOT_ARTIFACTS_IMG }}"
-
-      - name: Save the boot-artifacts image to a tarball
-        run: docker save "${{ env.BOOT_ARTIFACTS_IMG }}" -o /tmp/images/boot-artifacts.tar
 
       - name: Import the manager, bootd, boot-artifacts, image-service, ingest, and seeder images into RKE2 containerd
         uses: ./.github/actions/import-image-tarballs
@@ -2114,15 +2127,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Download the live boot image artifacts
-        uses: actions/download-artifact@v8
-        with:
-          name: kezio-live-image
-          path: dist/live
-
-      - name: Fail fast if the downloaded boot artifacts are empty
-        uses: ./.github/actions/assert-boot-artifacts-present
-
       - name: Prepare the KVM host
         uses: ./.github/actions/prepare-kvm-host
 
@@ -2149,10 +2153,10 @@ jobs:
             ${{ env.SEG_X_BRIDGE }} ${{ env.SEG_X_CIDR }} ${{ env.SEG_X_HOST_CIDR }} kezio-2site-x-group
             ${{ env.SEG_Y_BRIDGE }} ${{ env.SEG_Y_CIDR }} ${{ env.SEG_Y_HOST_CIDR }} kezio-2site-y-group
 
-      - name: Download the manager, bootd, image-service, ingest, and seeder image tarballs
+      - name: Download the manager, bootd, boot-artifacts, image-service, ingest, and seeder image tarballs
         uses: actions/download-artifact@v8
         with:
-          pattern: "image-tar-@(manager|bootd|image-service|ingest|seeder)"
+          pattern: "image-tar-@(manager|bootd|boot-artifacts|image-service|ingest|seeder)"
           path: /tmp/images
           merge-multiple: true
 
@@ -2182,12 +2186,6 @@ jobs:
 
       - name: Install csi-driver-nfs and mark it the default StorageClass
         uses: ./.github/actions/install-nfs-storage
-
-      - name: Build the boot-artifacts image
-        run: make docker-build-boot-artifacts BOOT_ARTIFACTS_IMG="${{ env.BOOT_ARTIFACTS_IMG }}"
-
-      - name: Save the boot-artifacts image to a tarball
-        run: docker save "${{ env.BOOT_ARTIFACTS_IMG }}" -o /tmp/images/boot-artifacts.tar
 
       - name: Import the manager, bootd, boot-artifacts, image-service, ingest, and seeder images into RKE2 containerd
         uses: ./.github/actions/import-image-tarballs
@@ -3222,15 +3220,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Download the live boot image artifacts
-        uses: actions/download-artifact@v8
-        with:
-          name: kezio-live-image
-          path: dist/live
-
-      - name: Fail fast if the downloaded boot artifacts are empty
-        uses: ./.github/actions/assert-boot-artifacts-present
-
       - name: Prepare the KVM host
         uses: ./.github/actions/prepare-kvm-host
 
@@ -3257,10 +3246,10 @@ jobs:
             ${{ env.SEG_T_BRIDGE }} ${{ env.SEG_T_CIDR }} ${{ env.SEG_T_HOST_CIDR }} kezio-3mach-group
             ${{ env.SEG_S_BRIDGE }} ${{ env.SEG_S_CIDR }} ${{ env.SEG_S_HOST_CIDR }} kezio-3mach-group
 
-      - name: Download the manager, bootd, image-service, ingest, and seeder image tarballs
+      - name: Download the manager, bootd, boot-artifacts, image-service, ingest, and seeder image tarballs
         uses: actions/download-artifact@v8
         with:
-          pattern: "image-tar-@(manager|bootd|image-service|ingest|seeder)"
+          pattern: "image-tar-@(manager|bootd|boot-artifacts|image-service|ingest|seeder)"
           path: /tmp/images
           merge-multiple: true
 
@@ -3291,12 +3280,6 @@ jobs:
 
       - name: Install csi-driver-nfs and mark it the default StorageClass
         uses: ./.github/actions/install-nfs-storage
-
-      - name: Build the boot-artifacts image
-        run: make docker-build-boot-artifacts BOOT_ARTIFACTS_IMG="${{ env.BOOT_ARTIFACTS_IMG }}"
-
-      - name: Save the boot-artifacts image to a tarball
-        run: docker save "${{ env.BOOT_ARTIFACTS_IMG }}" -o /tmp/images/boot-artifacts.tar
 
       - name: Import the manager, bootd, boot-artifacts, image-service, ingest, and seeder images into RKE2 containerd
         uses: ./.github/actions/import-image-tarballs
@@ -3966,29 +3949,32 @@ jobs:
             [ "${{ needs.e2e-two-site-concurrent.result }}" = "success" ] && \
             [ "${{ needs.e2e-three-machine-concurrent.result }}" = "success" ]
 
-  # The one place main.yaml pushes to ghcr.io. Nothing reaches the ":main"
-  # tag until every e2e lane passed, so the six ":main" images always name
-  # one commit that the whole suite agreed on.
+  # This job and publish-boot-artifacts below are the only places
+  # main.yaml pushes to ghcr.io. Nothing reaches the ":main" tag until
+  # every e2e lane passed, so the six ":main" images always name one
+  # commit that the whole suite agreed on.
   #
   # Two guards, because one is not enough. `needs: e2e-required` alone
   # would let this job run whenever that job merely finished, and
   # e2e-required carries `if: always()`, so it finishes even when a lane
-  # failed - its *result* is what says the lanes passed. And the
-  # branch/event test keeps the pull_request half of this workflow with no
-  # registry login at all, exactly as the images job used to.
+  # failed - its *result* is what says the lanes passed. That result test
+  # is redundant only while this `if:` calls no status function: adding
+  # `always()` here would drop the implicit `success()` on needs, and the
+  # explicit test is what would still hold. And the event test keeps the
+  # pull_request half of this workflow with no registry login at all,
+  # exactly as the images job used to. No branch test: the only push
+  # trigger this workflow has is `branches: [main]`, so a push event is
+  # already on main.
   #
-  # kezio-boot-artifacts joins the five service images here. The boot-
-  # artifacts job already uploaded dist/live as the "kezio-live-image"
-  # artifact for the VM lanes to download; this job downloads that same
-  # artifact and packages it, so the published image holds the identical
-  # live environment the lanes booted, and `lb build` runs once per run
-  # rather than twice.
+  # Five rows, not six: kezio-boot-artifacts is not built from a
+  # Dockerfile at push time at all, so it ships from
+  # publish-boot-artifacts below.
   publish:
     name: Publish ${{ matrix.name }}
     needs:
       - e2e-required
     if: >-
-      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      github.event_name == 'push' &&
       needs.e2e-required.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -4021,27 +4007,8 @@ jobs:
             image: kezio-bootd
             dockerfile: docker/bootd/Dockerfile
             platforms: linux/amd64,linux/arm64
-          - name: boot-artifacts
-            image: kezio-boot-artifacts
-            dockerfile: docker/boot-artifacts/Dockerfile
-            # The packaged live environment is an amd64 kernel, initrd and
-            # squashfs - there is no arm64 variant to publish.
-            platforms: linux/amd64
     steps:
       - uses: actions/checkout@v7
-
-      # Only the boot-artifacts row has a COPY source outside the
-      # checkout: docker/boot-artifacts/Dockerfile copies dist/live/.
-      - name: Download the live boot image artifacts
-        if: matrix.name == 'boot-artifacts'
-        uses: actions/download-artifact@v8
-        with:
-          name: kezio-live-image
-          path: dist/live
-
-      - name: Fail fast if the downloaded boot artifacts are empty
-        if: matrix.name == 'boot-artifacts'
-        uses: ./.github/actions/assert-boot-artifacts-present
 
       - uses: docker/setup-qemu-action@v4
 
@@ -4060,3 +4027,72 @@ jobs:
           platforms: ${{ matrix.platforms }}
           cache-scope: ${{ matrix.name }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  # kezio-boot-artifacts ships from the tarball the boot-artifacts job
+  # built and every VM lane booted, so the published bytes are the tested
+  # bytes rather than an equivalent rebuild of the same inputs. That makes
+  # this a different operation from the publish matrix above - load and
+  # retag, no Dockerfile, no build context, no platform matrix (the
+  # packaged live environment is an amd64 kernel, initrd and squashfs;
+  # there is no arm64 variant) - so it is its own job rather than a sixth
+  # matrix row guarded by `if:` on every step. push-image-to-ghcr stays a
+  # build-and-push action, unchanged for release.yaml.
+  #
+  # Same two guards as publish, for the same reasons.
+  publish-boot-artifacts:
+    name: Publish boot-artifacts
+    needs:
+      - e2e-required
+    if: >-
+      github.event_name == 'push' &&
+      needs.e2e-required.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    env:
+      # The tag the boot-artifacts job baked into the tarball.
+      BOOT_ARTIFACTS_IMG: "example.com/kezio-boot-artifacts:e2e"
+    steps:
+      - name: Download the boot-artifacts image tarball
+        uses: actions/download-artifact@v8
+        with:
+          name: image-tar-boot-artifacts
+          path: /tmp/images
+
+      - name: Log in to the registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/kezio-boot-artifacts
+          tags: |
+            type=ref,event=branch
+
+      # `docker load` restores the exact layers the lanes ran; tagging and
+      # pushing them changes no byte of the image. The OCI labels rode in
+      # from the build in the boot-artifacts job, which is the only place
+      # they can be applied once no rebuild happens here.
+      - name: Load the tested image and push it to ghcr.io
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          # An empty tag list would push nothing and still succeed.
+          if [ -z "${TAGS//[[:space:]]/}" ]; then
+            echo "::error::docker/metadata-action derived no tag to push" >&2
+            exit 1
+          fi
+          docker load -i /tmp/images/boot-artifacts.tar
+          printf '%s\n' "${TAGS}" | while read -r tag; do
+            [ -n "${tag}" ] || continue
+            docker tag "${BOOT_ARTIFACTS_IMG}" "${tag}"
+            docker push "${tag}"
+          done
