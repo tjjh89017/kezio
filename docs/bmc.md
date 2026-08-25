@@ -31,9 +31,10 @@ sitting in its firmware setup or boot menu, or with a hung kernel) has
 nothing to receive the graceful request, so this escalation is what
 actually powers it down.
 
-`afterDeploy: PowerOff` is a different mechanism entirely and never
-reaches the BMC: it only applies when a deployment finishes with no OS
-image to reboot into (a dataImages-only deploy), and kezio-agent itself
+`MachineClaim.spec.afterDeploy: PowerOff` is a different mechanism
+entirely and never reaches the BMC: it only applies when a deployment
+finishes with no OS image to reboot into (a dataImages-only deploy),
+and kezio-agent itself
 runs the guest-side power-off (`systemctl poweroff`) from inside the
 live environment at the end of the deploy, before it ever hands control
 back to firmware. A machine whose guest never receives or acts on that

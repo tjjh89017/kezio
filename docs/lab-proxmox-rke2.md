@@ -1123,14 +1123,12 @@ spec:
   bootMACAddress: "52:54:00:be:ef:01"
   subnetRef:
     name: lab-prov
-  targetDisk:
-    serialNumber: "KEZIOLAB0001"
 EOF
 ```
 
-The Machine has no `imageRef` yet. Enrollment and deployment are
-separate: kezio inspects the machine first, and section 9 adds the
-deploy intent after the agent registers. `.github/actions/create-bmc-machine`
+The Machine carries no deploy intent yet. Enrollment and deployment are
+separate: kezio inspects the machine first, and section 9 binds a
+`MachineClaim` after the agent registers. `.github/actions/create-bmc-machine`
 and `.github/actions/deploy-machine` are the same two halves.
 
 Four fields carry lab-specific detail:
@@ -1173,20 +1171,37 @@ the PXE time-out. Set the order back by hand
 
 ## 9. Deploy, and watch it
 
-Add the deploy intent:
+Bind a `MachineClaim` carrying the deploy intent:
 
 ```sh
-kubectl -n kezio-system patch machine lab-target-1 --type=merge \
-  -p '{"spec":{"imageRef":{"name":"lab-ubuntu"}}}'
+cat <<'EOF' | kubectl apply -f -
+apiVersion: kezio.kojuro.date/v1alpha3
+kind: MachineClaim
+metadata:
+  name: lab-target-1-claim
+  namespace: kezio-system
+spec:
+  machineName: lab-target-1
+  imageRef:
+    name: lab-ubuntu
+  targetDisk:
+    serialNumber: "KEZIOLAB0001"
+EOF
+kubectl -n kezio-system get machineclaim lab-target-1-claim -w
+```
+
+Wait until `status.phase` is `Bound`, then watch the machine deploy:
+
+```sh
 kubectl -n kezio-system get machine lab-target-1 -w
 ```
 
-Leave `spec.postHookRefs` unset. kezio then substitutes the shipped
-`kezio-default-finalize` PostHook, whose steps are `mkswap`,
-`install-removable-fallback` and `efibootmgr`. **A Machine that names
-any hook opts out of that substitution.** If you name your own hook, you
-must name `kezio-default-finalize` beside it, or the disk is written and
-never made bootable.
+Leave `spec.postHookRefs` unset on the claim. kezio then substitutes
+the shipped `kezio-default-finalize` PostHook, whose steps are
+`mkswap`, `install-removable-fallback` and `efibootmgr`. **A claim that
+names any hook opts out of that substitution.** If you name your own
+hook, you must name `kezio-default-finalize` beside it, or the disk is
+written and never made bootable.
 
 The Machine goes through Enrolling, Inspecting, Available,
 Provisioning, and Provisioned. `status.state` is the workflow axis.

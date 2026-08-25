@@ -1,6 +1,6 @@
 # Custom resource reference
 
-kezio defines nine custom resources in the group
+kezio defines ten custom resources in the group
 `kezio.kojuro.date`, version `v1alpha3`. Every kind is
 namespace-scoped. This document describes each kind, and how the kinds
 refer to each other.
@@ -32,13 +32,17 @@ NETWORK                        CONTENT
   |
   |  spec.subnetRef
   |
- Machine ---- spec.imageRef ------------> Image
-  |     \---- spec.dataImages[].imageRef -> Image
-  |      \--- spec.postHookRefs ---------> PostHook
-  |                                          ^
-  |                                          |  spec.postHookRefs
-  |                                        Image
+ Machine
+  ^  spec.machineName
   |
+ MachineClaim ---- spec.imageRef ------------> Image
+  |            \--- spec.dataImages[].imageRef -> Image
+  |             \-- spec.postHookRefs ---------> PostHook
+  |                                                ^
+  |                                                |  spec.postHookRefs
+  |                                              Image
+  |
+ Machine
   +--> MachineHardware   (same name, owned by the Machine)
   +--> DeployRun         (owned by the Machine)
 ```
@@ -46,6 +50,11 @@ NETWORK                        CONTENT
 The Site of a Machine is derived, never written by hand. The chain is
 `Machine.spec.subnetRef` to `Subnet.spec.siteRef` to `Site`
 (`internal/sitederive`).
+
+A `Machine` carries no deploy intent of its own. A `MachineClaim`
+binds to one `Machine` and carries the intent - which Image, which
+data images, which disk, which hooks. See
+[MachineClaim](#machineclaim) below.
 
 ## 1. The network model
 
@@ -297,17 +306,15 @@ A `Machine` is one bare-metal machine.
 | `spec.bmc.credentialsSecretRef` | The Secret that holds the BMC user name and password. Required. |
 | `spec.subnetRef` | The `Subnet` this machine network boots through. Required. A Machine with no Subnet cannot network boot. |
 | `spec.bootMACAddress` | The MAC address of the NIC that network boots. Inspection usually discovers it. It is mandatory only when the inspect-disable annotation skips inspection. |
-| `spec.imageRef` | The `Image` to deploy as the OS. It must be bootable. It may be absent when the machine deploys only data images. |
-| `spec.dataImages` | Additional non-OS images, deployed in the same live session. Each entry has its own `imageRef` and `targetDisk`. |
-| `spec.targetDisk` | The hints that select the disk for the OS image. |
-| `spec.postHookRefs` | An ordered list of `PostHook` objects attached to this machine. |
-| `spec.params` | Schemaless input for the templating of the attached hooks. |
-| `spec.ezio` | Per-machine overrides of the cluster-wide ezio tuning of the leecher. |
-| `spec.afterDeploy` | `Reboot` or `PowerOff`. Default `Reboot`. It applies only when the deployment ends with no OS image to reboot into. |
+| `spec.claimRef` | The `MachineClaim` bound to this machine. Written only by the claim controller. |
+
+A `Machine` carries no deploy intent: no image, no disk hint, no
+hooks. That intent lives on a `MachineClaim` bound to it - see
+[MachineClaim](#machineclaim) below.
 
 **There is no power intent field on a Machine.** Power follows the
-deploy lifecycle, and the `afterDeploy` mechanism. To reboot a machine
-outside that lifecycle, use the reboot annotation.
+deploy lifecycle, and the bound claim's `afterDeploy` mechanism. To
+reboot a machine outside that lifecycle, use the reboot annotation.
 
 The `Site` of a Machine is derived, and never written by hand. kezio
 follows `Machine.spec.subnetRef` to the `Subnet`, then
@@ -317,20 +324,16 @@ machine could boot from the bootd of one segment but declare a
 different Site, and then leech from a distant seeder instead of the
 one beside it.
 
-`spec.targetDisk` and each `dataImages[].targetDisk` hold disk hints:
-`deviceName`, `serialNumber`, `wwn`, `model`, `vendor`,
-`minSizeGigabytes`, `maxSizeGigabytes`, `rotational`, `pciePath`,
-`hctl`, and `slotNumber`. All given fields must match the same disk.
-The controller matches the hints against the reported disk inventory,
-and needs exactly one match before it writes anything. All disks
-resolved for one Machine must be different from each other.
-
 `status.state` is `Enrolling`, `Inspecting`, `Available`,
-`Provisioning`, `Provisioned`, `Deprovisioning`, or `PoweringOff`. The
-last two occur only after a deletion timestamp is set. There is no
-Error state. `status.operationalStatus` (`OK`, `error`, `delayed`,
-`detached`) is a separate axis, so a failure never erases the position
-of the machine in the workflow.
+`Provisioning`, `Provisioned`, `Deprovisioning`, `PoweringOff`, or
+`Released`. `Deprovisioning` and `PoweringOff` occur only after a
+deletion timestamp is set. `Released` means the bound claim is gone
+and the machine's disks still hold whatever that claim wrote - kezio
+erases nothing. An operator returns a `Released` machine to
+`Available` with the re-inspect annotation. There is no Error state.
+`status.operationalStatus` (`OK`, `error`, `delayed`, `detached`) is a
+separate axis, so a failure never erases the position of the machine
+in the workflow.
 
 Other status fields include `currentRunRef`, `lastSuccessfulRunRef`,
 `lastAttemptedRunRef` (the last DeployRun that ended, successful or
@@ -354,6 +357,51 @@ Annotations, read directly off the object:
 | `kezio.kojuro.date/re-inspect` | Asks for a new inspection. The controller consumes the annotation, deletes the existing `MachineHardware`, and emits an Event. |
 | `kezio.kojuro.date/confirm-status-loss` | Releases the `StatusLossHold` condition. The controller consumes the annotation. |
 | `kezio.kojuro.date/bmc-insecure-skip-verify` | Set to exactly `true`, the BMC connection does not verify the TLS certificate. `false` means verify. The webhook refuses every other value. |
+
+### MachineClaim
+
+A `MachineClaim` holds the deploy intent: which Image, which data
+images, which disk, which hooks. Give it a `Machine`, and it deploys.
+
+| Field | Purpose |
+|---|---|
+| `spec.machineName` | Binds the claim to exactly one `Machine` by name. Mutually exclusive with `spec.selector`. |
+| `spec.selector` | Chooses a candidate `Machine` by label and, optionally, reported hardware, instead of naming one. Mutually exclusive with `spec.machineName`. |
+| `spec.imageRef` | The `Image` to deploy as the OS. It must be bootable. It may be absent when the claim deploys only data images. |
+| `spec.dataImages` | Additional non-OS images, deployed in the same live session. Each entry has its own `imageRef` and `targetDisk`. |
+| `spec.targetDisk` | The hints that select the disk for the OS image. Ignored when `imageRef` is absent. |
+| `spec.postHookRefs` | An ordered list of `PostHook` objects attached to this claim's deployment. |
+| `spec.params` | Schemaless input for the templating of the attached hooks. |
+| `spec.ezio` | Per-machine overrides of the cluster-wide ezio tuning of the leecher. |
+| `spec.afterDeploy` | `Reboot` or `PowerOff`. Default `Reboot`. It applies only when the deployment ends with no OS image to reboot into. |
+
+`spec.targetDisk` and each `dataImages[].targetDisk` hold disk hints:
+`deviceName`, `serialNumber`, `wwn`, `model`, `vendor`,
+`minSizeGigabytes`, `maxSizeGigabytes`, `rotational`, `pciePath`,
+`hctl`, and `slotNumber`. All given fields must match the same disk.
+The controller matches the hints against the reported disk inventory,
+and needs exactly one match before it writes anything. All disks
+resolved for one claim must be different from each other.
+
+The claim controller binds a `Pending` claim to a `Machine` (by
+`spec.machineName`, or by resolving `spec.selector` against candidate
+Machines), then writes `Machine.spec.claimRef` back and sets
+`status.phase` to `Bound`. `status.machineName` and `status.boundAt`
+record what it bound to and when. `status.phase` is `Failed` only when
+`spec.machineName` names a `Machine` that does not exist - a state
+that never retries on its own.
+
+Deleting a `MachineClaim` releases its `Machine`: the claim controller
+clears `Machine.spec.claimRef` and the Machine moves to
+`status.state` `Released`, disks untouched. Only the re-inspect
+annotation brings a `Released` machine back to `Available`.
+
+`status.currentRunRef` and `status.lastSuccessfulRunRef` name the
+`DeployRun` in flight and the most recent one that succeeded, for this
+claim's intent.
+
+Conditions: `Bound` and `Ready` (the bound machine reached
+`Provisioned` for this claim's current intent).
 
 ### MachineHardware
 
@@ -379,7 +427,8 @@ owns the object.
 | Field | Purpose |
 |---|---|
 | `spec.machineRef` | The `Machine` this run deploys to. |
-| `spec.imageRef` | The OS `Image` resolved for this run. Absent for a run that has only data images. |
+| `spec.claimRef` | The `MachineClaim` this run serves. The run outlives the claim - this is a record of who asked for it, not a dependency the run needs kept alive. |
+| `spec.imageRef` | The OS `Image` resolved for this run, copied from `MachineClaim.spec.imageRef`. Absent for a run that has only data images. |
 | `spec.dataImages` | The resolved non-OS image list. |
 | `spec.resolvedDisks` | The disk each image resolved to, against the inventory known at creation. |
 | `spec.hooksHash` | A content hash of every resolved hook step for this run. |
@@ -448,8 +497,8 @@ The steps can reference three reserved names without a declaration:
 them.
 
 Params merge in this order: the declared defaults of the PostHook,
-then `Image.spec.params`, then `Machine.spec.params`. A later entry
-overrides an earlier one.
+then `Image.spec.params`, then `MachineClaim.spec.params`. A later
+entry overrides an earlier one.
 
 Conditions: `Ready` and `Valid`.
 
@@ -460,17 +509,17 @@ the namespace of the manager. Its steps are `mkswap`,
 `install-removable-fallback`, and `efibootmgr`, all Linux-only.
 
 Hooks run in this order: the `postHookRefs` of the OS `Image` first,
-then the `postHookRefs` of the `Machine`.
+then the `postHookRefs` of the `MachineClaim`.
 
 kezio substitutes the default hook only when **all** of these hold
 (`internal/planbuild`, `resolveMachineHooks`):
 
-- `Machine.spec.postHookRefs` is empty, and
+- `MachineClaim.spec.postHookRefs` is empty, and
 - the `postHookRefs` of the OS Image is empty, and
-- the Machine deploys an OS image.
+- the claim deploys an OS image.
 
 **A caller that names any hook opts out of the substitution.** This
-holds for a hook named on the Machine, and for a hook named on the
+holds for a hook named on the claim, and for a hook named on the
 Image. If the caller still wants a boot entry, the caller must name
 `kezio-default-finalize` as well, or supply the equivalent steps.
 
@@ -519,9 +568,13 @@ default-network annotation for the same reason. See
 - A slot cannot set both `contentRef` and `fsType`.
 - The specs of `ImageImport`, `PartitionContent`, `Image`, and
   `DeployRun` are all immutable after creation.
-- Any `postHookRefs` on a Machine or on its OS Image stops the
+- Any `postHookRefs` on a MachineClaim or on its OS Image stops the
   substitution of `kezio-default-finalize`.
-- A Machine has no power intent field.
+- A Machine carries no deploy intent, and no power intent field. Both
+  live on the MachineClaim bound to it.
+- Deleting a MachineClaim releases its Machine to `status.state`
+  `Released`; the re-inspect annotation is the only way back to
+  `Available`.
 - A `Subnet` must declare a boot half, or `seederNetworkRef`, or both.
 - A seeder is per (`Image`, `Site`). A tracker is per `Site`.
 
