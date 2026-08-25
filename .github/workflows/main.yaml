@@ -730,6 +730,25 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  # The two lanes above prove the controller and the image plane on a
+  # plain cluster, with no virtual machine involved. Every lane that
+  # starts virtual machines hangs off this job, so a broken image plane
+  # stops the run here instead of after three long lanes each rediscover
+  # it. Gate only; the required-check names stay "Build" and "E2E".
+  e2e-novm-required:
+    name: E2E without VMs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    needs:
+      - e2e-fast-lane
+      - e2e-image-path
+    steps:
+      - name: All lanes without VMs passed
+        run: |
+          [ "${{ needs.e2e-fast-lane.result }}" = "success" ] && \
+            [ "${{ needs.e2e-image-path.result }}" = "success" ]
+
   # Deploy lane: a KubeVirt VM PXE-boots through a per-Subnet bootd pod
   # into the live image, kezio-agent registers with a single-use token,
   # MachineHardware holds the inventory, and the Machine reaches
@@ -749,7 +768,7 @@ jobs:
   # steps or jobs, not more matrix legs here.
   e2e-deploy:
     name: Deploy lane
-    needs: [build-required, e2e-fast-lane]
+    needs: [boot-artifacts, e2e-novm-required]
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
@@ -1365,7 +1384,7 @@ jobs:
   # is this lane's reason to exist.
   e2e-routed-site:
     name: Routed lane
-    needs: [build-required, e2e-fast-lane, e2e-network-probes]
+    needs: [boot-artifacts, e2e-novm-required, e2e-network-probes]
     runs-on: ubuntu-latest
     timeout-minutes: 150
     env:
@@ -2055,7 +2074,7 @@ jobs:
   # never leech across Sites regardless.
   e2e-two-site-concurrent:
     name: Two-site concurrent lane
-    needs: [build-required, e2e-fast-lane, e2e-network-probes]
+    needs: [boot-artifacts, e2e-novm-required, e2e-network-probes]
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
@@ -2950,9 +2969,9 @@ jobs:
             ${{ runner.temp }}/console-2site-x.log
             ${{ runner.temp }}/console-2site-y.log
 
-  # Stable required-check names for the branch ruleset. The real jobs
-  # hang off these through `needs`; the ruleset references "Build" and
-  # "E2E" so the graph can grow without ruleset edits.
+  # Stable required-check names for the branch ruleset. These two
+  # aggregate results only - no job depends on them - so the graph can
+  # grow without a ruleset edit as long as "Build" and "E2E" stay.
   build-required:
     name: Build
     runs-on: ubuntu-latest
