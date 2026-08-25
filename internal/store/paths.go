@@ -24,9 +24,12 @@ import "fmt"
 // chosen by the user at import time, not derived from the content's info
 // hash - the info hash only exists after partclone has run, and making it
 // the identity forced a second partclone run outside the cluster just to
-// learn the names. The filesystem layout inside that PVC - torrent.info,
-// a content/ data subdirectory, content.torrent - is defined in layout.go
-// and is a plain path contract with no Kubernetes API involved.
+// learn the names. The filesystem layout inside that PVC - torrent.info
+// and a content/ data subdirectory - is defined in layout.go and is a
+// plain path contract with no Kubernetes API involved. No .torrent file
+// is stored: the tracker is not part of a torrent's identity, so the
+// seeder builds one per tracker at serve time (BuildTorrentFile) from
+// the same info dict, and ValidateContentDir rejects any other file.
 
 const (
 	// pvcContentSuffix is the fixed suffix on the PVC name a
