@@ -19,7 +19,7 @@ inputs:
   namespace:
     description: Namespace the target VM and its VirtualMachineBMC live in.
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   vm-name:
     description: Name of the already-existing target VirtualMachine; also used as the VirtualMachineBMC's own name.
     required: true

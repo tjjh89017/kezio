@@ -14,7 +14,7 @@ inputs:
   namespace:
     description: 'Namespace the tracker, image-service, and the token Secret were deployed into.'
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   tracker-label-selector:
     description: >-
       Label selector matching the tracker Deployment to wait on.

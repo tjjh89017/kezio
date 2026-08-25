@@ -34,7 +34,7 @@ inputs:
   namespace:
     description: Namespace the DeployRun lives in (deploy-machine's own namespace output).
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
 
 runs:
   using: composite

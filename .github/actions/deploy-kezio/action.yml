@@ -14,7 +14,7 @@ inputs:
   namespace:
     description: 'Namespace the kustomize overlay deploys the controller-manager into.'
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   kustomize-dir:
     description: 'Kustomize overlay directory to apply after CRD install.'
     required: false

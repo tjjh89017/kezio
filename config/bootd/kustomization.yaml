@@ -12,7 +12,7 @@
 # label on its Subnet's namespace and a NetworkAttachmentDefinition
 # there (see networkattachmentdefinition.example.yaml), neither of which
 # this kustomization provisions.
-namespace: scaffold-system
+namespace: kezio-system
 namePrefix: kezio-
 
 labels:

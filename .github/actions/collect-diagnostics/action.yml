@@ -16,7 +16,7 @@ inputs:
   namespace:
     description: 'Namespace to collect the controller-manager pod/logs from.'
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   workload-namespace:
     description: >-
       Namespace to collect the Machine/DeployRun/MachineHardware CRs and
@@ -78,7 +78,7 @@ runs:
 
         # csi-driver-nfs's controller/node run in kube-system, and the NFS
         # server itself in "default" - neither is NAMESPACE, and both
-        # exist before scaffold-system does (install-nfs-storage runs
+        # exist before kezio-system does (install-nfs-storage runs
         # ahead of the controller-manager that creates that namespace). A
         # silently-failing driver or server leaves every RWX PVC in
         # NAMESPACE unbound (or bound but unmountable) with no clue why

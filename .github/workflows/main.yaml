@@ -291,7 +291,7 @@ jobs:
         uses: ./.github/actions/run-fake-plan-walk
         with:
           namespace: "default"
-          manager-namespace: "scaffold-system"
+          manager-namespace: "kezio-system"
           subnet-name: kezio-e2e-fast-lane-subnet
 
       - name: Run a fake-deployer disk-hint matching walk
@@ -309,7 +309,7 @@ jobs:
         if: failure()
         uses: ./.github/actions/collect-diagnostics
         with:
-          namespace: "scaffold-system"
+          namespace: "kezio-system"
           workload-namespace: "default"
 
       - name: Upload diagnostics
@@ -404,7 +404,7 @@ jobs:
       - name: Install cert-manager
         uses: ./.github/actions/install-cert-manager
 
-      # Creates the scaffold-system namespace (config/manager/manager.yaml)
+      # Creates the kezio-system namespace (config/manager/manager.yaml)
       # that opentracker and the token Secret deploy into below - it must
       # run first.
       # The manager-image tag must match the local-tag the images job
@@ -499,7 +499,7 @@ jobs:
         with:
           name: kezio-e2e-image-path-site
           seeder-subnet-name: kezio-e2e-leecher-demand-subnet
-          tracker-external-url: http://opentracker.scaffold-system.svc.cluster.local:6969/announce
+          tracker-external-url: http://opentracker.kezio-system.svc.cluster.local:6969/announce
           wait-for: Ready
 
       - name: Create the image-service bearer token Secret
@@ -558,7 +558,7 @@ jobs:
         if: failure()
         uses: ./.github/actions/collect-diagnostics
         with:
-          namespace: "scaffold-system"
+          namespace: "kezio-system"
           workload-namespace: "default"
 
       - name: Upload diagnostics
@@ -732,8 +732,8 @@ jobs:
             AGENT_SERVER_ADDR=:8091
             BOOTD_DEPLOYMENT_IMAGE=example.com/kezio-bootd:e2e
             BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE=${{ env.BOOT_ARTIFACTS_IMG }}
-            BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL=http://boot-server.scaffold-system.svc.cluster.local:8090
-            BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL=http://agent-server.scaffold-system.svc.cluster.local:8091
+            BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL=http://boot-server.kezio-system.svc.cluster.local:8090
+            BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL=http://agent-server.kezio-system.svc.cluster.local:8091
             IMAGE_INGEST_STAGING_PVC=kezio-image-service-staging
             IMAGE_INGEST_IMAGE=example.com/kezio-ingest:e2e
             IMAGE_INGEST_SOURCE_FORMAT=raw
@@ -860,7 +860,7 @@ jobs:
         with:
           secret-name: "${{ env.TARGET_VM_NAME }}-bmc-creds"
           machine-name: ${{ env.TARGET_VM_NAME }}
-          bmc-address: "redfish+http://${{ env.TARGET_VM_NAME }}-virtbmc.scaffold-system.svc.cluster.local/redfish/v1/Systems/1"
+          bmc-address: "redfish+http://${{ env.TARGET_VM_NAME }}-virtbmc.kezio-system.svc.cluster.local/redfish/v1/Systems/1"
           boot-mac: ${{ env.TARGET_VM_MAC }}
           subnet-name: ${{ env.SUBNET_NAME }}
           target-disk-serial: "${{ env.TARGET_DISK_SERIAL }}"
@@ -1092,7 +1092,7 @@ jobs:
           output-dir: e2e-bundle
           deployments: |
             kezio-bootd-${{ env.SUBNET_NAME }}:bootd.log
-            scaffold-controller-manager:controller-manager.log
+            kezio-controller-manager:controller-manager.log
             kezio-image-service:image-service.log
           resources: |
             machine/${{ env.TARGET_VM_NAME }}:machine.yaml
@@ -1145,7 +1145,7 @@ jobs:
         uses: ./.github/actions/collect-site-diagnostics
         with:
           artifact-name-prefix: deploy-${{ matrix.dhcp-scenario }}
-          namespaces: "scaffold-system"
+          namespaces: "kezio-system"
           tracker-label-selector: "app.kubernetes.io/name=kezio,app.kubernetes.io/component=tracker"
           bridges: ${{ env.PROVISIONING_BRIDGE }}
           extra-artifact-paths: ${{ runner.temp }}/console-${{ matrix.dhcp-scenario }}.log
@@ -1336,8 +1336,8 @@ jobs:
             AGENT_SERVER_ADDR=:8091
             BOOTD_DEPLOYMENT_IMAGE=example.com/kezio-bootd:e2e
             BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE=${{ env.BOOT_ARTIFACTS_IMG }}
-            BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL=http://boot-server.scaffold-system.svc.cluster.local:8090
-            BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL=http://agent-server.scaffold-system.svc.cluster.local:8091
+            BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL=http://boot-server.kezio-system.svc.cluster.local:8090
+            BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL=http://agent-server.kezio-system.svc.cluster.local:8091
             IMAGE_INGEST_STAGING_PVC=kezio-image-service-staging
             IMAGE_INGEST_IMAGE=example.com/kezio-ingest:e2e
             IMAGE_INGEST_SOURCE_FORMAT=raw
@@ -1357,7 +1357,7 @@ jobs:
       - name: Create the boot NetworkAttachmentDefinitions for segments A and B
         shell: bash
         env:
-          NAMESPACE: "scaffold-system"
+          NAMESPACE: "kezio-system"
           SEG_A_BRIDGE: ${{ env.SEG_A_BRIDGE }}
           SEG_B_BRIDGE: ${{ env.SEG_B_BRIDGE }}
           BOOTD_A_IP: ${{ env.BOOTD_A_IP }}
@@ -1536,7 +1536,7 @@ jobs:
         with:
           secret-name: "${{ env.VM_A_NAME }}-bmc-creds"
           machine-name: ${{ env.VM_A_NAME }}
-          bmc-address: "redfish+http://${{ env.VM_A_NAME }}-virtbmc.scaffold-system.svc.cluster.local/redfish/v1/Systems/1"
+          bmc-address: "redfish+http://${{ env.VM_A_NAME }}-virtbmc.kezio-system.svc.cluster.local/redfish/v1/Systems/1"
           boot-mac: ${{ env.VM_A_MAC }}
           subnet-name: ${{ env.SUBNET_A_NAME }}
           target-disk-serial: "${{ env.DISK_A_SERIAL }}"
@@ -1546,7 +1546,7 @@ jobs:
         with:
           secret-name: "${{ env.VM_B_NAME }}-bmc-creds"
           machine-name: ${{ env.VM_B_NAME }}
-          bmc-address: "redfish+http://${{ env.VM_B_NAME }}-virtbmc.scaffold-system.svc.cluster.local/redfish/v1/Systems/1"
+          bmc-address: "redfish+http://${{ env.VM_B_NAME }}-virtbmc.kezio-system.svc.cluster.local/redfish/v1/Systems/1"
           boot-mac: ${{ env.VM_B_MAC }}
           subnet-name: ${{ env.SUBNET_B_NAME }}
           target-disk-serial: "${{ env.DISK_B_SERIAL }}"
@@ -1626,7 +1626,7 @@ jobs:
         shell: bash
         env:
           IMAGE_NAME: ${{ steps.build-image.outputs.image-name }}
-          SITE_IDENTITY: "scaffold-system/${{ env.SITE_NAME }}"
+          SITE_IDENTITY: "kezio-system/${{ env.SITE_NAME }}"
         run: |
           set -euo pipefail
           prefix="kezio-seeder-"
@@ -1648,14 +1648,14 @@ jobs:
         run: |
           set -euo pipefail
           patch='{"spec":{"imageRef":{"name":"${{ steps.build-image.outputs.image-name }}"},"postHookRefs":[]}}'
-          kubectl patch machine "${{ env.VM_A_NAME }}" -n scaffold-system --type=merge -p "${patch}"
+          kubectl patch machine "${{ env.VM_A_NAME }}" -n kezio-system --type=merge -p "${patch}"
 
       - name: Set machine B's deploy intent
         shell: bash
         run: |
           set -euo pipefail
           patch='{"spec":{"imageRef":{"name":"${{ steps.build-image.outputs.image-name }}"},"postHookRefs":[]}}'
-          kubectl patch machine "${{ env.VM_B_NAME }}" -n scaffold-system --type=merge -p "${patch}"
+          kubectl patch machine "${{ env.VM_B_NAME }}" -n kezio-system --type=merge -p "${patch}"
 
       # Proof 1 (concurrency) and proof 5 (PartitionContent.status.seeders[]
       # reports one Site entry with machineCount 2) together: both machines
@@ -1667,13 +1667,13 @@ jobs:
       - name: Assert both deploys are in flight at once, with PartitionContent reporting machineCount 2
         uses: ./.github/actions/assert-concurrent-deploy-demand
         with:
-          namespace: "scaffold-system"
+          namespace: "kezio-system"
           image-name: ${{ steps.build-image.outputs.image-name }}
           machines: |
             ${{ env.VM_A_NAME }}
             ${{ env.VM_B_NAME }}
           expected-demand: |
-            scaffold-system/${{ env.SITE_NAME }}=2
+            kezio-system/${{ env.SITE_NAME }}=2
 
       # Resolved here, mid-deploy, for the swarm read below and not
       # reused later: the info hash it reads is what the tracker scrape
@@ -1745,9 +1745,9 @@ jobs:
         uses: ./.github/actions/assert-seeder-placement
         with:
           image-name: ${{ steps.build-image.outputs.image-name }}
-          site-namespace: "scaffold-system"
+          site-namespace: "kezio-system"
           site-name: ${{ env.SITE_NAME }}
-          expected-seeding-nad: "scaffold-system/kezio-seeder-network"
+          expected-seeding-nad: "kezio-system/kezio-seeder-network"
           expected-tracker-url: "http://${{ env.TRACKER_IP }}:6969/announce"
 
       # Proof 2 (explicit half): no second seeder Deployment appeared even
@@ -1758,11 +1758,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          count="$(kubectl get deployments -n scaffold-system -l app.kubernetes.io/component=image-seeder -o json | jq '.items | length')"
-          echo "seeder Deployments in scaffold-system: ${count}"
+          count="$(kubectl get deployments -n kezio-system -l app.kubernetes.io/component=image-seeder -o json | jq '.items | length')"
+          echo "seeder Deployments in kezio-system: ${count}"
           if [ "${count}" -ne 1 ]; then
-            echo "::error::expected exactly 1 seeder Deployment in scaffold-system (one per (Image, Site) pair; this lane deploys one Image to one Site), found ${count}" >&2
-            kubectl get deployments -n scaffold-system -l app.kubernetes.io/component=image-seeder -o wide
+            echo "::error::expected exactly 1 seeder Deployment in kezio-system (one per (Image, Site) pair; this lane deploys one Image to one Site), found ${count}" >&2
+            kubectl get deployments -n kezio-system -l app.kubernetes.io/component=image-seeder -o wide
             exit 1
           fi
 
@@ -1775,9 +1775,9 @@ jobs:
       - name: Assert the Site's tracker placement and status reflection
         uses: ./.github/actions/assert-tracker-placement
         with:
-          site-namespace: "scaffold-system"
+          site-namespace: "kezio-system"
           site-name: ${{ env.SITE_NAME }}
-          expected-seeding-nad-namespace: "scaffold-system"
+          expected-seeding-nad-namespace: "kezio-system"
           expected-seeding-nad-name: "kezio-seeder-network"
           expected-tracker-ip: ${{ env.TRACKER_IP }}
           expected-ready-status: "Unknown"
@@ -1834,7 +1834,7 @@ jobs:
       - name: Assert the Site's status
         uses: ./.github/actions/assert-site-status
         with:
-          site-namespace: "scaffold-system"
+          site-namespace: "kezio-system"
           site-name: ${{ env.SITE_NAME }}
           expected-subnet-refs: |
             ${{ env.SUBNET_A_NAME }}
@@ -1850,7 +1850,7 @@ jobs:
         uses: ./.github/actions/collect-site-diagnostics
         with:
           artifact-name-prefix: routed
-          namespaces: "scaffold-system"
+          namespaces: "kezio-system"
           tracker-label-selector: "app.kubernetes.io/name=kezio,app.kubernetes.io/component=tracker"
           bridges: |
             ${{ env.SEG_A_BRIDGE }}
@@ -2031,8 +2031,8 @@ jobs:
             AGENT_SERVER_ADDR=:8091
             BOOTD_DEPLOYMENT_IMAGE=example.com/kezio-bootd:e2e
             BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE=${{ env.BOOT_ARTIFACTS_IMG }}
-            BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL=http://boot-server.scaffold-system.svc.cluster.local:8090
-            BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL=http://agent-server.scaffold-system.svc.cluster.local:8091
+            BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL=http://boot-server.kezio-system.svc.cluster.local:8090
+            BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL=http://agent-server.kezio-system.svc.cluster.local:8091
             IMAGE_INGEST_STAGING_PVC=kezio-image-service-staging
             IMAGE_INGEST_IMAGE=example.com/kezio-ingest:e2e
             IMAGE_INGEST_SOURCE_FORMAT=raw
@@ -2057,7 +2057,7 @@ jobs:
       - name: Create the boot and seeding NetworkAttachmentDefinitions for Site X and Site Y
         shell: bash
         env:
-          NAMESPACE: "scaffold-system"
+          NAMESPACE: "kezio-system"
           SEG_X_BRIDGE: ${{ env.SEG_X_BRIDGE }}
           SEG_Y_BRIDGE: ${{ env.SEG_Y_BRIDGE }}
           BOOTD_X_IP: ${{ env.BOOTD_X_IP }}
@@ -2327,7 +2327,7 @@ jobs:
         with:
           secret-name: "${{ env.VM_X_NAME }}-bmc-creds"
           machine-name: ${{ env.VM_X_NAME }}
-          bmc-address: "redfish+http://${{ env.VM_X_NAME }}-virtbmc.scaffold-system.svc.cluster.local/redfish/v1/Systems/1"
+          bmc-address: "redfish+http://${{ env.VM_X_NAME }}-virtbmc.kezio-system.svc.cluster.local/redfish/v1/Systems/1"
           boot-mac: ${{ env.VM_X_MAC }}
           subnet-name: ${{ env.SUBNET_X_NAME }}
           target-disk-serial: "${{ env.DISK_X_SERIAL }}"
@@ -2337,7 +2337,7 @@ jobs:
         with:
           secret-name: "${{ env.VM_Y_NAME }}-bmc-creds"
           machine-name: ${{ env.VM_Y_NAME }}
-          bmc-address: "redfish+http://${{ env.VM_Y_NAME }}-virtbmc.scaffold-system.svc.cluster.local/redfish/v1/Systems/1"
+          bmc-address: "redfish+http://${{ env.VM_Y_NAME }}-virtbmc.kezio-system.svc.cluster.local/redfish/v1/Systems/1"
           boot-mac: ${{ env.VM_Y_MAC }}
           subnet-name: ${{ env.SUBNET_Y_NAME }}
           target-disk-serial: "${{ env.DISK_Y_SERIAL }}"
@@ -2416,14 +2416,14 @@ jobs:
         run: |
           set -euo pipefail
           patch='{"spec":{"imageRef":{"name":"${{ steps.build-image.outputs.image-name }}"},"postHookRefs":[]}}'
-          kubectl patch machine "${{ env.VM_X_NAME }}" -n scaffold-system --type=merge -p "${patch}"
+          kubectl patch machine "${{ env.VM_X_NAME }}" -n kezio-system --type=merge -p "${patch}"
 
       - name: Set machine Y's deploy intent
         shell: bash
         run: |
           set -euo pipefail
           patch='{"spec":{"imageRef":{"name":"${{ steps.build-image.outputs.image-name }}"},"postHookRefs":[]}}'
-          kubectl patch machine "${{ env.VM_Y_NAME }}" -n scaffold-system --type=merge -p "${patch}"
+          kubectl patch machine "${{ env.VM_Y_NAME }}" -n kezio-system --type=merge -p "${patch}"
 
       # Waits for both per-(Image, Site) seeder Deployments to exist, and
       # for each one's pod to hold an address - the earliest point the
@@ -2442,10 +2442,10 @@ jobs:
         id: wait-seeders
         shell: bash
         env:
-          NAMESPACE: "scaffold-system"
+          NAMESPACE: "kezio-system"
           IMAGE_NAME: ${{ steps.build-image.outputs.image-name }}
-          SITE_X_IDENTITY: "scaffold-system/${{ env.SITE_X_NAME }}"
-          SITE_Y_IDENTITY: "scaffold-system/${{ env.SITE_Y_NAME }}"
+          SITE_X_IDENTITY: "kezio-system/${{ env.SITE_X_NAME }}"
+          SITE_Y_IDENTITY: "kezio-system/${{ env.SITE_Y_NAME }}"
         run: |
           set -euo pipefail
           compute_name() {
@@ -2561,14 +2561,14 @@ jobs:
       - name: Assert both deploys are in flight at once, with PartitionContent reporting one machine per Site
         uses: ./.github/actions/assert-concurrent-deploy-demand
         with:
-          namespace: "scaffold-system"
+          namespace: "kezio-system"
           image-name: ${{ steps.build-image.outputs.image-name }}
           machines: |
             ${{ env.VM_X_NAME }}
             ${{ env.VM_Y_NAME }}
           expected-demand: |
-            scaffold-system/${{ env.SITE_X_NAME }}=1
-            scaffold-system/${{ env.SITE_Y_NAME }}=1
+            kezio-system/${{ env.SITE_X_NAME }}=1
+            kezio-system/${{ env.SITE_Y_NAME }}=1
           summary-title: "Concurrent two-site deploy evidence"
 
       # Resolved here, mid-deploy, for the two swarm reads below and not
@@ -2662,18 +2662,18 @@ jobs:
         uses: ./.github/actions/assert-seeder-placement
         with:
           image-name: ${{ steps.build-image.outputs.image-name }}
-          site-namespace: "scaffold-system"
+          site-namespace: "kezio-system"
           site-name: ${{ env.SITE_X_NAME }}
-          expected-seeding-nad: "scaffold-system/${{ env.SEEDER_NAD_X_NAME }}"
+          expected-seeding-nad: "kezio-system/${{ env.SEEDER_NAD_X_NAME }}"
           expected-tracker-url: "http://${{ env.TRACKER_X_IP }}:6969/announce"
 
       - name: Assert Site Y's seeder Deployment placement and tuning contract
         uses: ./.github/actions/assert-seeder-placement
         with:
           image-name: ${{ steps.build-image.outputs.image-name }}
-          site-namespace: "scaffold-system"
+          site-namespace: "kezio-system"
           site-name: ${{ env.SITE_Y_NAME }}
-          expected-seeding-nad: "scaffold-system/${{ env.SEEDER_NAD_Y_NAME }}"
+          expected-seeding-nad: "kezio-system/${{ env.SEEDER_NAD_Y_NAME }}"
           expected-tracker-url: "http://${{ env.TRACKER_Y_IP }}:6969/announce"
 
       # Proof 2 (explicit half): exactly two seeder Deployments exist -
@@ -2682,11 +2682,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          count="$(kubectl get deployments -n scaffold-system -l app.kubernetes.io/component=image-seeder -o json | jq '.items | length')"
-          echo "seeder Deployments in scaffold-system: ${count}"
+          count="$(kubectl get deployments -n kezio-system -l app.kubernetes.io/component=image-seeder -o json | jq '.items | length')"
+          echo "seeder Deployments in kezio-system: ${count}"
           if [ "${count}" -ne 2 ]; then
-            echo "::error::expected exactly 2 seeder Deployments in scaffold-system (one per Site; this lane deploys one Image to two Sites), found ${count}" >&2
-            kubectl get deployments -n scaffold-system -l app.kubernetes.io/component=image-seeder -o wide
+            echo "::error::expected exactly 2 seeder Deployments in kezio-system (one per Site; this lane deploys one Image to two Sites), found ${count}" >&2
+            kubectl get deployments -n kezio-system -l app.kubernetes.io/component=image-seeder -o wide
             exit 1
           fi
 
@@ -2700,7 +2700,7 @@ jobs:
         uses: ./.github/actions/assert-tracker-placement
         with:
           site-name: ${{ env.SITE_X_NAME }}
-          expected-seeding-nad-namespace: "scaffold-system"
+          expected-seeding-nad-namespace: "kezio-system"
           expected-seeding-nad-name: ${{ env.SEEDER_NAD_X_NAME }}
           expected-tracker-ip: ${{ env.TRACKER_X_IP }}
           expected-ready-status: "Unknown"
@@ -2710,7 +2710,7 @@ jobs:
         uses: ./.github/actions/assert-tracker-placement
         with:
           site-name: ${{ env.SITE_Y_NAME }}
-          expected-seeding-nad-namespace: "scaffold-system"
+          expected-seeding-nad-namespace: "kezio-system"
           expected-seeding-nad-name: ${{ env.SEEDER_NAD_Y_NAME }}
           expected-tracker-ip: ${{ env.TRACKER_Y_IP }}
           expected-ready-status: "Unknown"
@@ -2831,7 +2831,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          kubectl patch subnet "${{ env.SUBNET_Y_NAME }}" -n scaffold-system --type=merge \
+          kubectl patch subnet "${{ env.SUBNET_Y_NAME }}" -n kezio-system --type=merge \
             -p '{"spec":{"seederNetworkRef":{"name":"kezio-seeder-network-y-does-not-exist"}}}'
 
       # Waits for both halves of the degraded shape, not only Valid: the
@@ -2846,9 +2846,9 @@ jobs:
           set -euo pipefail
           deadline=$(( $(date +%s) + 120 ))
           while true; do
-            valid_reason="$(kubectl get site "${{ env.SITE_Y_NAME }}" -n scaffold-system \
+            valid_reason="$(kubectl get site "${{ env.SITE_Y_NAME }}" -n kezio-system \
               -o jsonpath='{.status.conditions[?(@.type=="Valid")].reason}' || true)"
-            ready_status="$(kubectl get site "${{ env.SITE_Y_NAME }}" -n scaffold-system \
+            ready_status="$(kubectl get site "${{ env.SITE_Y_NAME }}" -n kezio-system \
               -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' || true)"
             echo "$(date -Is) Site Y Valid.reason=${valid_reason:-<empty>} Ready=${ready_status:-<empty>}"
             if [ "${valid_reason}" = "SeederNADNotFound" ] && [ "${ready_status}" = "False" ]; then
@@ -2856,7 +2856,7 @@ jobs:
             fi
             if [ "$(date +%s)" -ge "${deadline}" ]; then
               echo "::error::Site Y never reported Valid=SeederNADNotFound with Ready=False after the fault" >&2
-              kubectl get site "${{ env.SITE_Y_NAME }}" -n scaffold-system -o yaml
+              kubectl get site "${{ env.SITE_Y_NAME }}" -n kezio-system -o yaml
               exit 1
             fi
             sleep 3
@@ -2892,7 +2892,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          kubectl patch subnet "${{ env.SUBNET_Y_NAME }}" -n scaffold-system --type=merge \
+          kubectl patch subnet "${{ env.SUBNET_Y_NAME }}" -n kezio-system --type=merge \
             -p '{"spec":{"seederNetworkRef":{"name":"${{ env.SEEDER_NAD_Y_NAME }}"}}}'
 
       # Recovery is the pre-fault state, which is Valid=Unknown with
@@ -2906,13 +2906,13 @@ jobs:
           set -euo pipefail
           deadline=$(( $(date +%s) + 60 ))
           while true; do
-            reason="$(kubectl get site "${{ env.SITE_Y_NAME }}" -n scaffold-system \
+            reason="$(kubectl get site "${{ env.SITE_Y_NAME }}" -n kezio-system \
               -o jsonpath='{.status.conditions[?(@.type=="Valid")].reason}' || true)"
             echo "$(date -Is) Site Y Valid.reason=${reason:-<empty>}"
             [ "${reason}" = "TrackerIPAMHostLocalBounded" ] && break
             if [ "$(date +%s)" -ge "${deadline}" ]; then
               echo "::error::Site Y did not recover to Valid.reason=TrackerIPAMHostLocalBounded after reverting the fault" >&2
-              kubectl get site "${{ env.SITE_Y_NAME }}" -n scaffold-system -o yaml
+              kubectl get site "${{ env.SITE_Y_NAME }}" -n kezio-system -o yaml
               exit 1
             fi
             sleep 3
@@ -2923,7 +2923,7 @@ jobs:
         uses: ./.github/actions/collect-site-diagnostics
         with:
           artifact-name-prefix: two-site
-          namespaces: "scaffold-system"
+          namespaces: "kezio-system"
           tracker-label-selector: "app.kubernetes.io/name=kezio,app.kubernetes.io/component=tracker"
           bridges: |
             ${{ env.SEG_X_BRIDGE }}
@@ -3120,8 +3120,8 @@ jobs:
             AGENT_SERVER_ADDR=:8091
             BOOTD_DEPLOYMENT_IMAGE=example.com/kezio-bootd:e2e
             BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE=${{ env.BOOT_ARTIFACTS_IMG }}
-            BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL=http://boot-server.scaffold-system.svc.cluster.local:8090
-            BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL=http://agent-server.scaffold-system.svc.cluster.local:8091
+            BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL=http://boot-server.kezio-system.svc.cluster.local:8090
+            BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL=http://agent-server.kezio-system.svc.cluster.local:8091
             IMAGE_INGEST_STAGING_PVC=kezio-image-service-staging
             IMAGE_INGEST_IMAGE=example.com/kezio-ingest:e2e
             IMAGE_INGEST_SOURCE_FORMAT=raw
@@ -3145,7 +3145,7 @@ jobs:
       - name: Create the boot NetworkAttachmentDefinitions for segment T
         shell: bash
         env:
-          NAMESPACE: "scaffold-system"
+          NAMESPACE: "kezio-system"
           SEG_T_BRIDGE: ${{ env.SEG_T_BRIDGE }}
           BOOTD_T_IP: ${{ env.BOOTD_T_IP }}
         run: |
@@ -3317,7 +3317,7 @@ jobs:
         with:
           secret-name: "${{ env.VM_1_NAME }}-bmc-creds"
           machine-name: ${{ env.VM_1_NAME }}
-          bmc-address: "redfish+http://${{ env.VM_1_NAME }}-virtbmc.scaffold-system.svc.cluster.local/redfish/v1/Systems/1"
+          bmc-address: "redfish+http://${{ env.VM_1_NAME }}-virtbmc.kezio-system.svc.cluster.local/redfish/v1/Systems/1"
           boot-mac: ${{ env.VM_1_MAC }}
           subnet-name: ${{ env.SUBNET_T_NAME }}
           target-disk-serial: "${{ env.DISK_1_SERIAL }}"
@@ -3327,7 +3327,7 @@ jobs:
         with:
           secret-name: "${{ env.VM_2_NAME }}-bmc-creds"
           machine-name: ${{ env.VM_2_NAME }}
-          bmc-address: "redfish+http://${{ env.VM_2_NAME }}-virtbmc.scaffold-system.svc.cluster.local/redfish/v1/Systems/1"
+          bmc-address: "redfish+http://${{ env.VM_2_NAME }}-virtbmc.kezio-system.svc.cluster.local/redfish/v1/Systems/1"
           boot-mac: ${{ env.VM_2_MAC }}
           subnet-name: ${{ env.SUBNET_T_NAME }}
           target-disk-serial: "${{ env.DISK_2_SERIAL }}"
@@ -3337,7 +3337,7 @@ jobs:
         with:
           secret-name: "${{ env.VM_3_NAME }}-bmc-creds"
           machine-name: ${{ env.VM_3_NAME }}
-          bmc-address: "redfish+http://${{ env.VM_3_NAME }}-virtbmc.scaffold-system.svc.cluster.local/redfish/v1/Systems/1"
+          bmc-address: "redfish+http://${{ env.VM_3_NAME }}-virtbmc.kezio-system.svc.cluster.local/redfish/v1/Systems/1"
           boot-mac: ${{ env.VM_3_MAC }}
           subnet-name: ${{ env.SUBNET_T_NAME }}
           target-disk-serial: "${{ env.DISK_3_SERIAL }}"
@@ -3430,7 +3430,7 @@ jobs:
         shell: bash
         env:
           IMAGE_NAME: ${{ steps.build-image.outputs.image-name }}
-          SITE_IDENTITY: "scaffold-system/${{ env.SITE_NAME }}"
+          SITE_IDENTITY: "kezio-system/${{ env.SITE_NAME }}"
         run: |
           set -euo pipefail
           prefix="kezio-seeder-"
@@ -3452,21 +3452,21 @@ jobs:
         run: |
           set -euo pipefail
           patch='{"spec":{"imageRef":{"name":"${{ steps.build-image.outputs.image-name }}"},"postHookRefs":[]}}'
-          kubectl patch machine "${{ env.VM_1_NAME }}" -n scaffold-system --type=merge -p "${patch}"
+          kubectl patch machine "${{ env.VM_1_NAME }}" -n kezio-system --type=merge -p "${patch}"
 
       - name: Set machine 2's deploy intent
         shell: bash
         run: |
           set -euo pipefail
           patch='{"spec":{"imageRef":{"name":"${{ steps.build-image.outputs.image-name }}"},"postHookRefs":[]}}'
-          kubectl patch machine "${{ env.VM_2_NAME }}" -n scaffold-system --type=merge -p "${patch}"
+          kubectl patch machine "${{ env.VM_2_NAME }}" -n kezio-system --type=merge -p "${patch}"
 
       - name: Set machine 3's deploy intent
         shell: bash
         run: |
           set -euo pipefail
           patch='{"spec":{"imageRef":{"name":"${{ steps.build-image.outputs.image-name }}"},"postHookRefs":[]}}'
-          kubectl patch machine "${{ env.VM_3_NAME }}" -n scaffold-system --type=merge -p "${patch}"
+          kubectl patch machine "${{ env.VM_3_NAME }}" -n kezio-system --type=merge -p "${patch}"
 
       # The overlap is ASSERTED, not hoped for: this polls until all
       # three Machines are observed mid-deploy (state != Provisioned,
@@ -3480,14 +3480,14 @@ jobs:
       - name: Assert all three deploys are in flight at once, with PartitionContent reporting machineCount 3
         uses: ./.github/actions/assert-concurrent-deploy-demand
         with:
-          namespace: "scaffold-system"
+          namespace: "kezio-system"
           image-name: ${{ steps.build-image.outputs.image-name }}
           machines: |
             ${{ env.VM_1_NAME }}
             ${{ env.VM_2_NAME }}
             ${{ env.VM_3_NAME }}
           expected-demand: |
-            scaffold-system/${{ env.SITE_NAME }}=3
+            kezio-system/${{ env.SITE_NAME }}=3
           summary-title: "Concurrent three-machine deploy evidence"
 
       # Resolved here, mid-deploy, and not reused later: the info hash it
@@ -3529,7 +3529,7 @@ jobs:
       - name: Record live-environment memory use during the deploy (not a gate)
         shell: bash
         env:
-          NAMESPACE: "scaffold-system"
+          NAMESPACE: "kezio-system"
           VM_NAMES: "${{ env.VM_1_NAME }} ${{ env.VM_2_NAME }} ${{ env.VM_3_NAME }}"
         run: |
           set -uo pipefail
@@ -3608,20 +3608,20 @@ jobs:
         uses: ./.github/actions/assert-seeder-placement
         with:
           image-name: ${{ steps.build-image.outputs.image-name }}
-          site-namespace: "scaffold-system"
+          site-namespace: "kezio-system"
           site-name: ${{ env.SITE_NAME }}
-          expected-seeding-nad: "scaffold-system/kezio-seeder-network"
+          expected-seeding-nad: "kezio-system/kezio-seeder-network"
           expected-tracker-url: "http://${{ env.TRACKER_IP }}:6969/announce"
 
       - name: Assert no second seeder Deployment appeared
         shell: bash
         run: |
           set -euo pipefail
-          count="$(kubectl get deployments -n scaffold-system -l app.kubernetes.io/component=image-seeder -o json | jq '.items | length')"
-          echo "seeder Deployments in scaffold-system: ${count}"
+          count="$(kubectl get deployments -n kezio-system -l app.kubernetes.io/component=image-seeder -o json | jq '.items | length')"
+          echo "seeder Deployments in kezio-system: ${count}"
           if [ "${count}" -ne 1 ]; then
-            echo "::error::expected exactly 1 seeder Deployment in scaffold-system (one per (Image, Site) pair; this lane deploys one Image to one Site, whatever the machine count), found ${count}" >&2
-            kubectl get deployments -n scaffold-system -l app.kubernetes.io/component=image-seeder -o wide
+            echo "::error::expected exactly 1 seeder Deployment in kezio-system (one per (Image, Site) pair; this lane deploys one Image to one Site, whatever the machine count), found ${count}" >&2
+            kubectl get deployments -n kezio-system -l app.kubernetes.io/component=image-seeder -o wide
             exit 1
           fi
 
@@ -3631,9 +3631,9 @@ jobs:
       - name: Assert the Site's tracker placement and status reflection
         uses: ./.github/actions/assert-tracker-placement
         with:
-          site-namespace: "scaffold-system"
+          site-namespace: "kezio-system"
           site-name: ${{ env.SITE_NAME }}
-          expected-seeding-nad-namespace: "scaffold-system"
+          expected-seeding-nad-namespace: "kezio-system"
           expected-seeding-nad-name: "kezio-seeder-network"
           expected-tracker-ip: ${{ env.TRACKER_IP }}
           expected-ready-status: "Unknown"
@@ -3679,7 +3679,7 @@ jobs:
       - name: Assert the Site's status
         uses: ./.github/actions/assert-site-status
         with:
-          site-namespace: "scaffold-system"
+          site-namespace: "kezio-system"
           site-name: ${{ env.SITE_NAME }}
           expected-subnet-refs: |
             ${{ env.SUBNET_T_NAME }}
@@ -3694,7 +3694,7 @@ jobs:
         uses: ./.github/actions/collect-site-diagnostics
         with:
           artifact-name-prefix: three-machine
-          namespaces: "scaffold-system"
+          namespaces: "kezio-system"
           tracker-label-selector: "app.kubernetes.io/name=kezio,app.kubernetes.io/component=tracker"
           bridges: |
             ${{ env.SEG_T_BRIDGE }}

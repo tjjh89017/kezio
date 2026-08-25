@@ -14,7 +14,7 @@ inputs:
   namespace:
     description: 'Namespace the kustomize overlay deploys image-service into.'
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   kustomize-dir:
     description: 'Kustomize overlay directory to apply.'
     required: false

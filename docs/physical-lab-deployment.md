@@ -174,13 +174,13 @@ controller does not create for you, alongside the NAD from 2.2:
 - **A `bootd` ServiceAccount, bound to `config/bootd/rbac.yaml`'s
   ClusterRole.** Apply it with `kubectl apply -k config/bootd`. That
   kustomization gives the ServiceAccount the base name `bootd`, the
-  `kezio-` name prefix, and the `scaffold-system` namespace, so the
-  applied object is `kezio-bootd` in `scaffold-system` and nowhere
+  `kezio-` name prefix, and the `kezio-system` namespace, so the
+  applied object is `kezio-bootd` in `kezio-system` and nowhere
   else. Every bootd Deployment stamps `serviceAccountName: kezio-bootd`
   unconditionally, and creates no ServiceAccount
   (`internal/controller/subnet_bootd_config.go`'s
   `bootdDefaultServiceAccountName`). A `Subnet` namespace other than
-  `scaffold-system` needs its own `kezio-bootd` ServiceAccount, bound to
+  `kezio-system` needs its own `kezio-bootd` ServiceAccount, bound to
   the same ClusterRole (a subject on `config/bootd/rbac.yaml`'s
   ClusterRoleBinding, or its own RoleBinding), before its bootd pod can
   start.
@@ -193,7 +193,7 @@ has a Service of its own: `boot-server`
 `agent-server` (`config/components/agent-server`,
 `internal/agentserver`, also ClusterIP). `config/default` alone creates
 neither Service - an overlay must include both components (see section
-7, step 1). Neither Service carries the `scaffold-` name prefix, because
+7, step 1). Neither Service carries the `kezio-` name prefix, because
 that prefix belongs to `config/default` and these components are outside
 it.
 
@@ -205,9 +205,9 @@ The prescribed fix is bootd's own reverse proxy: set
 `BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL` and
 `BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL` on the controller-manager
 Deployment to those two Services' in-cluster cluster-DNS URLs
-(`http://boot-server.scaffold-system.svc.cluster.local:8090` and
-`http://agent-server.scaffold-system.svc.cluster.local:8091`, for a
-deployment that keeps `config/default`'s own `scaffold-system`
+(`http://boot-server.kezio-system.svc.cluster.local:8090` and
+`http://agent-server.kezio-system.svc.cluster.local:8091`, for a
+deployment that keeps `config/default`'s own `kezio-system`
 namespace). Every `Subnet`'s bootd then proxies every `/boot/...` and `/agent/...`
 request it receives to the matching Service. Point `BOOT_SERVER_URL`
 and `BOOT_AGENT_SERVER_URL` (also on the controller-manager Deployment)
@@ -267,7 +267,7 @@ apiVersion: kezio.kojuro.date/v1alpha2
 kind: Site
 metadata:
   name: lab-site
-  namespace: scaffold-system
+  namespace: kezio-system
 spec:
   seederSubnetRef:
     name: lab-subnet-data
@@ -278,7 +278,7 @@ apiVersion: kezio.kojuro.date/v1alpha2
 kind: Subnet
 metadata:
   name: lab-subnet-a
-  namespace: scaffold-system
+  namespace: kezio-system
 spec:
   siteRef: { name: lab-site }
   cidr: 198.51.100.0/24
@@ -290,7 +290,7 @@ apiVersion: kezio.kojuro.date/v1alpha2
 kind: Subnet
 metadata:
   name: lab-subnet-b
-  namespace: scaffold-system
+  namespace: kezio-system
 spec:
   siteRef: { name: lab-site }
   cidr: 198.51.101.0/24
@@ -302,7 +302,7 @@ apiVersion: kezio.kojuro.date/v1alpha2
 kind: Subnet
 metadata:
   name: lab-subnet-data
-  namespace: scaffold-system
+  namespace: kezio-system
 spec:
   siteRef: { name: lab-site }
   cidr: 198.51.102.0/24
@@ -652,9 +652,9 @@ open work.
 | One bootd replica per boot-half Subnet | `internal/controller/subnet_controller.go` |
 | bootd needs a Multus attachment, not `hostNetwork` | `config/bootd/networkattachmentdefinition.example.yaml` |
 | Namespace needs `pod-security.kubernetes.io/enforce=privileged` | `config/bootd/kustomization.yaml`, `config/netboot-e2e/namespace-privileged-patch.yaml` |
-| `config/default` deploys into `scaffold-system` with the `scaffold-` name prefix | `config/default/kustomization.yaml` |
-| The `boot-server` and `agent-server` Services come from `config/components`, carry no `scaffold-` prefix, and are ClusterIP | `config/components/boot-server/service.yaml`, `config/components/agent-server/service.yaml` |
-| The bootd ServiceAccount is `kezio-bootd` in `scaffold-system`; every bootd Deployment names it without creating it | `config/bootd/kustomization.yaml`, `config/bootd/rbac.yaml`, `internal/controller/subnet_bootd_config.go` |
+| `config/default` deploys into `kezio-system` with the `kezio-` name prefix | `config/default/kustomization.yaml` |
+| The `boot-server` and `agent-server` Services come from `config/components`, carry no `kezio-` prefix, and are ClusterIP | `config/components/boot-server/service.yaml`, `config/components/agent-server/service.yaml` |
+| The bootd ServiceAccount is `kezio-bootd` in `kezio-system`; every bootd Deployment names it without creating it | `config/bootd/kustomization.yaml`, `config/bootd/rbac.yaml`, `internal/controller/subnet_bootd_config.go` |
 | No-NAT rule for tracker/seeder | `docs/network-model.md` |
 | Tracker Service (`config/opentracker`) is ClusterIP-only and is the externalURL-only escape hatch, not the Site-owned tracker's deployment path; no Service at all exists for a seeder pod or a Site-owned tracker | `config/opentracker/kustomization.yaml`, `config/opentracker/opentracker-service.yaml`, `internal/controller/site_tracker_deployment.go`, `internal/controller/image_seeder.go` |
 | e2e lanes use Multus same-bridge attachment for tracker/seeder | `.github/actions/create-provisioning-nads`, `.github/workflows/main.yaml` (`e2e-routed-site`, `e2e-two-site-concurrent`) |

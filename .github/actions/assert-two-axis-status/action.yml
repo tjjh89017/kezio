@@ -54,7 +54,7 @@ inputs:
   namespace:
     description: Namespace the Machine (and the PostHook this action creates) live in.
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   image-name:
     description: >-
       Name of an already-Ready Image (e.g. build-deploy-test-image's own

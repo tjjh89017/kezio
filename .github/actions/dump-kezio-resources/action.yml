@@ -18,7 +18,7 @@ inputs:
   namespace:
     description: Namespace to dump kezio resources from.
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
 
 runs:
   using: composite

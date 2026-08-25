@@ -56,7 +56,7 @@ inputs:
       Newline-separated namespaces to scan for tracker/seeder/bootd
       Deployments and pods. Blank lines are skipped.
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   tracker-label-selector:
     description: >-
       Label selector matching every tracker Deployment/pod across

@@ -34,7 +34,7 @@ inputs:
   namespace:
     description: 'Namespace the PartitionContent, its Image, its seeder Deployment, and the demand Machine created here all live in.'
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   seeder-image:
     description: 'Image the leecher Pod runs - must match the cluster''s PARTITIONCONTENT_SEEDER_IMAGE so it is already resolvable locally.'
     required: false

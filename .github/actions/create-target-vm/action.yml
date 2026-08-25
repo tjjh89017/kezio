@@ -14,7 +14,7 @@ inputs:
   namespace:
     description: Namespace the VM and its data PVC are created in.
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   vm-name:
     description: Name shared by the VirtualMachine and its data PVC (<vm-name>-data).
     required: true

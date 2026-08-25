@@ -11,7 +11,7 @@
 # Deploy as an addition once config/default is applied:
 #
 #   kustomize build config/opentracker | kubectl apply -f -
-namespace: scaffold-system
+namespace: kezio-system
 
 labels:
   - includeSelectors: true

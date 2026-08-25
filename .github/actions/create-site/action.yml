@@ -30,7 +30,7 @@ inputs:
   namespace:
     description: Namespace the Site is created in.
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   seeder-subnet-name:
     description: >-
       Site.spec.seederSubnetRef.name. Empty omits seederSubnetRef

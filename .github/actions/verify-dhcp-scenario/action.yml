@@ -15,7 +15,7 @@ inputs:
   namespace:
     description: Namespace kezio-existing-dhcp and the bootd Deployment are deployed in.
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   bootd-deployment-name:
     description: 'Name of the Subnet''s bootd Deployment, e.g. "kezio-bootd-<subnet-name>" (see deploy-bootd).'
     required: true

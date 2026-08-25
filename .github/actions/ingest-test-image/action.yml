@@ -30,7 +30,7 @@ inputs:
   namespace:
     description: 'Namespace the image-service Service and the Image live in.'
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   token:
     description: Bearer token kezioctl authenticates the upload with.
     required: true

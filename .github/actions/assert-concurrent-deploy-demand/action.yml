@@ -26,7 +26,7 @@ inputs:
   namespace:
     description: Namespace the Image, Machines, and PartitionContents live in.
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   image-name:
     description: >-
       Name of the Image every named Machine deploys. Its

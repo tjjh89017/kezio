@@ -39,7 +39,7 @@ inputs:
   namespace:
     description: Namespace the NetworkAttachmentDefinitions are created in - must match the Subnet's own namespace, since bootdNetworkRef/seederNetworkRef resolve unqualified names there.
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   bridge-name:
     description: 'Host Linux bridge every NAD attaches to, e.g. "kezio-prov0".'
     required: true

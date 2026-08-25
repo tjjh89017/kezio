@@ -62,7 +62,7 @@ inputs:
       Machine that names it - a Machine's postHookRefs resolve in the
       Machine's own namespace unless the ref sets one.
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   timeout:
     description: >-
       Timeout to wait for the PostHook's Valid condition to reach True,

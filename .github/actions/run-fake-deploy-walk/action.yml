@@ -17,7 +17,7 @@ inputs:
       Namespace the Machine, its credentials Secret, and its DeployRun are
       created in. Machines are namespaced and independent of the
       controller-manager's own namespace (deploy-kezio's "namespace"
-      input), so this defaults to "default" rather than "scaffold-system".
+      input), so this defaults to "default" rather than "kezio-system".
     required: false
     default: "default"
   machine-name:

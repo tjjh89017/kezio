@@ -18,7 +18,7 @@ inputs:
   namespace:
     description: Namespace to create the Secret in.
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   secret-name:
     description: Name of the Secret to create.
     required: false

@@ -28,7 +28,7 @@ inputs:
     required: false
     default: "v4.13.4"
   nfs-server-namespace:
-    description: 'Namespace to deploy the NFS server Service/Deployment into. Always exists (unlike scaffold-system, not yet created this early in the lane).'
+    description: 'Namespace to deploy the NFS server Service/Deployment into. Always exists (unlike kezio-system, not yet created this early in the lane).'
     required: false
     default: "default"
   nfs-server-image:

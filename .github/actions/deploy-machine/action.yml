@@ -47,7 +47,7 @@ inputs:
   namespace:
     description: Namespace the Machine (and its DeployRuns) live in.
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   image-name:
     description: Name of the Image to deploy as this machine's OS - written to spec.imageRef.name.
     required: true

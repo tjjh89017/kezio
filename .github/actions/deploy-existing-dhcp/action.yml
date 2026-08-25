@@ -13,7 +13,7 @@ inputs:
   namespace:
     description: Namespace the pod, its ConfigMap, and its NetworkAttachmentDefinition are created in.
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   name:
     description: >-
       Base name for every resource this action creates (Deployment,

@@ -25,7 +25,7 @@ inputs:
   site-namespace:
     description: Namespace the Site lives in.
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   site-name:
     description: Name of the Site to inspect.
     required: true

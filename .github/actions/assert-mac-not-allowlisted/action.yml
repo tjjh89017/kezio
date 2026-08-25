@@ -14,7 +14,7 @@ inputs:
   namespace:
     description: Namespace the VM and bootd Deployment live in.
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   vm-name:
     description: Name of the already-created, powered-off VirtualMachine to power on (see create-target-vm) - its VirtualMachineBMC is created here.
     required: true

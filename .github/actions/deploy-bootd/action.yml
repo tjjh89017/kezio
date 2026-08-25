@@ -16,7 +16,7 @@ inputs:
   namespace:
     description: Namespace config/bootd's RBAC is applied into, and the Subnet's own namespace.
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   subnet-name:
     description: 'Name of the Subnet whose bootd Deployment (kezio-bootd-<subnet-name>) this action waits on.'
     required: true

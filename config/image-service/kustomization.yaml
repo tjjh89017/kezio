@@ -3,13 +3,13 @@
 # config/default's resources: it needs its own staging PVC and a bearer
 # token Secret the operator provisions out of band, and it scales
 # independently of the controller manager. Deploy it as an addition once
-# config/default is applied and the scaffold-system namespace exists:
+# config/default is applied and the kezio-system namespace exists:
 #
 #   kustomize build config/image-service | kubectl apply -f -
 #
 # (after creating the kezio-image-service-token Secret and setting the
 # image with `kustomize edit set image`, as with config/manager).
-namespace: scaffold-system
+namespace: kezio-system
 namePrefix: kezio-
 
 labels:

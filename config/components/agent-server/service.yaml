@@ -6,7 +6,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: agent-server
-  namespace: scaffold-system
+  namespace: kezio-system
   labels:
     app.kubernetes.io/name: kezio
     app.kubernetes.io/component: agent-server
@@ -15,7 +15,7 @@ spec:
   type: ClusterIP
   selector:
     control-plane: controller-manager
-    app.kubernetes.io/name: scaffold
+    app.kubernetes.io/name: kezio
   ports:
     - name: agent-http
       port: 8091

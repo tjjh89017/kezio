@@ -18,7 +18,7 @@ inputs:
   namespace:
     description: Namespace to collect the controller-manager, bootd, and VM/VMI diagnostics from.
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   target-vm-name:
     description: Name of the target VirtualMachine/VirtualMachineInstance/VirtualMachineBMC to dump.
     required: true

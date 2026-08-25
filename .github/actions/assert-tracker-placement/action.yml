@@ -40,7 +40,7 @@ inputs:
   site-namespace:
     description: Namespace the Site (and its tracker Deployment) live in.
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   site-name:
     description: Name of the Site whose tracker placement is being asserted.
     required: true

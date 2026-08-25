@@ -16,7 +16,7 @@ inputs:
   namespace:
     description: Namespace the Machine and MachineHardware live in.
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   timeout:
     description: >-
       Total timeout for the whole walk (AgentRegistered, then inventory,

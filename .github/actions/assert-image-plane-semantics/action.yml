@@ -14,7 +14,7 @@ inputs:
   namespace:
     description: 'Namespace every object below lives in.'
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   content-name:
     description: 'PartitionContent object name ingest-test-image produced, e.g. its content-name output.'
     required: true

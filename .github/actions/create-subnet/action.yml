@@ -24,7 +24,7 @@ inputs:
   namespace:
     description: Namespace the Subnet is created in.
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   cidr:
     description: 'Subnet.spec.cidr, e.g. "192.0.2.0/24".'
     required: true

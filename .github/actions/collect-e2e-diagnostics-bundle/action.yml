@@ -18,7 +18,7 @@ inputs:
   namespace:
     description: Namespace to collect from.
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   output-dir:
     description: Directory the collected files are written into (created if missing).
     required: false

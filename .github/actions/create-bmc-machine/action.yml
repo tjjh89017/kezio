@@ -16,7 +16,7 @@ inputs:
   namespace:
     description: Namespace the Secret and Machine are created in.
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   secret-name:
     description: Name of the basic-auth Secret created for the BMC credentials.
     required: true

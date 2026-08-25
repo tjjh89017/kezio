@@ -43,7 +43,7 @@ inputs:
   namespace:
     description: Namespace the Machine and target VM live in (deploy-machine's own namespace output).
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   deploy-run-name:
     description: Name of the DeployRun this verifies (deploy-machine's own deploy-run-name output).
     required: true

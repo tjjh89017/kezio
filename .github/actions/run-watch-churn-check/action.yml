@@ -29,15 +29,15 @@ inputs:
   manager-namespace:
     description: 'Namespace the controller-manager and its metrics Service are deployed into.'
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   metrics-service-name:
     description: 'Name of the controller-manager metrics Service, from config/default/metrics_service.yaml plus the kustomize namePrefix.'
     required: false
-    default: "scaffold-controller-manager-metrics-service"
+    default: "kezio-controller-manager-metrics-service"
   metrics-reader-clusterrole:
     description: 'Name of the metrics-reader ClusterRole, from config/rbac/metrics_reader_role.yaml plus the kustomize namePrefix.'
     required: false
-    default: "scaffold-metrics-reader"
+    default: "kezio-metrics-reader"
   sampler-image:
     description: 'Image for the throwaway pod used to curl the metrics endpoint from inside the cluster.'
     required: false

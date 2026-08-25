@@ -36,7 +36,7 @@ inputs:
   namespace:
     description: Namespace the VirtualMachine (and Machine, if polled) lives in.
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   target-status:
     description: VirtualMachine.status.printableStatus to wait for (e.g. Stopped, Running).
     required: true

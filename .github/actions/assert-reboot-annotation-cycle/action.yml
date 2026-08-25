@@ -64,7 +64,7 @@ inputs:
   namespace:
     description: Namespace the Machine and its VirtualMachine/VirtualMachineInstance live in.
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   vm-name:
     description: Name of the VirtualMachine/VirtualMachineInstance backing machine-name. Defaults to machine-name (this lane's own enroll convention).
     required: false

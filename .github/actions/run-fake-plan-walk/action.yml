@@ -28,7 +28,7 @@ inputs:
       kezio-default-finalize PostHook (deploy-kezio's own "namespace"
       input, config/default's namespace).
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   image-name:
     description: 'Name of the mkfs-only Image fixture.'
     required: false

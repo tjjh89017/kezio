@@ -63,11 +63,11 @@ The `kezio-node` VM needs a minimum of 8 vCPU, 16 GiB RAM, and 200 GiB
 of disk. Each import writes a full copy of the image into PVCs, so give
 the disk sufficient space for every image that you import.
 
-Every object in this guide is in the `scaffold-system` namespace.
-`config/default` sets that namespace and a `scaffold-` name prefix, and
+Every object in this guide is in the `kezio-system` namespace.
+`config/default` sets that namespace and a `kezio-` name prefix, and
 `config/image-service` and `config/bootd` name the same namespace. The
 controller-manager Deployment is therefore
-`scaffold-controller-manager`.
+`kezio-controller-manager`.
 
 ## 2. Prepare the Proxmox host
 
@@ -598,7 +598,7 @@ patches:
   - path: namespace-privileged-patch.yaml
     target:
       kind: Namespace
-      name: scaffold-system
+      name: kezio-system
 EOF
 ```
 
@@ -611,7 +611,7 @@ Point it at your images, and apply it:
 
 make install                                    # the CRDs, always from config/crd
 bin/kustomize build config/lab | kubectl apply -f -
-kubectl -n scaffold-system rollout status deployment/scaffold-controller-manager --timeout=180s
+kubectl -n kezio-system rollout status deployment/kezio-controller-manager --timeout=180s
 ```
 
 `config/components/boot-artifacts` renames its own placeholder to
@@ -624,7 +624,7 @@ the manager container lost its `POD_NAMESPACE` variable, and every
 Machine waits for ever with nothing in the log to explain it:
 
 ```sh
-kubectl wait --for=create posthook/kezio-default-finalize -n scaffold-system --timeout=60s
+kubectl wait --for=create posthook/kezio-default-finalize -n kezio-system --timeout=60s
 ```
 
 Each **other** namespace that will hold a `Subnet` needs the same
@@ -637,7 +637,7 @@ yourself. There is no safe placeholder for it in version control:
 
 ```sh
 export IMAGE_SERVICE_TOKEN="$(openssl rand -hex 32)"
-kubectl -n scaffold-system create secret generic kezio-image-service-token \
+kubectl -n kezio-system create secret generic kezio-image-service-token \
   --from-literal=token="${IMAGE_SERVICE_TOKEN}" \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
@@ -647,7 +647,7 @@ The Deployment does not become Ready until this Secret exists. Then:
 ```sh
 (cd config/image-service && ../../bin/kustomize edit set image "image-service=${IMAGE_SERVICE_IMG}")
 bin/kustomize build config/image-service | kubectl apply -f -
-kubectl -n scaffold-system rollout status deployment/kezio-image-service --timeout=180s
+kubectl -n kezio-system rollout status deployment/kezio-image-service --timeout=180s
 ```
 
 This creates the `kezio-image-service-staging` PVC, at 100Gi and
@@ -677,7 +677,7 @@ the boot API and the agent API through the reverse proxy of bootd, so it
 is the only address that the target VM ever needs.
 
 ```sh
-kubectl -n scaffold-system set env deployment/scaffold-controller-manager \
+kubectl -n kezio-system set env deployment/kezio-controller-manager \
   DEPLOYER=agent \
   BOOT_SERVER_ADDR=:8090 \
   BOOT_SERVER_URL="http://192.0.2.2" \
@@ -685,8 +685,8 @@ kubectl -n scaffold-system set env deployment/scaffold-controller-manager \
   AGENT_SERVER_ADDR=:8091 \
   BOOTD_DEPLOYMENT_IMAGE="${BOOTD_IMG}" \
   BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE="${BOOT_ARTIFACTS_IMG}" \
-  BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL="http://boot-server.scaffold-system.svc.cluster.local:8090" \
-  BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL="http://agent-server.scaffold-system.svc.cluster.local:8091" \
+  BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL="http://boot-server.kezio-system.svc.cluster.local:8090" \
+  BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL="http://agent-server.kezio-system.svc.cluster.local:8091" \
   IMAGE_INGEST_IMAGE="${INGEST_IMG}" \
   IMAGE_INGEST_STAGING_PVC=kezio-image-service-staging \
   PARTITIONCONTENT_PUBLISH_IMAGE="${INGEST_IMG}" \
@@ -694,7 +694,7 @@ kubectl -n scaffold-system set env deployment/scaffold-controller-manager \
   PARTITIONCONTENT_SEEDER_GRACE_PERIOD=30s \
   TRACKER_DEPLOYMENT_IMAGE=ghcr.io/tunisiano187/opentracker-docker:master
 
-kubectl -n scaffold-system rollout status deployment/scaffold-controller-manager --timeout=180s
+kubectl -n kezio-system rollout status deployment/kezio-controller-manager --timeout=180s
 ```
 
 What each group does, and where it is easy to make an error:
@@ -739,7 +739,7 @@ apiVersion: k8s.cni.cncf.io/v1
 kind: NetworkAttachmentDefinition
 metadata:
   name: kezio-boot-network
-  namespace: scaffold-system
+  namespace: kezio-system
 spec:
   config: |
     {
@@ -761,7 +761,7 @@ apiVersion: k8s.cni.cncf.io/v1
 kind: NetworkAttachmentDefinition
 metadata:
   name: kezio-seeder-network
-  namespace: scaffold-system
+  namespace: kezio-system
 spec:
   config: |
     {
@@ -847,7 +847,7 @@ apiVersion: kezio.kojuro.date/v1alpha2
 kind: Site
 metadata:
   name: lab
-  namespace: scaffold-system
+  namespace: kezio-system
 spec: {}
 EOF
 ```
@@ -860,7 +860,7 @@ apiVersion: kezio.kojuro.date/v1alpha2
 kind: Subnet
 metadata:
   name: lab-prov
-  namespace: scaffold-system
+  namespace: kezio-system
 spec:
   siteRef:
     name: lab
@@ -887,7 +887,7 @@ apiVersion: kezio.kojuro.date/v1alpha2
 kind: Site
 metadata:
   name: lab
-  namespace: scaffold-system
+  namespace: kezio-system
 spec:
   seederSubnetRef:
     name: lab-prov
@@ -925,9 +925,9 @@ Notes on these three objects:
 ### 6.3 Wait for the objects, and read their conditions
 
 ```sh
-kubectl -n scaffold-system rollout status deployment/kezio-bootd-lab-prov --timeout=180s
+kubectl -n kezio-system rollout status deployment/kezio-bootd-lab-prov --timeout=180s
 curl -s -o /dev/null -w '%{http_code}\n' http://192.0.2.2:80/boot/artifacts/manifest.json
-kubectl -n scaffold-system get site lab -o jsonpath='{.status.trackerURL}{"\n"}'
+kubectl -n kezio-system get site lab -o jsonpath='{.status.trackerURL}{"\n"}'
 ```
 
 The bootd Deployment is `kezio-bootd-<subnet name>`. The Subnet
@@ -945,7 +945,7 @@ Nothing is wrong. The CI lanes accept the same result
 If the bootd Deployment never appears, the Subnet states the cause:
 
 ```sh
-kubectl -n scaffold-system get subnet lab-prov -o jsonpath='{.status.conditions}' | jq .
+kubectl -n kezio-system get subnet lab-prov -o jsonpath='{.status.conditions}' | jq .
 ```
 
 `BootdNamespacePSALabelMissing` and `BootdServiceAccountMissing` are the
@@ -1050,10 +1050,10 @@ The image-service Service is ClusterIP, so port-forward it from the
 node:
 
 ```sh
-kubectl -n scaffold-system port-forward svc/kezio-image-service 18080:8080 &
+kubectl -n kezio-system port-forward svc/kezio-image-service 18080:8080 &
 bin/kezioctl image upload ./ubuntu-24.04-minimal-cloudimg-amd64.img \
   --name lab-ubuntu \
-  --namespace scaffold-system \
+  --namespace kezio-system \
   --server http://127.0.0.1:18080 \
   --token "${IMAGE_SERVICE_TOKEN}"
 ```
@@ -1071,9 +1071,9 @@ to `--name`.
 Watch it:
 
 ```sh
-kubectl -n scaffold-system get imageimport lab-ubuntu -w
-kubectl -n scaffold-system get image lab-ubuntu -w
-kubectl -n scaffold-system get partitioncontent
+kubectl -n kezio-system get imageimport lab-ubuntu -w
+kubectl -n kezio-system get image lab-ubuntu -w
+kubectl -n kezio-system get partitioncontent
 ```
 
 Wait until the `ImageImport` reports `Ready`, and then until the `Image`
@@ -1100,7 +1100,7 @@ token from section 2.5, not the `PROXMOX_USER` credentials that
 `params.env` holds:
 
 ```sh
-kubectl -n scaffold-system create secret generic lab-target-1-bmc \
+kubectl -n kezio-system create secret generic lab-target-1-bmc \
   --type=kubernetes.io/basic-auth \
   --from-literal=username='kezio@pve!kezio' \
   --from-literal=password='<token-secret>'
@@ -1114,7 +1114,7 @@ apiVersion: kezio.kojuro.date/v1alpha2
 kind: Machine
 metadata:
   name: lab-target-1
-  namespace: scaffold-system
+  namespace: kezio-system
 spec:
   bmc:
     address: redfish+http://10.0.0.10:8000/redfish/v1/Systems/501
@@ -1157,7 +1157,7 @@ kezio now powers the VM on through the BMC, boots the live environment,
 and waits for the agent to register. Watch it:
 
 ```sh
-kubectl -n scaffold-system get machine lab-target-1 -w
+kubectl -n kezio-system get machine lab-target-1 -w
 ```
 
 Wait until `status.state` is `Available`.
@@ -1176,9 +1176,9 @@ the PXE time-out. Set the order back by hand
 Add the deploy intent:
 
 ```sh
-kubectl -n scaffold-system patch machine lab-target-1 --type=merge \
+kubectl -n kezio-system patch machine lab-target-1 --type=merge \
   -p '{"spec":{"imageRef":{"name":"lab-ubuntu"}}}'
-kubectl -n scaffold-system get machine lab-target-1 -w
+kubectl -n kezio-system get machine lab-target-1 -w
 ```
 
 Leave `spec.postHookRefs` unset. kezio then substitutes the shipped
@@ -1212,10 +1212,10 @@ What happens behind each step:
 Useful views while it runs:
 
 ```sh
-kubectl -n scaffold-system logs -f deployment/scaffold-controller-manager
-kubectl -n scaffold-system logs -f deployment/kezio-bootd-lab-prov
-kubectl -n scaffold-system get deployment -l app.kubernetes.io/component=image-seeder
-kubectl -n scaffold-system get deployrun
+kubectl -n kezio-system logs -f deployment/kezio-controller-manager
+kubectl -n kezio-system logs -f deployment/kezio-bootd-lab-prov
+kubectl -n kezio-system get deployment -l app.kubernetes.io/component=image-seeder
+kubectl -n kezio-system get deployrun
 ```
 
 Watch the console of the VM at the same time, in the Proxmox web UI (VM
@@ -1230,9 +1230,9 @@ designed behavior, not a failure.
 ## 10. Confirm the result
 
 ```sh
-kubectl -n scaffold-system get machine lab-target-1 \
+kubectl -n kezio-system get machine lab-target-1 \
   -o jsonpath='{.status.state}{"\n"}{.status.conditions}' | jq .
-kubectl -n scaffold-system get deployrun \
+kubectl -n kezio-system get deployrun \
   -o custom-columns=NAME:.metadata.name,PHASE:.status.phase
 ```
 
@@ -1293,7 +1293,7 @@ have content needs a `seederSubnetRef`, or its Machines wait for ever.
 
 | Symptom | Where to look |
 |---|---|
-| No bootd Deployment appears | `kubectl -n scaffold-system get subnet lab-prov -o yaml`, `status.conditions`. `BootdNamespacePSALabelMissing`, `BootdServiceAccountMissing`, and `BootdDeploymentImageUnconfigured` are all named there. |
+| No bootd Deployment appears | `kubectl -n kezio-system get subnet lab-prov -o yaml`, `status.conditions`. `BootdNamespacePSALabelMissing`, `BootdServiceAccountMissing`, and `BootdDeploymentImageUnconfigured` are all named there. |
 | `Valid=Unknown` on the Subnet or the Site | Expected with the `host-local` seeder NAD above. See section 6.3. |
 | The VM shows PXE-E16 or PXE-E18 and never boots | The FORWARD accept and the checksum rule in section 3.4. Then confirm that the `k8s.v1.cni.cncf.io/network-status` annotation of the bootd pod really lists `kezio-boot-network`. |
 | The VM gets no DHCP answer at all | The MAC gate. `spec.bootMACAddress` must be exactly the MAC of the NIC. The log of bootd names each MAC that it refuses. |

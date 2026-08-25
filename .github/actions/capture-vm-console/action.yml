@@ -30,7 +30,7 @@ inputs:
   namespace:
     description: Namespace the VM lives in.
     required: false
-    default: "scaffold-system"
+    default: "kezio-system"
   logfile:
     description: >-
       Path the console output is appended to. Put it under the runner

@@ -2,7 +2,7 @@ apiVersion: kezio.kojuro.date/v1alpha2
 kind: Subnet
 metadata:
   labels:
-    app.kubernetes.io/name: scaffold
+    app.kubernetes.io/name: kezio
     app.kubernetes.io/managed-by: kustomize
   name: subnet-dataplane-sample
 spec:
