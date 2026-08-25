@@ -43,12 +43,18 @@ func TestRunsToGC(t *testing.T) {
 		}
 	}
 
+	// Runs in cases that say nothing about now are all far older than
+	// minRunAgeBeforeGC, so only the retain window and the protected names
+	// decide their fate.
+	defaultNow := ts(1_000_000).Time
+
 	cases := []struct {
 		name    string
 		runs    []keziov1alpha2.DeployRun
 		machine keziov1alpha2.Machine
 		retain  int
-		want    []string // names expected in the GC victim list
+		now     time.Time // zero means defaultNow
+		want    []string  // names expected in the GC victim list
 	}{
 		{
 			name:   "fewer runs than retain: nothing is GC'd",
@@ -108,11 +114,37 @@ func TestRunsToGC(t *testing.T) {
 			retain: 5,
 			want:   []string{"oldest"},
 		},
+		{
+			// The window startProvisioningRun opens: the run exists and no
+			// Machine status names it yet. Age alone has to keep it.
+			name: "a run younger than the bound survives with no status naming it",
+			runs: []keziov1alpha2.DeployRun{
+				run("fresh", 999_600), run("r2", 999_601), run("r3", 999_602),
+				run("r4", 999_603), run("r5", 999_604), run("r6", 999_605),
+			},
+			retain: 5,
+			now:    ts(1_000_000).Time,
+			want:   nil,
+		},
+		{
+			name: "a run older than the bound outside the window is still collected",
+			runs: []keziov1alpha2.DeployRun{
+				run("stale", 1_000), run("r2", 999_601), run("r3", 999_602),
+				run("r4", 999_603), run("r5", 999_604), run("r6", 999_605),
+			},
+			retain: 5,
+			now:    ts(1_000_000).Time,
+			want:   []string{"stale"},
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := runsToGC(tc.runs, &tc.machine, tc.retain)
+			now := tc.now
+			if now.IsZero() {
+				now = defaultNow
+			}
+			got := runsToGC(tc.runs, &tc.machine, tc.retain, now)
 			gotNames := make([]string, len(got))
 			for i, r := range got {
 				gotNames[i] = r.Name
@@ -168,6 +200,11 @@ var _ = Describe("DeployRun Controller", func() {
 			return names
 		}
 
+		// Every DeployRun envtest creates is seconds old, so a GC test that
+		// wants collection to happen at all has to age them past
+		// minRunAgeBeforeGC through the reconciler's clock.
+		agedPastBound := func() time.Time { return time.Now().Add(2 * minRunAgeBeforeGC) }
+
 		It("keeps the newest 5 DeployRuns and deletes older ones, leaving other machines untouched", func() {
 			machineA := newMachine(fmt.Sprintf("gc-a-%d", GinkgoRandomSeed()))
 			machineB := newMachine(fmt.Sprintf("gc-b-%d", GinkgoRandomSeed()))
@@ -187,7 +224,7 @@ var _ = Describe("DeployRun Controller", func() {
 				time.Sleep(1100 * time.Millisecond)
 			}
 
-			reconciler := &DeployRunReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			reconciler := &DeployRunReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Now: agedPastBound}
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: runs[len(runs)-1].Name, Namespace: "default"},
 			})
@@ -220,7 +257,7 @@ var _ = Describe("DeployRun Controller", func() {
 				newest = newRun(fmt.Sprintf("%s-run-%d", machine.Name, i), machine)
 			}
 
-			reconciler := &DeployRunReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			reconciler := &DeployRunReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Now: agedPastBound}
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: newest.Name, Namespace: "default"},
 			})
@@ -228,6 +265,29 @@ var _ = Describe("DeployRun Controller", func() {
 
 			Expect(remainingNames(machine)).To(HaveLen(6), "5 newest plus the protected run outside the window")
 			Expect(remainingNames(machine)).To(ContainElement(protectedRun.Name))
+		})
+
+		It("keeps a just-created DeployRun that no Machine status names yet", func() {
+			machine := newMachine(fmt.Sprintf("gc-young-%d", GinkgoRandomSeed()))
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, machine)).To(Succeed())
+			})
+
+			// Six runs against a retain of 5, and the Machine status names
+			// none of them - exactly the state startProvisioningRun is in
+			// between creating a run and recording it.
+			var runs []*keziov1alpha2.DeployRun
+			for i := 0; i < 6; i++ {
+				runs = append(runs, newRun(fmt.Sprintf("%s-run-%d", machine.Name, i), machine))
+			}
+
+			reconciler := &DeployRunReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: runs[0].Name, Namespace: "default"},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(remainingNames(machine)).To(HaveLen(6), "no run is old enough to collect")
 		})
 	})
 

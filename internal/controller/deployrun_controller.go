@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -34,10 +35,32 @@ import (
 // survive GC, on top of any protected run outside that window.
 const retainedRunsPerMachine = 5
 
+// minRunAgeBeforeGC is the age under which a DeployRun is never collected,
+// whatever the Machine status does or does not name. startProvisioningRun
+// creates the run before it writes status.currentRunRef, and this
+// reconciler reads the Machine through a cache that can lag further behind,
+// so a live run briefly has nothing naming it. The bound only has to
+// outlast that gap - one status write plus cache propagation - and is set
+// far above it because the cost of overshooting is nil: a run this young
+// is inside the retained window anyway except in a burst pathological
+// enough to never occur.
+const minRunAgeBeforeGC = 10 * time.Minute
+
 // DeployRunReconciler reconciles a DeployRun object
 type DeployRunReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// Now returns the current time. Defaults to time.Now; tests override it
+	// to age DeployRuns past minRunAgeBeforeGC without sleeping real time.
+	Now func() time.Time
+}
+
+// now returns r.Now(), falling back to time.Now.
+func (r *DeployRunReconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
 }
 
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=deployruns,verbs=get;list;watch;create;update;patch;delete
@@ -84,7 +107,7 @@ func (r *DeployRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 	}
 
-	for _, victim := range runsToGC(siblings, &machine, retainedRunsPerMachine) {
+	for _, victim := range runsToGC(siblings, &machine, retainedRunsPerMachine, r.now()) {
 		if err := r.Delete(ctx, &victim); err != nil && !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, fmt.Errorf("deleting DeployRun %q: %w", victim.Name, err)
 		}
@@ -97,11 +120,12 @@ func (r *DeployRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 // runsToGC picks the runs to delete out of a single Machine's DeployRuns:
 // every run beyond the newest retain, except a run named by
 // machine.status.currentRunRef, lastSuccessfulRunRef, or
-// lastAttemptedRunRef. A protected run
-// outside the retained window still counts toward nothing - it simply
-// survives alongside the newest retain, so the kept count can exceed retain
-// when a protected run is old.
-func runsToGC(runs []keziov1alpha2.DeployRun, machine *keziov1alpha2.Machine, retain int) []keziov1alpha2.DeployRun {
+// lastAttemptedRunRef, and except a run younger than minRunAgeBeforeGC. A
+// protected run outside the retained window still counts toward nothing -
+// it simply survives alongside the newest retain, so the kept count can
+// exceed retain when a protected run is old, or when a run too young to
+// collect sorts outside the window.
+func runsToGC(runs []keziov1alpha2.DeployRun, machine *keziov1alpha2.Machine, retain int, now time.Time) []keziov1alpha2.DeployRun {
 	protected := protectedRunNames(machine)
 
 	ordered := make([]keziov1alpha2.DeployRun, len(runs))
@@ -122,6 +146,9 @@ func runsToGC(runs []keziov1alpha2.DeployRun, machine *keziov1alpha2.Machine, re
 			continue
 		}
 		if protected[candidate.Name] {
+			continue
+		}
+		if now.Sub(candidate.CreationTimestamp.Time) < minRunAgeBeforeGC {
 			continue
 		}
 		victims = append(victims, candidate)
