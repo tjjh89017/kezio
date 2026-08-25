@@ -46,9 +46,13 @@ UEFI firmware (db: Microsoft UEFI CA)
 
 `hack/live-image/build.sh`'s `stage_signed_boot_binaries` step is what
 pulls `shimx64.efi`/`grubx64.efi` into the published `kezio-boot-
-artifacts` image that `config/bootd`'s `fetch-boot-artifacts`
-initContainer `cp`s them out of (see `docker/boot-artifacts/Dockerfile`
-and `config/bootd/README.md`). It extracts the `.signed`
+artifacts` image (`docker/boot-artifacts/Dockerfile`). Each `Subnet`'s
+bootd Deployment then carries a `fetch-boot-artifacts` initContainer
+that `cp`s those two files out of that image into the directory bootd
+serves over TFTP. The controller builds that initContainer, not a
+manifest: see `internal/controller/subnet_bootd_deployment.go`, and the
+`BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE` variable that names the image.
+The build step extracts the `.signed`
 member of each package (`shimx64.efi.signed`, and
 `grubnetx64.efi.signed` - the netboot GRUB build, whose embedded
 `/grub` prefix resolves against the TFTP device it was loaded from,
@@ -142,20 +146,22 @@ requesting MAC to a `Machine` and only returns a live-boot config
 calls for one; every other case - an unrecognized MAC included - gets
 the fixed, fail-secure `bootLocalConfig` that chainloads the local disk
 (see `internal/bootserver`'s package doc). Operators are also expected
-to run the boot L2 segment as a controlled network per
-`config/bootd/README.md`'s network assumptions rather than an open,
-untrusted one.
+to run the boot L2 segment as a controlled network, not an open,
+untrusted one: target machines attach only to the provisioning bridge,
+and they do not share it with unrelated cluster or data-plane traffic
+(`docs/physical-lab-deployment.md`, section 2.2).
 
 ## CI does not exercise Secure Boot
 
 None of kezio's CI workflows boot with Secure Boot enabled:
 
-- `.github/workflows/main.yaml`'s `e2e-deploy` job defines its target VM
-  with OVMF UEFI firmware and `firmware.bootloader.efi.secureBoot:
-  false` - no Secure Boot keys are enrolled, so it does not exercise the
-  shim/GRUB/kernel signature checks at all. The shim and GRUB binaries
-  it boots are still the real signed artifacts the `boot-artifacts` job
-  builds - only the firmware-side enforcement is off.
+- Every target VM comes from the `.github/actions/create-target-vm`
+  composite action, which defines it with OVMF UEFI firmware and
+  `firmware.bootloader.efi.secureBoot: false` - no Secure Boot keys are
+  enrolled, so no lane exercises the shim/GRUB/kernel signature checks
+  at all. The shim and GRUB binaries these VMs boot are still the real
+  signed artifacts the `boot-artifacts` job builds - only the
+  firmware-side enforcement is off.
 
 This is a deliberate, documented gap, not a silent one: a real
 end-to-end Secure Boot test needs enrolled Secure Boot keys in the test

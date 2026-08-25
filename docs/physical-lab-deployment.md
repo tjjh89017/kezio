@@ -172,33 +172,43 @@ controller does not create for you, alongside the NAD from 2.2:
   Pod Security Admission profiles, so a namespace missing this label
   admission-rejects the bootd pod outright.
 - **A `bootd` ServiceAccount, bound to `config/bootd/rbac.yaml`'s
-  ClusterRole.** That file provisions this ServiceAccount in
-  `kezio-system` (kustomized from the base name `bootd`) only, and
-  every bootd Deployment stamps `serviceAccountName: kezio-bootd`
-  unconditionally without creating it
+  ClusterRole.** Apply it with `kubectl apply -k config/bootd`. That
+  kustomization gives the ServiceAccount the base name `bootd`, the
+  `kezio-` name prefix, and the `scaffold-system` namespace, so the
+  applied object is `kezio-bootd` in `scaffold-system` and nowhere
+  else. Every bootd Deployment stamps `serviceAccountName: kezio-bootd`
+  unconditionally, and creates no ServiceAccount
   (`internal/controller/subnet_bootd_config.go`'s
   `bootdDefaultServiceAccountName`). A `Subnet` namespace other than
-  `kezio-system` needs its own `kezio-bootd` ServiceAccount, bound to
+  `scaffold-system` needs its own `kezio-bootd` ServiceAccount, bound to
   the same ClusterRole (a subject on `config/bootd/rbac.yaml`'s
   ClusterRoleBinding, or its own RoleBinding), before its bootd pod can
   start.
 
 ### 2.4 Reverse-proxying the agent and boot APIs (recommended)
 
-Without further setup, a booting machine needs to reach the boot
-config server (`internal/bootserver`, ClusterIP-only Service by
-default) and the agent registration server (`internal/agentserver`,
-also ClusterIP-only by default) directly on the provisioning segment.
-That is usually not possible from outside the cluster network.
+Both servers run inside the controller-manager process, and each one
+has a Service of its own: `boot-server`
+(`config/components/boot-server`, `internal/bootserver`, ClusterIP) and
+`agent-server` (`config/components/agent-server`,
+`internal/agentserver`, also ClusterIP). `config/default` alone creates
+neither Service - an overlay must include both components (see section
+7, step 1). Neither Service carries the `scaffold-` name prefix, because
+that prefix belongs to `config/default` and these components are outside
+it.
+
+Without further setup, a booting machine needs to reach these two
+ClusterIP Services directly on the provisioning segment. That is
+usually not possible from outside the cluster network.
 
 The prescribed fix is bootd's own reverse proxy: set
 `BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL` and
 `BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL` on the controller-manager
-Deployment to those two Services' in-cluster cluster-DNS URLs (for
-example
-`http://boot-server.kezio-system.svc.cluster.local:8090` and
-`http://agent-server.kezio-system.svc.cluster.local:8091`). Every
-`Subnet`'s bootd then proxies every `/boot/...` and `/agent/...`
+Deployment to those two Services' in-cluster cluster-DNS URLs
+(`http://boot-server.scaffold-system.svc.cluster.local:8090` and
+`http://agent-server.scaffold-system.svc.cluster.local:8091`, for a
+deployment that keeps `config/default`'s own `scaffold-system`
+namespace). Every `Subnet`'s bootd then proxies every `/boot/...` and `/agent/...`
 request it receives to the matching Service. Point `BOOT_SERVER_URL`
 and `BOOT_AGENT_SERVER_URL` (also on the controller-manager Deployment)
 at each `Subnet`'s own `bootdServerIP` instead of a separately exposed
@@ -257,7 +267,7 @@ apiVersion: kezio.kojuro.date/v1alpha2
 kind: Site
 metadata:
   name: lab-site
-  namespace: kezio-system
+  namespace: scaffold-system
 spec:
   seederSubnetRef:
     name: lab-subnet-data
@@ -268,7 +278,7 @@ apiVersion: kezio.kojuro.date/v1alpha2
 kind: Subnet
 metadata:
   name: lab-subnet-a
-  namespace: kezio-system
+  namespace: scaffold-system
 spec:
   siteRef: { name: lab-site }
   cidr: 198.51.100.0/24
@@ -280,7 +290,7 @@ apiVersion: kezio.kojuro.date/v1alpha2
 kind: Subnet
 metadata:
   name: lab-subnet-b
-  namespace: kezio-system
+  namespace: scaffold-system
 spec:
   siteRef: { name: lab-site }
   cidr: 198.51.101.0/24
@@ -292,7 +302,7 @@ apiVersion: kezio.kojuro.date/v1alpha2
 kind: Subnet
 metadata:
   name: lab-subnet-data
-  namespace: kezio-system
+  namespace: scaffold-system
 spec:
   siteRef: { name: lab-site }
   cidr: 198.51.102.0/24
@@ -386,15 +396,22 @@ created for it, and no tracker either (see section 2 above).
 This is the shape kezio's own end-to-end lanes use today
 (`.github/workflows/main.yaml`'s `e2e-routed-site` and
 `e2e-two-site-concurrent` jobs create `NetworkAttachmentDefinition`s for
-the boot network(s), the tracker, and the seeder, as static-IPAM Multus
-attachments).
+the boot network(s), the tracker, and the seeder as Multus attachments;
+the boot and tracker NADs use static IPAM, and the seeder NAD uses a
+`host-local` pool, because every seeder pod of the Site shares that one
+NAD - see `.github/actions/create-provisioning-nads`).
 
 **This shape needs one address per concurrently active `(Image, Site)`
 seeder Deployment, not one address per Site**, plus one more for the
 Site's own tracker. See `docs/network-model.md`'s "address-pool sizing
-rule" section for the full sizing rule and why a real site should move
-to a `whereabouts` pool (with its `ip-reconciler` CronJob deployed
-alongside it) once more than one Image can be active at a time.
+rule" section for the full sizing rule, and why a real site must move
+from a single static address to a range-based IPAM pool once more than
+one Image can be active at a time. kezio's own e2e lanes and lab guide
+make that choice with `host-local` and a narrowed range
+(`.github/actions/create-provisioning-nads`). `whereabouts` is the other
+supported choice, and it needs its `ip-reconciler` CronJob deployed with
+it - see `docs/network-model.md`'s "whereabouts needs its ip-reconciler"
+section.
 `internal/nadvalidate.CheckSeederStaticMultiImage` raises an Advisory
 condition on the Subnet once a Site crosses that line.
 
@@ -513,7 +530,15 @@ each BMC's actual listening port against its own documentation.
 
 ## 7. Bring-up order
 
-1. Deploy `config/default` (CRDs and controller-manager).
+1. Deploy an overlay over `config/default` (CRDs and
+   controller-manager). `config/default` alone is not sufficient for a
+   machine that network boots: the overlay must also include
+   `config/components/boot-server`, `config/components/agent-server`,
+   and `config/components/boot-artifacts`, and it must put the
+   `pod-security.kubernetes.io/enforce=privileged` label on the
+   namespace. `config/netboot-e2e` composes exactly this set, but it
+   pins its boot-artifacts image to a CI-only tag; copy its shape into
+   an overlay of your own.
 2. Set `BOOT_SERVER_ADDR`, `AGENT_SERVER_ADDR`, `BOOT_SERVER_URL`,
    `BOOT_AGENT_SERVER_URL`, and `DEPLOYER=agent` on the
    controller-manager Deployment.
@@ -572,11 +597,12 @@ comparing a lab run against a CI run.
   exactly two seeder Deployments exist (one per Site), and that
   injecting a fault into one Site's seeding `Subnet` degrades only that
   Site's status, leaving the other Site's status unaffected.
-- **Tracker/seeder connectivity always uses the Multus, same-bridge,
-  static-IPAM shape** described in section 3 - none of these lanes
-  exercises a routed-L3-to-a-cluster-Service shape, since kezio ships
-  no LoadBalancer/NodePort/hostPort variant of a tracker or seeder
-  Service to exercise.
+- **Tracker/seeder connectivity always uses the Multus, same-bridge
+  shape** described in section 3, with a static tracker address and a
+  `host-local` seeder pool - none of these lanes exercises a
+  routed-L3-to-a-cluster-Service shape, since kezio ships no
+  LoadBalancer/NodePort/hostPort variant of a tracker or seeder Service
+  to exercise.
 - **The BMC lanes' Redfish endpoints are plain HTTP** (KubeVirtBMC's
   generated Service does not terminate TLS), reached with the
   `redfish+http://` scheme instead of `redfish://`. A production BMC's
@@ -615,11 +641,13 @@ open work.
 | `dhcp.mode: lease` renders a lease-serving `dhcp-range` and `dhcp-boot`/`dhcp-match` instead of `pxe-service`; the MAC gate is unchanged | `api/v1alpha2/subnet_types.go` (`SubnetDHCP`), `internal/bootd/render.go` |
 | One bootd replica per boot-half Subnet | `internal/controller/subnet_controller.go` |
 | bootd needs a Multus attachment, not `hostNetwork` | `config/bootd/networkattachmentdefinition.example.yaml` |
-| Namespace needs `pod-security.kubernetes.io/enforce=privileged` | `config/bootd/networkattachmentdefinition.example.yaml`, `config/bootd/rbac.yaml` |
-| Boot config server / agent server default Services are ClusterIP | `internal/bootserver`, `internal/agentserver` |
+| Namespace needs `pod-security.kubernetes.io/enforce=privileged` | `config/bootd/kustomization.yaml`, `config/netboot-e2e/namespace-privileged-patch.yaml` |
+| `config/default` deploys into `scaffold-system` with the `scaffold-` name prefix | `config/default/kustomization.yaml` |
+| The `boot-server` and `agent-server` Services come from `config/components`, carry no `scaffold-` prefix, and are ClusterIP | `config/components/boot-server/service.yaml`, `config/components/agent-server/service.yaml` |
+| The bootd ServiceAccount is `kezio-bootd` in `scaffold-system`; every bootd Deployment names it without creating it | `config/bootd/kustomization.yaml`, `config/bootd/rbac.yaml`, `internal/controller/subnet_bootd_config.go` |
 | No-NAT rule for tracker/seeder | `docs/network-model.md` |
 | Tracker Service (`config/opentracker`) is ClusterIP-only and is the externalURL-only escape hatch, not the Site-owned tracker's deployment path; no Service at all exists for a seeder pod or a Site-owned tracker | `config/opentracker/kustomization.yaml`, `config/opentracker/opentracker-service.yaml`, `internal/controller/site_tracker_deployment.go`, `internal/controller/image_seeder.go` |
-| e2e lanes use Multus same-bridge attachment for tracker/seeder | `.github/workflows/main.yaml` (`e2e-routed-site`, `e2e-two-site-concurrent`) |
+| e2e lanes use Multus same-bridge attachment for tracker/seeder | `.github/actions/create-provisioning-nads`, `.github/workflows/main.yaml` (`e2e-routed-site`, `e2e-two-site-concurrent`) |
 | Fixed BT port 16881; torrent HTTP port 8080; gRPC port 50051 | `internal/seederdeploy/identity.go` |
 | Tracker port 6969 | `internal/controller/site_tracker_deployment.go` (`trackerAnnouncePort`) |
 | A Site runs at most one tracker of its own, only when it has a seederSubnetRef | `api/v1alpha2/site_types.go`, `internal/controller/site_controller.go` |
@@ -630,4 +658,5 @@ open work.
 | `redfish+http://` exists and is documented as a lab/test-only scheme | `internal/bmc/redfish/redfish.go`, `docs/bmc.md` |
 | `e2e-routed-site` builds two boot Subnets plus one data-plane-only Subnet, one Site | `.github/workflows/main.yaml` (`e2e-routed-site` job) |
 | `e2e-two-site-concurrent` builds two Sites that cannot route to each other and asserts isolation | `.github/workflows/main.yaml` (`e2e-two-site-concurrent` job) |
-| whereabouts needs its `ip-reconciler` CronJob deployed alongside it | `docs/lab-proxmox-rke2.md` |
+| whereabouts needs its `ip-reconciler` CronJob deployed alongside it | `docs/network-model.md` ("whereabouts needs its ip-reconciler" section) |
+| The e2e lanes' seeder NAD uses a `host-local` pool, not static IPAM | `.github/actions/create-provisioning-nads` |
