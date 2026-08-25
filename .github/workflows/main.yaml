@@ -355,7 +355,7 @@ jobs:
   # status updates.
   e2e-fast-lane:
     name: Fast lane
-    needs: [images]
+    needs: [build-required]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -493,7 +493,7 @@ jobs:
   # the fixture -> the demand Machine deleted.
   e2e-image-path:
     name: Image path
-    needs: [images]
+    needs: [build-required]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -730,28 +730,6 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-  # The two lanes above prove the controller and the image plane on a
-  # plain cluster, with no virtual machine involved. Every lane that
-  # starts virtual machines hangs off this job, so a broken image plane
-  # stops the run here instead of after three long lanes each rediscover
-  # it. This job proves behavior only - each lane that starts virtual
-  # machines names the image build it downloads from, so no edge here
-  # carries that ordering. Gate only; the required-check names stay
-  # "Build" and "E2E".
-  e2e-novm-required:
-    name: E2E without VMs
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    if: always()
-    needs:
-      - e2e-fast-lane
-      - e2e-image-path
-    steps:
-      - name: All lanes without VMs passed
-        run: |
-          [ "${{ needs.e2e-fast-lane.result }}" = "success" ] && \
-            [ "${{ needs.e2e-image-path.result }}" = "success" ]
-
   # Deploy lane: a KubeVirt VM PXE-boots through a per-Subnet bootd pod
   # into the live image, kezio-agent registers with a single-use token,
   # MachineHardware holds the inventory, and the Machine reaches
@@ -771,7 +749,7 @@ jobs:
   # steps or jobs, not more matrix legs here.
   e2e-deploy:
     name: Deploy lane
-    needs: [images, boot-artifacts, e2e-novm-required]
+    needs: [build-required]
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
@@ -1387,7 +1365,7 @@ jobs:
   # is this lane's reason to exist.
   e2e-routed-site:
     name: Routed lane
-    needs: [images, boot-artifacts, e2e-novm-required, e2e-network-probes]
+    needs: [build-required, e2e-network-probes]
     runs-on: ubuntu-latest
     timeout-minutes: 150
     env:
@@ -2077,7 +2055,7 @@ jobs:
   # never leech across Sites regardless.
   e2e-two-site-concurrent:
     name: Two-site concurrent lane
-    needs: [images, boot-artifacts, e2e-novm-required, e2e-network-probes]
+    needs: [build-required, e2e-network-probes]
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
@@ -2972,9 +2950,15 @@ jobs:
             ${{ runner.temp }}/console-2site-x.log
             ${{ runner.temp }}/console-2site-y.log
 
-  # Stable required-check names for the branch ruleset. These two
-  # aggregate results only - no job depends on them - so the graph can
+  # Stable required-check names for the branch ruleset, so the graph can
   # grow without a ruleset edit as long as "Build" and "E2E" stay.
+  #
+  # "Build" is also the gate every e2e lane waits on: one edge saying
+  # "the build is good" rather than each lane listing the artifacts it
+  # downloads. A lane therefore starts only once both image tarballs and
+  # boot artifacts exist, including the lanes that use neither - the
+  # price of a single gate, paid so a broken build stops the run in one
+  # place. "E2E" aggregates the lanes and nothing depends on it.
   build-required:
     name: Build
     runs-on: ubuntu-latest
