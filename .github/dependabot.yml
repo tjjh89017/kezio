@@ -1,0 +1,28 @@
+version: 2
+
+updates:
+  # Third-party action versions only. Nothing else in this repository is
+  # tracked here: Go modules are pinned in go.mod and updated deliberately.
+  - package-ecosystem: "github-actions"
+    # "/" reaches .github/workflows. The composite actions under
+    # .github/actions/*/action.yml are separate scan targets and are not
+    # covered by it, yet four third-party actions are called from there
+    # (actions/upload-artifact, docker/build-push-action,
+    # docker/login-action, docker/metadata-action). Leaving them out would
+    # let a workflow and a composite action run two major versions of the
+    # same action in one build.
+    directories:
+      - "/"
+      - "/.github/actions/*"
+    schedule:
+      interval: "daily"
+    # One pull request for every action version, not one per call site.
+    # hack/actionpins fails the build when two call sites of the same
+    # action disagree on a version, so an update that reaches the workflow
+    # without reaching the composite actions that call the same action is
+    # a red build by construction. Grouping is what makes each update
+    # arrive as a single, self-consistent change.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
