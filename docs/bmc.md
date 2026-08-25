@@ -17,7 +17,7 @@ MachineSpec carries no power-intent field: there is no `spec.online`
 switch, and the reboot annotation
 (`kezio.kojuro.date/reboot[-<client>]`) is the only extra power lever a
 client holds over an otherwise idle or provisioned machine (see
-`api/v1alpha2/machine_types.go`'s own doc comment on MachineSpec). The
+`api/v1alpha3/machine_types.go`'s own doc comment on MachineSpec). The
 BMC-level graceful-then-forced power-off only runs as part of deleting
 a Machine: `MachineReconciler`'s delete walk powers the machine off
 (`AgentDeployer.PowerOff`) once deprovisioning finishes, before

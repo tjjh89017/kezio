@@ -32,7 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/ingest"
 )
 
@@ -83,7 +83,7 @@ const (
 )
 
 // ingestJobName returns the deterministic ingest Job name for imp.
-func ingestJobName(imp *keziov1alpha2.ImageImport) string {
+func ingestJobName(imp *keziov1alpha3.ImageImport) string {
 	return truncatedName(ingestJobNamePrefix+imp.Name, k8sNameMaxLength)
 }
 
@@ -103,7 +103,7 @@ func ingestScratchPVCName(importName string) string {
 // collection reclaims it once the ImageImport itself is deleted - nothing
 // else cleans it up once ingest finishes (see buildIngestJob's doc
 // comment for why it must outlive the ingest Job's own pod).
-func (r *ImageImportReconciler) ensureIngestScratchPVC(ctx context.Context, imp *keziov1alpha2.ImageImport) (*corev1.PersistentVolumeClaim, error) {
+func (r *ImageImportReconciler) ensureIngestScratchPVC(ctx context.Context, imp *keziov1alpha3.ImageImport) (*corev1.PersistentVolumeClaim, error) {
 	name := ingestScratchPVCName(imp.Name)
 	key := client.ObjectKey{Namespace: imp.Namespace, Name: name}
 
@@ -126,7 +126,7 @@ func (r *ImageImportReconciler) ensureIngestScratchPVC(ctx context.Context, imp 
 
 // buildIngestScratchPVC constructs the (not yet created) PVC backing an
 // import's ingest scratch space.
-func (r *ImageImportReconciler) buildIngestScratchPVC(imp *keziov1alpha2.ImageImport, name string) *corev1.PersistentVolumeClaim {
+func (r *ImageImportReconciler) buildIngestScratchPVC(imp *keziov1alpha3.ImageImport, name string) *corev1.PersistentVolumeClaim {
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -152,7 +152,7 @@ func (r *ImageImportReconciler) buildIngestScratchPVC(imp *keziov1alpha2.ImageIm
 }
 
 // ingestJobFor gets the ingest Job for imp, if any.
-func (r *ImageImportReconciler) ingestJobFor(ctx context.Context, imp *keziov1alpha2.ImageImport) (*batchv1.Job, error) {
+func (r *ImageImportReconciler) ingestJobFor(ctx context.Context, imp *keziov1alpha3.ImageImport) (*batchv1.Job, error) {
 	job := &batchv1.Job{}
 	key := client.ObjectKey{Namespace: imp.Namespace, Name: ingestJobName(imp)}
 	if err := r.Get(ctx, key, job); err != nil {
@@ -166,7 +166,7 @@ func (r *ImageImportReconciler) ingestJobFor(ctx context.Context, imp *keziov1al
 
 // createIngestJob creates the ingest Job for imp. r.Ingest must be
 // ready() - the caller gates on that before calling this.
-func (r *ImageImportReconciler) createIngestJob(ctx context.Context, imp *keziov1alpha2.ImageImport, scratchPVCName string) error {
+func (r *ImageImportReconciler) createIngestJob(ctx context.Context, imp *keziov1alpha3.ImageImport, scratchPVCName string) error {
 	job := r.buildIngestJob(imp, scratchPVCName)
 	if err := controllerutil.SetControllerReference(imp, job, r.Scheme); err != nil {
 		return fmt.Errorf("imageimport %q: setting ingest job owner reference: %w", imp.Name, err)
@@ -210,7 +210,7 @@ func (r *ImageImportReconciler) createIngestJob(ctx context.Context, imp *keziov
 //     message (bounded at ingest.TerminationMessageLimit by Kubernetes),
 //     success or failure - the sole transport this controller reads back
 //     from (see readIngestResult).
-func (r *ImageImportReconciler) buildIngestJob(imp *keziov1alpha2.ImageImport, scratchPVCName string) *batchv1.Job {
+func (r *ImageImportReconciler) buildIngestJob(imp *keziov1alpha3.ImageImport, scratchPVCName string) *batchv1.Job {
 	backoffLimit := int32(0)
 	labels := map[string]string{
 		imageAppNameLabel:      imageAppNameValue,
@@ -339,7 +339,7 @@ func readJobResult(ctx context.Context, c client.Client, namespace string, job *
 // what removes it) to let this reconciler build a fresh one on the next
 // reconcile. ImageImportSpec is immutable, so there is nothing else for a
 // retry to change.
-func (r *ImageImportReconciler) reconcileIngesting(ctx context.Context, imp *keziov1alpha2.ImageImport) (ctrl.Result, error) {
+func (r *ImageImportReconciler) reconcileIngesting(ctx context.Context, imp *keziov1alpha3.ImageImport) (ctrl.Result, error) {
 	if strings.HasPrefix(imp.Spec.Source.URL, ingest.StagedURLScheme+"://") && r.Ingest.StagingPVCName == "" {
 		return r.recordImportPending(ctx, imp, "StagingUnconfigured",
 			"spec.source.url uses a staged upload but no staging PVC is configured on the manager; the import stays Pending until it is")

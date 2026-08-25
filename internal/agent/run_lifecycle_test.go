@@ -26,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 )
 
@@ -150,7 +150,7 @@ func TestRegisterWithRetry_RetriesThenSucceeds(t *testing.T) {
 	cfg.RegisterRetryInterval = 2 * time.Millisecond
 
 	start := time.Now()
-	result, err := registerWithRetry(context.Background(), client, cfg, keziov1alpha2.MachineHardwareSpec{})
+	result, err := registerWithRetry(context.Background(), client, cfg, keziov1alpha3.MachineHardwareSpec{})
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -190,7 +190,7 @@ func TestRegisterWithRetry_CtxCancelledReturnsPromptly(t *testing.T) {
 	cancel()
 
 	start := time.Now()
-	_, err := registerWithRetry(ctx, client, cfg, keziov1alpha2.MachineHardwareSpec{})
+	_, err := registerWithRetry(ctx, client, cfg, keziov1alpha3.MachineHardwareSpec{})
 	elapsed := time.Since(start)
 
 	if err != context.Canceled {

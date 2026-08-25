@@ -2,7 +2,7 @@ name: Assert a Machine's state and operationalStatus are independent axes
 
 description: >-
   Proves the two-axis status design the full-deploy e2e lane's redesign
-  claims for api/v1alpha2/machine_types.go's MachineStatus: an error never
+  claims for api/v1alpha3/machine_types.go's MachineStatus: an error never
   changes status.state, only status.operationalStatus. Runs strictly
   before deploy-machine's own happy-path patch, so deploy-machine
   (unmodified, called right after this action) is itself the recovery/
@@ -107,7 +107,7 @@ runs:
       run: |
         set -euo pipefail
         cat <<EOF | kubectl apply -f -
-        apiVersion: kezio.kojuro.date/v1alpha2
+        apiVersion: kezio.kojuro.date/v1alpha3
         kind: PostHook
         metadata:
           name: ${NAME}

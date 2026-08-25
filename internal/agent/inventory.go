@@ -24,7 +24,7 @@ import (
 	"strconv"
 	"strings"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // Collect gathers the full hardware inventory this machine's agent
@@ -42,25 +42,25 @@ import (
 // /sys/block or /sys/class/net directories, or read /proc/meminfo or
 // /proc/cpuinfo - a live environment where those are missing has bigger
 // problems than an incomplete inventory.
-func Collect(root string) (keziov1alpha2.MachineHardwareSpec, error) {
+func Collect(root string) (keziov1alpha3.MachineHardwareSpec, error) {
 	disks, err := collectDisks(root)
 	if err != nil {
-		return keziov1alpha2.MachineHardwareSpec{}, err
+		return keziov1alpha3.MachineHardwareSpec{}, err
 	}
 	nics, err := collectNICs(root)
 	if err != nil {
-		return keziov1alpha2.MachineHardwareSpec{}, err
+		return keziov1alpha3.MachineHardwareSpec{}, err
 	}
 	memBytes, err := collectMemoryBytes(root)
 	if err != nil {
-		return keziov1alpha2.MachineHardwareSpec{}, err
+		return keziov1alpha3.MachineHardwareSpec{}, err
 	}
 	cpuCount, err := collectCPUCount(root)
 	if err != nil {
-		return keziov1alpha2.MachineHardwareSpec{}, err
+		return keziov1alpha3.MachineHardwareSpec{}, err
 	}
 
-	return keziov1alpha2.MachineHardwareSpec{
+	return keziov1alpha3.MachineHardwareSpec{
 		Disks:       disks,
 		Nics:        nics,
 		MemoryBytes: memBytes,
@@ -85,14 +85,14 @@ func isVirtualBlockDevice(name string) bool {
 	return false
 }
 
-func collectDisks(root string) ([]keziov1alpha2.MachineHardwareDisk, error) {
+func collectDisks(root string) ([]keziov1alpha3.MachineHardwareDisk, error) {
 	blockDir := filepath.Join(root, "sys", "block")
 	entries, err := os.ReadDir(blockDir)
 	if err != nil {
 		return nil, err
 	}
 
-	disks := make([]keziov1alpha2.MachineHardwareDisk, 0, len(entries))
+	disks := make([]keziov1alpha3.MachineHardwareDisk, 0, len(entries))
 	for _, e := range entries {
 		name := e.Name()
 		if isVirtualBlockDevice(name) {
@@ -104,10 +104,10 @@ func collectDisks(root string) ([]keziov1alpha2.MachineHardwareDisk, error) {
 	return disks, nil
 }
 
-func collectOneDisk(blockDir, name string) keziov1alpha2.MachineHardwareDisk {
+func collectOneDisk(blockDir, name string) keziov1alpha3.MachineHardwareDisk {
 	devDir := filepath.Join(blockDir, name)
 
-	disk := keziov1alpha2.MachineHardwareDisk{
+	disk := keziov1alpha3.MachineHardwareDisk{
 		DeviceName:   "/dev/" + name,
 		SerialNumber: readTrimmed(filepath.Join(devDir, "device", "serial")),
 		WWN:          readTrimmed(filepath.Join(devDir, "wwid")),
@@ -169,20 +169,20 @@ func lastMatch(re *regexp.Regexp, target string) (string, bool) {
 	return found, found != ""
 }
 
-func collectNICs(root string) ([]keziov1alpha2.MachineHardwareNIC, error) {
+func collectNICs(root string) ([]keziov1alpha3.MachineHardwareNIC, error) {
 	netDir := filepath.Join(root, "sys", "class", "net")
 	entries, err := os.ReadDir(netDir)
 	if err != nil {
 		return nil, err
 	}
 
-	nics := make([]keziov1alpha2.MachineHardwareNIC, 0, len(entries))
+	nics := make([]keziov1alpha3.MachineHardwareNIC, 0, len(entries))
 	for _, e := range entries {
 		name := e.Name()
 		if name == "lo" {
 			continue
 		}
-		nics = append(nics, keziov1alpha2.MachineHardwareNIC{
+		nics = append(nics, keziov1alpha3.MachineHardwareNIC{
 			Name:       name,
 			MACAddress: readTrimmed(filepath.Join(netDir, name, "address")),
 		})

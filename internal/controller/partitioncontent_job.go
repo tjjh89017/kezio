@@ -28,7 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/ingest"
 )
 
@@ -53,7 +53,7 @@ func publishJobName(contentName string) string {
 }
 
 // publishJobFor gets pc's publish Job, if any.
-func (r *PartitionContentReconciler) publishJobFor(ctx context.Context, pc *keziov1alpha2.PartitionContent) (*batchv1.Job, error) {
+func (r *PartitionContentReconciler) publishJobFor(ctx context.Context, pc *keziov1alpha3.PartitionContent) (*batchv1.Job, error) {
 	job := &batchv1.Job{}
 	key := client.ObjectKey{Namespace: pc.Namespace, Name: publishJobName(pc.Name)}
 	if err := r.Get(ctx, key, job); err != nil {
@@ -68,7 +68,7 @@ func (r *PartitionContentReconciler) publishJobFor(ctx context.Context, pc *kezi
 // createPublishJob creates pc's publish Job. r.Publish must be ready()
 // (see PartitionContentPublishConfig) - the caller gates on that before
 // calling this, since an unready config means Pending, not a Job.
-func (r *PartitionContentReconciler) createPublishJob(ctx context.Context, pc *keziov1alpha2.PartitionContent, pvcName string) error {
+func (r *PartitionContentReconciler) createPublishJob(ctx context.Context, pc *keziov1alpha3.PartitionContent, pvcName string) error {
 	job := r.buildPublishJob(pc, pvcName)
 	if err := controllerutil.SetControllerReference(pc, job, r.Scheme); err != nil {
 		return fmt.Errorf("partitioncontent %q: setting publish job owner reference: %w", pc.Name, err)
@@ -97,7 +97,7 @@ func (r *PartitionContentReconciler) createPublishJob(ctx context.Context, pc *k
 // PartitionContent this controller ever publishes was created by an
 // ImageImport (imageimport_controller.go's ensureImportedContent), so
 // Source is always populated by the time a publish Job is built.
-func (r *PartitionContentReconciler) buildPublishJob(pc *keziov1alpha2.PartitionContent, pvcName string) *batchv1.Job {
+func (r *PartitionContentReconciler) buildPublishJob(pc *keziov1alpha3.PartitionContent, pvcName string) *batchv1.Job {
 	backoffLimit := int32(publishJobBackoffLimit)
 	labels := map[string]string{
 		partitionContentAppNameLabel:      partitionContentAppNameValue,

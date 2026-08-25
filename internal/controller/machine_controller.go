@@ -43,7 +43,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/deployer"
 	"github.com/tjjh89017/kezio/internal/planbuild"
 )
@@ -134,7 +134,7 @@ type MachineReconciler struct {
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *MachineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var machine keziov1alpha2.Machine
+	var machine keziov1alpha3.Machine
 	if err := r.Get(ctx, req.NamespacedName, &machine); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -149,8 +149,8 @@ func (r *MachineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return r.onDelete(ctx, &machine)
 	}
 
-	if !controllerutil.ContainsFinalizer(&machine, keziov1alpha2.MachineFinalizer) {
-		controllerutil.AddFinalizer(&machine, keziov1alpha2.MachineFinalizer)
+	if !controllerutil.ContainsFinalizer(&machine, keziov1alpha3.MachineFinalizer) {
+		controllerutil.AddFinalizer(&machine, keziov1alpha3.MachineFinalizer)
 		if err := r.Update(ctx, &machine); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -165,20 +165,20 @@ func (r *MachineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 // credentials Secret through the forward path's blocking gate - a
 // deletion in progress must proceed with empty credentials rather than
 // wedge on a secret that is absent or unreadable.
-func (r *MachineReconciler) onDelete(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
-	if !controllerutil.ContainsFinalizer(machine, keziov1alpha2.MachineFinalizer) {
+func (r *MachineReconciler) onDelete(ctx context.Context, machine *keziov1alpha3.Machine) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(machine, keziov1alpha3.MachineFinalizer) {
 		return ctrl.Result{}, nil
 	}
 
 	switch machine.Status.State {
-	case keziov1alpha2.MachineStateDeprovisioning:
+	case keziov1alpha3.MachineStateDeprovisioning:
 		return r.reconcileDeprovisioning(ctx, machine)
-	case keziov1alpha2.MachineStatePoweringOff:
+	case keziov1alpha3.MachineStatePoweringOff:
 		return r.reconcilePoweringOff(ctx, machine)
 	default:
 		// Any other recorded state (including empty) means the delete
 		// walk has not started yet: enter it at the first stage.
-		return r.advanceDeleteStage(ctx, machine, keziov1alpha2.MachineStateDeprovisioning)
+		return r.advanceDeleteStage(ctx, machine, keziov1alpha3.MachineStateDeprovisioning)
 	}
 }
 
@@ -186,23 +186,23 @@ func (r *MachineReconciler) onDelete(ctx context.Context, machine *keziov1alpha2
 // straight to the next stage when the detached annotation is present: a
 // detached Machine never dials the BMC-adjacent deployer, on the forward
 // walk or the delete walk alike.
-func (r *MachineReconciler) reconcileDeprovisioning(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+func (r *MachineReconciler) reconcileDeprovisioning(ctx context.Context, machine *keziov1alpha3.Machine) (ctrl.Result, error) {
 	if isDetached(machine) {
-		return r.advanceDeleteStage(ctx, machine, keziov1alpha2.MachineStatePoweringOff)
+		return r.advanceDeleteStage(ctx, machine, keziov1alpha3.MachineStatePoweringOff)
 	}
-	step := func(ctx context.Context, m *keziov1alpha2.Machine) (deployer.Result, error) {
+	step := func(ctx context.Context, m *keziov1alpha3.Machine) (deployer.Result, error) {
 		return r.Deployer.Deprovision(ctx, m, restartOnFailure(m))
 	}
-	return r.runDeleteStage(ctx, machine, step, "deprovision", keziov1alpha2.MachineStatePoweringOff)
+	return r.runDeleteStage(ctx, machine, step, "deprovision", keziov1alpha3.MachineStatePoweringOff)
 }
 
 // reconcilePoweringOff runs the power-off delete stage, or skips it straight
 // to release when detached - see reconcileDeprovisioning.
-func (r *MachineReconciler) reconcilePoweringOff(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+func (r *MachineReconciler) reconcilePoweringOff(ctx context.Context, machine *keziov1alpha3.Machine) (ctrl.Result, error) {
 	if isDetached(machine) {
 		return r.advanceDeleteStage(ctx, machine, "")
 	}
-	step := func(ctx context.Context, m *keziov1alpha2.Machine) (deployer.Result, error) {
+	step := func(ctx context.Context, m *keziov1alpha3.Machine) (deployer.Result, error) {
 		return r.Deployer.PowerOff(ctx, m)
 	}
 	// An empty nextState tells runDeleteStage/advanceDeleteStage this is
@@ -220,7 +220,7 @@ func (r *MachineReconciler) reconcilePoweringOff(ctx context.Context, machine *k
 // outlive it, matching applyNonCompleteOutcome; Delayed itself requeues
 // without touching error state. Failed goes through
 // recordDeleteStageFailure, which applies the give-up threshold.
-func (r *MachineReconciler) runDeleteStage(ctx context.Context, machine *keziov1alpha2.Machine, step func(context.Context, *keziov1alpha2.Machine) (deployer.Result, error), stageName, nextState string) (ctrl.Result, error) {
+func (r *MachineReconciler) runDeleteStage(ctx context.Context, machine *keziov1alpha3.Machine, step func(context.Context, *keziov1alpha3.Machine) (deployer.Result, error), stageName, nextState string) (ctrl.Result, error) {
 	result, err := step(ctx, machine)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -253,7 +253,7 @@ func (r *MachineReconciler) runDeleteStage(ctx context.Context, machine *keziov1
 // error level, bumps machineDeleteStageGiveUpTotal, and advances exactly as
 // a Complete outcome would - a dead stage must never block the machine's
 // removal.
-func (r *MachineReconciler) recordDeleteStageFailure(ctx context.Context, machine *keziov1alpha2.Machine, result deployer.Result, stageName, nextState string) (ctrl.Result, error) {
+func (r *MachineReconciler) recordDeleteStageFailure(ctx context.Context, machine *keziov1alpha3.Machine, result deployer.Result, stageName, nextState string) (ctrl.Result, error) {
 	applyFailure(machine, result.ErrorType, result.ErrorMessage)
 	giveUp := machine.Status.ErrorCount > deleteStageMaxErrorCount
 	stampLastUpdated(machine)
@@ -283,7 +283,7 @@ func (r *MachineReconciler) recordDeleteStageFailure(ctx context.Context, machin
 // that records nextState does not itself re-trigger the watch (the Machine
 // update predicate ignores status-only changes), so this requeues
 // explicitly to run the next delete stage.
-func (r *MachineReconciler) advanceDeleteStage(ctx context.Context, machine *keziov1alpha2.Machine, nextState string) (ctrl.Result, error) {
+func (r *MachineReconciler) advanceDeleteStage(ctx context.Context, machine *keziov1alpha3.Machine, nextState string) (ctrl.Result, error) {
 	if nextState == "" {
 		return r.releaseMachine(ctx, machine)
 	}
@@ -303,11 +303,11 @@ func (r *MachineReconciler) advanceDeleteStage(ctx context.Context, machine *kez
 // since once the Machine is actually removed nothing maps a dangling
 // Secret owner reference back to a live reconcile that could still clear
 // it.
-func (r *MachineReconciler) releaseMachine(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+func (r *MachineReconciler) releaseMachine(ctx context.Context, machine *keziov1alpha3.Machine) (ctrl.Result, error) {
 	if err := r.releaseCredentialsSecretFinalizer(ctx, machine); err != nil {
 		return ctrl.Result{}, err
 	}
-	controllerutil.RemoveFinalizer(machine, keziov1alpha2.MachineFinalizer)
+	controllerutil.RemoveFinalizer(machine, keziov1alpha3.MachineFinalizer)
 	return ctrl.Result{}, r.Update(ctx, machine)
 }
 
@@ -316,11 +316,11 @@ func (r *MachineReconciler) releaseMachine(ctx context.Context, machine *keziov1
 // Available/Provisioned re-trigger. It never advances more than one step:
 // the status-only writes along the way do not re-trigger the Machine watch,
 // so every step that must run again returns an explicit requeue.
-func (r *MachineReconciler) onChange(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+func (r *MachineReconciler) onChange(ctx context.Context, machine *keziov1alpha3.Machine) (ctrl.Result, error) {
 	if isDetached(machine) {
 		return r.reconcileDetached(ctx, machine)
 	}
-	if machine.Status.OperationalStatus == keziov1alpha2.MachineOperationalStatusDetached {
+	if machine.Status.OperationalStatus == keziov1alpha3.MachineOperationalStatusDetached {
 		return r.clearDetached(ctx, machine)
 	}
 
@@ -338,19 +338,19 @@ func (r *MachineReconciler) onChange(ctx context.Context, machine *keziov1alpha2
 		// must go with it - otherwise the machine could reach
 		// Available/Provisioned still pointing at an orphaned DeployRun.
 		machine.Status.CurrentRunRef = nil
-		return r.setState(ctx, machine, keziov1alpha2.MachineStateEnrolling)
+		return r.setState(ctx, machine, keziov1alpha3.MachineStateEnrolling)
 	}
 
 	switch machine.Status.State {
 	case "":
 		return r.reconcileEmptyStatus(ctx, machine)
-	case keziov1alpha2.MachineStateEnrolling:
-		return r.setState(ctx, machine, keziov1alpha2.MachineStateInspecting)
-	case keziov1alpha2.MachineStateInspecting:
+	case keziov1alpha3.MachineStateEnrolling:
+		return r.setState(ctx, machine, keziov1alpha3.MachineStateInspecting)
+	case keziov1alpha3.MachineStateInspecting:
 		return r.reconcileInspecting(ctx, machine)
-	case keziov1alpha2.MachineStateAvailable, keziov1alpha2.MachineStateProvisioned:
+	case keziov1alpha3.MachineStateAvailable, keziov1alpha3.MachineStateProvisioned:
 		return r.reconcileIdle(ctx, machine)
-	case keziov1alpha2.MachineStateProvisioning:
+	case keziov1alpha3.MachineStateProvisioning:
 		return r.reconcileProvisioning(ctx, machine)
 	default:
 		return ctrl.Result{}, fmt.Errorf("machine %q: unknown status.state %q", machine.Name, machine.Status.State)
@@ -361,7 +361,7 @@ func (r *MachineReconciler) onChange(ctx context.Context, machine *keziov1alpha2
 // applyMachineStatus sends: identity plus status, deliberately with no Spec
 // field at all. MachineSpec has several non-omitempty-eligible required
 // fields (non-pointer structs, and string fields with no omitempty), so
-// marshaling any *keziov1alpha2.Machine value - even one built with a
+// marshaling any *keziov1alpha3.Machine value - even one built with a
 // zero-valued Spec - puts a populated "spec" object in the request body.
 // Sent to the status subresource, the API server validates that body
 // against the whole resource's schema, and a zero-valued required Spec
@@ -377,7 +377,7 @@ func (r *MachineReconciler) onChange(ctx context.Context, machine *keziov1alpha2
 type machineStatusApplyBody struct {
 	metav1.TypeMeta `json:",inline"`
 	Metadata        machineStatusApplyBodyMetadata `json:"metadata,omitempty"`
-	Status          keziov1alpha2.MachineStatus    `json:"status"`
+	Status          keziov1alpha3.MachineStatus    `json:"status"`
 }
 
 // machineStatusApplyBodyMetadata mirrors the JSON shape of the
@@ -405,9 +405,9 @@ type machineStatusApplyBodyMetadata struct {
 // every write, not a disjoint subset. That is safe today because the
 // Machine controller is the only writer of Machine.status - a future writer
 // of disjoint fields needs a narrower patch shape than this one.
-func (r *MachineReconciler) applyMachineStatus(ctx context.Context, machine *keziov1alpha2.Machine, onSuccess ...func()) error {
+func (r *MachineReconciler) applyMachineStatus(ctx context.Context, machine *keziov1alpha3.Machine, onSuccess ...func()) error {
 	body := machineStatusApplyBody{
-		TypeMeta: metav1.TypeMeta{APIVersion: keziov1alpha2.GroupVersion.String(), Kind: "Machine"},
+		TypeMeta: metav1.TypeMeta{APIVersion: keziov1alpha3.GroupVersion.String(), Kind: "Machine"},
 		Metadata: machineStatusApplyBodyMetadata{Name: machine.Name, Namespace: machine.Namespace},
 		Status:   machine.Status,
 	}
@@ -433,11 +433,11 @@ func (r *MachineReconciler) applyMachineStatus(ctx context.Context, machine *kez
 // predicate ignores status-only changes), so this requeues explicitly to run
 // the next walk step. onSuccess callbacks (an event, typically) run only
 // after the write succeeds - see applyMachineStatus.
-func (r *MachineReconciler) setState(ctx context.Context, machine *keziov1alpha2.Machine, state string, onSuccess ...func()) (ctrl.Result, error) {
+func (r *MachineReconciler) setState(ctx context.Context, machine *keziov1alpha3.Machine, state string, onSuccess ...func()) (ctrl.Result, error) {
 	machine.Status.State = state
 	markOperational(machine)
 	machine.Status.ErrorCount = 0
-	meta.RemoveStatusCondition(&machine.Status.Conditions, keziov1alpha2.MachineConditionStatusLossHold)
+	meta.RemoveStatusCondition(&machine.Status.Conditions, keziov1alpha3.MachineConditionStatusLossHold)
 	stampLastUpdated(machine)
 	if err := r.applyMachineStatus(ctx, machine, onSuccess...); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: setting status.state to %q: %w", machine.Name, state, err)
@@ -460,7 +460,7 @@ func (r *MachineReconciler) setState(ctx context.Context, machine *keziov1alpha2
 // reconciler is the only thing that ever creates one, and it has not run
 // for this Machine yet), while a Machine that was actually provisioned
 // before the restore still owns its DeployRun history, GC retention aside.
-func (r *MachineReconciler) reconcileEmptyStatus(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+func (r *MachineReconciler) reconcileEmptyStatus(ctx context.Context, machine *keziov1alpha3.Machine) (ctrl.Result, error) {
 	if statusLossHeld(machine) {
 		return r.reconcileStatusLossHold(ctx, machine)
 	}
@@ -475,13 +475,13 @@ func (r *MachineReconciler) reconcileEmptyStatus(ctx context.Context, machine *k
 		}
 	}
 
-	return r.setState(ctx, machine, keziov1alpha2.MachineStateEnrolling)
+	return r.setState(ctx, machine, keziov1alpha3.MachineStateEnrolling)
 }
 
 // hasPriorDeployRuns reports whether at least one DeployRun already names
 // machine in its spec.machineRef, in machine's own namespace.
-func (r *MachineReconciler) hasPriorDeployRuns(ctx context.Context, machine *keziov1alpha2.Machine) (bool, error) {
-	var runs keziov1alpha2.DeployRunList
+func (r *MachineReconciler) hasPriorDeployRuns(ctx context.Context, machine *keziov1alpha3.Machine) (bool, error) {
+	var runs keziov1alpha3.DeployRunList
 	if err := r.List(ctx, &runs, client.InNamespace(machine.Namespace)); err != nil {
 		return false, fmt.Errorf("machine %q: listing DeployRuns for status-loss detection: %w", machine.Name, err)
 	}
@@ -495,25 +495,25 @@ func (r *MachineReconciler) hasPriorDeployRuns(ctx context.Context, machine *kez
 
 // statusLossHeld reports whether machine currently carries an active
 // status-loss hold.
-func statusLossHeld(machine *keziov1alpha2.Machine) bool {
-	return meta.IsStatusConditionTrue(machine.Status.Conditions, keziov1alpha2.MachineConditionStatusLossHold)
+func statusLossHeld(machine *keziov1alpha3.Machine) bool {
+	return meta.IsStatusConditionTrue(machine.Status.Conditions, keziov1alpha3.MachineConditionStatusLossHold)
 }
 
 // enterStatusLossHold records the hold and emits a Warning Event. No
 // requeue: nothing here resolves on its own, only an operator editing the
 // confirm annotation (or the spec) does, and that arrives through the
 // normal watch.
-func (r *MachineReconciler) enterStatusLossHold(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+func (r *MachineReconciler) enterStatusLossHold(ctx context.Context, machine *keziov1alpha3.Machine) (ctrl.Result, error) {
 	meta.SetStatusCondition(&machine.Status.Conditions, metav1.Condition{
-		Type:    keziov1alpha2.MachineConditionStatusLossHold,
+		Type:    keziov1alpha3.MachineConditionStatusLossHold,
 		Status:  metav1.ConditionTrue,
 		Reason:  "PriorDeployRunsFound",
-		Message: "status was never recorded but spec carries deploy intent and DeployRuns already exist for this machine; holding until " + keziov1alpha2.MachineAnnotationConfirmStatusLoss + " is set",
+		Message: "status was never recorded but spec carries deploy intent and DeployRuns already exist for this machine; holding until " + keziov1alpha3.MachineAnnotationConfirmStatusLoss + " is set",
 	})
 	stampLastUpdated(machine)
 	onSuccess := func() {
 		r.Recorder.Eventf(machine, corev1.EventTypeWarning, "StatusLossHold",
-			"status was never recorded but spec carries deploy intent and DeployRuns already exist for this machine; holding until the %q annotation is set", keziov1alpha2.MachineAnnotationConfirmStatusLoss)
+			"status was never recorded but spec carries deploy intent and DeployRuns already exist for this machine; holding until the %q annotation is set", keziov1alpha3.MachineAnnotationConfirmStatusLoss)
 	}
 	if err := r.applyMachineStatus(ctx, machine, onSuccess); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: entering status-loss hold: %w", machine.Name, err)
@@ -527,15 +527,15 @@ func (r *MachineReconciler) enterStatusLossHold(ctx context.Context, machine *ke
 // operator-driven annotation/spec edit, which retriggers this reconciler on
 // its own through the watch. Once observed, the annotation is consumed
 // (never left in place) before the walk resumes at Enrolling.
-func (r *MachineReconciler) reconcileStatusLossHold(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
-	if _, confirmed := machine.Annotations[keziov1alpha2.MachineAnnotationConfirmStatusLoss]; !confirmed {
+func (r *MachineReconciler) reconcileStatusLossHold(ctx context.Context, machine *keziov1alpha3.Machine) (ctrl.Result, error) {
+	if _, confirmed := machine.Annotations[keziov1alpha3.MachineAnnotationConfirmStatusLoss]; !confirmed {
 		return ctrl.Result{}, nil
 	}
 
 	if err := r.consumeConfirmStatusLossAnnotation(ctx, machine); err != nil {
 		return ctrl.Result{}, err
 	}
-	return r.setState(ctx, machine, keziov1alpha2.MachineStateEnrolling, func() {
+	return r.setState(ctx, machine, keziov1alpha3.MachineStateEnrolling, func() {
 		r.Recorder.Event(machine, corev1.EventTypeNormal, "StatusLossHoldCleared",
 			"confirm-status-loss annotation accepted: resuming the normal state walk from Enrolling")
 	})
@@ -544,9 +544,9 @@ func (r *MachineReconciler) reconcileStatusLossHold(ctx context.Context, machine
 // consumeConfirmStatusLossAnnotation removes
 // MachineAnnotationConfirmStatusLoss from machine, mirroring
 // consumeReInspectAnnotation's consume-then-delete discipline.
-func (r *MachineReconciler) consumeConfirmStatusLossAnnotation(ctx context.Context, machine *keziov1alpha2.Machine) error {
+func (r *MachineReconciler) consumeConfirmStatusLossAnnotation(ctx context.Context, machine *keziov1alpha3.Machine) error {
 	patch := client.MergeFrom(machine.DeepCopy())
-	delete(machine.Annotations, keziov1alpha2.MachineAnnotationConfirmStatusLoss)
+	delete(machine.Annotations, keziov1alpha3.MachineAnnotationConfirmStatusLoss)
 	if err := r.Patch(ctx, machine, patch); err != nil {
 		return fmt.Errorf("machine %q: consuming confirm-status-loss annotation: %w", machine.Name, err)
 	}
@@ -557,9 +557,9 @@ func (r *MachineReconciler) consumeConfirmStatusLossAnnotation(ctx context.Conte
 // inspect-disable annotation is set - skips inspection entirely: no
 // MachineHardware is created, and spec.bootMACAddress (mandatory in that
 // case, per the Machine webhook) carries the identity instead.
-func (r *MachineReconciler) reconcileInspecting(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+func (r *MachineReconciler) reconcileInspecting(ctx context.Context, machine *keziov1alpha3.Machine) (ctrl.Result, error) {
 	if inspectDisabled(machine) {
-		return r.setState(ctx, machine, keziov1alpha2.MachineStateAvailable)
+		return r.setState(ctx, machine, keziov1alpha3.MachineStateAvailable)
 	}
 
 	secret, blocked, gateResult, err := r.resolveCredentialsSecret(ctx, machine)
@@ -580,7 +580,7 @@ func (r *MachineReconciler) reconcileInspecting(ctx context.Context, machine *ke
 		}
 	}
 	if result.Outcome == deployer.Complete {
-		return r.setState(ctx, machine, keziov1alpha2.MachineStateAvailable)
+		return r.setState(ctx, machine, keziov1alpha3.MachineStateAvailable)
 	}
 	return r.applyNonCompleteOutcome(ctx, machine, result, restarting)
 }
@@ -591,11 +591,11 @@ func (r *MachineReconciler) reconcileInspecting(ctx context.Context, machine *ke
 // Provisioned -> Available path, and it is what lets a released machine
 // re-enter service. A Provisioned machine with a set deploy payload always
 // refuses, and every other state refuses.
-func reInspectAcceptable(machine *keziov1alpha2.Machine) bool {
+func reInspectAcceptable(machine *keziov1alpha3.Machine) bool {
 	switch machine.Status.State {
-	case keziov1alpha2.MachineStateAvailable:
+	case keziov1alpha3.MachineStateAvailable:
 		return true
-	case keziov1alpha2.MachineStateProvisioned:
+	case keziov1alpha3.MachineStateProvisioned:
 		return isEmptyDeployPayload(machine)
 	default:
 		return false
@@ -609,7 +609,7 @@ func reInspectAcceptable(machine *keziov1alpha2.Machine) bool {
 // reconcile. On acceptance the existing MachineHardware is deleted (never
 // patched) and the machine moves to Inspecting, where the normal inspection
 // walk creates a fresh one.
-func (r *MachineReconciler) reconcileReInspect(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+func (r *MachineReconciler) reconcileReInspect(ctx context.Context, machine *keziov1alpha3.Machine) (ctrl.Result, error) {
 	accepted := reInspectAcceptable(machine)
 	if err := r.consumeReInspectAnnotation(ctx, machine); err != nil {
 		return ctrl.Result{}, err
@@ -618,14 +618,14 @@ func (r *MachineReconciler) reconcileReInspect(ctx context.Context, machine *kez
 	if !accepted {
 		r.Recorder.Eventf(machine, corev1.EventTypeWarning, "ReInspectRefused",
 			"re-inspect annotation refused: machine is in state %q; re-inspect is accepted in %q, or in %q with an empty deploy payload",
-			machine.Status.State, keziov1alpha2.MachineStateAvailable, keziov1alpha2.MachineStateProvisioned)
+			machine.Status.State, keziov1alpha3.MachineStateAvailable, keziov1alpha3.MachineStateProvisioned)
 		return ctrl.Result{}, nil
 	}
 
 	if err := r.deleteMachineHardware(ctx, machine); err != nil {
 		return ctrl.Result{}, err
 	}
-	return r.setState(ctx, machine, keziov1alpha2.MachineStateInspecting, func() {
+	return r.setState(ctx, machine, keziov1alpha3.MachineStateInspecting, func() {
 		r.Recorder.Event(machine, corev1.EventTypeNormal, "ReInspectAccepted",
 			"re-inspect annotation accepted: MachineHardware deleted, machine moving to Inspecting")
 	})
@@ -635,9 +635,9 @@ func (r *MachineReconciler) reconcileReInspect(ctx context.Context, machine *kez
 // machine. Called exactly once per reconcile that observes the annotation,
 // before acting on it, so a crash or a refuse decision can never leave the
 // annotation to re-trigger this branch forever.
-func (r *MachineReconciler) consumeReInspectAnnotation(ctx context.Context, machine *keziov1alpha2.Machine) error {
+func (r *MachineReconciler) consumeReInspectAnnotation(ctx context.Context, machine *keziov1alpha3.Machine) error {
 	patch := client.MergeFrom(machine.DeepCopy())
-	delete(machine.Annotations, keziov1alpha2.MachineAnnotationReInspect)
+	delete(machine.Annotations, keziov1alpha3.MachineAnnotationReInspect)
 	if err := r.Patch(ctx, machine, patch); err != nil {
 		return fmt.Errorf("machine %q: consuming re-inspect annotation: %w", machine.Name, err)
 	}
@@ -648,8 +648,8 @@ func (r *MachineReconciler) consumeReInspectAnnotation(ctx context.Context, mach
 // any. It never patches: re-inspection always produces a genuinely new
 // object (a new UID) through the normal inspection walk's create call, not
 // an update of the old one.
-func (r *MachineReconciler) deleteMachineHardware(ctx context.Context, machine *keziov1alpha2.Machine) error {
-	hw := &keziov1alpha2.MachineHardware{ObjectMeta: metav1.ObjectMeta{Name: machine.Name, Namespace: machine.Namespace}}
+func (r *MachineReconciler) deleteMachineHardware(ctx context.Context, machine *keziov1alpha3.Machine) error {
+	hw := &keziov1alpha3.MachineHardware{ObjectMeta: metav1.ObjectMeta{Name: machine.Name, Namespace: machine.Namespace}}
 	if err := r.Delete(ctx, hw); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("machine %q: deleting MachineHardware for re-inspection: %w", machine.Name, err)
 	}
@@ -662,7 +662,7 @@ func (r *MachineReconciler) deleteMachineHardware(ctx context.Context, machine *
 // being resolvable and Ready per the cross-reference contract (see
 // imageReadyForProvisioning) - a Machine with no imageRef never reaches
 // that gate at all.
-func (r *MachineReconciler) reconcileIdle(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+func (r *MachineReconciler) reconcileIdle(ctx context.Context, machine *keziov1alpha3.Machine) (ctrl.Result, error) {
 	lastRun, err := r.lastSuccessfulRun(ctx, machine)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: reading last successful DeployRun: %w", machine.Name, err)
@@ -687,7 +687,7 @@ func (r *MachineReconciler) reconcileIdle(ctx context.Context, machine *keziov1a
 		return ctrl.Result{}, nil
 	}
 
-	meta.RemoveStatusCondition(&machine.Status.Conditions, keziov1alpha2.MachineConditionProgressing)
+	meta.RemoveStatusCondition(&machine.Status.Conditions, keziov1alpha3.MachineConditionProgressing)
 	return r.startProvisioningRun(ctx, machine)
 }
 
@@ -699,7 +699,7 @@ func (r *MachineReconciler) reconcileIdle(ctx context.Context, machine *keziov1a
 // message. A nil ImageRef reports ready unconditionally with no lookup at
 // all - the fast lane (no OS image, or a dataImages-only deploy) never
 // depended on an Image existing and must keep working exactly as before.
-func (r *MachineReconciler) imageReadyForProvisioning(ctx context.Context, machine *keziov1alpha2.Machine) (ready bool, reason, message string, err error) {
+func (r *MachineReconciler) imageReadyForProvisioning(ctx context.Context, machine *keziov1alpha3.Machine) (ready bool, reason, message string, err error) {
 	ref := machine.Spec.ImageRef
 	if ref == nil {
 		return true, "", "", nil
@@ -709,7 +709,7 @@ func (r *MachineReconciler) imageReadyForProvisioning(ctx context.Context, machi
 	if namespace == "" {
 		namespace = machine.Namespace
 	}
-	var image keziov1alpha2.Image
+	var image keziov1alpha3.Image
 	key := client.ObjectKey{Namespace: namespace, Name: ref.Name}
 	if err := r.Get(ctx, key, &image); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -718,7 +718,7 @@ func (r *MachineReconciler) imageReadyForProvisioning(ctx context.Context, machi
 		return false, "", "", fmt.Errorf("machine %q: getting Image %q: %w", machine.Name, ref.Name, err)
 	}
 
-	cond := meta.FindStatusCondition(image.Status.Conditions, keziov1alpha2.ImageConditionReady)
+	cond := meta.FindStatusCondition(image.Status.Conditions, keziov1alpha3.ImageConditionReady)
 	switch {
 	case cond == nil:
 		return false, "ImageNotReady", fmt.Sprintf("Image %q has no Ready condition yet", ref.Name), nil
@@ -761,12 +761,12 @@ func classifyPlanBuildError(err error) (notReady, failed bool) {
 // error is transient and returned unchanged. The DeployRun passed to
 // Build is a throwaway (never created): only its resolved Snapshot is
 // used here, not the DeployPlan Build also returns.
-func (r *MachineReconciler) currentHooksHash(ctx context.Context, machine *keziov1alpha2.Machine) (hooksHash string, ok bool, result ctrl.Result, err error) {
+func (r *MachineReconciler) currentHooksHash(ctx context.Context, machine *keziov1alpha3.Machine) (hooksHash string, ok bool, result ctrl.Result, err error) {
 	if r.Builder == nil {
 		return "", true, ctrl.Result{}, nil
 	}
 
-	_, snapshot, buildErr := r.Builder.Build(ctx, machine, &keziov1alpha2.DeployRun{})
+	_, snapshot, buildErr := r.Builder.Build(ctx, machine, &keziov1alpha3.DeployRun{})
 	if buildErr == nil {
 		return snapshot.HooksHash, true, ctrl.Result{}, nil
 	}
@@ -778,7 +778,7 @@ func (r *MachineReconciler) currentHooksHash(ctx context.Context, machine *kezio
 	case failed:
 		result, err = r.recordFailure(ctx, machine, deployer.Result{
 			Outcome:      deployer.Failed,
-			ErrorType:    keziov1alpha2.MachineErrorTypeTransient,
+			ErrorType:    keziov1alpha3.MachineErrorTypeTransient,
 			ErrorMessage: buildErr.Error(),
 		})
 	default:
@@ -797,9 +797,9 @@ func (r *MachineReconciler) currentHooksHash(ctx context.Context, machine *kezio
 // The condition uses machine.Generation, not the referenced object's, per
 // the same observedGeneration-per-writer convention every other condition
 // in this codebase follows.
-func (r *MachineReconciler) markDelayedNotReady(ctx context.Context, machine *keziov1alpha2.Machine, reason, message string) (ctrl.Result, error) {
+func (r *MachineReconciler) markDelayedNotReady(ctx context.Context, machine *keziov1alpha3.Machine, reason, message string) (ctrl.Result, error) {
 	meta.SetStatusCondition(&machine.Status.Conditions, metav1.Condition{
-		Type:               keziov1alpha2.MachineConditionProgressing,
+		Type:               keziov1alpha3.MachineConditionProgressing,
 		Status:             metav1.ConditionFalse,
 		ObservedGeneration: machine.Generation,
 		Reason:             reason,
@@ -820,7 +820,7 @@ func (r *MachineReconciler) markDelayedNotReady(ctx context.Context, machine *ke
 // touching error state, a DiskSelectionError/ValidationError records a
 // Failed provision step, and anything else is a transient error returned
 // unchanged.
-func (r *MachineReconciler) startProvisioningRun(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+func (r *MachineReconciler) startProvisioningRun(ctx context.Context, machine *keziov1alpha3.Machine) (ctrl.Result, error) {
 	run, err := r.createDeployRun(ctx, machine)
 	if err != nil {
 		notReady, failed := classifyPlanBuildError(err)
@@ -830,7 +830,7 @@ func (r *MachineReconciler) startProvisioningRun(ctx context.Context, machine *k
 		case failed:
 			return r.recordFailure(ctx, machine, deployer.Result{
 				Outcome:      deployer.Failed,
-				ErrorType:    keziov1alpha2.MachineErrorTypeTransient,
+				ErrorType:    keziov1alpha3.MachineErrorTypeTransient,
 				ErrorMessage: err.Error(),
 			})
 		default:
@@ -838,8 +838,8 @@ func (r *MachineReconciler) startProvisioningRun(ctx context.Context, machine *k
 		}
 	}
 
-	machine.Status.State = keziov1alpha2.MachineStateProvisioning
-	machine.Status.CurrentRunRef = &keziov1alpha2.NameRef{Name: run.Name}
+	machine.Status.State = keziov1alpha3.MachineStateProvisioning
+	machine.Status.CurrentRunRef = &keziov1alpha3.NameRef{Name: run.Name}
 	markOperational(machine)
 	machine.Status.ErrorCount = 0
 	stampLastUpdated(machine)
@@ -849,7 +849,7 @@ func (r *MachineReconciler) startProvisioningRun(ctx context.Context, machine *k
 	return ctrl.Result{Requeue: true}, nil
 }
 
-func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *keziov1alpha3.Machine) (ctrl.Result, error) {
 	// A nil currentRunRef while still Provisioning is not an invariant
 	// violation: recordCurrentRunDeleted clears it after the run
 	// disappears out from under an in-progress deployment, and this is
@@ -888,14 +888,14 @@ func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *
 			// The only place a reference to a failed run is kept:
 			// applyNonCompleteOutcome writes this field with the failure it
 			// records, in the same patch.
-			machine.Status.LastAttemptedRunRef = &keziov1alpha2.NameRef{Name: run.Name}
+			machine.Status.LastAttemptedRunRef = &keziov1alpha3.NameRef{Name: run.Name}
 		}
 		return r.applyNonCompleteOutcome(ctx, machine, result, restarting)
 	}
 
-	machine.Status.State = keziov1alpha2.MachineStateProvisioned
-	machine.Status.LastSuccessfulRunRef = &keziov1alpha2.NameRef{Name: run.Name}
-	machine.Status.LastAttemptedRunRef = &keziov1alpha2.NameRef{Name: run.Name}
+	machine.Status.State = keziov1alpha3.MachineStateProvisioned
+	machine.Status.LastSuccessfulRunRef = &keziov1alpha3.NameRef{Name: run.Name}
+	machine.Status.LastAttemptedRunRef = &keziov1alpha3.NameRef{Name: run.Name}
 	markOperational(machine)
 	machine.Status.ErrorCount = 0
 	stampLastUpdated(machine)
@@ -914,21 +914,21 @@ func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *
 // stale-restart) with errorType MachineErrorTypeRestart asks the deployer
 // to discard in-progress step state; every other case, including an
 // unrecognized errorType, resumes the step in place.
-func restartOnFailure(machine *keziov1alpha2.Machine) bool {
-	return machine.Status.OperationalStatus == keziov1alpha2.MachineOperationalStatusError &&
-		machine.Status.ErrorType == keziov1alpha2.MachineErrorTypeRestart
+func restartOnFailure(machine *keziov1alpha3.Machine) bool {
+	return machine.Status.OperationalStatus == keziov1alpha3.MachineOperationalStatusError &&
+		machine.Status.ErrorType == keziov1alpha3.MachineErrorTypeRestart
 }
 
 // hasUnknownErrorType reports whether the machine is recorded as errored
 // with an errorType outside the known set (Transient, Restart): corrupt
 // data or a value written by an incompatible controller version. An empty
 // errorType is the no-error case, not unknown, so it does not match.
-func hasUnknownErrorType(machine *keziov1alpha2.Machine) bool {
-	if machine.Status.OperationalStatus != keziov1alpha2.MachineOperationalStatusError {
+func hasUnknownErrorType(machine *keziov1alpha3.Machine) bool {
+	if machine.Status.OperationalStatus != keziov1alpha3.MachineOperationalStatusError {
 		return false
 	}
 	switch machine.Status.ErrorType {
-	case "", keziov1alpha2.MachineErrorTypeTransient, keziov1alpha2.MachineErrorTypeRestart:
+	case "", keziov1alpha3.MachineErrorTypeTransient, keziov1alpha3.MachineErrorTypeRestart:
 		return false
 	default:
 		return true
@@ -939,11 +939,11 @@ func hasUnknownErrorType(machine *keziov1alpha2.Machine) bool {
 // detached annotation is present, without ever calling the deployer: state,
 // errorType, errorCount, and every deployer-derived field are frozen
 // exactly as they were the moment detached was set.
-func (r *MachineReconciler) reconcileDetached(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
-	if machine.Status.OperationalStatus == keziov1alpha2.MachineOperationalStatusDetached {
+func (r *MachineReconciler) reconcileDetached(ctx context.Context, machine *keziov1alpha3.Machine) (ctrl.Result, error) {
+	if machine.Status.OperationalStatus == keziov1alpha3.MachineOperationalStatusDetached {
 		return ctrl.Result{}, nil
 	}
-	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusDetached
+	machine.Status.OperationalStatus = keziov1alpha3.MachineOperationalStatusDetached
 	stampLastUpdated(machine)
 	if err := r.applyMachineStatus(ctx, machine); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: recording detached status: %w", machine.Name, err)
@@ -957,7 +957,7 @@ func (r *MachineReconciler) reconcileDetached(ctx context.Context, machine *kezi
 // one-step-per-reconcile discipline as clearRetryStatus. The annotation removal
 // that reached this reconcile already happened; nothing further will
 // re-trigger the watch, so this requeues explicitly to resume the walk.
-func (r *MachineReconciler) clearDetached(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+func (r *MachineReconciler) clearDetached(ctx context.Context, machine *keziov1alpha3.Machine) (ctrl.Result, error) {
 	markOperational(machine)
 	stampLastUpdated(machine)
 	if err := r.applyMachineStatus(ctx, machine); err != nil {
@@ -973,7 +973,7 @@ func (r *MachineReconciler) clearDetached(ctx context.Context, machine *keziov1a
 // (the same two-axis error/delay bookkeeping as Inspect/Provision) and
 // leaves every reboot annotation untouched, so the reboot is retried as-is
 // on the next reconcile.
-func (r *MachineReconciler) reconcileReboot(ctx context.Context, machine *keziov1alpha2.Machine, hard bool) (ctrl.Result, error) {
+func (r *MachineReconciler) reconcileReboot(ctx context.Context, machine *keziov1alpha3.Machine, hard bool) (ctrl.Result, error) {
 	result, err := r.Deployer.Reboot(ctx, machine, hard)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -995,7 +995,7 @@ func (r *MachineReconciler) reconcileReboot(ctx context.Context, machine *keziov
 // restarting is the restartOnFailure value the caller passed into the
 // deployer step that produced result: see clearRetryStatus's doc comment
 // for why Continuing/Busy need it.
-func (r *MachineReconciler) applyNonCompleteOutcome(ctx context.Context, machine *keziov1alpha2.Machine, result deployer.Result, restarting bool) (ctrl.Result, error) {
+func (r *MachineReconciler) applyNonCompleteOutcome(ctx context.Context, machine *keziov1alpha3.Machine, result deployer.Result, restarting bool) (ctrl.Result, error) {
 	switch result.Outcome {
 	case deployer.Continuing:
 		return r.clearRetryStatus(ctx, machine, restarting, ctrl.Result{RequeueAfter: jitter(continuingRequeueInterval)})
@@ -1016,7 +1016,7 @@ func (r *MachineReconciler) applyNonCompleteOutcome(ctx context.Context, machine
 
 // recordDelayed marks machine delayed and requeues after
 // delayedRequeueInterval, the fixed delay for a deployer.Delayed outcome.
-func (r *MachineReconciler) recordDelayed(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+func (r *MachineReconciler) recordDelayed(ctx context.Context, machine *keziov1alpha3.Machine) (ctrl.Result, error) {
 	return r.markDelayed(ctx, machine, delayedRequeueInterval)
 }
 
@@ -1024,8 +1024,8 @@ func (r *MachineReconciler) recordDelayed(ctx context.Context, machine *keziov1a
 // left untouched - delayed is not an error, so it never joins the error
 // backoff/reset accounting. The caller always requeues after requeueAfter,
 // a fixed delay independent of any error backoff.
-func (r *MachineReconciler) markDelayed(ctx context.Context, machine *keziov1alpha2.Machine, requeueAfter time.Duration) (ctrl.Result, error) {
-	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusDelayed
+func (r *MachineReconciler) markDelayed(ctx context.Context, machine *keziov1alpha3.Machine, requeueAfter time.Duration) (ctrl.Result, error) {
+	machine.Status.OperationalStatus = keziov1alpha3.MachineOperationalStatusDelayed
 	stampLastUpdated(machine)
 	if err := r.applyMachineStatus(ctx, machine); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: recording delayed status: %w", machine.Name, err)
@@ -1059,11 +1059,11 @@ func (r *MachineReconciler) markDelayed(ctx context.Context, machine *keziov1alp
 // state"), so a run stuck failing the same way every restart still shows
 // a climbing errorCount for backoff/observability - this only unblocks
 // the deployer from being asked to restart forever.
-func (r *MachineReconciler) clearRetryStatus(ctx context.Context, machine *keziov1alpha2.Machine, restarting bool, result ctrl.Result) (ctrl.Result, error) {
+func (r *MachineReconciler) clearRetryStatus(ctx context.Context, machine *keziov1alpha3.Machine, restarting bool, result ctrl.Result) (ctrl.Result, error) {
 	switch {
-	case machine.Status.OperationalStatus == keziov1alpha2.MachineOperationalStatusDelayed:
+	case machine.Status.OperationalStatus == keziov1alpha3.MachineOperationalStatusDelayed:
 		markOperational(machine)
-	case restarting && machine.Status.OperationalStatus == keziov1alpha2.MachineOperationalStatusError:
+	case restarting && machine.Status.OperationalStatus == keziov1alpha3.MachineOperationalStatusError:
 		markOperational(machine)
 	default:
 		return result, nil
@@ -1075,7 +1075,7 @@ func (r *MachineReconciler) clearRetryStatus(ctx context.Context, machine *kezio
 	return result, nil
 }
 
-func (r *MachineReconciler) recordFailure(ctx context.Context, machine *keziov1alpha2.Machine, result deployer.Result) (ctrl.Result, error) {
+func (r *MachineReconciler) recordFailure(ctx context.Context, machine *keziov1alpha3.Machine, result deployer.Result) (ctrl.Result, error) {
 	applyFailure(machine, result.ErrorType, result.ErrorMessage)
 	stampLastUpdated(machine)
 	if err := r.applyMachineStatus(ctx, machine); err != nil {
@@ -1087,8 +1087,8 @@ func (r *MachineReconciler) recordFailure(ctx context.Context, machine *keziov1a
 // applyFailure applies the two-axis error semantics shared by every failure
 // path: state is left untouched, only operationalStatus/errorType/
 // errorMessage/errorCount change.
-func applyFailure(machine *keziov1alpha2.Machine, errorType keziov1alpha2.MachineErrorType, errorMessage string) {
-	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusError
+func applyFailure(machine *keziov1alpha3.Machine, errorType keziov1alpha3.MachineErrorType, errorMessage string) {
+	machine.Status.OperationalStatus = keziov1alpha3.MachineOperationalStatusError
 	machine.Status.ErrorType = errorType
 	machine.Status.ErrorMessage = errorMessage
 	machine.Status.ErrorCount++
@@ -1106,8 +1106,8 @@ func applyFailure(machine *keziov1alpha2.Machine, errorType keziov1alpha2.Machin
 // errorCount is deliberately not reset here: its reset points are not the
 // same set (clearRetryStatus clears the error status but keeps the count -
 // see its own doc comment), so callers that do reset it say so themselves.
-func markOperational(machine *keziov1alpha2.Machine) {
-	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusOK
+func markOperational(machine *keziov1alpha3.Machine) {
+	machine.Status.OperationalStatus = keziov1alpha3.MachineOperationalStatusOK
 	machine.Status.ErrorType = ""
 	machine.Status.ErrorMessage = ""
 }
@@ -1121,11 +1121,11 @@ func markOperational(machine *keziov1alpha2.Machine) {
 // (state unchanged, operationalStatus=error) rather than a parallel error
 // path, and currentRunRef is cleared in the same patch so the next
 // Provisioning reconcile's nil-ref branch starts a fresh run.
-func (r *MachineReconciler) recordCurrentRunDeleted(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
+func (r *MachineReconciler) recordCurrentRunDeleted(ctx context.Context, machine *keziov1alpha3.Machine) (ctrl.Result, error) {
 	// MachineErrorTypeRestart: the run this errorType would ask to resume no
 	// longer exists, so the only meaningful next step is starting over, not
 	// resuming in-progress step state.
-	applyFailure(machine, keziov1alpha2.MachineErrorTypeRestart, fmt.Sprintf("current DeployRun %q no longer exists", machine.Status.CurrentRunRef.Name))
+	applyFailure(machine, keziov1alpha3.MachineErrorTypeRestart, fmt.Sprintf("current DeployRun %q no longer exists", machine.Status.CurrentRunRef.Name))
 	machine.Status.CurrentRunRef = nil
 	stampLastUpdated(machine)
 	if err := r.applyMachineStatus(ctx, machine); err != nil {
@@ -1147,16 +1147,16 @@ func (r *MachineReconciler) recordCurrentRunDeleted(ctx context.Context, machine
 // stay empty, exactly as before this field existed. See Builder's own doc
 // comment for why the existing envtest/FakeDeployer suites rely on this
 // (their fixture Machines/Images are not shaped for a real plan build).
-func (r *MachineReconciler) createDeployRun(ctx context.Context, machine *keziov1alpha2.Machine) (*keziov1alpha2.DeployRun, error) {
-	run := &keziov1alpha2.DeployRun{
+func (r *MachineReconciler) createDeployRun(ctx context.Context, machine *keziov1alpha3.Machine) (*keziov1alpha3.DeployRun, error) {
+	run := &keziov1alpha3.DeployRun{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: machine.Name + "-",
 			Namespace:    machine.Namespace,
 		},
-		Spec: keziov1alpha2.DeployRunSpec{
-			MachineRef: keziov1alpha2.NameRef{Name: machine.Name},
+		Spec: keziov1alpha3.DeployRunSpec{
+			MachineRef: keziov1alpha3.NameRef{Name: machine.Name},
 			ImageRef:   machine.Spec.ImageRef.DeepCopy(),
-			DataImages: append([]keziov1alpha2.MachineDataImage(nil), machine.Spec.DataImages...),
+			DataImages: append([]keziov1alpha3.MachineDataImage(nil), machine.Spec.DataImages...),
 		},
 	}
 	if r.Builder != nil {
@@ -1179,7 +1179,7 @@ func (r *MachineReconciler) createDeployRun(ctx context.Context, machine *keziov
 // ref, or a ref whose DeployRun no longer exists, both mean "no successful
 // run known" rather than an error: an operator can delete old DeployRuns
 // without wedging the provisioning trigger.
-func (r *MachineReconciler) lastSuccessfulRun(ctx context.Context, machine *keziov1alpha2.Machine) (*keziov1alpha2.DeployRun, error) {
+func (r *MachineReconciler) lastSuccessfulRun(ctx context.Context, machine *keziov1alpha3.Machine) (*keziov1alpha3.DeployRun, error) {
 	if machine.Status.LastSuccessfulRunRef == nil {
 		return nil, nil
 	}
@@ -1190,12 +1190,12 @@ func (r *MachineReconciler) lastSuccessfulRun(ctx context.Context, machine *kezi
 	return run, err
 }
 
-func (r *MachineReconciler) getRun(ctx context.Context, machine *keziov1alpha2.Machine, ref *keziov1alpha2.NameRef) (*keziov1alpha2.DeployRun, error) {
+func (r *MachineReconciler) getRun(ctx context.Context, machine *keziov1alpha3.Machine, ref *keziov1alpha3.NameRef) (*keziov1alpha3.DeployRun, error) {
 	ns := ref.Namespace
 	if ns == "" {
 		ns = machine.Namespace
 	}
-	var run keziov1alpha2.DeployRun
+	var run keziov1alpha3.DeployRun
 	if err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: ref.Name}, &run); err != nil {
 		return nil, err
 	}
@@ -1214,7 +1214,7 @@ func (r *MachineReconciler) getRun(ctx context.Context, machine *keziov1alpha2.M
 // empty string when hook resolution is not wired in (no Builder), which
 // only ever compares equal to a lastRun that itself carries no
 // HooksHash.
-func shouldProvision(machine *keziov1alpha2.Machine, lastRun *keziov1alpha2.DeployRun, hooksHash string) bool {
+func shouldProvision(machine *keziov1alpha3.Machine, lastRun *keziov1alpha3.DeployRun, hooksHash string) bool {
 	if isEmptyDeployPayload(machine) {
 		return false
 	}
@@ -1227,7 +1227,7 @@ func shouldProvision(machine *keziov1alpha2.Machine, lastRun *keziov1alpha2.Depl
 // isEmptyDeployPayload reports whether machine.spec carries no deploy
 // intent at all: no OS image and no data images. An empty payload never
 // triggers a run - clearing intent means "nothing to do", not "wipe".
-func isEmptyDeployPayload(machine *keziov1alpha2.Machine) bool {
+func isEmptyDeployPayload(machine *keziov1alpha3.Machine) bool {
 	return machine.Spec.ImageRef == nil && len(machine.Spec.DataImages) == 0
 }
 
@@ -1237,13 +1237,13 @@ func isEmptyDeployPayload(machine *keziov1alpha2.Machine) bool {
 // a dataImages entry triggers correctly. resolvedDisks is deliberately
 // excluded: device names are not stable across boots, and a
 // re-resolution must never diff into a disk-wiping redeploy.
-func intentSubsetEqual(machine *keziov1alpha2.Machine, lastRun *keziov1alpha2.DeployRun, hooksHash string) bool {
+func intentSubsetEqual(machine *keziov1alpha3.Machine, lastRun *keziov1alpha3.DeployRun, hooksHash string) bool {
 	return nameRefEqual(machine.Spec.ImageRef, lastRun.Spec.ImageRef) &&
 		reflect.DeepEqual(machine.Spec.DataImages, lastRun.Spec.DataImages) &&
 		hooksHash == lastRun.Spec.HooksHash
 }
 
-func nameRefEqual(a, b *keziov1alpha2.NameRef) bool {
+func nameRefEqual(a, b *keziov1alpha3.NameRef) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
@@ -1269,7 +1269,7 @@ func nameRefEqual(a, b *keziov1alpha2.NameRef) bool {
 //
 // Otherwise this claims the Secret (label, owner reference, finalizer) and
 // returns (secret, false, ctrl.Result{}, nil): the caller proceeds.
-func (r *MachineReconciler) resolveCredentialsSecret(ctx context.Context, machine *keziov1alpha2.Machine) (*corev1.Secret, bool, ctrl.Result, error) {
+func (r *MachineReconciler) resolveCredentialsSecret(ctx context.Context, machine *keziov1alpha3.Machine) (*corev1.Secret, bool, ctrl.Result, error) {
 	name := machine.Spec.BMC.CredentialsSecretRef.Name
 	if name == "" {
 		return nil, true, ctrl.Result{}, nil
@@ -1303,15 +1303,15 @@ func (r *MachineReconciler) resolveCredentialsSecret(ctx context.Context, machin
 // (controller or not) once this Machine is actually deleted, cascading the
 // Secret's own deletion - releaseCredentialsSecretFinalizer (run from
 // onDelete) is what lets that deletion complete.
-func (r *MachineReconciler) claimCredentialsSecret(ctx context.Context, machine *keziov1alpha2.Machine, secret *corev1.Secret) error {
+func (r *MachineReconciler) claimCredentialsSecret(ctx context.Context, machine *keziov1alpha3.Machine, secret *corev1.Secret) error {
 	patch := client.MergeFrom(secret.DeepCopy())
 	changed := false
 
-	if secret.Labels[keziov1alpha2.MachineCredentialsSecretLabel] != annotationValueTrue {
+	if secret.Labels[keziov1alpha3.MachineCredentialsSecretLabel] != annotationValueTrue {
 		if secret.Labels == nil {
 			secret.Labels = map[string]string{}
 		}
-		secret.Labels[keziov1alpha2.MachineCredentialsSecretLabel] = annotationValueTrue
+		secret.Labels[keziov1alpha3.MachineCredentialsSecretLabel] = annotationValueTrue
 		changed = true
 	}
 
@@ -1326,7 +1326,7 @@ func (r *MachineReconciler) claimCredentialsSecret(ctx context.Context, machine 
 		changed = true
 	}
 
-	if controllerutil.AddFinalizer(secret, keziov1alpha2.MachineCredentialsSecretFinalizer) {
+	if controllerutil.AddFinalizer(secret, keziov1alpha3.MachineCredentialsSecretFinalizer) {
 		changed = true
 	}
 
@@ -1346,7 +1346,7 @@ func (r *MachineReconciler) claimCredentialsSecret(ctx context.Context, machine 
 // removal call, not a check against other Machines that might name the
 // same Secret - sharing one BMC credentials Secret across Machines is not
 // guarded here.
-func (r *MachineReconciler) releaseCredentialsSecretFinalizer(ctx context.Context, machine *keziov1alpha2.Machine) error {
+func (r *MachineReconciler) releaseCredentialsSecretFinalizer(ctx context.Context, machine *keziov1alpha3.Machine) error {
 	name := machine.Spec.BMC.CredentialsSecretRef.Name
 	if name == "" {
 		return nil
@@ -1361,7 +1361,7 @@ func (r *MachineReconciler) releaseCredentialsSecretFinalizer(ctx context.Contex
 		return fmt.Errorf("machine %q: getting BMC credentials secret %q for finalizer release: %w", machine.Name, name, err)
 	}
 
-	if !controllerutil.RemoveFinalizer(&secret, keziov1alpha2.MachineCredentialsSecretFinalizer) {
+	if !controllerutil.RemoveFinalizer(&secret, keziov1alpha3.MachineCredentialsSecretFinalizer) {
 		return nil
 	}
 	if err := r.Update(ctx, &secret); err != nil {
@@ -1386,9 +1386,9 @@ func (r *MachineReconciler) releaseCredentialsSecretFinalizer(ctx context.Contex
 // "null" once every subfield was removed. Making these fields pointers
 // would let SSA clear them cleanly, but that is a schema change outside
 // this function's scope.
-func (r *MachineReconciler) recordTriedCredentials(ctx context.Context, machine *keziov1alpha2.Machine, secret *corev1.Secret) error {
-	observed := keziov1alpha2.MachineCredentialsStatus{
-		SecretRef:       &keziov1alpha2.SecretReference{Name: secret.Name},
+func (r *MachineReconciler) recordTriedCredentials(ctx context.Context, machine *keziov1alpha3.Machine, secret *corev1.Secret) error {
+	observed := keziov1alpha3.MachineCredentialsStatus{
+		SecretRef:       &keziov1alpha3.SecretReference{Name: secret.Name},
 		ResourceVersion: secret.ResourceVersion,
 	}
 	goodStale := machine.Status.GoodCredentials.SecretRef != nil &&
@@ -1400,7 +1400,7 @@ func (r *MachineReconciler) recordTriedCredentials(ctx context.Context, machine 
 	patch := client.MergeFrom(machine.DeepCopy())
 	machine.Status.TriedCredentials = observed
 	if goodStale {
-		machine.Status.GoodCredentials = keziov1alpha2.MachineCredentialsStatus{}
+		machine.Status.GoodCredentials = keziov1alpha3.MachineCredentialsStatus{}
 	}
 	stampLastUpdated(machine)
 	// FieldOwner is honored on a merge patch too, even though this is not a
@@ -1418,7 +1418,7 @@ func (r *MachineReconciler) recordTriedCredentials(ctx context.Context, machine 
 // error and without Outcome == Failed - the modeled stand-in for "the BMC
 // answered" in a codebase whose fake path never dials a real BMC. A no-op
 // when goodCredentials is already up to date.
-func (r *MachineReconciler) recordGoodCredentials(ctx context.Context, machine *keziov1alpha2.Machine) error {
+func (r *MachineReconciler) recordGoodCredentials(ctx context.Context, machine *keziov1alpha3.Machine) error {
 	if machine.Status.TriedCredentials.SecretRef == nil {
 		return nil
 	}
@@ -1437,7 +1437,7 @@ func (r *MachineReconciler) recordGoodCredentials(ctx context.Context, machine *
 // credentialsStatusEqual compares two MachineCredentialsStatus values by
 // value, since SecretRef is a pointer and the zero value (no observation
 // yet) must compare equal to itself.
-func credentialsStatusEqual(a, b keziov1alpha2.MachineCredentialsStatus) bool {
+func credentialsStatusEqual(a, b keziov1alpha3.MachineCredentialsStatus) bool {
 	if a.ResourceVersion != b.ResourceVersion {
 		return false
 	}
@@ -1449,7 +1449,7 @@ func credentialsStatusEqual(a, b keziov1alpha2.MachineCredentialsStatus) bool {
 	}
 }
 
-func stampLastUpdated(machine *keziov1alpha2.Machine) {
+func stampLastUpdated(machine *keziov1alpha3.Machine) {
 	now := metav1.Now()
 	machine.Status.LastUpdated = &now
 }
@@ -1511,8 +1511,8 @@ var machineUpdatePredicate = predicate.Or(
 // SetupWithManager sets up the controller with the Manager.
 func (r *MachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&keziov1alpha2.Machine{}, builder.WithPredicates(machineUpdatePredicate)).
-		Owns(&keziov1alpha2.DeployRun{}, builder.WithPredicates(deployRunDeletionOnly)).
+		For(&keziov1alpha3.Machine{}, builder.WithPredicates(machineUpdatePredicate)).
+		Owns(&keziov1alpha3.DeployRun{}, builder.WithPredicates(deployRunDeletionOnly)).
 		// MatchEveryOwner: claimCredentialsSecret sets a non-controller
 		// owner reference on the BMC credentials Secret, so the default
 		// controller-only owner match would never see it. No predicate:

@@ -1,7 +1,7 @@
 name: Assert a Site's status shape
 
 description: >-
-  Asserts api/v1alpha2/site_types.go's SiteStatus against the real
+  Asserts api/v1alpha3/site_types.go's SiteStatus against the real
   cluster: status.subnetRefs is the expected set, status.seederReady
   matches an expected value, and each named condition carries the
   expected status (and, where given, reason). Generic and read-only by

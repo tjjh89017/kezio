@@ -27,7 +27,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // imageImportControllerFieldOwner is the Server-Side Apply field manager
@@ -42,7 +42,7 @@ const imageImportControllerFieldOwner = "kezio-imageimport-controller"
 type imageImportStatusApplyBody struct {
 	metav1.TypeMeta `json:",inline"`
 	Metadata        imageImportStatusApplyBodyMetadata `json:"metadata,omitempty"`
-	Status          keziov1alpha2.ImageImportStatus    `json:"status"`
+	Status          keziov1alpha3.ImageImportStatus    `json:"status"`
 }
 
 // imageImportStatusApplyBodyMetadata mirrors imageStatusApplyBodyMetadata.
@@ -55,9 +55,9 @@ type imageImportStatusApplyBodyMetadata struct {
 // under imageImportControllerFieldOwner. This reconciler is the only
 // writer of ImageImport.status, so sending the full status on every write
 // is safe here, mirroring applyImageStatus.
-func (r *ImageImportReconciler) applyImageImportStatus(ctx context.Context, imp *keziov1alpha2.ImageImport) error {
+func (r *ImageImportReconciler) applyImageImportStatus(ctx context.Context, imp *keziov1alpha3.ImageImport) error {
 	body := imageImportStatusApplyBody{
-		TypeMeta: metav1.TypeMeta{APIVersion: keziov1alpha2.GroupVersion.String(), Kind: "ImageImport"},
+		TypeMeta: metav1.TypeMeta{APIVersion: keziov1alpha3.GroupVersion.String(), Kind: "ImageImport"},
 		Metadata: imageImportStatusApplyBodyMetadata{Name: imp.Name, Namespace: imp.Namespace},
 		Status:   imp.Status,
 	}
@@ -71,9 +71,9 @@ func (r *ImageImportReconciler) applyImageImportStatus(ctx context.Context, imp 
 
 // setImageImportReadyCondition sets the Ready condition on
 // imp.Status.Conditions, stamping ObservedGeneration from imp.Generation.
-func setImageImportReadyCondition(imp *keziov1alpha2.ImageImport, status metav1.ConditionStatus, reason, message string) {
+func setImageImportReadyCondition(imp *keziov1alpha3.ImageImport, status metav1.ConditionStatus, reason, message string) {
 	meta.SetStatusCondition(&imp.Status.Conditions, metav1.Condition{
-		Type:               keziov1alpha2.ImageImportConditionReady,
+		Type:               keziov1alpha3.ImageImportConditionReady,
 		Status:             status,
 		ObservedGeneration: imp.Generation,
 		Reason:             reason,
@@ -85,8 +85,8 @@ func setImageImportReadyCondition(imp *keziov1alpha2.ImageImport, status metav1.
 // configuration the import needs. This is a visible, non-error hold, not
 // a failure - it clears on its own once the manager is configured,
 // mirroring PartitionContentReconciler.recordPending.
-func (r *ImageImportReconciler) recordImportPending(ctx context.Context, imp *keziov1alpha2.ImageImport, reason, message string) (ctrl.Result, error) {
-	imp.Status.State = keziov1alpha2.ImageImportStatePending
+func (r *ImageImportReconciler) recordImportPending(ctx context.Context, imp *keziov1alpha3.ImageImport, reason, message string) (ctrl.Result, error) {
+	imp.Status.State = keziov1alpha3.ImageImportStatePending
 	setImageImportReadyCondition(imp, metav1.ConditionFalse, reason, message)
 	if err := r.applyImageImportStatus(ctx, imp); err != nil {
 		return ctrl.Result{}, fmt.Errorf("imageimport %q: recording Pending: %w", imp.Name, err)
@@ -97,8 +97,8 @@ func (r *ImageImportReconciler) recordImportPending(ctx context.Context, imp *ke
 // recordIngesting records Ingesting: the ingest Job exists and has not
 // yet reported success or failure (including the moment it was just
 // created).
-func (r *ImageImportReconciler) recordIngesting(ctx context.Context, imp *keziov1alpha2.ImageImport, reason, message string) (ctrl.Result, error) {
-	imp.Status.State = keziov1alpha2.ImageImportStateIngesting
+func (r *ImageImportReconciler) recordIngesting(ctx context.Context, imp *keziov1alpha3.ImageImport, reason, message string) (ctrl.Result, error) {
+	imp.Status.State = keziov1alpha3.ImageImportStateIngesting
 	setImageImportReadyCondition(imp, metav1.ConditionFalse, reason, message)
 	if err := r.applyImageImportStatus(ctx, imp); err != nil {
 		return ctrl.Result{}, fmt.Errorf("imageimport %q: recording Ingesting: %w", imp.Name, err)
@@ -109,9 +109,9 @@ func (r *ImageImportReconciler) recordIngesting(ctx context.Context, imp *keziov
 // recordImportReady records Ready: every PartitionContent this import
 // captured, and the Image binding them, now exist. Their own controllers
 // take it from here - this import has nothing left to do.
-func (r *ImageImportReconciler) recordImportReady(ctx context.Context, imp *keziov1alpha2.ImageImport, contentRefs []keziov1alpha2.NameRef) (ctrl.Result, error) {
-	imp.Status.State = keziov1alpha2.ImageImportStateReady
-	imp.Status.ImageRef = &keziov1alpha2.NameRef{Name: imp.Spec.ImageName}
+func (r *ImageImportReconciler) recordImportReady(ctx context.Context, imp *keziov1alpha3.ImageImport, contentRefs []keziov1alpha3.NameRef) (ctrl.Result, error) {
+	imp.Status.State = keziov1alpha3.ImageImportStateReady
+	imp.Status.ImageRef = &keziov1alpha3.NameRef{Name: imp.Spec.ImageName}
 	imp.Status.ContentRefs = contentRefs
 	setImageImportReadyCondition(imp, metav1.ConditionTrue, "ImportComplete",
 		fmt.Sprintf("captured %d partition content object(s) and created Image %q", len(contentRefs), imp.Spec.ImageName))
@@ -125,8 +125,8 @@ func (r *ImageImportReconciler) recordImportReady(ctx context.Context, imp *kezi
 // succeeded but its result could not be trusted, or a name this import
 // had to create was already taken. See reconcileIngesting's doc comment
 // for retry semantics.
-func (r *ImageImportReconciler) recordImportFailed(ctx context.Context, imp *keziov1alpha2.ImageImport, message string) (ctrl.Result, error) {
-	imp.Status.State = keziov1alpha2.ImageImportStateFailed
+func (r *ImageImportReconciler) recordImportFailed(ctx context.Context, imp *keziov1alpha3.ImageImport, message string) (ctrl.Result, error) {
+	imp.Status.State = keziov1alpha3.ImageImportStateFailed
 	setImageImportReadyCondition(imp, metav1.ConditionFalse, "ImportFailed", message)
 	if err := r.applyImageImportStatus(ctx, imp); err != nil {
 		return ctrl.Result{}, fmt.Errorf("imageimport %q: recording Failed: %w", imp.Name, err)

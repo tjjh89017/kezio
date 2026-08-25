@@ -4,7 +4,7 @@ description: >-
   Creates a PostHook with one script step and waits for it to pass static
   validation, so a lane can name it in a Machine's postHookRefs. The step
   is the only end-to-end coverage of the environment contract a script
-  step runs under (api/v1alpha2's PostHookStep.Script and
+  step runs under (api/v1alpha3's PostHookStep.Script and
   internal/agent/deploy's scriptStepEnv/slotEnv): the agent hands the
   deploy plan's device paths to the script through KEZIO_TARGET_DISK,
   KEZIO_PARTITIONS, KEZIO_PART_<number>, and the KEZIO_DATA_DISK_<index>*
@@ -210,7 +210,7 @@ runs:
           --arg namespace "${NAMESPACE}" \
           --rawfile script "${script_path}" \
           '{
-            apiVersion: "kezio.kojuro.date/v1alpha2",
+            apiVersion: "kezio.kojuro.date/v1alpha3",
             kind: "PostHook",
             metadata: {name: $name, namespace: $namespace},
             spec: {steps: [{osFamily: "Linux", script: {script: $script}}]}

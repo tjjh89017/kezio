@@ -22,7 +22,7 @@ import (
 )
 
 // macPattern matches a colon-separated MAC address, case-insensitively.
-// It intentionally mirrors keziov1alpha2's MAC pattern rather than
+// It intentionally mirrors keziov1alpha3's MAC pattern rather than
 // importing it: the two must accept the same strings, but this package
 // only ever needs the pattern to normalize a MAC address, not the CRD
 // validation marker that string is also used as.

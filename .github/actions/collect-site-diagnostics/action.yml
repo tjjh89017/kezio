@@ -17,7 +17,7 @@ description: >-
   bootd pods per Subnet, each bootd pod's rendered dnsmasq config plus
   the DHCP options it handed out (the only record of what a machine
   received in its lease, and thus of whether a machine can leave its own
-  segment), every kezio v1alpha2 object in each scanned
+  segment), every kezio v1alpha3 object in each scanned
   namespace (the status a failing assertion read, not only the pods
   behind it), and a runner-wide network snapshot (bridges, addresses,
   routes, neighbor table, nftables/iptables rulesets, sysctl forwarding

@@ -28,26 +28,26 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 var _ = Describe("Subnet Controller", func() {
 	var subnetCount int
 
-	newSubnet := func() *keziov1alpha2.Subnet {
+	newSubnet := func() *keziov1alpha3.Subnet {
 		subnetCount++
-		return &keziov1alpha2.Subnet{
+		return &keziov1alpha3.Subnet{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      fmt.Sprintf("subnet-%d", subnetCount),
 				Namespace: "default",
 			},
-			Spec: keziov1alpha2.SubnetSpec{
-				SiteRef:         keziov1alpha2.NameRef{Name: "site-a"},
+			Spec: keziov1alpha3.SubnetSpec{
+				SiteRef:         keziov1alpha3.NameRef{Name: "site-a"},
 				CIDR:            "192.0.2.0/24",
 				BootdServerIP:   "192.0.2.2",
-				BootdNetworkRef: &keziov1alpha2.NameRef{Name: "bootd-net"},
-				DHCP: &keziov1alpha2.SubnetDHCP{
-					Mode: keziov1alpha2.SubnetDHCPModeProxy,
+				BootdNetworkRef: &keziov1alpha3.NameRef{Name: "bootd-net"},
+				DHCP: &keziov1alpha3.SubnetDHCP{
+					Mode: keziov1alpha3.SubnetDHCPModeProxy,
 				},
 			},
 		}
@@ -85,7 +85,7 @@ var _ = Describe("Subnet Controller", func() {
 	It("admits a lease range with both leaseRangeStart and leaseRangeEnd set", func() {
 		ctx := context.Background()
 		subnet := newSubnet()
-		subnet.Spec.DHCP.Mode = keziov1alpha2.SubnetDHCPModeLease
+		subnet.Spec.DHCP.Mode = keziov1alpha3.SubnetDHCPModeLease
 		// Lease mode requires a gateway; the empty string keeps this spec
 		// about the lease range rather than about routing.
 		subnet.Spec.DHCP.Gateway = ptr.To("")

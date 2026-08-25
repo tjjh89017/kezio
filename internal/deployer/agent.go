@@ -30,7 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/bmc"
 	"github.com/tjjh89017/kezio/internal/planbuild"
 )
@@ -140,7 +140,7 @@ var _ Deployer = (*AgentDeployer)(nil)
 // connectBMC resolves machine.spec.bmc.credentialsSecretRef from
 // machine's own namespace and connects to its BMC. Errors never include
 // the resolved credentials.
-func (d *AgentDeployer) connectBMC(ctx context.Context, machine *keziov1alpha2.Machine) (bmc.BMC, error) {
+func (d *AgentDeployer) connectBMC(ctx context.Context, machine *keziov1alpha3.Machine) (bmc.BMC, error) {
 	var secret corev1.Secret
 	key := client.ObjectKey{Namespace: machine.Namespace, Name: machine.Spec.BMC.CredentialsSecretRef.Name}
 	if err := d.Client.Get(ctx, key, &secret); err != nil {
@@ -156,7 +156,7 @@ func (d *AgentDeployer) connectBMC(ctx context.Context, machine *keziov1alpha2.M
 	// decision is made: the Machine webhook admits only "true" or "false",
 	// so no other spelling can reach this and read as enabled.
 	opts := bmc.Options{
-		InsecureSkipVerify: machine.Annotations[keziov1alpha2.MachineAnnotationBMCInsecureSkipVerify] == "true",
+		InsecureSkipVerify: machine.Annotations[keziov1alpha3.MachineAnnotationBMCInsecureSkipVerify] == "true",
 	}
 
 	bmcClient, err := bmc.Connect(ctx, machine.Spec.BMC.Address, creds, opts)
@@ -180,7 +180,7 @@ func classifyBMCError(err error) Result {
 	}
 	return Result{
 		Outcome:      Failed,
-		ErrorType:    keziov1alpha2.MachineErrorTypeTransient,
+		ErrorType:    keziov1alpha3.MachineErrorTypeTransient,
 		ErrorMessage: err.Error(),
 	}
 }
@@ -197,7 +197,7 @@ func isNetworkUnreachable(err error) bool {
 // pxeArmedAt reads agentDeployerPXEArmedAnnotation off machine. The second
 // return is false when the annotation is absent or fails to parse - both
 // treated as "not armed yet", never as an error.
-func pxeArmedAt(machine *keziov1alpha2.Machine) (time.Time, bool) {
+func pxeArmedAt(machine *keziov1alpha3.Machine) (time.Time, bool) {
 	raw, ok := machine.Annotations[agentDeployerPXEArmedAnnotation]
 	if !ok {
 		return time.Time{}, false
@@ -211,7 +211,7 @@ func pxeArmedAt(machine *keziov1alpha2.Machine) (time.Time, bool) {
 
 // armPXE stamps agentDeployerPXEArmedAnnotation with the current time,
 // mutating machine in place so the caller's copy reflects it immediately.
-func (d *AgentDeployer) armPXE(ctx context.Context, machine *keziov1alpha2.Machine) error {
+func (d *AgentDeployer) armPXE(ctx context.Context, machine *keziov1alpha3.Machine) error {
 	patch := client.MergeFrom(machine.DeepCopy())
 	if machine.Annotations == nil {
 		machine.Annotations = map[string]string{}
@@ -227,7 +227,7 @@ func (d *AgentDeployer) armPXE(ctx context.Context, machine *keziov1alpha2.Machi
 // completes, so a later re-inspect (which restarts the walk at Inspecting
 // with no restartOnFailure) starts from "not armed" instead of reading a
 // stale timestamp from the previous inspection pass.
-func (d *AgentDeployer) disarmPXE(ctx context.Context, machine *keziov1alpha2.Machine) error {
+func (d *AgentDeployer) disarmPXE(ctx context.Context, machine *keziov1alpha3.Machine) error {
 	if _, ok := machine.Annotations[agentDeployerPXEArmedAnnotation]; !ok {
 		return nil
 	}
@@ -242,7 +242,7 @@ func (d *AgentDeployer) disarmPXE(ctx context.Context, machine *keziov1alpha2.Ma
 // provisionBootMarker reads and parses agentDeployerProvisionBootAnnotation
 // off machine. The second return is false when the annotation is absent or
 // fails to parse - both treated as "not armed yet", never as an error.
-func provisionBootMarker(machine *keziov1alpha2.Machine) (agentDeployerProvisionBootMarker, bool) {
+func provisionBootMarker(machine *keziov1alpha3.Machine) (agentDeployerProvisionBootMarker, bool) {
 	raw, ok := machine.Annotations[agentDeployerProvisionBootAnnotation]
 	if !ok {
 		return agentDeployerProvisionBootMarker{}, false
@@ -258,7 +258,7 @@ func provisionBootMarker(machine *keziov1alpha2.Machine) (agentDeployerProvision
 // current time and the agent session token hash observed right now (empty
 // when machine has no session yet), mutating machine in place so the
 // caller's copy reflects it immediately.
-func (d *AgentDeployer) armProvisionBoot(ctx context.Context, machine *keziov1alpha2.Machine) error {
+func (d *AgentDeployer) armProvisionBoot(ctx context.Context, machine *keziov1alpha3.Machine) error {
 	baseline := ""
 	if machine.Status.AgentSession != nil {
 		baseline = machine.Status.AgentSession.TokenHash
@@ -285,7 +285,7 @@ func (d *AgentDeployer) armProvisionBoot(ctx context.Context, machine *keziov1al
 // DeployRun to Pending, so a later DeployRun for the same Machine starts
 // its own boot-into-agent step from "not armed" instead of reading a stale
 // marker left over from this one.
-func (d *AgentDeployer) disarmProvisionBoot(ctx context.Context, machine *keziov1alpha2.Machine) error {
+func (d *AgentDeployer) disarmProvisionBoot(ctx context.Context, machine *keziov1alpha3.Machine) error {
 	if _, ok := machine.Annotations[agentDeployerProvisionBootAnnotation]; !ok {
 		return nil
 	}
@@ -305,7 +305,7 @@ func (d *AgentDeployer) disarmProvisionBoot(ctx context.Context, machine *keziov
 // observed at arm time - proves this boot's kezio-agent actually
 // registered, rather than a stale session an earlier Inspect or Provision
 // attempt already left in place.
-func agentSessionFresh(machine *keziov1alpha2.Machine, baseline string) bool {
+func agentSessionFresh(machine *keziov1alpha3.Machine, baseline string) bool {
 	session := machine.Status.AgentSession
 	return session != nil && session.TokenHash != baseline
 }
@@ -319,7 +319,7 @@ func agentSessionFresh(machine *keziov1alpha2.Machine, baseline string) bool {
 // same-name MachineHardware, both written out of band by
 // internal/agentserver once kezio-agent boots and registers; Inspect
 // itself never talks to the agent.
-func (d *AgentDeployer) Inspect(ctx context.Context, machine *keziov1alpha2.Machine, restartOnFailure bool) (Result, error) {
+func (d *AgentDeployer) Inspect(ctx context.Context, machine *keziov1alpha3.Machine, restartOnFailure bool) (Result, error) {
 	armedAt, armed := pxeArmedAt(machine)
 	if !armed || restartOnFailure {
 		return d.armPXEAndPowerOn(ctx, machine)
@@ -329,7 +329,7 @@ func (d *AgentDeployer) Inspect(ctx context.Context, machine *keziov1alpha2.Mach
 
 // armPXEAndPowerOn is Inspect's first-pass branch: see Inspect's doc
 // comment.
-func (d *AgentDeployer) armPXEAndPowerOn(ctx context.Context, machine *keziov1alpha2.Machine) (Result, error) {
+func (d *AgentDeployer) armPXEAndPowerOn(ctx context.Context, machine *keziov1alpha3.Machine) (Result, error) {
 	bmcClient, err := d.connectBMC(ctx, machine)
 	if err != nil {
 		return classifyBMCError(err), nil
@@ -361,9 +361,9 @@ func (d *AgentDeployer) armPXEAndPowerOn(ctx context.Context, machine *keziov1al
 // pollAgentRegistration is Inspect's later-pass branch: see Inspect's doc
 // comment. armedAt is when armPXEAndPowerOn last ran, read back from
 // agentDeployerPXEArmedAnnotation.
-func (d *AgentDeployer) pollAgentRegistration(ctx context.Context, machine *keziov1alpha2.Machine, armedAt time.Time) (Result, error) {
-	if apimeta.IsStatusConditionTrue(machine.Status.Conditions, keziov1alpha2.MachineConditionAgentRegistered) {
-		var hw keziov1alpha2.MachineHardware
+func (d *AgentDeployer) pollAgentRegistration(ctx context.Context, machine *keziov1alpha3.Machine, armedAt time.Time) (Result, error) {
+	if apimeta.IsStatusConditionTrue(machine.Status.Conditions, keziov1alpha3.MachineConditionAgentRegistered) {
+		var hw keziov1alpha3.MachineHardware
 		key := client.ObjectKey{Namespace: machine.Namespace, Name: machine.Name}
 		switch err := d.Client.Get(ctx, key, &hw); {
 		case err == nil:
@@ -379,7 +379,7 @@ func (d *AgentDeployer) pollAgentRegistration(ctx context.Context, machine *kezi
 	if time.Since(armedAt) > agentDeployerInspectDeadline {
 		return Result{
 			Outcome:      Failed,
-			ErrorType:    keziov1alpha2.MachineErrorTypeRestart,
+			ErrorType:    keziov1alpha3.MachineErrorTypeRestart,
 			ErrorMessage: fmt.Sprintf("agent deployer: no agent registration observed within %s of arming PXE boot", agentDeployerInspectDeadline),
 		}, nil
 	}
@@ -437,7 +437,7 @@ func (d *AgentDeployer) pollAgentRegistration(ctx context.Context, machine *kezi
 // forces a fresh marker (armProvisionBootAndPowerOn always overwrites
 // unconditionally) regardless of whether one was already armed, so the
 // machine is booted again rather than trusted to still be mid-boot.
-func (d *AgentDeployer) Provision(ctx context.Context, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun, restartOnFailure bool) (Result, error) {
+func (d *AgentDeployer) Provision(ctx context.Context, machine *keziov1alpha3.Machine, run *keziov1alpha3.DeployRun, restartOnFailure bool) (Result, error) {
 	if restartOnFailure && run.Status.Phase != "" {
 		if err := d.resetProvisionAttempt(ctx, run); err != nil {
 			return Result{}, err
@@ -451,7 +451,7 @@ func (d *AgentDeployer) Provision(ctx context.Context, machine *keziov1alpha2.Ma
 
 // resetProvisionAttempt clears run's in-progress attempt state so it reads
 // as freshly created: see Provision's restartOnFailure doc comment.
-func (d *AgentDeployer) resetProvisionAttempt(ctx context.Context, run *keziov1alpha2.DeployRun) error {
+func (d *AgentDeployer) resetProvisionAttempt(ctx context.Context, run *keziov1alpha3.DeployRun) error {
 	run.Status.Phase = ""
 	run.Status.Partitions = nil
 	run.Status.PhaseTimings = nil
@@ -469,7 +469,7 @@ func (d *AgentDeployer) resetProvisionAttempt(ctx context.Context, run *keziov1a
 // or restartOnFailure asking to discard whatever marker is there, arms PXE
 // boot and powers on; otherwise a marker present hands off to
 // pollAgentBoot.
-func (d *AgentDeployer) startProvision(ctx context.Context, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun, restartOnFailure bool) (Result, error) {
+func (d *AgentDeployer) startProvision(ctx context.Context, machine *keziov1alpha3.Machine, run *keziov1alpha3.DeployRun, restartOnFailure bool) (Result, error) {
 	marker, armed := provisionBootMarker(machine)
 	if !armed || restartOnFailure {
 		return d.armProvisionBootAndPowerOn(ctx, machine)
@@ -482,7 +482,7 @@ func (d *AgentDeployer) startProvision(ctx context.Context, machine *keziov1alph
 // marker, read back from agentDeployerProvisionBootAnnotation. A fresh
 // registration proceeds to validate the plan and commit run to Pending;
 // otherwise this waits, or gives up past the deadline.
-func (d *AgentDeployer) pollAgentBoot(ctx context.Context, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun, marker agentDeployerProvisionBootMarker) (Result, error) {
+func (d *AgentDeployer) pollAgentBoot(ctx context.Context, machine *keziov1alpha3.Machine, run *keziov1alpha3.DeployRun, marker agentDeployerProvisionBootMarker) (Result, error) {
 	if agentSessionFresh(machine, marker.BaselineSessionHash) {
 		result, err := d.commitProvisionPending(ctx, machine, run)
 		if err != nil {
@@ -503,7 +503,7 @@ func (d *AgentDeployer) pollAgentBoot(ctx context.Context, machine *keziov1alpha
 	if time.Since(marker.ArmedAt) > agentDeployerProvisionBootDeadline {
 		return Result{
 			Outcome:      Failed,
-			ErrorType:    keziov1alpha2.MachineErrorTypeRestart,
+			ErrorType:    keziov1alpha3.MachineErrorTypeRestart,
 			ErrorMessage: fmt.Sprintf("agent deployer: no agent registration observed within %s of arming PXE boot for provisioning", agentDeployerProvisionBootDeadline),
 		}, nil
 	}
@@ -516,7 +516,7 @@ func (d *AgentDeployer) pollAgentBoot(ctx context.Context, machine *keziov1alpha
 // armPXEAndPowerOn's reasoning: a machine stuck in an old OS (or the OS
 // this same deploy just wrote on a prior attempt) must actually reboot
 // into the PXE override, not merely be told it is already running.
-func (d *AgentDeployer) armProvisionBootAndPowerOn(ctx context.Context, machine *keziov1alpha2.Machine) (Result, error) {
+func (d *AgentDeployer) armProvisionBootAndPowerOn(ctx context.Context, machine *keziov1alpha3.Machine) (Result, error) {
 	bmcClient, err := d.connectBMC(ctx, machine)
 	if err != nil {
 		return classifyBMCError(err), nil
@@ -548,7 +548,7 @@ func (d *AgentDeployer) armProvisionBootAndPowerOn(ctx context.Context, machine 
 // commitProvisionPending validates that PlanBuilder can resolve a plan for
 // run at all, then records run at DeployRunPhasePending: see Provision's
 // doc comment.
-func (d *AgentDeployer) commitProvisionPending(ctx context.Context, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun) (Result, error) {
+func (d *AgentDeployer) commitProvisionPending(ctx context.Context, machine *keziov1alpha3.Machine, run *keziov1alpha3.DeployRun) (Result, error) {
 	if _, _, err := d.PlanBuilder.Build(ctx, machine, run); err != nil {
 		result, ok := planBuildErrorResult(err)
 		if !ok {
@@ -558,9 +558,9 @@ func (d *AgentDeployer) commitProvisionPending(ctx context.Context, machine *kez
 	}
 
 	now := metav1.Now()
-	run.Status.Phase = keziov1alpha2.DeployRunPhasePending
-	run.Status.PhaseTimings = append(run.Status.PhaseTimings, keziov1alpha2.DeployRunPhaseTiming{
-		Phase:     keziov1alpha2.DeployRunPhasePending,
+	run.Status.Phase = keziov1alpha3.DeployRunPhasePending
+	run.Status.PhaseTimings = append(run.Status.PhaseTimings, keziov1alpha3.DeployRunPhaseTiming{
+		Phase:     keziov1alpha3.DeployRunPhasePending,
 		StartedAt: now,
 	})
 	// Start the stall clock at the commit itself: an agent that never
@@ -590,7 +590,7 @@ func planBuildErrorResult(err error) (result Result, ok bool) {
 	if errors.As(err, &diskErr) || errors.As(err, &validationErr) {
 		return Result{
 			Outcome:      Failed,
-			ErrorType:    keziov1alpha2.MachineErrorTypeTransient,
+			ErrorType:    keziov1alpha3.MachineErrorTypeTransient,
 			ErrorMessage: err.Error(),
 		}, true
 	}
@@ -600,14 +600,14 @@ func planBuildErrorResult(err error) (result Result, ok bool) {
 
 // provisionResultFromPhase is Provision's later-pass branch: see
 // Provision's doc comment.
-func provisionResultFromPhase(run *keziov1alpha2.DeployRun) Result {
+func provisionResultFromPhase(run *keziov1alpha3.DeployRun) Result {
 	switch run.Status.Phase {
-	case keziov1alpha2.DeployRunPhaseSucceeded:
+	case keziov1alpha3.DeployRunPhaseSucceeded:
 		return Result{Outcome: Complete}
-	case keziov1alpha2.DeployRunPhaseFailed:
+	case keziov1alpha3.DeployRunPhaseFailed:
 		return Result{
 			Outcome:      Failed,
-			ErrorType:    keziov1alpha2.MachineErrorTypeRestart,
+			ErrorType:    keziov1alpha3.MachineErrorTypeRestart,
 			ErrorMessage: deployRunFailureMessage(run),
 		}
 	default:
@@ -623,7 +623,7 @@ func provisionResultFromPhase(run *keziov1alpha2.DeployRun) Result {
 // back to the current phase's own start time, and a run with neither
 // (only reachable by hand-written status) is left Continuing rather
 // than failed on a clock this deployer never started.
-func provisionStallResult(run *keziov1alpha2.DeployRun) Result {
+func provisionStallResult(run *keziov1alpha3.DeployRun) Result {
 	last := run.Status.LastProgressAt
 	if last == nil {
 		if n := len(run.Status.PhaseTimings); n > 0 {
@@ -635,7 +635,7 @@ func provisionStallResult(run *keziov1alpha2.DeployRun) Result {
 	}
 	return Result{
 		Outcome:      Failed,
-		ErrorType:    keziov1alpha2.MachineErrorTypeRestart,
+		ErrorType:    keziov1alpha3.MachineErrorTypeRestart,
 		ErrorMessage: fmt.Sprintf("agent deployer: no deploy progress observed for %s with DeployRun %q in phase %s; treating the run as stalled", agentDeployerProvisionStallDeadline, run.Name, run.Status.Phase),
 	}
 }
@@ -644,8 +644,8 @@ func provisionStallResult(run *keziov1alpha2.DeployRun) Result {
 // recorded on run.status.conditions[Succeeded]=False, falling back to a
 // generic message if that condition is absent - defensive only, since
 // the progress handler always sets it alongside DeployRunPhaseFailed.
-func deployRunFailureMessage(run *keziov1alpha2.DeployRun) string {
-	cond := apimeta.FindStatusCondition(run.Status.Conditions, keziov1alpha2.DeployRunConditionSucceeded)
+func deployRunFailureMessage(run *keziov1alpha3.DeployRun) string {
+	cond := apimeta.FindStatusCondition(run.Status.Conditions, keziov1alpha3.DeployRunConditionSucceeded)
 	if cond != nil && cond.Message != "" {
 		return cond.Message
 	}
@@ -671,7 +671,7 @@ func deployRunFailureMessage(run *keziov1alpha2.DeployRun) string {
 // Provision (or Inspect, if the machine was never provisioned) wrote it;
 // a caller that wants the data actually destroyed must do that before,
 // or independently of, deleting the Machine.
-func (d *AgentDeployer) Deprovision(ctx context.Context, machine *keziov1alpha2.Machine, restartOnFailure bool) (Result, error) {
+func (d *AgentDeployer) Deprovision(ctx context.Context, machine *keziov1alpha3.Machine, restartOnFailure bool) (Result, error) {
 	return Result{Outcome: Complete}, nil
 }
 
@@ -680,7 +680,7 @@ func (d *AgentDeployer) Deprovision(ctx context.Context, machine *keziov1alpha2.
 // same escalation ForcePowerOff's own doc comment describes. This does
 // not wait for the guest OS to actually finish shutting down; it either
 // completes within these two BMC calls or reports the failing one.
-func (d *AgentDeployer) PowerOff(ctx context.Context, machine *keziov1alpha2.Machine) (Result, error) {
+func (d *AgentDeployer) PowerOff(ctx context.Context, machine *keziov1alpha3.Machine) (Result, error) {
 	bmcClient, err := d.connectBMC(ctx, machine)
 	if err != nil {
 		return classifyBMCError(err), nil
@@ -709,7 +709,7 @@ func (d *AgentDeployer) PowerOff(ctx context.Context, machine *keziov1alpha2.Mac
 // shutdown, then immediately request power-on - best effort, matching
 // Reboot's own contract that it does not wait for the machine to finish
 // rebooting.
-func (d *AgentDeployer) Reboot(ctx context.Context, machine *keziov1alpha2.Machine, hard bool) (Result, error) {
+func (d *AgentDeployer) Reboot(ctx context.Context, machine *keziov1alpha3.Machine, hard bool) (Result, error) {
 	bmcClient, err := d.connectBMC(ctx, machine)
 	if err != nil {
 		return classifyBMCError(err), nil

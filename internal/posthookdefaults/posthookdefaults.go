@@ -22,7 +22,7 @@ package posthookdefaults
 import (
 	"os"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // DefaultFinalizeHookName is the name of the shipped default PostHook.
@@ -40,20 +40,20 @@ const DefaultFinalizeHookName = "kezio-default-finalize"
 // ship a bare shim there (Ubuntu and Debian cloud images both do) leave
 // it unable to start anything on its own. The step is a no-op on an ESP
 // that already boots.
-func Spec() keziov1alpha2.PostHookSpec {
-	return keziov1alpha2.PostHookSpec{
-		Steps: []keziov1alpha2.PostHookStep{
+func Spec() keziov1alpha3.PostHookSpec {
+	return keziov1alpha3.PostHookSpec{
+		Steps: []keziov1alpha3.PostHookStep{
 			{
-				OSFamily: keziov1alpha2.OSFamilyLinux,
-				Builtin:  &keziov1alpha2.PostHookBuiltinStep{Name: keziov1alpha2.BuiltinStepMkswap},
+				OSFamily: keziov1alpha3.OSFamilyLinux,
+				Builtin:  &keziov1alpha3.PostHookBuiltinStep{Name: keziov1alpha3.BuiltinStepMkswap},
 			},
 			{
-				OSFamily: keziov1alpha2.OSFamilyLinux,
-				Builtin:  &keziov1alpha2.PostHookBuiltinStep{Name: keziov1alpha2.BuiltinStepInstallRemovableFallback},
+				OSFamily: keziov1alpha3.OSFamilyLinux,
+				Builtin:  &keziov1alpha3.PostHookBuiltinStep{Name: keziov1alpha3.BuiltinStepInstallRemovableFallback},
 			},
 			{
-				OSFamily: keziov1alpha2.OSFamilyLinux,
-				Builtin:  &keziov1alpha2.PostHookBuiltinStep{Name: keziov1alpha2.BuiltinStepEfibootmgr},
+				OSFamily: keziov1alpha3.OSFamilyLinux,
+				Builtin:  &keziov1alpha3.PostHookBuiltinStep{Name: keziov1alpha3.BuiltinStepEfibootmgr},
 			},
 		},
 	}

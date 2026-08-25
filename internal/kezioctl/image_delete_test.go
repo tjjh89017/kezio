@@ -28,7 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 func TestImageDelete_NotFound(t *testing.T) {
@@ -44,21 +44,21 @@ func TestImageDelete_NotFound(t *testing.T) {
 }
 
 func TestImageDelete_DeletesTheImage(t *testing.T) {
-	img := &keziov1alpha2.Image{ObjectMeta: metav1.ObjectMeta{Name: "gone-soon", Namespace: "default"}}
+	img := &keziov1alpha3.Image{ObjectMeta: metav1.ObjectMeta{Name: "gone-soon", Namespace: "default"}}
 	c := fake.NewClientBuilder().WithScheme(Scheme).WithObjects(img).Build()
 
 	if err := ImageDelete(context.Background(), c, ImageDeleteOptions{Name: "gone-soon", Namespace: "default"}); err != nil {
 		t.Fatalf("ImageDelete() error = %v", err)
 	}
 
-	err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "gone-soon"}, &keziov1alpha2.Image{})
+	err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "gone-soon"}, &keziov1alpha3.Image{})
 	if !apierrors.IsNotFound(err) {
 		t.Errorf("Get() after delete = %v, want NotFound", err)
 	}
 }
 
 func TestImageDelete_WaitReturnsOnceGone(t *testing.T) {
-	img := &keziov1alpha2.Image{ObjectMeta: metav1.ObjectMeta{Name: "waited-for", Namespace: "default"}}
+	img := &keziov1alpha3.Image{ObjectMeta: metav1.ObjectMeta{Name: "waited-for", Namespace: "default"}}
 	c := fake.NewClientBuilder().WithScheme(Scheme).WithObjects(img).Build()
 
 	err := ImageDelete(context.Background(), c, ImageDeleteOptions{
@@ -77,7 +77,7 @@ func TestImageDelete_WaitCanceledByOuterContext(t *testing.T) {
 	// A finalizer keeps the Image present past the delete call. The outer
 	// context is canceled well before WaitTimeout elapses, so the error
 	// must report cancellation, not a bogus timeout.
-	img := &keziov1alpha2.Image{
+	img := &keziov1alpha3.Image{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "outer-canceled",
 			Namespace:  "default",
@@ -113,7 +113,7 @@ func TestImageDelete_WaitCanceledByOuterContext(t *testing.T) {
 func TestImageDelete_WaitTimesOut(t *testing.T) {
 	// A finalizer keeps the Image present past the delete call, so Wait
 	// must give up once WaitTimeout elapses rather than block forever.
-	img := &keziov1alpha2.Image{
+	img := &keziov1alpha3.Image{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "stuck",
 			Namespace:  "default",

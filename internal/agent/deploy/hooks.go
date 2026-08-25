@@ -25,7 +25,7 @@ import (
 	"strings"
 	"time"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 )
 
@@ -64,14 +64,14 @@ func (e *Executor) runHooks(ctx context.Context, plan *agentapi.DeployPlan) erro
 }
 
 // effectiveHookTimeout returns step's timeout, falling back to
-// keziov1alpha2.PostHookDefaultTimeoutSeconds for a non-positive value -
+// keziov1alpha3.PostHookDefaultTimeoutSeconds for a non-positive value -
 // defensive only: the manager always resolves ResolvedHookStep's
 // timeout from a step's own EffectiveTimeoutSeconds(), which already
 // never returns zero.
 func effectiveHookTimeout(step agentapi.ResolvedHookStep) time.Duration {
 	seconds := step.TimeoutSeconds
 	if seconds <= 0 {
-		seconds = keziov1alpha2.PostHookDefaultTimeoutSeconds
+		seconds = keziov1alpha3.PostHookDefaultTimeoutSeconds
 	}
 	return time.Duration(seconds) * time.Second
 }
@@ -122,7 +122,7 @@ func (e *Executor) runScriptStep(ctx context.Context, plan *agentapi.DeployPlan,
 
 // Environment variable names a script step gets its device paths under.
 // This set is the documented contract a PostHook script may rely on (see
-// keziov1alpha2.PostHookStep.Script); keep the names stable.
+// keziov1alpha3.PostHookStep.Script); keep the names stable.
 //
 //   - KEZIO_TARGET_DISK is the OS image's target disk, absent when the
 //     plan deploys no OS image.
@@ -214,16 +214,16 @@ func (e *Executor) unmountAll(ctx context.Context, mounted []string) {
 type builtinFunc func(ctx context.Context, e *Executor, plan *agentapi.DeployPlan, params map[string]string) error
 
 // builtinRegistry maps a PostHookBuiltinStep.Name (see
-// keziov1alpha2.BuiltinStep* constants) to its implementation. Every name
+// keziov1alpha3.BuiltinStep* constants) to its implementation. Every name
 // the CRD's own +kubebuilder:validation:Enum accepts has an entry here;
 // runBuiltinStep reports any other name as an error rather than a silent
 // no-op, so a builtin the CRD accepts but this registry has not caught up
 // to implementing fails loudly instead of pretending to have run.
 var builtinRegistry = map[string]builtinFunc{
-	keziov1alpha2.BuiltinStepMkswap:                   runBuiltinMkswap,
-	keziov1alpha2.BuiltinStepEfibootmgr:               runBuiltinEfibootmgr,
-	keziov1alpha2.BuiltinStepGrowLastPartition:        runBuiltinGrowLastPartition,
-	keziov1alpha2.BuiltinStepInstallRemovableFallback: runBuiltinInstallRemovableFallback,
+	keziov1alpha3.BuiltinStepMkswap:                   runBuiltinMkswap,
+	keziov1alpha3.BuiltinStepEfibootmgr:               runBuiltinEfibootmgr,
+	keziov1alpha3.BuiltinStepGrowLastPartition:        runBuiltinGrowLastPartition,
+	keziov1alpha3.BuiltinStepInstallRemovableFallback: runBuiltinInstallRemovableFallback,
 }
 
 // runBuiltinStep looks step.Builtin up in builtinRegistry and runs it.

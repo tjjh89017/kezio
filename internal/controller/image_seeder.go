@@ -30,7 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/sitederive"
 )
 
@@ -96,7 +96,7 @@ type seederSiteProblem struct {
 // resolution failed is already excluded there and never blocks another
 // Site's own processing here, nor does an error reconciling one Site
 // block another's.
-func (r *ImageReconciler) reconcileImageSeeder(ctx context.Context, image *keziov1alpha2.Image) (ctrl.Result, error) {
+func (r *ImageReconciler) reconcileImageSeeder(ctx context.Context, image *keziov1alpha3.Image) (ctrl.Result, error) {
 	demand, noSeederSites, err := r.imageSeedDemandBySite(ctx, image)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -151,7 +151,7 @@ func (r *ImageReconciler) reconcileImageSeeder(ctx context.Context, image *kezio
 // mirroring the per-content reconcileSeeder's state machine one level up:
 // create on demand, patch placement drift, cancel or run a grace-period
 // shutdown, and leave a terminating Deployment alone.
-func (r *ImageReconciler) reconcileImageSeederSite(ctx context.Context, image *keziov1alpha2.Image, site string, demand *seederSiteDemand, dep *appsv1.Deployment, contents []seededContent) (ctrl.Result, seederSiteProblem, error) {
+func (r *ImageReconciler) reconcileImageSeederSite(ctx context.Context, image *keziov1alpha3.Image, site string, demand *seederSiteDemand, dep *appsv1.Deployment, contents []seededContent) (ctrl.Result, seederSiteProblem, error) {
 	wantsSeeder := demand != nil && demand.count > 0
 
 	switch {
@@ -214,7 +214,7 @@ func (r *ImageReconciler) reconcileImageSeederSite(ctx context.Context, image *k
 // object. That object is read only to check ownership, never patched,
 // updated, or deleted - a foreign Deployment must never be adopted or
 // overwritten, and the caller must not count this Site as served.
-func (r *ImageReconciler) createImageSeederDeployment(ctx context.Context, image *keziov1alpha2.Image, site string, contents []seededContent, res sitederive.Resolution) (foreign bool, err error) {
+func (r *ImageReconciler) createImageSeederDeployment(ctx context.Context, image *keziov1alpha3.Image, site string, contents []seededContent, res sitederive.Resolution) (foreign bool, err error) {
 	dep := r.buildImageSeederDeployment(image, site, contents, res)
 	if err := controllerutil.SetControllerReference(image, dep, r.Scheme); err != nil {
 		return false, fmt.Errorf("image %q: setting seeder deployment owner reference: %w", image.Name, err)
@@ -242,7 +242,7 @@ func (r *ImageReconciler) createImageSeederDeployment(ctx context.Context, image
 // creation. Selector is never touched either - it is immutable on an
 // existing Deployment, and this Deployment's own name already makes it
 // exact per (Image, Site).
-func (r *ImageReconciler) ensureImageSeederPlacement(ctx context.Context, image *keziov1alpha2.Image, site string, dep *appsv1.Deployment, contents []seededContent, res sitederive.Resolution) (*appsv1.Deployment, error) {
+func (r *ImageReconciler) ensureImageSeederPlacement(ctx context.Context, image *keziov1alpha3.Image, site string, dep *appsv1.Deployment, contents []seededContent, res sitederive.Resolution) (*appsv1.Deployment, error) {
 	desired := r.buildImageSeederDeployment(image, site, contents, res)
 
 	wantAnnotations := desired.Spec.Template.Annotations

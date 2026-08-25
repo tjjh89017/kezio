@@ -28,13 +28,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 func newMachineStatusWriteScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
-	if err := keziov1alpha2.AddToScheme(s); err != nil {
+	if err := keziov1alpha3.AddToScheme(s); err != nil {
 		t.Fatalf("adding kezio scheme: %v", err)
 	}
 	return s
@@ -46,7 +46,7 @@ func newMachineStatusWriteScheme(t *testing.T) *runtime.Scheme {
 // just skip the ones a caller expects.
 func TestApplyMachineStatusDropsCallbacksOnWriteFailure(t *testing.T) {
 	s := newMachineStatusWriteScheme(t)
-	machine := &keziov1alpha2.Machine{ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: "default"}}
+	machine := &keziov1alpha3.Machine{ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: "default"}}
 	base := fake.NewClientBuilder().WithScheme(s).WithObjects(machine).Build()
 	writeErr := errors.New("boom")
 	c := interceptor.NewClient(base, interceptor.Funcs{
@@ -71,7 +71,7 @@ func TestApplyMachineStatusDropsCallbacksOnWriteFailure(t *testing.T) {
 // once, in the order given.
 func TestApplyMachineStatusRunsCallbacksInOrderOnlyOnSuccess(t *testing.T) {
 	s := newMachineStatusWriteScheme(t)
-	machine := &keziov1alpha2.Machine{ObjectMeta: metav1.ObjectMeta{Name: "m2", Namespace: "default"}}
+	machine := &keziov1alpha3.Machine{ObjectMeta: metav1.ObjectMeta{Name: "m2", Namespace: "default"}}
 	base := fake.NewClientBuilder().WithScheme(s).WithObjects(machine).Build()
 	c := interceptor.NewClient(base, interceptor.Funcs{
 		SubResourcePatch: func(context.Context, client.Client, string, client.Object, client.Patch, ...client.SubResourcePatchOption) error {

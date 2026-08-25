@@ -48,7 +48,7 @@ description: >-
   5-second poll interval is very low, but this action never lets that
   possibility pass as a silent success.
 
-  Evidence gathered, cross-checked against api/v1alpha2's own json tags:
+  Evidence gathered, cross-checked against api/v1alpha3's own json tags:
     - status.currentRunRef.name (Machine) moves off the deleted run's
       name - through the nil interval recordCurrentRunDeleted's own
       comment documents (currentRunRef cleared, errorType Restart,

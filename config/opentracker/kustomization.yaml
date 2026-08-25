@@ -2,7 +2,7 @@
 # Site.spec.tracker.externalURL escape hatch only: SiteReconciler now
 # creates its own reconciler-managed tracker Deployment per seeding
 # Site (one per Site, single-homed on that Site's seeding network,
-# bound to Site.spec.tracker.ip - see api/v1alpha2/site_types.go), so
+# bound to Site.spec.tracker.ip - see api/v1alpha3/site_types.go), so
 # this manifest is no longer the deployment path a lane or an operator
 # applies for a Site's own tracker. It stays for an operator who wants
 # a tracker running independently of any Site and points

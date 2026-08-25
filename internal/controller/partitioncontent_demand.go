@@ -25,7 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // machineImageRefIndex indexes Machine by every Image it may cause to be
@@ -48,7 +48,7 @@ var (
 // reconcilers' SetupWithManager call it or in what order.
 func ensureMachineImageRefIndex(mgr ctrl.Manager) error {
 	machineImageRefIndexOnce.Do(func() {
-		machineImageRefIndexErr = mgr.GetFieldIndexer().IndexField(context.Background(), &keziov1alpha2.Machine{}, machineImageRefIndex, indexMachineImageRefs)
+		machineImageRefIndexErr = mgr.GetFieldIndexer().IndexField(context.Background(), &keziov1alpha3.Machine{}, machineImageRefIndex, indexMachineImageRefs)
 	})
 	return machineImageRefIndexErr
 }
@@ -56,7 +56,7 @@ func ensureMachineImageRefIndex(mgr ctrl.Manager) error {
 // indexMachineImageRefs extracts machineImageRefIndex's keys for obj, for
 // the field indexer.
 func indexMachineImageRefs(obj client.Object) []string {
-	machine, ok := obj.(*keziov1alpha2.Machine)
+	machine, ok := obj.(*keziov1alpha3.Machine)
 	if !ok {
 		return nil
 	}
@@ -78,10 +78,10 @@ func objectKeyIndexString(key client.ObjectKey) string {
 // spec.imageRef/spec.dataImages may deploy, namespace-resolved against
 // machine's own namespace - mirroring deployRunImageNames' resolution of
 // DeployRunSpec's equivalent fields.
-func machineImageRefs(machine *keziov1alpha2.Machine) []client.ObjectKey {
+func machineImageRefs(machine *keziov1alpha3.Machine) []client.ObjectKey {
 	seen := make(map[client.ObjectKey]bool, 1+len(machine.Spec.DataImages))
 	keys := make([]client.ObjectKey, 0, 1+len(machine.Spec.DataImages))
-	add := func(ref keziov1alpha2.NameRef) {
+	add := func(ref keziov1alpha3.NameRef) {
 		namespace := ref.Namespace
 		if namespace == "" {
 			namespace = machine.Namespace
@@ -115,7 +115,7 @@ func machineImageRefs(machine *keziov1alpha2.Machine) []client.ObjectKey {
 // has not started deploying, but pre-seeding the content ahead of
 // provisioning - so the transfer is already warm once provisioning starts
 // - is the entire point of a seeder Deployment existing at all.
-func (r *PartitionContentReconciler) resolveSeedDemand(ctx context.Context, pc *keziov1alpha2.PartitionContent) (bool, error) {
+func (r *PartitionContentReconciler) resolveSeedDemand(ctx context.Context, pc *keziov1alpha3.PartitionContent) (bool, error) {
 	images, err := r.imagesReferencing(ctx, pc)
 	if err != nil {
 		return false, fmt.Errorf("partitioncontent %q: listing referencing images: %w", pc.Name, err)
@@ -141,8 +141,8 @@ func (r *PartitionContentReconciler) resolveSeedDemand(ctx context.Context, pc *
 // hasLiveMachineReferencing reports whether any Machine not being deleted
 // names image via spec.imageRef or spec.dataImages[].imageRef, via
 // machineImageRefIndex.
-func (r *PartitionContentReconciler) hasLiveMachineReferencing(ctx context.Context, image *keziov1alpha2.Image) (bool, error) {
-	var list keziov1alpha2.MachineList
+func (r *PartitionContentReconciler) hasLiveMachineReferencing(ctx context.Context, image *keziov1alpha3.Image) (bool, error) {
+	var list keziov1alpha3.MachineList
 	key := objectKeyIndexString(client.ObjectKey{Namespace: image.Namespace, Name: image.Name})
 	if err := r.List(ctx, &list, client.MatchingFields{machineImageRefIndex: key}); err != nil {
 		return false, err
@@ -153,7 +153,7 @@ func (r *PartitionContentReconciler) hasLiveMachineReferencing(ctx context.Conte
 // anyLiveMachine reports whether any machine in machines is not being
 // deleted - the pure predicate half of hasLiveMachineReferencing, kept
 // separate so it is unit-testable without a live index or client.
-func anyLiveMachine(machines []keziov1alpha2.Machine) bool {
+func anyLiveMachine(machines []keziov1alpha3.Machine) bool {
 	for i := range machines {
 		if machines[i].DeletionTimestamp.IsZero() {
 			return true
@@ -169,7 +169,7 @@ func anyLiveMachine(machines []keziov1alpha2.Machine) bool {
 // (a Get, not machineImageRefIndex, which only maps the other direction) -
 // cheap since a Machine names at most a handful of Images.
 func (r *PartitionContentReconciler) mapMachineToPartitionContents(ctx context.Context, obj client.Object) []reconcile.Request {
-	machine, ok := obj.(*keziov1alpha2.Machine)
+	machine, ok := obj.(*keziov1alpha3.Machine)
 	if !ok {
 		return nil
 	}
@@ -182,7 +182,7 @@ func (r *PartitionContentReconciler) mapMachineToPartitionContents(ctx context.C
 // resolved-Image lookup deployRunImageNames already implements for the
 // deletion-blocking finalizer walk.
 func (r *PartitionContentReconciler) mapDeployRunToPartitionContents(ctx context.Context, obj client.Object) []reconcile.Request {
-	run, ok := obj.(*keziov1alpha2.DeployRun)
+	run, ok := obj.(*keziov1alpha3.DeployRun)
 	if !ok {
 		return nil
 	}
@@ -196,7 +196,7 @@ func (r *PartitionContentReconciler) imageRefsToPartitionContentRequests(ctx con
 	seen := make(map[client.ObjectKey]bool)
 	var requests []reconcile.Request
 	for _, ref := range refs {
-		var image keziov1alpha2.Image
+		var image keziov1alpha3.Image
 		if err := r.Get(ctx, ref, &image); err != nil {
 			continue
 		}

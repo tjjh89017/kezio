@@ -26,7 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // imageMissingContentMessageLimit bounds how many slot problems a
@@ -67,7 +67,7 @@ type slotContentAggregation struct {
 //
 // A blank slot (no contentRef) and a swap/uuid slot need no content and
 // are skipped entirely.
-func (r *ImageReconciler) aggregateSlotContents(ctx context.Context, image *keziov1alpha2.Image) (slotContentAggregation, error) {
+func (r *ImageReconciler) aggregateSlotContents(ctx context.Context, image *keziov1alpha3.Image) (slotContentAggregation, error) {
 	var agg slotContentAggregation
 	for _, slot := range image.Spec.Layout.Slots {
 		if slot.ContentRef == nil {
@@ -85,7 +85,7 @@ func (r *ImageReconciler) aggregateSlotContents(ctx context.Context, image *kezi
 			namespace = image.Namespace
 		}
 
-		var content keziov1alpha2.PartitionContent
+		var content keziov1alpha3.PartitionContent
 		key := client.ObjectKey{Namespace: namespace, Name: slot.ContentRef.Name}
 		if err := r.Get(ctx, key, &content); err != nil {
 			if apierrors.IsNotFound(err) {
@@ -106,7 +106,7 @@ func (r *ImageReconciler) aggregateSlotContents(ctx context.Context, image *kezi
 				slot.Number, slot.SizeBytes, slot.ContentRef.Name, content.Spec.LastExtentEnd))
 		}
 
-		cond := meta.FindStatusCondition(content.Status.Conditions, keziov1alpha2.PartitionContentConditionReady)
+		cond := meta.FindStatusCondition(content.Status.Conditions, keziov1alpha3.PartitionContentConditionReady)
 		if cond == nil {
 			agg.notReady = append(agg.notReady, fmt.Sprintf("slot %d: PartitionContent %q has no Ready condition yet", slot.Number, slot.ContentRef.Name))
 			continue
@@ -115,7 +115,7 @@ func (r *ImageReconciler) aggregateSlotContents(ctx context.Context, image *kezi
 			agg.stale = true
 			continue
 		}
-		if content.Status.State == keziov1alpha2.PartitionContentStateFailed {
+		if content.Status.State == keziov1alpha3.PartitionContentStateFailed {
 			agg.failed = append(agg.failed, fmt.Sprintf("slot %d: PartitionContent %q failed", slot.Number, slot.ContentRef.Name))
 			continue
 		}

@@ -32,7 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/imageservice"
 )
 
@@ -93,7 +93,7 @@ func TestImageUpload_ChecksumAndNamesPropagateIntoCR(t *testing.T) {
 		t.Fatalf("Upload.Checksum = %q, want %q", res.Upload.Checksum, wantChecksum)
 	}
 
-	stored := &keziov1alpha2.ImageImport{}
+	stored := &keziov1alpha3.ImageImport{}
 	key := client.ObjectKey{Namespace: "kezio-system", Name: testUploadName}
 	if err := c.Get(context.Background(), key, stored); err != nil {
 		t.Fatalf("get created ImageImport: %v", err)
@@ -179,7 +179,7 @@ func TestImageUpload_UploadFailureDoesNotCreateImageImport(t *testing.T) {
 		t.Fatal("expected an error when the upload fails")
 	}
 
-	list := &keziov1alpha2.ImageImportList{}
+	list := &keziov1alpha3.ImageImportList{}
 	if err := c.List(context.Background(), list); err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
@@ -214,9 +214,9 @@ func TestImageUpload_WaitReturnsOnceTheImageIsReady(t *testing.T) {
 	// for it, so the wait has to observe a state it did not start in.
 	go func() {
 		time.Sleep(5 * time.Millisecond)
-		image := &keziov1alpha2.Image{
+		image := &keziov1alpha3.Image{
 			ObjectMeta: metav1.ObjectMeta{Name: testUploadName, Namespace: "kezio-system"},
-			Status:     keziov1alpha2.ImageStatus{State: keziov1alpha2.ImageStateReady},
+			Status:     keziov1alpha3.ImageStatus{State: keziov1alpha3.ImageStateReady},
 		}
 		_ = c.Create(context.Background(), image)
 		_ = c.Update(context.Background(), image)
@@ -242,7 +242,7 @@ func TestImageUpload_WaitReturnsOnceTheImageIsReady(t *testing.T) {
 	if len(lines) == 0 {
 		t.Fatalf("progress = %q, want at least one wait line", progress.String())
 	}
-	if !strings.Contains(lines[len(lines)-1], keziov1alpha2.ImageStateReady) {
+	if !strings.Contains(lines[len(lines)-1], keziov1alpha3.ImageStateReady) {
 		t.Errorf("last wait line = %q, want it to report the Image as Ready", lines[len(lines)-1])
 	}
 }
@@ -261,16 +261,16 @@ func TestImageUpload_WaitReportsTheImportFailureReason(t *testing.T) {
 	const failureMessage = `partitioncontent "ubuntu-2404-golden-p1" already exists`
 	go func() {
 		key := client.ObjectKey{Namespace: "kezio-system", Name: testUploadName}
-		imp := &keziov1alpha2.ImageImport{}
+		imp := &keziov1alpha3.ImageImport{}
 		for range 200 {
 			if err := c.Get(context.Background(), key, imp); err == nil {
 				break
 			}
 			time.Sleep(time.Millisecond)
 		}
-		imp.Status.State = keziov1alpha2.ImageImportStateFailed
+		imp.Status.State = keziov1alpha3.ImageImportStateFailed
 		imp.Status.Conditions = []metav1.Condition{{
-			Type:               keziov1alpha2.ImageImportConditionReady,
+			Type:               keziov1alpha3.ImageImportConditionReady,
 			Status:             metav1.ConditionFalse,
 			Reason:             "ImportFailed",
 			Message:            failureMessage,
@@ -365,7 +365,7 @@ func TestImageUpload_ImportAlreadyExists(t *testing.T) {
 	srv := newImageServiceTestServer(t, "test-token")
 	defer srv.Close()
 
-	existing := &keziov1alpha2.ImageImport{}
+	existing := &keziov1alpha3.ImageImport{}
 	existing.Name = "dup"
 	existing.Namespace = "default"
 	c := fake.NewClientBuilder().WithScheme(Scheme).WithObjects(existing).Build()

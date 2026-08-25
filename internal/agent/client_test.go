@@ -24,7 +24,7 @@ import (
 	"strconv"
 	"testing"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 )
 
@@ -41,7 +41,7 @@ func TestClient_Register_ReturnsMachineNameAndSessionToken(t *testing.T) {
 	defer server.Close()
 
 	c := NewClient(server.URL)
-	result, err := c.Register(context.Background(), "boot-token", keziov1alpha2.MachineHardwareSpec{})
+	result, err := c.Register(context.Background(), "boot-token", keziov1alpha3.MachineHardwareSpec{})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestClient_Register_RejectsResponseMissingSessionToken(t *testing.T) {
 	defer server.Close()
 
 	c := NewClient(server.URL)
-	if _, err := c.Register(context.Background(), "boot-token", keziov1alpha2.MachineHardwareSpec{}); err == nil {
+	if _, err := c.Register(context.Background(), "boot-token", keziov1alpha3.MachineHardwareSpec{}); err == nil {
 		t.Fatal("Register: want an error for a response with no session token")
 	}
 }
@@ -79,7 +79,7 @@ func TestClient_Register_NonOKStatusIsError(t *testing.T) {
 	defer server.Close()
 
 	c := NewClient(server.URL)
-	if _, err := c.Register(context.Background(), "boot-token", keziov1alpha2.MachineHardwareSpec{}); err == nil {
+	if _, err := c.Register(context.Background(), "boot-token", keziov1alpha3.MachineHardwareSpec{}); err == nil {
 		t.Fatal("Register: want an error for a 401 response")
 	}
 }

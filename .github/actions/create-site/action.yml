@@ -1,7 +1,7 @@
 name: Create a Site
 
 description: >-
-  Applies a `Site` CR (api/v1alpha2/site_types.go) that SiteReconciler
+  Applies a `Site` CR (api/v1alpha3/site_types.go) that SiteReconciler
   watches to place a per-Site tracker Deployment, and waits for a
   caller-selectable status condition. Follows create-subnet's own
   conventions: kubectl apply, a poll loop against
@@ -122,7 +122,7 @@ runs:
       run: |
         set -euo pipefail
         site_yaml="$(cat <<EOF
-        apiVersion: kezio.kojuro.date/v1alpha2
+        apiVersion: kezio.kojuro.date/v1alpha3
         kind: Site
         metadata:
           name: ${NAME}

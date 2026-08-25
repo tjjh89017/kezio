@@ -31,7 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/posthookvalidate"
 )
 
@@ -55,7 +55,7 @@ type PostHookReconciler struct {
 // Reconcile fetches the PostHook and folds spec validation plus
 // reconcile-time source resolution into its Valid/Ready conditions.
 func (r *PostHookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var ph keziov1alpha2.PostHook
+	var ph keziov1alpha3.PostHook
 	if err := r.Get(ctx, req.NamespacedName, &ph); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -70,7 +70,7 @@ func (r *PostHookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 // not exist yet, or may be created after admission), so this is deferred
 // to reconcile time. Valid is False on either failure; Ready mirrors Valid
 // exactly, since a PostHook has nothing else to become ready.
-func (r *PostHookReconciler) onChange(ctx context.Context, ph *keziov1alpha2.PostHook) (ctrl.Result, error) {
+func (r *PostHookReconciler) onChange(ctx context.Context, ph *keziov1alpha3.PostHook) (ctrl.Result, error) {
 	if err := posthookvalidate.Validate(ph); err != nil {
 		return r.recordStatus(ctx, ph, metav1.ConditionFalse, "InvalidSpec", err.Error())
 	}
@@ -92,7 +92,7 @@ func (r *PostHookReconciler) onChange(ctx context.Context, ph *keziov1alpha2.Pos
 // a ConfigMap/Secret it names always lives alongside the PostHook
 // referencing it, mirroring ConfigMapKeyRef/SecretKeyRef's own doc
 // comments. An inline script has nothing to resolve here.
-func (r *PostHookReconciler) missingSources(ctx context.Context, ph *keziov1alpha2.PostHook) ([]string, error) {
+func (r *PostHookReconciler) missingSources(ctx context.Context, ph *keziov1alpha3.PostHook) ([]string, error) {
 	var missing []string
 	for i, step := range ph.Spec.Steps {
 		if step.Script == nil {
@@ -114,9 +114,9 @@ func (r *PostHookReconciler) missingSources(ctx context.Context, ph *keziov1alph
 // object or its key is missing. An inline script (SourceKind ==
 // PostHookScriptSourceInline) has nothing to resolve and always returns
 // "".
-func (r *PostHookReconciler) checkSource(ctx context.Context, namespace, path string, src keziov1alpha2.PostHookScriptSource) (string, error) {
+func (r *PostHookReconciler) checkSource(ctx context.Context, namespace, path string, src keziov1alpha3.PostHookScriptSource) (string, error) {
 	switch src.SourceKind() {
-	case keziov1alpha2.PostHookScriptSourceConfigMapRef:
+	case keziov1alpha3.PostHookScriptSourceConfigMapRef:
 		var cm corev1.ConfigMap
 		switch err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: src.ConfigMapRef.Name}, &cm); {
 		case apierrors.IsNotFound(err):
@@ -127,7 +127,7 @@ func (r *PostHookReconciler) checkSource(ctx context.Context, namespace, path st
 		if _, ok := cm.Data[src.ConfigMapRef.Key]; !ok {
 			return fmt.Sprintf("%s.configMapRef: ConfigMap %q has no key %q", path, src.ConfigMapRef.Name, src.ConfigMapRef.Key), nil
 		}
-	case keziov1alpha2.PostHookScriptSourceSecretRef:
+	case keziov1alpha3.PostHookScriptSourceSecretRef:
 		var secret corev1.Secret
 		switch err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: src.SecretRef.Name}, &secret); {
 		case apierrors.IsNotFound(err):
@@ -148,10 +148,10 @@ func (r *PostHookReconciler) checkSource(ctx context.Context, namespace, path st
 // status/reason/message on failure; on success it carries its own
 // reason/message, since "valid" and "ready" are different claims even
 // though a PostHook's Ready has no further condition of its own to add.
-func (r *PostHookReconciler) recordStatus(ctx context.Context, ph *keziov1alpha2.PostHook, status metav1.ConditionStatus, reason, message string) (ctrl.Result, error) {
+func (r *PostHookReconciler) recordStatus(ctx context.Context, ph *keziov1alpha3.PostHook, status metav1.ConditionStatus, reason, message string) (ctrl.Result, error) {
 	ph.Status.ObservedGeneration = ph.Generation
 	apimeta.SetStatusCondition(&ph.Status.Conditions, metav1.Condition{
-		Type:               keziov1alpha2.PostHookConditionValid,
+		Type:               keziov1alpha3.PostHookConditionValid,
 		Status:             status,
 		Reason:             reason,
 		Message:            message,
@@ -163,7 +163,7 @@ func (r *PostHookReconciler) recordStatus(ctx context.Context, ph *keziov1alpha2
 		readyReason, readyMessage = "PostHookReady", "PostHook is valid and ready"
 	}
 	apimeta.SetStatusCondition(&ph.Status.Conditions, metav1.Condition{
-		Type:               keziov1alpha2.PostHookConditionReady,
+		Type:               keziov1alpha3.PostHookConditionReady,
 		Status:             readyStatus,
 		Reason:             readyReason,
 		Message:            readyMessage,
@@ -188,7 +188,7 @@ func (r *PostHookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&keziov1alpha2.PostHook{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		For(&keziov1alpha3.PostHook{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.mapConfigMapToPostHooks)).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.mapSecretToPostHooks)).
 		Named("posthook").

@@ -27,7 +27,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // apiWarningCode is the only HTTP Warning code Kubernetes sends
@@ -61,7 +61,7 @@ func (h apiWarningHandler) HandleWarningHeaderWithContext(_ context.Context, cod
 var Scheme = runtime.NewScheme()
 
 func init() {
-	if err := keziov1alpha2.AddToScheme(Scheme); err != nil {
+	if err := keziov1alpha3.AddToScheme(Scheme); err != nil {
 		panic(fmt.Sprintf("register kezio API types: %v", err))
 	}
 }

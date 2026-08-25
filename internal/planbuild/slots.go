@@ -24,7 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 	"github.com/tjjh89017/kezio/internal/store"
 )
@@ -37,7 +37,7 @@ import (
 // slot resolves to Mkfs. site lazily resolves the deploying Machine's own
 // seeder placement, shared across every slot of every image this
 // Machine's plan builds so it is resolved at most once.
-func (b *Builder) buildSlots(ctx context.Context, image *keziov1alpha2.Image, targetDisk string, site *lazySiteResolution) ([]agentapi.DeploySlot, error) {
+func (b *Builder) buildSlots(ctx context.Context, image *keziov1alpha3.Image, targetDisk string, site *lazySiteResolution) ([]agentapi.DeploySlot, error) {
 	slots := make([]agentapi.DeploySlot, 0, len(image.Spec.Layout.Slots))
 	for _, s := range image.Spec.Layout.Slots {
 		slot, err := b.buildSlot(ctx, image, s, targetDisk, site)
@@ -49,7 +49,7 @@ func (b *Builder) buildSlots(ctx context.Context, image *keziov1alpha2.Image, ta
 	return slots, nil
 }
 
-func (b *Builder) buildSlot(ctx context.Context, image *keziov1alpha2.Image, s keziov1alpha2.ImageSlot, targetDisk string, site *lazySiteResolution) (agentapi.DeploySlot, error) {
+func (b *Builder) buildSlot(ctx context.Context, image *keziov1alpha3.Image, s keziov1alpha3.ImageSlot, targetDisk string, site *lazySiteResolution) (agentapi.DeploySlot, error) {
 	slot := agentapi.DeploySlot{
 		Number: s.Number,
 		Device: partitionDevicePath(targetDisk, s.Number),
@@ -63,7 +63,7 @@ func (b *Builder) buildSlot(ctx context.Context, image *keziov1alpha2.Image, s k
 		}
 		slot.Torrent = torrent
 
-	case s.Role == keziov1alpha2.PartitionRoleSwap:
+	case s.Role == keziov1alpha3.PartitionRoleSwap:
 		slot.Swap = &agentapi.DeploySwap{UUID: s.UUID}
 
 	default:
@@ -81,17 +81,17 @@ func (b *Builder) buildSlot(ctx context.Context, image *keziov1alpha2.Image, s k
 // reports NotReadyError (or, for a Site resolution failure, ValidationError
 // - see sitederive.Resolve's own error classification for why that is a
 // misconfiguration rather than something to wait out).
-func (b *Builder) buildTorrent(ctx context.Context, image *keziov1alpha2.Image, ref keziov1alpha2.NameRef, site *lazySiteResolution) (*agentapi.DeployTorrent, error) {
+func (b *Builder) buildTorrent(ctx context.Context, image *keziov1alpha3.Image, ref keziov1alpha3.NameRef, site *lazySiteResolution) (*agentapi.DeployTorrent, error) {
 	ns := resolveNamespace(ref, image.Namespace)
 
-	pc := &keziov1alpha2.PartitionContent{}
+	pc := &keziov1alpha3.PartitionContent{}
 	if err := b.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: ref.Name}, pc); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, &NotReadyError{Reason: fmt.Sprintf("partitioncontent %s/%s not found", ns, ref.Name)}
 		}
 		return nil, fmt.Errorf("get partitioncontent %s/%s: %w", ns, ref.Name, err)
 	}
-	if !meta.IsStatusConditionTrue(pc.Status.Conditions, keziov1alpha2.PartitionContentConditionReady) {
+	if !meta.IsStatusConditionTrue(pc.Status.Conditions, keziov1alpha3.PartitionContentConditionReady) {
 		return nil, &NotReadyError{Reason: fmt.Sprintf("partitioncontent %s/%s is not Ready yet", ns, ref.Name)}
 	}
 

@@ -29,7 +29,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // ErrSubnetNotFound classifies a Resolve failure caused by
@@ -83,25 +83,25 @@ type Resolution struct {
 	// attach through, taken from the seeding Subnet's
 	// Spec.SeederNetworkRef. Nil means the seeder runs on the ordinary
 	// cluster network with no Multus attachment.
-	SeederNetworkRef *keziov1alpha2.NameRef
+	SeederNetworkRef *keziov1alpha3.NameRef
 	// NodeSelector constrains seeder pods onto nodes attached to the
 	// seeding Subnet's broadcast domain, taken from
 	// Subnet.Spec.NodeSelector.
 	NodeSelector map[string]string
-	Subnet       *keziov1alpha2.Subnet
+	Subnet       *keziov1alpha3.Subnet
 }
 
 // Identity returns subnet's namespace-qualified identity string, the
 // same format Resolve returns as Resolution.Identity. Exported so a
 // caller that already has a *Subnet in hand computes the exact same
 // string without a second, independently-maintained formatting rule.
-func Identity(subnet *keziov1alpha2.Subnet) string {
+func Identity(subnet *keziov1alpha3.Subnet) string {
 	return subnet.Namespace + "/" + subnet.Name
 }
 
 // SiteIdentity returns site's namespace-qualified identity string, the
 // same format Resolve returns as Resolution.SiteIdentity.
-func SiteIdentity(site *keziov1alpha2.Site) string {
+func SiteIdentity(site *keziov1alpha3.Site) string {
 	return site.Namespace + "/" + site.Name
 }
 
@@ -114,7 +114,7 @@ func SiteIdentity(site *keziov1alpha2.Site) string {
 // this against SiteIdentity rather than comparing names alone, since
 // Site is namespace-scoped and its name carries no cluster-wide
 // uniqueness.
-func SiteRefIdentity(subnet *keziov1alpha2.Subnet) string {
+func SiteRefIdentity(subnet *keziov1alpha3.Subnet) string {
 	ns := subnet.Spec.SiteRef.Namespace
 	if ns == "" {
 		ns = subnet.Namespace
@@ -147,13 +147,13 @@ func SiteRefIdentity(subnet *keziov1alpha2.Subnet) string {
 // that cache rather than adding its own. Only Get is used, so a
 // read-only client.Reader (for example planbuild.Builder's own Client)
 // is sufficient.
-func Resolve(ctx context.Context, c client.Reader, machine *keziov1alpha2.Machine) (Resolution, error) {
+func Resolve(ctx context.Context, c client.Reader, machine *keziov1alpha3.Machine) (Resolution, error) {
 	subnetRef := machine.Spec.SubnetRef
 	subnetNS := subnetRef.Namespace
 	if subnetNS == "" {
 		subnetNS = machine.Namespace
 	}
-	subnet := &keziov1alpha2.Subnet{}
+	subnet := &keziov1alpha3.Subnet{}
 	if err := c.Get(ctx, client.ObjectKey{Namespace: subnetNS, Name: subnetRef.Name}, subnet); err != nil {
 		if apierrors.IsNotFound(err) {
 			return Resolution{}, fmt.Errorf("%w: %s/%s (machine %s/%s spec.subnetRef)",
@@ -167,7 +167,7 @@ func Resolve(ctx context.Context, c client.Reader, machine *keziov1alpha2.Machin
 	if siteNS == "" {
 		siteNS = subnet.Namespace
 	}
-	site := &keziov1alpha2.Site{}
+	site := &keziov1alpha3.Site{}
 	if err := c.Get(ctx, client.ObjectKey{Namespace: siteNS, Name: siteRef.Name}, site); err != nil {
 		if apierrors.IsNotFound(err) {
 			return Resolution{}, fmt.Errorf("%w: %s/%s (subnet %s spec.siteRef)",
@@ -189,7 +189,7 @@ func Resolve(ctx context.Context, c client.Reader, machine *keziov1alpha2.Machin
 	if seederNS == "" {
 		seederNS = site.Namespace
 	}
-	seederSubnet := &keziov1alpha2.Subnet{}
+	seederSubnet := &keziov1alpha3.Subnet{}
 	if err := c.Get(ctx, client.ObjectKey{Namespace: seederNS, Name: seederRef.Name}, seederSubnet); err != nil {
 		if apierrors.IsNotFound(err) {
 			return Resolution{}, fmt.Errorf("%w: %s/%s (site %s spec.seederSubnetRef)",
@@ -209,7 +209,7 @@ func Resolve(ctx context.Context, c client.Reader, machine *keziov1alpha2.Machin
 // the full Machine -> Subnet -> Site chain to a seeding Subnet. HasSeeder
 // is always true: a Subnet reached here is, by definition, one that hosts
 // a seeder.
-func ResolveSubnet(subnet *keziov1alpha2.Subnet) Resolution {
+func ResolveSubnet(subnet *keziov1alpha3.Subnet) Resolution {
 	return Resolution{
 		HasSeeder:        true,
 		Identity:         Identity(subnet),

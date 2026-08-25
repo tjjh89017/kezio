@@ -26,7 +26,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/store"
 )
 
@@ -202,7 +202,7 @@ func processPartition(ctx context.Context, cfg Config, deps Dependencies, rawPat
 		PartUUID:  part.PartUUID,
 	}
 
-	if role == keziov1alpha2.PartitionRoleSwap {
+	if role == keziov1alpha3.PartitionRoleSwap {
 		// Swap carries no content: the agent runs mkswap with the
 		// recorded UUID at deploy time instead of restoring bytes.
 		resultPart.FSType = ""

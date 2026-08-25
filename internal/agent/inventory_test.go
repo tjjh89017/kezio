@@ -21,10 +21,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
-func diskByName(disks []keziov1alpha2.MachineHardwareDisk, name string) *keziov1alpha2.MachineHardwareDisk {
+func diskByName(disks []keziov1alpha3.MachineHardwareDisk, name string) *keziov1alpha3.MachineHardwareDisk {
 	for i := range disks {
 		if disks[i].DeviceName == name {
 			return &disks[i]

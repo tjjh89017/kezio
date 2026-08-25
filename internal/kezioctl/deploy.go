@@ -25,7 +25,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // DeployOptions configures Deploy.
@@ -37,8 +37,8 @@ type DeployOptions struct {
 	// DataImages, PostHookRefs and Params are nil when their flag was not
 	// given, so Deploy leaves the corresponding spec field untouched
 	// rather than clearing it.
-	DataImages   []keziov1alpha2.MachineDataImage
-	PostHookRefs []keziov1alpha2.NameRef
+	DataImages   []keziov1alpha3.MachineDataImage
+	PostHookRefs []keziov1alpha3.NameRef
 	// Params merges into spec.params as a flat string map, the cheap
 	// subset of ImageSpec/MachineSpec's schemaless params a CLI flag can
 	// express honestly.
@@ -56,7 +56,7 @@ type DeployOptions struct {
 // takes effect once that run finishes. This command does not wait for any
 // of that; use `kezioctl status` to follow progress.
 func Deploy(ctx context.Context, c client.Client, opts DeployOptions) error {
-	machine := &keziov1alpha2.Machine{}
+	machine := &keziov1alpha3.Machine{}
 	key := client.ObjectKey{Namespace: opts.Namespace, Name: opts.MachineName}
 	if err := c.Get(ctx, key, machine); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -66,7 +66,7 @@ func Deploy(ctx context.Context, c client.Client, opts DeployOptions) error {
 	}
 
 	if opts.ImageName != "" {
-		machine.Spec.ImageRef = &keziov1alpha2.NameRef{
+		machine.Spec.ImageRef = &keziov1alpha3.NameRef{
 			Name:      opts.ImageName,
 			Namespace: opts.ImageNamespace,
 		}

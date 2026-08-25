@@ -26,7 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 var _ = Describe("PartitionContent Controller seed demand from Machines and DeployRuns", func() {
@@ -42,7 +42,7 @@ var _ = Describe("PartitionContent Controller seed demand from Machines and Depl
 		})
 	}
 
-	advanceToReady := func(r *PartitionContentReconciler, pc *keziov1alpha2.PartitionContent, hashHex string) {
+	advanceToReady := func(r *PartitionContentReconciler, pc *keziov1alpha3.PartitionContent, hashHex string) {
 		nn := types.NamespacedName{Name: pc.Name, Namespace: pc.Namespace}
 		reconcileAddsFinalizer(ctx, r, nn)
 
@@ -80,9 +80,9 @@ var _ = Describe("PartitionContent Controller seed demand from Machines and Depl
 		// No ImageReconciler runs in this suite, so no Image ever owns a
 		// seeder Deployment for image-demand-500: demand is real, but
 		// nothing is available yet.
-		var got keziov1alpha2.PartitionContent
+		var got keziov1alpha3.PartitionContent
 		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
-		degraded := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.PartitionContentConditionSeederDegraded)
+		degraded := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha3.PartitionContentConditionSeederDegraded)
 		Expect(degraded).NotTo(BeNil())
 		Expect(degraded.Status).To(Equal(metav1.ConditionTrue))
 		Expect(got.Status.Seeders).To(BeEmpty())
@@ -92,9 +92,9 @@ var _ = Describe("PartitionContent Controller seed demand from Machines and Depl
 		Eventually(func(g Gomega) {
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			g.Expect(err).NotTo(HaveOccurred())
-			var got keziov1alpha2.PartitionContent
+			var got keziov1alpha3.PartitionContent
 			g.Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
-			degraded := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.PartitionContentConditionSeederDegraded)
+			degraded := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha3.PartitionContentConditionSeederDegraded)
 			g.Expect(degraded).To(BeNil(), "no demand must clear SeederDegraded rather than leave it True")
 		}).Should(Succeed())
 	})
@@ -122,20 +122,20 @@ var _ = Describe("PartitionContent Controller seed demand from Machines and Depl
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		var got keziov1alpha2.PartitionContent
+		var got keziov1alpha3.PartitionContent
 		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
-		degraded := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.PartitionContentConditionSeederDegraded)
+		degraded := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha3.PartitionContentConditionSeederDegraded)
 		Expect(degraded).NotTo(BeNil())
 		Expect(degraded.Status).To(Equal(metav1.ConditionTrue))
 
-		run.Status.Phase = keziov1alpha2.DeployRunPhaseSucceeded
+		run.Status.Phase = keziov1alpha3.DeployRunPhaseSucceeded
 		Expect(k8sClient.Status().Update(ctx, run)).To(Succeed())
 
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
-		degraded = meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.PartitionContentConditionSeederDegraded)
+		degraded = meta.FindStatusCondition(got.Status.Conditions, keziov1alpha3.PartitionContentConditionSeederDegraded)
 		Expect(degraded).To(BeNil(), "no demand must clear SeederDegraded rather than leave it True")
 	})
 

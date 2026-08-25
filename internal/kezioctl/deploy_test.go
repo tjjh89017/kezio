@@ -25,11 +25,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 func TestDeploy_SetsImageRef(t *testing.T) {
-	machine := &keziov1alpha2.Machine{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Namespace: "default"}}
+	machine := &keziov1alpha3.Machine{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Namespace: "default"}}
 	c := fake.NewClientBuilder().WithScheme(Scheme).WithObjects(machine).Build()
 
 	err := Deploy(context.Background(), c, DeployOptions{
@@ -41,7 +41,7 @@ func TestDeploy_SetsImageRef(t *testing.T) {
 		t.Fatalf("Deploy() error = %v", err)
 	}
 
-	stored := &keziov1alpha2.Machine{}
+	stored := &keziov1alpha3.Machine{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "node-1"}, stored); err != nil {
 		t.Fatalf("get Machine: %v", err)
 	}
@@ -51,21 +51,21 @@ func TestDeploy_SetsImageRef(t *testing.T) {
 }
 
 func TestDeploy_SetsDataImagesPostHooksAndParams(t *testing.T) {
-	machine := &keziov1alpha2.Machine{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Namespace: "default"}}
+	machine := &keziov1alpha3.Machine{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Namespace: "default"}}
 	c := fake.NewClientBuilder().WithScheme(Scheme).WithObjects(machine).Build()
 
 	err := Deploy(context.Background(), c, DeployOptions{
 		MachineName:  "node-1",
 		Namespace:    "default",
-		DataImages:   []keziov1alpha2.MachineDataImage{{ImageRef: keziov1alpha2.NameRef{Name: "scratch"}}},
-		PostHookRefs: []keziov1alpha2.NameRef{{Name: "finalize"}},
+		DataImages:   []keziov1alpha3.MachineDataImage{{ImageRef: keziov1alpha3.NameRef{Name: "scratch"}}},
+		PostHookRefs: []keziov1alpha3.NameRef{{Name: "finalize"}},
 		Params:       map[string]string{"hostname": "node-1"},
 	})
 	if err != nil {
 		t.Fatalf("Deploy() error = %v", err)
 	}
 
-	stored := &keziov1alpha2.Machine{}
+	stored := &keziov1alpha3.Machine{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "node-1"}, stored); err != nil {
 		t.Fatalf("get Machine: %v", err)
 	}
@@ -81,10 +81,10 @@ func TestDeploy_SetsDataImagesPostHooksAndParams(t *testing.T) {
 }
 
 func TestDeploy_LeavesUnsetFieldsUntouched(t *testing.T) {
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-1", Namespace: "default"},
-		Spec: keziov1alpha2.MachineSpec{
-			DataImages: []keziov1alpha2.MachineDataImage{{ImageRef: keziov1alpha2.NameRef{Name: "kept"}}},
+		Spec: keziov1alpha3.MachineSpec{
+			DataImages: []keziov1alpha3.MachineDataImage{{ImageRef: keziov1alpha3.NameRef{Name: "kept"}}},
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(Scheme).WithObjects(machine).Build()
@@ -99,7 +99,7 @@ func TestDeploy_LeavesUnsetFieldsUntouched(t *testing.T) {
 		t.Fatalf("Deploy() error = %v", err)
 	}
 
-	stored := &keziov1alpha2.Machine{}
+	stored := &keziov1alpha3.Machine{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "node-1"}, stored); err != nil {
 		t.Fatalf("get Machine: %v", err)
 	}

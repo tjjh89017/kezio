@@ -1,7 +1,7 @@
-name: Dump all kezio v1alpha2 resources in a namespace
+name: Dump all kezio v1alpha3 resources in a namespace
 
 description: >-
-  Best-effort YAML dump of every kezio.kojuro.date/v1alpha2 kind
+  Best-effort YAML dump of every kezio.kojuro.date/v1alpha3 kind
   (machines, machinehardwares, subnets, sites, deployruns, images,
   partitioncontents) in one namespace - the YAML dump carries each
   Site's status.conditions along with everything else, so no separate
@@ -23,7 +23,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Dump kezio v1alpha2 resources
+    - name: Dump kezio v1alpha3 resources
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
@@ -33,6 +33,6 @@ runs:
         # step's own stdout would otherwise carry this dump, and that
         # never reaches the "Upload diagnostics" artifact.
         exec > >(tee "${RUNNER_TEMP}/kezio-resources-dump.log") 2>&1
-        echo "===== kezio v1alpha2 resources in ${NAMESPACE} ====="
+        echo "===== kezio v1alpha3 resources in ${NAMESPACE} ====="
         kubectl get machines,machinehardwares,subnets,sites,deployruns,images,partitioncontents \
           -n "${NAMESPACE}" -o yaml

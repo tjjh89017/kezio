@@ -32,7 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // createTestNAD creates a NetworkAttachmentDefinition, as unstructured
@@ -82,7 +82,7 @@ func createSubnetTestNamespace(ctx context.Context) string {
 		ExpectWithOffset(1, k8sClient.Delete(ctx, ns)).To(Succeed())
 	})
 	createBootdServiceAccount(ctx, name)
-	ExpectWithOffset(1, k8sClient.Create(ctx, &keziov1alpha2.Site{ObjectMeta: metav1.ObjectMeta{Name: "hq", Namespace: name}})).To(Succeed())
+	ExpectWithOffset(1, k8sClient.Create(ctx, &keziov1alpha3.Site{ObjectMeta: metav1.ObjectMeta{Name: "hq", Namespace: name}})).To(Succeed())
 	return name
 }
 
@@ -136,12 +136,12 @@ var _ = Describe("Subnet bootd Deployment reconciliation", func() {
 		Expect(bootdC.Env).To(ContainElement(corev1.EnvVar{Name: "BOOTD_SERVER_IP", Value: "192.0.2.2"}))
 		Expect(bootdC.Env).To(ContainElement(corev1.EnvVar{Name: "BOOTD_PROVISIONING_CIDR", Value: "192.0.2.0/24"}))
 
-		var afterCreate keziov1alpha2.Subnet
+		var afterCreate keziov1alpha3.Subnet
 		Expect(k8sClient.Get(ctx, key, &afterCreate)).To(Succeed())
-		validCond := findCondition(afterCreate.Status.Conditions, keziov1alpha2.SubnetConditionValid)
+		validCond := findCondition(afterCreate.Status.Conditions, keziov1alpha3.SubnetConditionValid)
 		Expect(validCond).NotTo(BeNil())
 		Expect(validCond.Status).To(Equal(metav1.ConditionTrue))
-		readyCond := findCondition(afterCreate.Status.Conditions, keziov1alpha2.SubnetConditionReady)
+		readyCond := findCondition(afterCreate.Status.Conditions, keziov1alpha3.SubnetConditionReady)
 		Expect(readyCond).NotTo(BeNil())
 		Expect(readyCond.Status).To(Equal(metav1.ConditionFalse), "the Deployment envtest just created never becomes Available - no real Deployment controller runs here")
 		Expect(readyCond.Reason).To(Equal("BootdDeploymentUnavailable"))
@@ -152,9 +152,9 @@ var _ = Describe("Subnet bootd Deployment reconciliation", func() {
 
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 		Expect(err).NotTo(HaveOccurred())
-		var afterAvailable keziov1alpha2.Subnet
+		var afterAvailable keziov1alpha3.Subnet
 		Expect(k8sClient.Get(ctx, key, &afterAvailable)).To(Succeed())
-		readyCond = findCondition(afterAvailable.Status.Conditions, keziov1alpha2.SubnetConditionReady)
+		readyCond = findCondition(afterAvailable.Status.Conditions, keziov1alpha3.SubnetConditionReady)
 		Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
 		Expect(readyCond.Reason).To(Equal("BootdReady"))
 
@@ -184,15 +184,15 @@ var _ = Describe("Subnet bootd Deployment reconciliation", func() {
 		Expect(k8sClient.List(ctx, &deployments, client.InNamespace(ns))).To(Succeed())
 		Expect(deployments.Items).To(HaveLen(1), "a non-blocking CheckBootdAddress Violation must not withhold the Deployment")
 
-		var updated keziov1alpha2.Subnet
+		var updated keziov1alpha3.Subnet
 		Expect(k8sClient.Get(ctx, key, &updated)).To(Succeed())
 
-		validCond := findCondition(updated.Status.Conditions, keziov1alpha2.SubnetConditionValid)
+		validCond := findCondition(updated.Status.Conditions, keziov1alpha3.SubnetConditionValid)
 		Expect(validCond).NotTo(BeNil())
 		Expect(validCond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(validCond.Reason).To(Equal("BootdAddressMismatch"))
 
-		readyCond := findCondition(updated.Status.Conditions, keziov1alpha2.SubnetConditionReady)
+		readyCond := findCondition(updated.Status.Conditions, keziov1alpha3.SubnetConditionReady)
 		Expect(readyCond).NotTo(BeNil())
 		Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(readyCond.Reason).To(Equal("BootdAddressMismatch"))
@@ -205,7 +205,7 @@ var _ = Describe("Subnet bootd Deployment reconciliation", func() {
 		// this out-of-cidr case.
 		createTestNAD(ctx, ns, "boot-nad", bootdStaticNADConfig("203.0.113.5"))
 
-		subnet := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
+		subnet := testSubnet(ns, func(s *keziov1alpha3.Subnet) {
 			s.Spec.BootdServerIP = "203.0.113.5"
 		})
 		Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
@@ -219,14 +219,14 @@ var _ = Describe("Subnet bootd Deployment reconciliation", func() {
 		Expect(k8sClient.List(ctx, &deployments, client.InNamespace(ns))).To(Succeed())
 		Expect(deployments.Items).To(BeEmpty(), "an out-of-cidr bootdServerIP must withhold the Deployment entirely")
 
-		var updated keziov1alpha2.Subnet
+		var updated keziov1alpha3.Subnet
 		Expect(k8sClient.Get(ctx, key, &updated)).To(Succeed())
-		validCond := findCondition(updated.Status.Conditions, keziov1alpha2.SubnetConditionValid)
+		validCond := findCondition(updated.Status.Conditions, keziov1alpha3.SubnetConditionValid)
 		Expect(validCond).NotTo(BeNil())
 		Expect(validCond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(validCond.Reason).To(Equal("BootdServerIPOutsideCIDR"))
 
-		readyCond := findCondition(updated.Status.Conditions, keziov1alpha2.SubnetConditionReady)
+		readyCond := findCondition(updated.Status.Conditions, keziov1alpha3.SubnetConditionReady)
 		Expect(readyCond).NotTo(BeNil())
 		Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(readyCond.Reason).To(Equal("BootdServerIPOutsideCIDR"))
@@ -238,15 +238,15 @@ var _ = Describe("Subnet bootd Deployment reconciliation", func() {
 	// corev1.EnvVar.Value is omitempty, so only a real round trip proves
 	// the variable is still set rather than dropped. The schema rules
 	// themselves live with the rest of the CRD schema specs, in
-	// internal/webhook/v1alpha2.
+	// internal/webhook/v1alpha3.
 	DescribeTable("carries a lease-mode Subnet's gateway into the bootd container",
 		func(gateway string) {
 			ns := createSubnetTestNamespace(ctx)
 			createTestNAD(ctx, ns, "boot-nad", bootdStaticNADConfig("192.0.2.2"))
 
-			subnet := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
-				s.Spec.DHCP = &keziov1alpha2.SubnetDHCP{
-					Mode:    keziov1alpha2.SubnetDHCPModeLease,
+			subnet := testSubnet(ns, func(s *keziov1alpha3.Subnet) {
+				s.Spec.DHCP = &keziov1alpha3.SubnetDHCP{
+					Mode:    keziov1alpha3.SubnetDHCPModeLease,
 					Gateway: ptr.To(gateway),
 				}
 			})
@@ -281,13 +281,13 @@ var _ = Describe("Subnet bootd Deployment reconciliation", func() {
 		first := testSubnet(ns)
 		Expect(k8sClient.Create(ctx, first)).To(Succeed())
 
-		second := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
+		second := testSubnet(ns, func(s *keziov1alpha3.Subnet) {
 			s.Name = rack2SubnetName
 			s.Spec.CIDR = rack2CIDR
 			s.Spec.BootdServerIP = rack2BootdServerIP
 			// Same bootdNetworkRef as first - the collision this check
 			// exists to catch.
-			s.Spec.BootdNetworkRef = &keziov1alpha2.NameRef{Name: "boot-nad"}
+			s.Spec.BootdNetworkRef = &keziov1alpha3.NameRef{Name: "boot-nad"}
 		})
 		Expect(k8sClient.Create(ctx, second)).To(Succeed())
 
@@ -307,9 +307,9 @@ var _ = Describe("Subnet bootd Deployment reconciliation", func() {
 		Expect(deployments.Items).To(BeEmpty(), "a bootdNetworkRef collision must withhold both Subnets' Deployments")
 
 		for _, key := range []types.NamespacedName{firstKey, secondKey} {
-			var updated keziov1alpha2.Subnet
+			var updated keziov1alpha3.Subnet
 			Expect(k8sClient.Get(ctx, key, &updated)).To(Succeed())
-			validCond := findCondition(updated.Status.Conditions, keziov1alpha2.SubnetConditionValid)
+			validCond := findCondition(updated.Status.Conditions, keziov1alpha3.SubnetConditionValid)
 			Expect(validCond).NotTo(BeNil())
 			Expect(validCond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(validCond.Reason).To(Equal("BootdNetworkCollision"))
@@ -332,13 +332,13 @@ var _ = Describe("Subnet bootd Deployment reconciliation", func() {
 		Expect(k8sClient.List(ctx, &deployments, client.InNamespace(ns))).To(Succeed())
 		Expect(deployments.Items).To(BeEmpty(), "no Deployment image configured must never create a Deployment")
 
-		var updated keziov1alpha2.Subnet
+		var updated keziov1alpha3.Subnet
 		Expect(k8sClient.Get(ctx, key, &updated)).To(Succeed())
-		validCond := findCondition(updated.Status.Conditions, keziov1alpha2.SubnetConditionValid)
+		validCond := findCondition(updated.Status.Conditions, keziov1alpha3.SubnetConditionValid)
 		Expect(validCond).NotTo(BeNil())
 		Expect(validCond.Status).To(Equal(metav1.ConditionTrue), "an unconfigured manager is not a Subnet misconfiguration")
 
-		readyCond := findCondition(updated.Status.Conditions, keziov1alpha2.SubnetConditionReady)
+		readyCond := findCondition(updated.Status.Conditions, keziov1alpha3.SubnetConditionReady)
 		Expect(readyCond).NotTo(BeNil())
 		Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(readyCond.Reason).To(Equal("BootdDeploymentImageUnconfigured"))
@@ -349,8 +349,8 @@ var _ = Describe("Subnet bootd Deployment reconciliation", func() {
 		createTestNAD(ctx, ns, "boot-nad", bootdStaticNADConfig("192.0.2.2"))
 		createTestNAD(ctx, ns, "seeder-nad", bootdStaticNADConfig("192.0.2.50"))
 
-		subnet := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
-			s.Spec.SeederNetworkRef = &keziov1alpha2.NameRef{Name: "seeder-nad"}
+		subnet := testSubnet(ns, func(s *keziov1alpha3.Subnet) {
+			s.Spec.SeederNetworkRef = &keziov1alpha3.NameRef{Name: "seeder-nad"}
 		})
 		Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
 
@@ -389,9 +389,9 @@ var _ = Describe("Subnet bootd Deployment reconciliation", func() {
 		Expect(k8sClient.List(ctx, &deployments, client.InNamespace(ns), client.MatchingLabels{bootdAppComponentLabel: bootdComponentValue})).To(Succeed())
 		Expect(deployments.Items).To(HaveLen(1), "an Advisory must not withhold the bootd Deployment")
 
-		var updated keziov1alpha2.Subnet
+		var updated keziov1alpha3.Subnet
 		Expect(k8sClient.Get(ctx, key, &updated)).To(Succeed())
-		validCond := findCondition(updated.Status.Conditions, keziov1alpha2.SubnetConditionValid)
+		validCond := findCondition(updated.Status.Conditions, keziov1alpha3.SubnetConditionValid)
 		Expect(validCond).NotTo(BeNil())
 		Expect(validCond.Status).To(Equal(metav1.ConditionTrue), "an Advisory verdict must never fail Valid")
 	})
@@ -400,11 +400,11 @@ var _ = Describe("Subnet bootd Deployment reconciliation", func() {
 		ns := createSubnetTestNamespace(ctx)
 		createTestNAD(ctx, ns, "seeder-nad", bootdStaticNADConfig("192.0.2.50"))
 
-		subnet := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
+		subnet := testSubnet(ns, func(s *keziov1alpha3.Subnet) {
 			s.Spec.BootdServerIP = ""
 			s.Spec.BootdNetworkRef = nil
 			s.Spec.DHCP = nil
-			s.Spec.SeederNetworkRef = &keziov1alpha2.NameRef{Name: "seeder-nad"}
+			s.Spec.SeederNetworkRef = &keziov1alpha3.NameRef{Name: "seeder-nad"}
 		})
 		Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
 
@@ -417,13 +417,13 @@ var _ = Describe("Subnet bootd Deployment reconciliation", func() {
 		Expect(k8sClient.List(ctx, &deployments, client.InNamespace(ns), client.MatchingLabels{bootdAppComponentLabel: bootdComponentValue})).To(Succeed())
 		Expect(deployments.Items).To(BeEmpty(), "a Subnet with no boot half must never get a bootd Deployment")
 
-		var updated keziov1alpha2.Subnet
+		var updated keziov1alpha3.Subnet
 		Expect(k8sClient.Get(ctx, key, &updated)).To(Succeed())
-		validCond := findCondition(updated.Status.Conditions, keziov1alpha2.SubnetConditionValid)
+		validCond := findCondition(updated.Status.Conditions, keziov1alpha3.SubnetConditionValid)
 		Expect(validCond).NotTo(BeNil())
 		Expect(validCond.Status).To(Equal(metav1.ConditionTrue))
 
-		readyCond := findCondition(updated.Status.Conditions, keziov1alpha2.SubnetConditionReady)
+		readyCond := findCondition(updated.Status.Conditions, keziov1alpha3.SubnetConditionReady)
 		Expect(readyCond).NotTo(BeNil())
 		Expect(readyCond.Status).To(Equal(metav1.ConditionTrue), "a data-plane-only Subnet has no Deployment to wait on, so it is Ready once Valid")
 		Expect(readyCond.Reason).To(Equal("SubnetReady"))

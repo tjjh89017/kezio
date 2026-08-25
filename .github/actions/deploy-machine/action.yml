@@ -23,7 +23,7 @@ description: >-
   unset and lets the controller substitute kezio-default-finalize itself.
 
   Waiting distinguishes the two status axes on Machine
-  (api/v1alpha2/machine_types.go's MachineStatus): status.state reaching
+  (api/v1alpha3/machine_types.go's MachineStatus): status.state reaching
   "Provisioned" is the only success signal. status.operationalStatus
   "error" is logged every time it is observed (with errorType/errorCount/
   errorMessage) but is never by itself a hard failure - ErrorCount exists

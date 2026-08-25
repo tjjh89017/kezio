@@ -22,7 +22,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // MachineTokenHashIndexField is the field index name handleRegister
@@ -38,7 +38,7 @@ const MachineTokenHashIndexField = ".status.netBoot.tokenHash"
 // all when the machine has no live token hash (never minted one, or one
 // already consumed by a prior registration).
 func IndexMachineTokenHash(obj client.Object) []string {
-	machine, ok := obj.(*keziov1alpha2.Machine)
+	machine, ok := obj.(*keziov1alpha3.Machine)
 	if !ok {
 		return nil
 	}
@@ -59,7 +59,7 @@ const MachineSessionTokenHashIndexField = ".status.agentSession.tokenHash"
 // MachineSessionTokenHashIndexField: the current session token hash, or
 // no keys at all when the machine has no live session.
 func IndexMachineSessionTokenHash(obj client.Object) []string {
-	machine, ok := obj.(*keziov1alpha2.Machine)
+	machine, ok := obj.(*keziov1alpha3.Machine)
 	if !ok {
 		return nil
 	}
@@ -74,8 +74,8 @@ func IndexMachineSessionTokenHash(obj client.Object) []string {
 // the manager starts, alongside internal/bootserver's own
 // SetupFieldIndexer, and before adding a Server that depends on it.
 func SetupFieldIndexer(ctx context.Context, mgr ctrl.Manager) error {
-	if err := mgr.GetFieldIndexer().IndexField(ctx, &keziov1alpha2.Machine{}, MachineTokenHashIndexField, IndexMachineTokenHash); err != nil {
+	if err := mgr.GetFieldIndexer().IndexField(ctx, &keziov1alpha3.Machine{}, MachineTokenHashIndexField, IndexMachineTokenHash); err != nil {
 		return err
 	}
-	return mgr.GetFieldIndexer().IndexField(ctx, &keziov1alpha2.Machine{}, MachineSessionTokenHashIndexField, IndexMachineSessionTokenHash)
+	return mgr.GetFieldIndexer().IndexField(ctx, &keziov1alpha3.Machine{}, MachineSessionTokenHashIndexField, IndexMachineSessionTokenHash)
 }

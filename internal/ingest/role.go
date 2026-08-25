@@ -19,7 +19,7 @@ package ingest
 import (
 	"strings"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // Well-known partition type identifiers used to classify a slot's role.
@@ -38,7 +38,7 @@ const (
 // partition.
 const blkidSwapType = "swap"
 
-// classifyRole assigns an OS-neutral role (api/v1alpha2's PartitionRole*
+// classifyRole assigns an OS-neutral role (api/v1alpha3's PartitionRole*
 // constants) to a partition, from its type identifier and detected file
 // system. Swap is detected by file system, not by partition type GUID,
 // because a partition can carry the Linux-swap type GUID yet (rarely)
@@ -49,12 +49,12 @@ func classifyRole(typeGUID, fsType string) string {
 	normalizedType := strings.ToLower(typeGUID)
 	switch normalizedType {
 	case espTypeGUIDGPT, espTypeMBR:
-		return keziov1alpha2.PartitionRoleESP
+		return keziov1alpha3.PartitionRoleESP
 	case msrTypeGUIDGPT:
-		return keziov1alpha2.PartitionRoleMSR
+		return keziov1alpha3.PartitionRoleMSR
 	}
 	if strings.EqualFold(fsType, blkidSwapType) {
-		return keziov1alpha2.PartitionRoleSwap
+		return keziov1alpha3.PartitionRoleSwap
 	}
-	return keziov1alpha2.PartitionRoleData
+	return keziov1alpha3.PartitionRoleData
 }

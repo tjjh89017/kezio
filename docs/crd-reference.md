@@ -1,7 +1,7 @@
 # Custom resource reference
 
 kezio defines nine custom resources in the group
-`kezio.kojuro.date`, version `v1alpha2`. Every kind is
+`kezio.kojuro.date`, version `v1alpha3`. Every kind is
 namespace-scoped. This document describes each kind, and how the kinds
 refer to each other.
 
@@ -10,7 +10,7 @@ network, then the content, then the machines that receive the content.
 
 Each `*Ref` field is a `NameRef`: a `name`, and an optional
 `namespace`. An empty `namespace` means the namespace of the object
-that holds the reference (`api/v1alpha2/shared_types.go`).
+that holds the reference (`api/v1alpha3/shared_types.go`).
 
 ## How the kinds relate
 
@@ -532,5 +532,5 @@ default-network annotation for the same reason. See
   address-pool sizing rule.
 - [`docs/physical-lab-deployment.md`](physical-lab-deployment.md): the
   operational setup, including both DHCP scenarios.
-- The types themselves, in `api/v1alpha2/`. Their doc comments are the
+- The types themselves, in `api/v1alpha3/`. Their doc comments are the
   authority for anything this document does not cover.

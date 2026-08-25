@@ -33,7 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 	"github.com/tjjh89017/kezio/internal/bootserver"
 )
@@ -47,15 +47,15 @@ func newTestServer(t *testing.T, now time.Time, objs ...client.Object) (*Server,
 	t.Helper()
 
 	scheme := runtime.NewScheme()
-	if err := keziov1alpha2.AddToScheme(scheme); err != nil {
+	if err := keziov1alpha3.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
 	}
 
 	builder := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithIndex(&keziov1alpha2.Machine{}, MachineTokenHashIndexField, IndexMachineTokenHash).
-		WithIndex(&keziov1alpha2.Machine{}, MachineSessionTokenHashIndexField, IndexMachineSessionTokenHash).
-		WithStatusSubresource(&keziov1alpha2.Machine{}, &keziov1alpha2.DeployRun{}, &keziov1alpha2.PostHook{}).
+		WithIndex(&keziov1alpha3.Machine{}, MachineTokenHashIndexField, IndexMachineTokenHash).
+		WithIndex(&keziov1alpha3.Machine{}, MachineSessionTokenHashIndexField, IndexMachineSessionTokenHash).
+		WithStatusSubresource(&keziov1alpha3.Machine{}, &keziov1alpha3.DeployRun{}, &keziov1alpha3.PostHook{}).
 		WithObjects(objs...)
 	c := builder.Build()
 
@@ -68,20 +68,20 @@ const testMachineName = "node-01"
 
 // newTestMachine builds a Machine named testMachineName with a live,
 // unexpired boot token whose hash is bootserver.HashToken(testToken).
-func newTestMachine(now time.Time) *keziov1alpha2.Machine {
-	return &keziov1alpha2.Machine{
+func newTestMachine(now time.Time) *keziov1alpha3.Machine {
+	return &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: testMachineName, UID: "machine-uid-01"},
-		Spec: keziov1alpha2.MachineSpec{
-			BMC: keziov1alpha2.MachineBMC{
+		Spec: keziov1alpha3.MachineSpec{
+			BMC: keziov1alpha3.MachineBMC{
 				Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-				CredentialsSecretRef: keziov1alpha2.SecretReference{Name: testMachineName + "-bmc"},
+				CredentialsSecretRef: keziov1alpha3.SecretReference{Name: testMachineName + "-bmc"},
 			},
 			BootMACAddress: "aa:bb:cc:dd:ee:01",
-			SubnetRef:      keziov1alpha2.NameRef{Name: "subnet-01"},
+			SubnetRef:      keziov1alpha3.NameRef{Name: "subnet-01"},
 		},
-		Status: keziov1alpha2.MachineStatus{
-			State: keziov1alpha2.MachineStateInspecting,
-			NetBoot: &keziov1alpha2.MachineNetBootStatus{
+		Status: keziov1alpha3.MachineStatus{
+			State: keziov1alpha3.MachineStateInspecting,
+			NetBoot: &keziov1alpha3.MachineNetBootStatus{
 				TokenHash: bootserver.HashToken(testToken),
 				ExpiresAt: metav1.NewTime(now.Add(30 * time.Minute)),
 			},
@@ -116,13 +116,13 @@ func doNext(handler http.Handler, token string) *httptest.ResponseRecorder {
 	return rec
 }
 
-func sampleInventory() keziov1alpha2.MachineHardwareSpec {
+func sampleInventory() keziov1alpha3.MachineHardwareSpec {
 	rotational := false
-	return keziov1alpha2.MachineHardwareSpec{
-		Disks: []keziov1alpha2.MachineHardwareDisk{
+	return keziov1alpha3.MachineHardwareSpec{
+		Disks: []keziov1alpha3.MachineHardwareDisk{
 			{DeviceName: "/dev/nvme0n1", SerialNumber: "S123", SizeBytes: 512 << 30, Rotational: &rotational},
 		},
-		Nics: []keziov1alpha2.MachineHardwareNIC{
+		Nics: []keziov1alpha3.MachineHardwareNIC{
 			{Name: "eth0", MACAddress: "aa:bb:cc:dd:ee:01"},
 		},
 		MemoryBytes: 16 << 30,
@@ -167,7 +167,7 @@ func TestHandleRegister_ValidTokenCreatesHardwareMintsSessionAndInvalidatesToken
 	}
 
 	// MachineHardware was created, name-aligned and controller-owned.
-	var hw keziov1alpha2.MachineHardware
+	var hw keziov1alpha3.MachineHardware
 	if err := c.Get(context.Background(), types.NamespacedName{Name: testMachineName}, &hw); err != nil {
 		t.Fatalf("Get MachineHardware: %v", err)
 	}
@@ -185,14 +185,14 @@ func TestHandleRegister_ValidTokenCreatesHardwareMintsSessionAndInvalidatesToken
 		t.Fatalf("owner reference Controller = %v, want true", owner.Controller)
 	}
 
-	var stored keziov1alpha2.Machine
+	var stored keziov1alpha3.Machine
 	if err := c.Get(context.Background(), types.NamespacedName{Name: testMachineName}, &stored); err != nil {
 		t.Fatalf("Get Machine: %v", err)
 	}
 	if stored.Status.NetBoot.TokenHash != "" {
 		t.Fatalf("token hash was not invalidated after a successful registration: %q", stored.Status.NetBoot.TokenHash)
 	}
-	cond := apimeta.FindStatusCondition(stored.Status.Conditions, keziov1alpha2.MachineConditionAgentRegistered)
+	cond := apimeta.FindStatusCondition(stored.Status.Conditions, keziov1alpha3.MachineConditionAgentRegistered)
 	if cond == nil || cond.Status != metav1.ConditionTrue {
 		t.Fatalf("AgentRegistered condition = %+v, want True", cond)
 	}
@@ -217,9 +217,9 @@ func TestHandleRegister_ValidTokenCreatesHardwareMintsSessionAndInvalidatesToken
 func TestHandleRegister_UpdatesExistingMachineHardware(t *testing.T) {
 	now := time.Now()
 	machine := newTestMachine(now)
-	existing := &keziov1alpha2.MachineHardware{
+	existing := &keziov1alpha3.MachineHardware{
 		ObjectMeta: metav1.ObjectMeta{Name: testMachineName},
-		Spec: keziov1alpha2.MachineHardwareSpec{
+		Spec: keziov1alpha3.MachineHardwareSpec{
 			MemoryBytes: 1 << 30,
 			CPUCount:    1,
 		},
@@ -231,7 +231,7 @@ func TestHandleRegister_UpdatesExistingMachineHardware(t *testing.T) {
 		t.Fatalf("status = %d, body = %s, want 200", rec.Code, rec.Body.String())
 	}
 
-	var hw keziov1alpha2.MachineHardware
+	var hw keziov1alpha3.MachineHardware
 	if err := c.Get(context.Background(), types.NamespacedName{Name: testMachineName}, &hw); err != nil {
 		t.Fatalf("Get MachineHardware: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestHandleRegister_RejectionsAreConstantShape(t *testing.T) {
 
 	cases := []struct {
 		name    string
-		machine *keziov1alpha2.Machine
+		machine *keziov1alpha3.Machine
 		token   string
 	}{
 		{
@@ -307,7 +307,7 @@ func TestHandleRegister_ExpiredTokenDoesNotInvalidateOrCreateHardware(t *testing
 		t.Fatalf("status = %d, want 401", rec.Code)
 	}
 
-	var stored keziov1alpha2.Machine
+	var stored keziov1alpha3.Machine
 	if err := c.Get(context.Background(), types.NamespacedName{Name: testMachineName}, &stored); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -315,7 +315,7 @@ func TestHandleRegister_ExpiredTokenDoesNotInvalidateOrCreateHardware(t *testing
 		t.Fatalf("expired token's hash was cleared despite the rejection: %+v", stored.Status.NetBoot)
 	}
 
-	var hw keziov1alpha2.MachineHardware
+	var hw keziov1alpha3.MachineHardware
 	err := c.Get(context.Background(), types.NamespacedName{Name: testMachineName}, &hw)
 	if err == nil {
 		t.Fatal("MachineHardware was created despite an expired token")
@@ -344,20 +344,20 @@ const testSessionToken = "session-0123456789abcdef0123456789abcdef0123456789abcd
 // a live, unexpired agent session (hash of testSessionToken), and no
 // net-boot token (already consumed, as it would be by the time a real
 // agent starts polling).
-func newTestMachineWithSession(now time.Time) *keziov1alpha2.Machine {
-	return &keziov1alpha2.Machine{
+func newTestMachineWithSession(now time.Time) *keziov1alpha3.Machine {
+	return &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: testMachineName},
-		Spec: keziov1alpha2.MachineSpec{
-			BMC: keziov1alpha2.MachineBMC{
+		Spec: keziov1alpha3.MachineSpec{
+			BMC: keziov1alpha3.MachineBMC{
 				Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-				CredentialsSecretRef: keziov1alpha2.SecretReference{Name: testMachineName + "-bmc"},
+				CredentialsSecretRef: keziov1alpha3.SecretReference{Name: testMachineName + "-bmc"},
 			},
 			BootMACAddress: "aa:bb:cc:dd:ee:01",
-			SubnetRef:      keziov1alpha2.NameRef{Name: "subnet-01"},
+			SubnetRef:      keziov1alpha3.NameRef{Name: "subnet-01"},
 		},
-		Status: keziov1alpha2.MachineStatus{
-			State: keziov1alpha2.MachineStateAvailable,
-			AgentSession: &keziov1alpha2.MachineAgentSessionStatus{
+		Status: keziov1alpha3.MachineStatus{
+			State: keziov1alpha3.MachineStateAvailable,
+			AgentSession: &keziov1alpha3.MachineAgentSessionStatus{
 				TokenHash: bootserver.HashToken(testSessionToken),
 				ExpiresAt: metav1.NewTime(now.Add(time.Hour)),
 			},
@@ -406,7 +406,7 @@ func TestHandleNext_RejectionsAreConstantShape(t *testing.T) {
 
 	cases := []struct {
 		name    string
-		machine *keziov1alpha2.Machine
+		machine *keziov1alpha3.Machine
 		token   string
 	}{
 		{

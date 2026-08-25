@@ -31,7 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/bmc"
 	"github.com/tjjh89017/kezio/internal/planbuild"
 	"github.com/tjjh89017/kezio/internal/posthookdefaults"
@@ -47,9 +47,9 @@ const agentTestMissingSecretName = "does-not-exist"
 
 // setAgentRegistered sets MachineConditionAgentRegistered=True on machine,
 // the write internal/agentserver makes at successful registration.
-func setAgentRegistered(machine *keziov1alpha2.Machine) {
+func setAgentRegistered(machine *keziov1alpha3.Machine) {
 	apimeta.SetStatusCondition(&machine.Status.Conditions, metav1.Condition{
-		Type:               keziov1alpha2.MachineConditionAgentRegistered,
+		Type:               keziov1alpha3.MachineConditionAgentRegistered,
 		Status:             metav1.ConditionTrue,
 		Reason:             "AgentRegistered",
 		Message:            "test fixture",
@@ -64,13 +64,13 @@ const agentTestBMCSecretName = "m1-bmc"
 func newAgentTestClient(t *testing.T, objs ...client.Object) client.Client {
 	t.Helper()
 	scheme := apimachineryruntime.NewScheme()
-	if err := keziov1alpha2.AddToScheme(scheme); err != nil {
+	if err := keziov1alpha3.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme(corev1) error = %v", err)
 	}
-	return fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&keziov1alpha2.DeployRun{}).WithObjects(objs...).Build()
+	return fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&keziov1alpha3.DeployRun{}).WithObjects(objs...).Build()
 }
 
 // agentTestBMCSecret builds the Secret agentTestBMCSecretName names, with
@@ -87,11 +87,11 @@ func agentTestBMCSecret() *corev1.Secret {
 
 // agentTestMachine returns a Machine wired to a fake BMC address unique to
 // t, with the credentials Secret it names.
-func agentTestMachine(t *testing.T) *keziov1alpha2.Machine {
+func agentTestMachine(t *testing.T) *keziov1alpha3.Machine {
 	m := newTestMachine()
-	m.Spec.BMC = keziov1alpha2.MachineBMC{
+	m.Spec.BMC = keziov1alpha3.MachineBMC{
 		Address:              fakeBMCAddress(t),
-		CredentialsSecretRef: keziov1alpha2.SecretReference{Name: agentTestBMCSecretName},
+		CredentialsSecretRef: keziov1alpha3.SecretReference{Name: agentTestBMCSecretName},
 	}
 	return m
 }
@@ -157,7 +157,7 @@ func TestAgentDeployerConnectBMCInsecureSkipVerifyAnnotation(t *testing.T) {
 			machine := agentTestMachine(t)
 			if tt.set {
 				machine.Annotations = map[string]string{
-					keziov1alpha2.MachineAnnotationBMCInsecureSkipVerify: tt.value,
+					keziov1alpha3.MachineAnnotationBMCInsecureSkipVerify: tt.value,
 				}
 			}
 			c := newAgentTestClient(t, machine, agentTestBMCSecret())
@@ -244,7 +244,7 @@ func TestAgentDeployerInspectRegisteredButHardwareMissingContinues(t *testing.T)
 
 func TestAgentDeployerInspectCompleteOnceRegisteredAndHardwarePresent(t *testing.T) {
 	machine := agentTestMachine(t)
-	hw := &keziov1alpha2.MachineHardware{ObjectMeta: metav1.ObjectMeta{Name: machine.Name, Namespace: machine.Namespace}}
+	hw := &keziov1alpha3.MachineHardware{ObjectMeta: metav1.ObjectMeta{Name: machine.Name, Namespace: machine.Namespace}}
 	c := newAgentTestClient(t, machine, agentTestBMCSecret(), hw)
 	d := &AgentDeployer{Client: c}
 
@@ -281,8 +281,8 @@ func TestAgentDeployerInspectDeadlineExceededFailsRestart(t *testing.T) {
 	if result.Outcome != Failed {
 		t.Fatalf("Inspect() outcome = %v, want Failed", result.Outcome)
 	}
-	if result.ErrorType != keziov1alpha2.MachineErrorTypeRestart {
-		t.Errorf("Inspect() ErrorType = %q, want %q", result.ErrorType, keziov1alpha2.MachineErrorTypeRestart)
+	if result.ErrorType != keziov1alpha3.MachineErrorTypeRestart {
+		t.Errorf("Inspect() ErrorType = %q, want %q", result.ErrorType, keziov1alpha3.MachineErrorTypeRestart)
 	}
 	if result.ErrorMessage == "" {
 		t.Error("Inspect() ErrorMessage is empty, want an explanation")
@@ -329,8 +329,8 @@ func TestAgentDeployerInspectMissingCredentialsSecretFailsTransientWithoutLeakin
 	if result.Outcome != Failed {
 		t.Fatalf("Inspect() outcome = %v, want Failed", result.Outcome)
 	}
-	if result.ErrorType != keziov1alpha2.MachineErrorTypeTransient {
-		t.Errorf("Inspect() ErrorType = %q, want %q", result.ErrorType, keziov1alpha2.MachineErrorTypeTransient)
+	if result.ErrorType != keziov1alpha3.MachineErrorTypeTransient {
+		t.Errorf("Inspect() ErrorType = %q, want %q", result.ErrorType, keziov1alpha3.MachineErrorTypeTransient)
 	}
 	if strings.Contains(result.ErrorMessage, "s3cr3t") || strings.Contains(result.ErrorMessage, "admin") {
 		t.Fatalf("Inspect() ErrorMessage leaked credential contents: %q", result.ErrorMessage)
@@ -365,12 +365,12 @@ const agentProvisionTestManagerNamespace = "kezio-system"
 // attaches it whenever machine.Spec.PostHookRefs is empty.
 func mustCreateDefaultPostHook(t *testing.T, c client.Client) {
 	t.Helper()
-	ph := &keziov1alpha2.PostHook{
+	ph := &keziov1alpha3.PostHook{
 		ObjectMeta: metav1.ObjectMeta{Name: posthookdefaults.DefaultFinalizeHookName, Namespace: agentProvisionTestManagerNamespace},
 		Spec:       posthookdefaults.Spec(),
 	}
 	apimeta.SetStatusCondition(&ph.Status.Conditions, metav1.Condition{
-		Type: keziov1alpha2.PostHookConditionValid, Status: metav1.ConditionTrue, Reason: "TestFixture", Message: "fixture",
+		Type: keziov1alpha3.PostHookConditionValid, Status: metav1.ConditionTrue, Reason: "TestFixture", Message: "fixture",
 	})
 	if err := c.Create(context.Background(), ph); err != nil {
 		t.Fatalf("create default posthook: %v", err)
@@ -382,21 +382,21 @@ func mustCreateDefaultPostHook(t *testing.T, c client.Client) {
 // resolve in a Provision test. The ESP slot is required for
 // mustCreateDefaultPostHook's default hook (efibootmgr) to resolve its
 // derived "part" parameter.
-func blankDataImage(name, ns string) *keziov1alpha2.Image {
-	img := &keziov1alpha2.Image{
+func blankDataImage(name, ns string) *keziov1alpha3.Image {
+	img := &keziov1alpha3.Image{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: keziov1alpha2.ImageSpec{
-			Layout: keziov1alpha2.ImageDiskLayout{
-				PartitionTable: keziov1alpha2.PartitionTableGPT,
+		Spec: keziov1alpha3.ImageSpec{
+			Layout: keziov1alpha3.ImageDiskLayout{
+				PartitionTable: keziov1alpha3.PartitionTableGPT,
 				SfdiskJSON:     `{"partitiontable":{}}`,
-				Slots: []keziov1alpha2.ImageSlot{
-					{Number: 1, Role: keziov1alpha2.PartitionRoleESP, FSType: "vfat"},
-					{Number: 2, Role: keziov1alpha2.PartitionRoleData, FSType: "ext4"},
+				Slots: []keziov1alpha3.ImageSlot{
+					{Number: 1, Role: keziov1alpha3.PartitionRoleESP, FSType: "vfat"},
+					{Number: 2, Role: keziov1alpha3.PartitionRoleData, FSType: "ext4"},
 				},
 			},
 		},
 	}
-	img.Status.State = keziov1alpha2.ImageStateReady
+	img.Status.State = keziov1alpha3.ImageStateReady
 	return img
 }
 
@@ -408,8 +408,8 @@ func blankDataImage(name, ns string) *keziov1alpha2.Image {
 // once and never cleared, so it cannot tell a fresh registration for this
 // attempt apart from a stale one an earlier Inspect already left in
 // place.
-func setFreshAgentSession(machine *keziov1alpha2.Machine, hash string) {
-	machine.Status.AgentSession = &keziov1alpha2.MachineAgentSessionStatus{
+func setFreshAgentSession(machine *keziov1alpha3.Machine, hash string) {
+	machine.Status.AgentSession = &keziov1alpha3.MachineAgentSessionStatus{
 		TokenHash: hash,
 		ExpiresAt: metav1.NewTime(time.Now().Add(time.Hour)),
 	}
@@ -417,7 +417,7 @@ func setFreshAgentSession(machine *keziov1alpha2.Machine, hash string) {
 
 func TestAgentDeployerProvisionFirstPassArmsPXEAndPowersOn(t *testing.T) {
 	machine := agentTestMachine(t)
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
 	c := newAgentTestClient(t, machine, agentTestBMCSecret())
 	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
 
@@ -454,7 +454,7 @@ func TestAgentDeployerProvisionFirstPassArmsPXEAndPowersOn(t *testing.T) {
 
 func TestAgentDeployerProvisionFirstPassAlreadyOnPowerCycles(t *testing.T) {
 	machine := agentTestMachine(t)
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
 	c := newAgentTestClient(t, machine, agentTestBMCSecret())
 	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
 	fakeBMCForAddress(machine.Spec.BMC.Address).state = bmc.PowerStateOn
@@ -478,7 +478,7 @@ func TestAgentDeployerProvisionFirstPassAlreadyOnPowerCycles(t *testing.T) {
 
 func TestAgentDeployerProvisionSecondPassWithoutFreshSessionContinuesAndDoesNotReArm(t *testing.T) {
 	machine := agentTestMachine(t)
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
 	c := newAgentTestClient(t, machine, agentTestBMCSecret())
 	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
 
@@ -506,14 +506,14 @@ func TestAgentDeployerProvisionSecondPassWithoutFreshSessionContinuesAndDoesNotR
 // with a still-valid, but stale, agent session before Provision ever
 // arms its own boot marker - the case agentSessionFresh must not
 // mistake for this attempt's own agent having booted.
-func stalePriorAgentSession(machine *keziov1alpha2.Machine) {
+func stalePriorAgentSession(machine *keziov1alpha3.Machine) {
 	setFreshAgentSession(machine, "stale-session-hash")
 }
 
 func TestAgentDeployerProvisionStalePriorSessionDoesNotCountAsBooted(t *testing.T) {
 	machine := agentTestMachine(t)
 	stalePriorAgentSession(machine)
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
 	c := newAgentTestClient(t, machine, agentTestBMCSecret())
 	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
 
@@ -534,7 +534,7 @@ func TestAgentDeployerProvisionStalePriorSessionDoesNotCountAsBooted(t *testing.
 
 func TestAgentDeployerProvisionBootDeadlineExceededFailsRestart(t *testing.T) {
 	machine := agentTestMachine(t)
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
 	c := newAgentTestClient(t, machine, agentTestBMCSecret())
 	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
 
@@ -552,8 +552,8 @@ func TestAgentDeployerProvisionBootDeadlineExceededFailsRestart(t *testing.T) {
 	if result.Outcome != Failed {
 		t.Fatalf("Provision() outcome = %v, want Failed", result.Outcome)
 	}
-	if result.ErrorType != keziov1alpha2.MachineErrorTypeRestart {
-		t.Errorf("Provision() ErrorType = %q, want %q", result.ErrorType, keziov1alpha2.MachineErrorTypeRestart)
+	if result.ErrorType != keziov1alpha3.MachineErrorTypeRestart {
+		t.Errorf("Provision() ErrorType = %q, want %q", result.ErrorType, keziov1alpha3.MachineErrorTypeRestart)
 	}
 	if result.ErrorMessage == "" {
 		t.Error("Provision() ErrorMessage is empty, want an explanation")
@@ -562,7 +562,7 @@ func TestAgentDeployerProvisionBootDeadlineExceededFailsRestart(t *testing.T) {
 
 func TestAgentDeployerProvisionBootDeadlineExceededRestartOnFailureReArms(t *testing.T) {
 	machine := agentTestMachine(t)
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
 	c := newAgentTestClient(t, machine, agentTestBMCSecret())
 	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
 
@@ -596,18 +596,18 @@ func TestAgentDeployerProvisionBootDeadlineExceededRestartOnFailureReArms(t *tes
 // run (WritingContent, with partitions, phase timings, and a not-yet-
 // terminal Succeeded=False condition), the shape restartOnFailure must
 // either preserve untouched or discard wholesale depending on its value.
-func seedInProgressProvisionAttempt(t *testing.T, c client.Client, run *keziov1alpha2.DeployRun) {
+func seedInProgressProvisionAttempt(t *testing.T, c client.Client, run *keziov1alpha3.DeployRun) {
 	t.Helper()
-	run.Status.Phase = keziov1alpha2.DeployRunPhaseWritingContent
-	run.Status.Partitions = []keziov1alpha2.DeployRunPartitionProgress{{Number: 1, Percent: 42}}
-	run.Status.PhaseTimings = []keziov1alpha2.DeployRunPhaseTiming{
-		{Phase: keziov1alpha2.DeployRunPhasePending, StartedAt: metav1.Now()},
-		{Phase: keziov1alpha2.DeployRunPhaseWritingContent, StartedAt: metav1.Now()},
+	run.Status.Phase = keziov1alpha3.DeployRunPhaseWritingContent
+	run.Status.Partitions = []keziov1alpha3.DeployRunPartitionProgress{{Number: 1, Percent: 42}}
+	run.Status.PhaseTimings = []keziov1alpha3.DeployRunPhaseTiming{
+		{Phase: keziov1alpha3.DeployRunPhasePending, StartedAt: metav1.Now()},
+		{Phase: keziov1alpha3.DeployRunPhaseWritingContent, StartedAt: metav1.Now()},
 	}
 	lastProgress := metav1.Now()
 	run.Status.LastProgressAt = &lastProgress
 	apimeta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-		Type: keziov1alpha2.DeployRunConditionSucceeded, Status: metav1.ConditionFalse, Reason: "InProgress", Message: "in progress",
+		Type: keziov1alpha3.DeployRunConditionSucceeded, Status: metav1.ConditionFalse, Reason: "InProgress", Message: "in progress",
 	})
 	if err := c.Status().Update(context.Background(), run); err != nil {
 		t.Fatalf("seed in-progress DeployRun status: %v", err)
@@ -644,7 +644,7 @@ func TestAgentDeployerProvisionRestartOnFailureDiscardsInProgressAttempt(t *test
 		t.Error("machine has no provision-boot marker after restart, want a fresh one armed")
 	}
 
-	var stored keziov1alpha2.DeployRun
+	var stored keziov1alpha3.DeployRun
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(run), &stored); err != nil {
 		t.Fatalf("Get DeployRun: %v", err)
 	}
@@ -667,8 +667,8 @@ func TestAgentDeployerProvisionResumeDoesNotDiscardInProgressAttempt(t *testing.
 	if result.Outcome != Continuing {
 		t.Fatalf("Provision() outcome = %v, want Continuing", result.Outcome)
 	}
-	if run.Status.Phase != keziov1alpha2.DeployRunPhaseWritingContent {
-		t.Errorf("run.Status.Phase = %q, want %q untouched", run.Status.Phase, keziov1alpha2.DeployRunPhaseWritingContent)
+	if run.Status.Phase != keziov1alpha3.DeployRunPhaseWritingContent {
+		t.Errorf("run.Status.Phase = %q, want %q untouched", run.Status.Phase, keziov1alpha3.DeployRunPhaseWritingContent)
 	}
 	if len(run.Status.Partitions) != 1 || len(run.Status.PhaseTimings) != 2 || len(run.Status.Conditions) != 1 {
 		t.Errorf("run.Status = %+v, want Partitions/PhaseTimings/Conditions left as seeded", run.Status)
@@ -684,7 +684,7 @@ func TestAgentDeployerProvisionResumeDoesNotDiscardInProgressAttempt(t *testing.
 func TestAgentDeployerProvisionMissingCredentialsSecretFailsTransientWithoutLeakingCredentials(t *testing.T) {
 	machine := agentTestMachine(t)
 	machine.Spec.BMC.CredentialsSecretRef.Name = agentTestMissingSecretName
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
 	c := newAgentTestClient(t, machine)
 	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
 
@@ -695,8 +695,8 @@ func TestAgentDeployerProvisionMissingCredentialsSecretFailsTransientWithoutLeak
 	if result.Outcome != Failed {
 		t.Fatalf("Provision() outcome = %v, want Failed", result.Outcome)
 	}
-	if result.ErrorType != keziov1alpha2.MachineErrorTypeTransient {
-		t.Errorf("Provision() ErrorType = %q, want %q", result.ErrorType, keziov1alpha2.MachineErrorTypeTransient)
+	if result.ErrorType != keziov1alpha3.MachineErrorTypeTransient {
+		t.Errorf("Provision() ErrorType = %q, want %q", result.ErrorType, keziov1alpha3.MachineErrorTypeTransient)
 	}
 	if strings.Contains(result.ErrorMessage, "s3cr3t") || strings.Contains(result.ErrorMessage, "admin") {
 		t.Fatalf("Provision() ErrorMessage leaked credential contents: %q", result.ErrorMessage)
@@ -706,7 +706,7 @@ func TestAgentDeployerProvisionMissingCredentialsSecretFailsTransientWithoutLeak
 func TestAgentDeployerProvisionNetworkUnreachableReportsDelayed(t *testing.T) {
 	machine := agentTestMachine(t)
 	machine.Spec.BMC.Address = fakeBMCDialErrScheme + "://10.0.0.10"
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
 	c := newAgentTestClient(t, machine, agentTestBMCSecret())
 	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
 
@@ -724,8 +724,8 @@ func TestAgentDeployerProvisionNetworkUnreachableReportsDelayed(t *testing.T) {
 
 func TestAgentDeployerProvisionAgentBootedNotReadyReportsDelayed(t *testing.T) {
 	machine := agentTestMachine(t)
-	machine.Spec.ImageRef = &keziov1alpha2.NameRef{Name: "img1"}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	machine.Spec.ImageRef = &keziov1alpha3.NameRef{Name: "img1"}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
 	c := newAgentTestClient(t, machine, agentTestBMCSecret())
 	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
 
@@ -746,7 +746,7 @@ func TestAgentDeployerProvisionAgentBootedNotReadyReportsDelayed(t *testing.T) {
 func TestAgentDeployerProvisionAgentBootedValidationErrorReportsFailed(t *testing.T) {
 	machine := agentTestMachine(t)
 	// No ImageRef and no DataImages: Build rejects this before any lookup.
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
 	c := newAgentTestClient(t, machine, agentTestBMCSecret())
 	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
 
@@ -762,8 +762,8 @@ func TestAgentDeployerProvisionAgentBootedValidationErrorReportsFailed(t *testin
 	if result.Outcome != Failed {
 		t.Fatalf("Provision() outcome = %v, want Failed", result.Outcome)
 	}
-	if result.ErrorType != keziov1alpha2.MachineErrorTypeTransient {
-		t.Errorf("Provision() ErrorType = %q, want %q", result.ErrorType, keziov1alpha2.MachineErrorTypeTransient)
+	if result.ErrorType != keziov1alpha3.MachineErrorTypeTransient {
+		t.Errorf("Provision() ErrorType = %q, want %q", result.ErrorType, keziov1alpha3.MachineErrorTypeTransient)
 	}
 	if result.ErrorMessage == "" {
 		t.Error("Provision() ErrorMessage is empty, want an explanation")
@@ -777,10 +777,10 @@ func TestAgentDeployerProvisionAgentBootedValidationErrorReportsFailed(t *testin
 
 func TestAgentDeployerProvisionAgentBootedSuccessRecordsPendingAndContinues(t *testing.T) {
 	machine := agentTestMachine(t)
-	machine.Spec.ImageRef = &keziov1alpha2.NameRef{Name: "img1"}
-	hw := &keziov1alpha2.MachineHardware{
+	machine.Spec.ImageRef = &keziov1alpha3.NameRef{Name: "img1"}
+	hw := &keziov1alpha3.MachineHardware{
 		ObjectMeta: metav1.ObjectMeta{Name: machine.Name, Namespace: machine.Namespace},
-		Spec:       keziov1alpha2.MachineHardwareSpec{Disks: []keziov1alpha2.MachineHardwareDisk{{DeviceName: "/dev/vda", SizeBytes: 32 << 30}}},
+		Spec:       keziov1alpha3.MachineHardwareSpec{Disks: []keziov1alpha3.MachineHardwareDisk{{DeviceName: "/dev/vda", SizeBytes: 32 << 30}}},
 	}
 	img := blankDataImage("img1", machine.Namespace)
 	c := newAgentTestClient(t, machine, agentTestBMCSecret(), hw, img)
@@ -800,10 +800,10 @@ func TestAgentDeployerProvisionAgentBootedSuccessRecordsPendingAndContinues(t *t
 	if result.Outcome != Continuing {
 		t.Fatalf("Provision() outcome = %v, want Continuing", result.Outcome)
 	}
-	if run.Status.Phase != keziov1alpha2.DeployRunPhasePending {
-		t.Fatalf("run.Status.Phase = %q, want %q", run.Status.Phase, keziov1alpha2.DeployRunPhasePending)
+	if run.Status.Phase != keziov1alpha3.DeployRunPhasePending {
+		t.Fatalf("run.Status.Phase = %q, want %q", run.Status.Phase, keziov1alpha3.DeployRunPhasePending)
 	}
-	if len(run.Status.PhaseTimings) != 1 || run.Status.PhaseTimings[0].Phase != keziov1alpha2.DeployRunPhasePending {
+	if len(run.Status.PhaseTimings) != 1 || run.Status.PhaseTimings[0].Phase != keziov1alpha3.DeployRunPhasePending {
 		t.Fatalf("run.Status.PhaseTimings = %+v, want one Pending entry", run.Status.PhaseTimings)
 	}
 	if run.Status.LastProgressAt == nil {
@@ -813,19 +813,19 @@ func TestAgentDeployerProvisionAgentBootedSuccessRecordsPendingAndContinues(t *t
 		t.Error("provision-boot marker still present after Provision committed the run to Pending, want it cleared")
 	}
 
-	var stored keziov1alpha2.DeployRun
+	var stored keziov1alpha3.DeployRun
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(run), &stored); err != nil {
 		t.Fatalf("Get DeployRun: %v", err)
 	}
-	if stored.Status.Phase != keziov1alpha2.DeployRunPhasePending {
-		t.Fatalf("stored run.Status.Phase = %q, want %q", stored.Status.Phase, keziov1alpha2.DeployRunPhasePending)
+	if stored.Status.Phase != keziov1alpha3.DeployRunPhasePending {
+		t.Fatalf("stored run.Status.Phase = %q, want %q", stored.Status.Phase, keziov1alpha3.DeployRunPhasePending)
 	}
 }
 
 func TestAgentDeployerProvisionLaterPassSucceededReportsComplete(t *testing.T) {
 	machine := agentTestMachine(t)
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
-	run.Status.Phase = keziov1alpha2.DeployRunPhaseSucceeded
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	run.Status.Phase = keziov1alpha3.DeployRunPhaseSucceeded
 	c := newAgentTestClient(t, machine, agentTestBMCSecret())
 	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
 
@@ -840,10 +840,10 @@ func TestAgentDeployerProvisionLaterPassSucceededReportsComplete(t *testing.T) {
 
 func TestAgentDeployerProvisionLaterPassFailedReportsFailedWithMessage(t *testing.T) {
 	machine := agentTestMachine(t)
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
-	run.Status.Phase = keziov1alpha2.DeployRunPhaseFailed
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	run.Status.Phase = keziov1alpha3.DeployRunPhaseFailed
 	apimeta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-		Type: keziov1alpha2.DeployRunConditionSucceeded, Status: metav1.ConditionFalse, Reason: "DeployFailed", Message: "writing partition table: rejected",
+		Type: keziov1alpha3.DeployRunConditionSucceeded, Status: metav1.ConditionFalse, Reason: "DeployFailed", Message: "writing partition table: rejected",
 	})
 	c := newAgentTestClient(t, machine, agentTestBMCSecret())
 	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
@@ -855,8 +855,8 @@ func TestAgentDeployerProvisionLaterPassFailedReportsFailedWithMessage(t *testin
 	if result.Outcome != Failed {
 		t.Fatalf("Provision() outcome = %v, want Failed", result.Outcome)
 	}
-	if result.ErrorType != keziov1alpha2.MachineErrorTypeRestart {
-		t.Errorf("Provision() ErrorType = %q, want %q (an agent-reported Failed run has abandoned its attempt)", result.ErrorType, keziov1alpha2.MachineErrorTypeRestart)
+	if result.ErrorType != keziov1alpha3.MachineErrorTypeRestart {
+		t.Errorf("Provision() ErrorType = %q, want %q (an agent-reported Failed run has abandoned its attempt)", result.ErrorType, keziov1alpha3.MachineErrorTypeRestart)
 	}
 	if result.ErrorMessage != "writing partition table: rejected" {
 		t.Errorf("Provision() ErrorMessage = %q, want the DeployRun's recorded failure message", result.ErrorMessage)
@@ -874,9 +874,9 @@ func TestAgentDeployerProvisionRestartOnFailureAfterAgentReportedFailedStartsFre
 	c := newAgentTestClient(t, machine, agentTestBMCSecret())
 	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
 	run := newTestDeployRun(t, c, machine)
-	run.Status.Phase = keziov1alpha2.DeployRunPhaseFailed
+	run.Status.Phase = keziov1alpha3.DeployRunPhaseFailed
 	apimeta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-		Type: keziov1alpha2.DeployRunConditionSucceeded, Status: metav1.ConditionFalse, Reason: "DeployFailed", Message: "agent reported failed",
+		Type: keziov1alpha3.DeployRunConditionSucceeded, Status: metav1.ConditionFalse, Reason: "DeployFailed", Message: "agent reported failed",
 	})
 	if err := c.Status().Update(context.Background(), run); err != nil {
 		t.Fatalf("seed Failed DeployRun status: %v", err)
@@ -886,7 +886,7 @@ func TestAgentDeployerProvisionRestartOnFailureAfterAgentReportedFailedStartsFre
 	if err != nil {
 		t.Fatalf("first Provision() error = %v", err)
 	}
-	if firstResult.Outcome != Failed || firstResult.ErrorType != keziov1alpha2.MachineErrorTypeRestart {
+	if firstResult.Outcome != Failed || firstResult.ErrorType != keziov1alpha3.MachineErrorTypeRestart {
 		t.Fatalf("first Provision() = %+v, want Failed/Restart", firstResult)
 	}
 
@@ -910,7 +910,7 @@ func TestAgentDeployerProvisionRestartOnFailureAfterAgentReportedFailedStartsFre
 		t.Error("machine has no provision-boot marker after restarting past an agent-reported Failed run")
 	}
 
-	var stored keziov1alpha2.DeployRun
+	var stored keziov1alpha3.DeployRun
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(run), &stored); err != nil {
 		t.Fatalf("Get DeployRun: %v", err)
 	}
@@ -921,8 +921,8 @@ func TestAgentDeployerProvisionRestartOnFailureAfterAgentReportedFailedStartsFre
 
 func TestAgentDeployerProvisionLaterPassInProgressReportsContinuing(t *testing.T) {
 	machine := agentTestMachine(t)
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
-	run.Status.Phase = keziov1alpha2.DeployRunPhaseWritingContent
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	run.Status.Phase = keziov1alpha3.DeployRunPhaseWritingContent
 	c := newAgentTestClient(t, machine, agentTestBMCSecret())
 	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
 
@@ -937,8 +937,8 @@ func TestAgentDeployerProvisionLaterPassInProgressReportsContinuing(t *testing.T
 
 func TestAgentDeployerProvisionLaterPassRecentProgressReportsContinuing(t *testing.T) {
 	machine := agentTestMachine(t)
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
-	run.Status.Phase = keziov1alpha2.DeployRunPhaseWritingContent
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	run.Status.Phase = keziov1alpha3.DeployRunPhaseWritingContent
 	recent := metav1.NewTime(time.Now().Add(-time.Minute))
 	run.Status.LastProgressAt = &recent
 	c := newAgentTestClient(t, machine, agentTestBMCSecret())
@@ -955,8 +955,8 @@ func TestAgentDeployerProvisionLaterPassRecentProgressReportsContinuing(t *testi
 
 func TestAgentDeployerProvisionLaterPassStalledFailsRestart(t *testing.T) {
 	machine := agentTestMachine(t)
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
-	run.Status.Phase = keziov1alpha2.DeployRunPhaseWritingContent
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	run.Status.Phase = keziov1alpha3.DeployRunPhaseWritingContent
 	stale := metav1.NewTime(time.Now().Add(-2 * agentDeployerProvisionStallDeadline))
 	run.Status.LastProgressAt = &stale
 	c := newAgentTestClient(t, machine, agentTestBMCSecret())
@@ -969,10 +969,10 @@ func TestAgentDeployerProvisionLaterPassStalledFailsRestart(t *testing.T) {
 	if result.Outcome != Failed {
 		t.Fatalf("Provision() outcome = %v, want Failed", result.Outcome)
 	}
-	if result.ErrorType != keziov1alpha2.MachineErrorTypeRestart {
-		t.Errorf("Provision() ErrorType = %q, want %q", result.ErrorType, keziov1alpha2.MachineErrorTypeRestart)
+	if result.ErrorType != keziov1alpha3.MachineErrorTypeRestart {
+		t.Errorf("Provision() ErrorType = %q, want %q", result.ErrorType, keziov1alpha3.MachineErrorTypeRestart)
 	}
-	if !strings.Contains(result.ErrorMessage, keziov1alpha2.DeployRunPhaseWritingContent) {
+	if !strings.Contains(result.ErrorMessage, keziov1alpha3.DeployRunPhaseWritingContent) {
 		t.Errorf("Provision() ErrorMessage = %q, want it to name the stalled phase", result.ErrorMessage)
 	}
 }
@@ -983,10 +983,10 @@ func TestAgentDeployerProvisionLaterPassStalledFailsRestart(t *testing.T) {
 // leaving such a run unbounded.
 func TestAgentDeployerProvisionLaterPassStalledWithoutLastProgressFallsBackToPhaseStart(t *testing.T) {
 	machine := agentTestMachine(t)
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
-	run.Status.Phase = keziov1alpha2.DeployRunPhasePending
-	run.Status.PhaseTimings = []keziov1alpha2.DeployRunPhaseTiming{
-		{Phase: keziov1alpha2.DeployRunPhasePending, StartedAt: metav1.NewTime(time.Now().Add(-2 * agentDeployerProvisionStallDeadline))},
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	run.Status.Phase = keziov1alpha3.DeployRunPhasePending
+	run.Status.PhaseTimings = []keziov1alpha3.DeployRunPhaseTiming{
+		{Phase: keziov1alpha3.DeployRunPhasePending, StartedAt: metav1.NewTime(time.Now().Add(-2 * agentDeployerProvisionStallDeadline))},
 	}
 	c := newAgentTestClient(t, machine, agentTestBMCSecret())
 	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
@@ -995,7 +995,7 @@ func TestAgentDeployerProvisionLaterPassStalledWithoutLastProgressFallsBackToPha
 	if err != nil {
 		t.Fatalf("Provision() error = %v", err)
 	}
-	if result.Outcome != Failed || result.ErrorType != keziov1alpha2.MachineErrorTypeRestart {
+	if result.Outcome != Failed || result.ErrorType != keziov1alpha3.MachineErrorTypeRestart {
 		t.Fatalf("Provision() = %+v, want Failed/Restart", result)
 	}
 }

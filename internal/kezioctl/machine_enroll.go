@@ -24,7 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // MachineEnrollOptions configures MachineEnroll. It corresponds directly
@@ -56,19 +56,19 @@ type MachineEnrollOptions struct {
 // whose scheme has no registered driver, and a few other rules - so this
 // command does not duplicate any of that and simply returns whatever the
 // API server rejects it with.
-func MachineEnroll(ctx context.Context, c client.Client, opts MachineEnrollOptions) (*keziov1alpha2.Machine, error) {
-	machine := &keziov1alpha2.Machine{
+func MachineEnroll(ctx context.Context, c client.Client, opts MachineEnrollOptions) (*keziov1alpha3.Machine, error) {
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      opts.Name,
 			Namespace: opts.Namespace,
 		},
-		Spec: keziov1alpha2.MachineSpec{
-			BMC: keziov1alpha2.MachineBMC{
+		Spec: keziov1alpha3.MachineSpec{
+			BMC: keziov1alpha3.MachineBMC{
 				Address:              opts.BMCAddress,
-				CredentialsSecretRef: keziov1alpha2.SecretReference{Name: opts.BMCCredentialsSecret},
+				CredentialsSecretRef: keziov1alpha3.SecretReference{Name: opts.BMCCredentialsSecret},
 			},
 			BootMACAddress: opts.BootMACAddress,
-			SubnetRef: keziov1alpha2.NameRef{
+			SubnetRef: keziov1alpha3.NameRef{
 				Name:      opts.SubnetName,
 				Namespace: opts.SubnetNamespace,
 			},

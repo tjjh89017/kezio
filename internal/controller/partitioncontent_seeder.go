@@ -29,7 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // reconcileSeeder reflects pc's real per-Site seeder placement into
@@ -40,7 +40,7 @@ import (
 // Site), owned by whichever Image references this content
 // (ImageReconciler.reconcileImageSeeder) - this reconciler only reads
 // what already exists there and reflects it.
-func (r *PartitionContentReconciler) reconcileSeeder(ctx context.Context, pc *keziov1alpha2.PartitionContent) (ctrl.Result, error) {
+func (r *PartitionContentReconciler) reconcileSeeder(ctx context.Context, pc *keziov1alpha3.PartitionContent) (ctrl.Result, error) {
 	images, err := r.imagesReferencing(ctx, pc)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("partitioncontent %q: listing referencing images: %w", pc.Name, err)
@@ -69,7 +69,7 @@ func (r *PartitionContentReconciler) reconcileSeeder(ctx context.Context, pc *ke
 // so there is one source of truth (seederDemandBySite/
 // listImageSeederDeployments) and no cross-object staleness window.
 type seederSiteFindings struct {
-	sites         []keziov1alpha2.PartitionContentSeederSite
+	sites         []keziov1alpha3.PartitionContentSeederSite
 	demandBySite  map[string]*seederSiteDemand
 	noSeederSites []string
 }
@@ -80,7 +80,7 @@ type seederSiteFindings struct {
 // count reconcileImageSeeder itself groups by (seederDemandBySite) -
 // deduplicated across every referencing Image, so a Machine referencing
 // two Images that both reference pc is not counted twice.
-func (r *PartitionContentReconciler) collectSeederSites(ctx context.Context, pc *keziov1alpha2.PartitionContent, images []keziov1alpha2.Image) (seederSiteFindings, error) {
+func (r *PartitionContentReconciler) collectSeederSites(ctx context.Context, pc *keziov1alpha3.PartitionContent, images []keziov1alpha3.Image) (seederSiteFindings, error) {
 	machines, err := r.demandMachinesForContent(ctx, pc, images)
 	if err != nil {
 		return seederSiteFindings{}, err
@@ -100,13 +100,13 @@ func (r *PartitionContentReconciler) collectSeederSites(ctx context.Context, pc 
 		}
 	}
 
-	sites := make([]keziov1alpha2.PartitionContentSeederSite, 0, len(available))
+	sites := make([]keziov1alpha3.PartitionContentSeederSite, 0, len(available))
 	for site := range available {
 		count := 0
 		if d, ok := demand[site]; ok {
 			count = d.count
 		}
-		sites = append(sites, keziov1alpha2.PartitionContentSeederSite{Site: site, MachineCount: int32(count)})
+		sites = append(sites, keziov1alpha3.PartitionContentSeederSite{Site: site, MachineCount: int32(count)})
 	}
 	sort.Slice(sites, func(i, j int) bool { return sites[i].Site < sites[j].Site })
 	return seederSiteFindings{sites: sites, demandBySite: demand, noSeederSites: noSeederSites}, nil
@@ -119,8 +119,8 @@ func (r *PartitionContentReconciler) collectSeederSites(ctx context.Context, pc 
 // deleted - the Machine each such active DeployRun names
 // (activeDeployRunsReferencing already resolves that edge case for the
 // deletion-blocking finalizer walk; this reuses it).
-func (r *PartitionContentReconciler) demandMachinesForContent(ctx context.Context, pc *keziov1alpha2.PartitionContent, images []keziov1alpha2.Image) (map[client.ObjectKey]*keziov1alpha2.Machine, error) {
-	seen := make(map[client.ObjectKey]*keziov1alpha2.Machine)
+func (r *PartitionContentReconciler) demandMachinesForContent(ctx context.Context, pc *keziov1alpha3.PartitionContent, images []keziov1alpha3.Image) (map[client.ObjectKey]*keziov1alpha3.Machine, error) {
+	seen := make(map[client.ObjectKey]*keziov1alpha3.Machine)
 
 	for i := range images {
 		live, err := machinesReferencingImage(ctx, r.Client, client.ObjectKey{Namespace: images[i].Namespace, Name: images[i].Name})
@@ -146,7 +146,7 @@ func (r *PartitionContentReconciler) demandMachinesForContent(ctx context.Contex
 		if _, ok := seen[key]; ok {
 			continue
 		}
-		var m keziov1alpha2.Machine
+		var m keziov1alpha3.Machine
 		if err := r.Get(ctx, key, &m); err != nil {
 			continue // deleted/unresolvable machine: no Site to attribute demand to
 		}
@@ -169,13 +169,13 @@ func (r *PartitionContentReconciler) demandMachinesForContent(ctx context.Contex
 // The "at least one Site is serving" success case (available) is
 // unconditional exactly as before; only the fully-unavailable case gains
 // a specific reason (recordSeederUnavailable).
-func (r *PartitionContentReconciler) recordSeederStatus(ctx context.Context, pc *keziov1alpha2.PartitionContent, findings seederSiteFindings, demand bool) (ctrl.Result, error) {
+func (r *PartitionContentReconciler) recordSeederStatus(ctx context.Context, pc *keziov1alpha3.PartitionContent, findings seederSiteFindings, demand bool) (ctrl.Result, error) {
 	pc.Status.Seeders = findings.sites
 	available := len(findings.sites) > 0
 
 	switch {
 	case !demand:
-		meta.RemoveStatusCondition(&pc.Status.Conditions, keziov1alpha2.PartitionContentConditionSeederDegraded)
+		meta.RemoveStatusCondition(&pc.Status.Conditions, keziov1alpha3.PartitionContentConditionSeederDegraded)
 	case available:
 		setPartitionContentSeederDegradedCondition(pc, metav1.ConditionFalse, "SeederAvailable",
 			"at least one Site has a seeder deployment with an available replica")
@@ -205,7 +205,7 @@ type partitionContentSeederDegradedCause struct {
 // causes above do not apply - a seeder Deployment that exists somewhere
 // but has not yet reported an available replica. Multiple causes share
 // Reason "SeederDegraded", mirroring updateImageSeederCondition.
-func (r *PartitionContentReconciler) recordSeederUnavailable(pc *keziov1alpha2.PartitionContent, findings seederSiteFindings) {
+func (r *PartitionContentReconciler) recordSeederUnavailable(pc *keziov1alpha3.PartitionContent, findings seederSiteFindings) {
 	var causes []partitionContentSeederDegradedCause
 
 	if len(findings.demandBySite) > 0 && !r.Seeder.ready() {
@@ -264,7 +264,7 @@ func (r *PartitionContentReconciler) mapSeederDeploymentToPartitionContents(ctx 
 		return nil
 	}
 
-	var image keziov1alpha2.Image
+	var image keziov1alpha3.Image
 	if err := r.Get(ctx, client.ObjectKey{Namespace: dep.Namespace, Name: imageName}, &image); err != nil {
 		return nil
 	}

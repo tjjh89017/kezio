@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 func TestRouteAndHeaderConstants(t *testing.T) {
@@ -51,11 +51,11 @@ func TestRouteAndHeaderConstants(t *testing.T) {
 func TestRegisterRequestRoundTrip(t *testing.T) {
 	rotational := false
 	want := RegisterRequest{
-		Hardware: keziov1alpha2.MachineHardwareSpec{
-			Disks: []keziov1alpha2.MachineHardwareDisk{
+		Hardware: keziov1alpha3.MachineHardwareSpec{
+			Disks: []keziov1alpha3.MachineHardwareDisk{
 				{DeviceName: "/dev/nvme0n1", SerialNumber: "S123", SizeBytes: 512 << 30, Rotational: &rotational},
 			},
-			Nics: []keziov1alpha2.MachineHardwareNIC{
+			Nics: []keziov1alpha3.MachineHardwareNIC{
 				{Name: "eth0", MACAddress: "aa:bb:cc:dd:ee:01"},
 			},
 			MemoryBytes: 16 << 30,
@@ -167,7 +167,7 @@ func validDeployPlan() DeployPlan {
 		},
 		DataImages: []DeployDataImagePlan{
 			{
-				ImageRef:     keziov1alpha2.NameRef{Name: "data-image"},
+				ImageRef:     keziov1alpha3.NameRef{Name: "data-image"},
 				TargetDisk:   "/dev/sdb",
 				SfdiskScript: `{"partitiontable":{}}`,
 				Slots:        []DeploySlot{{Number: 1, Device: "/dev/sdb1", Mkfs: &DeployMkfs{Filesystem: "ext4"}}},
@@ -179,11 +179,11 @@ func validDeployPlan() DeployPlan {
 				Steps: []ResolvedHookStep{
 					{Type: HookStepTypeBuiltin, Builtin: "efibootmgr", TimeoutSeconds: 30},
 					{Type: HookStepTypeScript, Content: "echo hi", TimeoutSeconds: 30},
-					{Type: HookStepTypeScript, Content: "echo linux", OSFamily: keziov1alpha2.OSFamilyLinux, TimeoutSeconds: 30},
+					{Type: HookStepTypeScript, Content: "echo linux", OSFamily: keziov1alpha3.OSFamilyLinux, TimeoutSeconds: 30},
 				},
 			},
 		},
-		AfterDeploy: keziov1alpha2.AfterDeployReboot,
+		AfterDeploy: keziov1alpha3.AfterDeployReboot,
 	}
 }
 
@@ -252,13 +252,13 @@ func TestDeployPlanValidate_DataImagesOnlyNoTargetDiskIsValid(t *testing.T) {
 		RunUID:        "uid-1",
 		DataImages: []DeployDataImagePlan{
 			{
-				ImageRef:     keziov1alpha2.NameRef{Name: "data-image"},
+				ImageRef:     keziov1alpha3.NameRef{Name: "data-image"},
 				TargetDisk:   "/dev/sdb",
 				SfdiskScript: `{"partitiontable":{}}`,
 				Slots:        []DeploySlot{{Number: 1, Device: "/dev/sdb1", Mkfs: &DeployMkfs{Filesystem: "ext4"}}},
 			},
 		},
-		AfterDeploy: keziov1alpha2.AfterDeployPowerOff,
+		AfterDeploy: keziov1alpha3.AfterDeployPowerOff,
 	}
 	if err := p.Validate(); err != nil {
 		t.Fatalf("Validate() = %v, want nil for a dataImages-only plan with no OS image (no targetDisk, no slots)", err)

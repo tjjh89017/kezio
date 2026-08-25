@@ -21,7 +21,7 @@ import (
 	"strings"
 	"testing"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 const nvmeDevice = "/dev/nvme0n1"
@@ -30,8 +30,8 @@ func boolPtr(b bool) *bool    { return &b }
 func int64Ptr(i int64) *int64 { return &i }
 func int32Ptr(i int32) *int32 { return &i }
 
-func nvme() keziov1alpha2.MachineHardwareDisk {
-	return keziov1alpha2.MachineHardwareDisk{
+func nvme() keziov1alpha3.MachineHardwareDisk {
+	return keziov1alpha3.MachineHardwareDisk{
 		DeviceName:   nvmeDevice,
 		SerialNumber: "S6XANJ0T123456",
 		WWN:          "0x5002538e00000001",
@@ -45,8 +45,8 @@ func nvme() keziov1alpha2.MachineHardwareDisk {
 	}
 }
 
-func hdd() keziov1alpha2.MachineHardwareDisk {
-	return keziov1alpha2.MachineHardwareDisk{
+func hdd() keziov1alpha3.MachineHardwareDisk {
+	return keziov1alpha3.MachineHardwareDisk{
 		DeviceName:   "/dev/sda",
 		SerialNumber: "Z1D2AB3C",
 		WWN:          "0x5000c500e0000002",
@@ -61,27 +61,27 @@ func hdd() keziov1alpha2.MachineHardwareDisk {
 }
 
 func TestMatch_SingleHintFields(t *testing.T) {
-	disks := []keziov1alpha2.MachineHardwareDisk{nvme(), hdd()}
+	disks := []keziov1alpha3.MachineHardwareDisk{nvme(), hdd()}
 
 	cases := []struct {
 		name    string
-		hints   *keziov1alpha2.TargetDiskHints
+		hints   *keziov1alpha3.TargetDiskHints
 		wantDev string
 	}{
-		{"deviceName", &keziov1alpha2.TargetDiskHints{DeviceName: "/dev/sda"}, "/dev/sda"},
-		{"serialNumber", &keziov1alpha2.TargetDiskHints{SerialNumber: "S6XANJ0T123456"}, nvmeDevice},
-		{"wwn", &keziov1alpha2.TargetDiskHints{WWN: "0x5000c500e0000002"}, "/dev/sda"},
-		{"model exact", &keziov1alpha2.TargetDiskHints{Model: "Samsung SSD 990 PRO"}, nvmeDevice},
-		{"model trimmed", &keziov1alpha2.TargetDiskHints{Model: "Seagate Barracuda"}, "/dev/sda"},
-		{"vendor exact", &keziov1alpha2.TargetDiskHints{Vendor: "SAMSUNG"}, nvmeDevice},
-		{"vendor trimmed", &keziov1alpha2.TargetDiskHints{Vendor: "Seagate"}, "/dev/sda"},
-		{"minSize excludes smaller", &keziov1alpha2.TargetDiskHints{MinSizeGigabytes: int64Ptr(2000)}, "/dev/sda"},
-		{"maxSize excludes larger", &keziov1alpha2.TargetDiskHints{MaxSizeGigabytes: int64Ptr(2000)}, nvmeDevice},
-		{"rotational true", &keziov1alpha2.TargetDiskHints{Rotational: boolPtr(true)}, "/dev/sda"},
-		{"rotational false", &keziov1alpha2.TargetDiskHints{Rotational: boolPtr(false)}, nvmeDevice},
-		{"pciePath", &keziov1alpha2.TargetDiskHints{PciePath: "0000:02:00.0"}, "/dev/sda"},
-		{"hctl", &keziov1alpha2.TargetDiskHints{HCTL: "1:0:0:0"}, "/dev/sda"},
-		{"slotNumber", &keziov1alpha2.TargetDiskHints{SlotNumber: int32Ptr(1)}, nvmeDevice},
+		{"deviceName", &keziov1alpha3.TargetDiskHints{DeviceName: "/dev/sda"}, "/dev/sda"},
+		{"serialNumber", &keziov1alpha3.TargetDiskHints{SerialNumber: "S6XANJ0T123456"}, nvmeDevice},
+		{"wwn", &keziov1alpha3.TargetDiskHints{WWN: "0x5000c500e0000002"}, "/dev/sda"},
+		{"model exact", &keziov1alpha3.TargetDiskHints{Model: "Samsung SSD 990 PRO"}, nvmeDevice},
+		{"model trimmed", &keziov1alpha3.TargetDiskHints{Model: "Seagate Barracuda"}, "/dev/sda"},
+		{"vendor exact", &keziov1alpha3.TargetDiskHints{Vendor: "SAMSUNG"}, nvmeDevice},
+		{"vendor trimmed", &keziov1alpha3.TargetDiskHints{Vendor: "Seagate"}, "/dev/sda"},
+		{"minSize excludes smaller", &keziov1alpha3.TargetDiskHints{MinSizeGigabytes: int64Ptr(2000)}, "/dev/sda"},
+		{"maxSize excludes larger", &keziov1alpha3.TargetDiskHints{MaxSizeGigabytes: int64Ptr(2000)}, nvmeDevice},
+		{"rotational true", &keziov1alpha3.TargetDiskHints{Rotational: boolPtr(true)}, "/dev/sda"},
+		{"rotational false", &keziov1alpha3.TargetDiskHints{Rotational: boolPtr(false)}, nvmeDevice},
+		{"pciePath", &keziov1alpha3.TargetDiskHints{PciePath: "0000:02:00.0"}, "/dev/sda"},
+		{"hctl", &keziov1alpha3.TargetDiskHints{HCTL: "1:0:0:0"}, "/dev/sda"},
+		{"slotNumber", &keziov1alpha3.TargetDiskHints{SlotNumber: int32Ptr(1)}, nvmeDevice},
 	}
 
 	for _, tc := range cases {
@@ -98,20 +98,20 @@ func TestMatch_SingleHintFields(t *testing.T) {
 }
 
 func TestMatch_ExactMatchIsCaseSensitive(t *testing.T) {
-	disks := []keziov1alpha2.MachineHardwareDisk{nvme()}
+	disks := []keziov1alpha3.MachineHardwareDisk{nvme()}
 
-	_, err := Match(disks, &keziov1alpha2.TargetDiskHints{SerialNumber: "s6xanj0t123456"})
+	_, err := Match(disks, &keziov1alpha3.TargetDiskHints{SerialNumber: "s6xanj0t123456"})
 	if !errors.Is(err, ErrNoMatch) {
 		t.Fatalf("Match() with wrong-case serial number: err = %v, want ErrNoMatch", err)
 	}
 }
 
 func TestMatch_ANDSemantics(t *testing.T) {
-	disks := []keziov1alpha2.MachineHardwareDisk{nvme(), hdd()}
+	disks := []keziov1alpha3.MachineHardwareDisk{nvme(), hdd()}
 
 	// Two fields that individually would each match a different disk in
 	// isolation must combine with AND: only a disk matching both wins.
-	hints := &keziov1alpha2.TargetDiskHints{
+	hints := &keziov1alpha3.TargetDiskHints{
 		Vendor:     "SAMSUNG",
 		Rotational: boolPtr(false),
 	}
@@ -125,7 +125,7 @@ func TestMatch_ANDSemantics(t *testing.T) {
 
 	// A combination no disk satisfies (SAMSUNG vendor + rotational) is
 	// zero matches, not a partial match.
-	contradiction := &keziov1alpha2.TargetDiskHints{
+	contradiction := &keziov1alpha3.TargetDiskHints{
 		Vendor:     "SAMSUNG",
 		Rotational: boolPtr(true),
 	}
@@ -135,9 +135,9 @@ func TestMatch_ANDSemantics(t *testing.T) {
 }
 
 func TestMatch_ZeroMatches(t *testing.T) {
-	disks := []keziov1alpha2.MachineHardwareDisk{nvme(), hdd()}
+	disks := []keziov1alpha3.MachineHardwareDisk{nvme(), hdd()}
 
-	_, err := Match(disks, &keziov1alpha2.TargetDiskHints{SerialNumber: "no-such-serial"})
+	_, err := Match(disks, &keziov1alpha3.TargetDiskHints{SerialNumber: "no-such-serial"})
 	if !errors.Is(err, ErrNoMatch) {
 		t.Fatalf("Match() error = %v, want ErrNoMatch", err)
 	}
@@ -151,11 +151,11 @@ func TestMatch_ManyMatches(t *testing.T) {
 	b := nvme()
 	b.DeviceName = "/dev/nvme1n1"
 	b.SerialNumber = "S6XANJ0T999999"
-	disks := []keziov1alpha2.MachineHardwareDisk{a, b}
+	disks := []keziov1alpha3.MachineHardwareDisk{a, b}
 
 	// Both disks share the same rotational value and vendor is unset, so
 	// the hint alone does not disambiguate them.
-	_, err := Match(disks, &keziov1alpha2.TargetDiskHints{Rotational: boolPtr(false)})
+	_, err := Match(disks, &keziov1alpha3.TargetDiskHints{Rotational: boolPtr(false)})
 	if !errors.Is(err, ErrAmbiguous) {
 		t.Fatalf("Match() error = %v, want ErrAmbiguous", err)
 	}
@@ -168,7 +168,7 @@ func TestMatch_ManyMatches(t *testing.T) {
 }
 
 func TestMatch_ManyMatchesMessageIsBounded(t *testing.T) {
-	disks := make([]keziov1alpha2.MachineHardwareDisk, 0, 8)
+	disks := make([]keziov1alpha3.MachineHardwareDisk, 0, 8)
 	for i := range 8 {
 		d := nvme()
 		d.DeviceName = "/dev/nvme" + string(rune('0'+i)) + "n1"
@@ -176,7 +176,7 @@ func TestMatch_ManyMatchesMessageIsBounded(t *testing.T) {
 		disks = append(disks, d)
 	}
 
-	_, err := Match(disks, &keziov1alpha2.TargetDiskHints{Rotational: boolPtr(false)})
+	_, err := Match(disks, &keziov1alpha3.TargetDiskHints{Rotational: boolPtr(false)})
 	if !errors.Is(err, ErrAmbiguous) {
 		t.Fatalf("Match() error = %v, want ErrAmbiguous", err)
 	}
@@ -186,7 +186,7 @@ func TestMatch_ManyMatchesMessageIsBounded(t *testing.T) {
 }
 
 func TestMatch_NoHintSingleDisk(t *testing.T) {
-	disks := []keziov1alpha2.MachineHardwareDisk{nvme()}
+	disks := []keziov1alpha3.MachineHardwareDisk{nvme()}
 
 	got, err := Match(disks, nil)
 	if err != nil {
@@ -197,7 +197,7 @@ func TestMatch_NoHintSingleDisk(t *testing.T) {
 	}
 
 	// An empty (non-nil) hints struct behaves the same as nil.
-	got, err = Match(disks, &keziov1alpha2.TargetDiskHints{})
+	got, err = Match(disks, &keziov1alpha3.TargetDiskHints{})
 	if err != nil {
 		t.Fatalf("Match() error = %v, want nil", err)
 	}
@@ -207,7 +207,7 @@ func TestMatch_NoHintSingleDisk(t *testing.T) {
 }
 
 func TestMatch_NoHintMultipleDisks(t *testing.T) {
-	disks := []keziov1alpha2.MachineHardwareDisk{nvme(), hdd()}
+	disks := []keziov1alpha3.MachineHardwareDisk{nvme(), hdd()}
 
 	_, err := Match(disks, nil)
 	if !errors.Is(err, ErrAmbiguous) {
@@ -226,22 +226,22 @@ func TestMatch_NoHintNoDisks(t *testing.T) {
 }
 
 func TestMatch_SizeRangeBoundaries(t *testing.T) {
-	disk := keziov1alpha2.MachineHardwareDisk{
+	disk := keziov1alpha3.MachineHardwareDisk{
 		DeviceName: nvmeDevice,
 		SizeBytes:  500 * giB,
 	}
-	disks := []keziov1alpha2.MachineHardwareDisk{disk}
+	disks := []keziov1alpha3.MachineHardwareDisk{disk}
 
 	cases := []struct {
 		name      string
-		hints     *keziov1alpha2.TargetDiskHints
+		hints     *keziov1alpha3.TargetDiskHints
 		wantMatch bool
 	}{
-		{"min at exact boundary matches", &keziov1alpha2.TargetDiskHints{MinSizeGigabytes: int64Ptr(500)}, true},
-		{"min one GiB over boundary excludes", &keziov1alpha2.TargetDiskHints{MinSizeGigabytes: int64Ptr(501)}, false},
-		{"max at exact boundary matches", &keziov1alpha2.TargetDiskHints{MaxSizeGigabytes: int64Ptr(500)}, true},
-		{"max one GiB under boundary excludes", &keziov1alpha2.TargetDiskHints{MaxSizeGigabytes: int64Ptr(499)}, false},
-		{"in range matches", &keziov1alpha2.TargetDiskHints{MinSizeGigabytes: int64Ptr(400), MaxSizeGigabytes: int64Ptr(600)}, true},
+		{"min at exact boundary matches", &keziov1alpha3.TargetDiskHints{MinSizeGigabytes: int64Ptr(500)}, true},
+		{"min one GiB over boundary excludes", &keziov1alpha3.TargetDiskHints{MinSizeGigabytes: int64Ptr(501)}, false},
+		{"max at exact boundary matches", &keziov1alpha3.TargetDiskHints{MaxSizeGigabytes: int64Ptr(500)}, true},
+		{"max one GiB under boundary excludes", &keziov1alpha3.TargetDiskHints{MaxSizeGigabytes: int64Ptr(499)}, false},
+		{"in range matches", &keziov1alpha3.TargetDiskHints{MinSizeGigabytes: int64Ptr(400), MaxSizeGigabytes: int64Ptr(600)}, true},
 	}
 
 	for _, tc := range cases {
@@ -258,16 +258,16 @@ func TestMatch_SizeRangeBoundaries(t *testing.T) {
 }
 
 func TestMatch_UnsetRotationalDiskDoesNotMatchEitherValue(t *testing.T) {
-	disk := keziov1alpha2.MachineHardwareDisk{
+	disk := keziov1alpha3.MachineHardwareDisk{
 		DeviceName: nvmeDevice,
 		// Rotational left nil: the agent did not report it.
 	}
-	disks := []keziov1alpha2.MachineHardwareDisk{disk}
+	disks := []keziov1alpha3.MachineHardwareDisk{disk}
 
-	if _, err := Match(disks, &keziov1alpha2.TargetDiskHints{Rotational: boolPtr(false)}); !errors.Is(err, ErrNoMatch) {
+	if _, err := Match(disks, &keziov1alpha3.TargetDiskHints{Rotational: boolPtr(false)}); !errors.Is(err, ErrNoMatch) {
 		t.Fatalf("Match() error = %v, want ErrNoMatch against an unreported rotational field", err)
 	}
-	if _, err := Match(disks, &keziov1alpha2.TargetDiskHints{Rotational: boolPtr(true)}); !errors.Is(err, ErrNoMatch) {
+	if _, err := Match(disks, &keziov1alpha3.TargetDiskHints{Rotational: boolPtr(true)}); !errors.Is(err, ErrNoMatch) {
 		t.Fatalf("Match() error = %v, want ErrNoMatch against an unreported rotational field", err)
 	}
 }
@@ -302,8 +302,8 @@ func TestCheckDistinct_ConflictBySerial(t *testing.T) {
 }
 
 func TestCheckDistinct_ConflictByDeviceNameWhenNoSerial(t *testing.T) {
-	d1 := keziov1alpha2.MachineHardwareDisk{DeviceName: "/dev/sdb"}
-	d2 := keziov1alpha2.MachineHardwareDisk{DeviceName: "/dev/sdb"}
+	d1 := keziov1alpha3.MachineHardwareDisk{DeviceName: "/dev/sdb"}
+	d2 := keziov1alpha3.MachineHardwareDisk{DeviceName: "/dev/sdb"}
 
 	err := CheckDistinct([]Selection{
 		{Label: "OS image", Disk: &d1},

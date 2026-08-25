@@ -22,7 +22,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // newMachineCmd builds the `kezioctl machine` command group.
@@ -132,7 +132,7 @@ requires exactly one match. At least one hint flag is required.`,
 				return fmt.Errorf("at least one disk hint flag is required (see --help)")
 			}
 
-			hints := keziov1alpha2.TargetDiskHints{
+			hints := keziov1alpha3.TargetDiskHints{
 				DeviceName:   deviceName,
 				SerialNumber: serial,
 				WWN:          wwn,

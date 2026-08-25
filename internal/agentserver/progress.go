@@ -28,7 +28,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 )
 
@@ -56,11 +56,11 @@ var progressNow = time.Now
 // attempt a whole deadline later. The retry reads through the cache like the
 // first attempt: it converges as the cache catches up, which is the
 // same watch event that would have made the first read correct.
-func (s *Server) persistProgress(ctx context.Context, machine *keziov1alpha2.Machine, req agentapi.ProgressRequest) error {
+func (s *Server) persistProgress(ctx context.Context, machine *keziov1alpha3.Machine, req agentapi.ProgressRequest) error {
 	key := client.ObjectKey{Namespace: machine.Namespace, Name: req.RunName}
 
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		var run keziov1alpha2.DeployRun
+		var run keziov1alpha3.DeployRun
 		if err := s.Client.Get(ctx, key, &run); err != nil {
 			return err
 		}
@@ -89,7 +89,7 @@ func (s *Server) persistProgress(ctx context.Context, machine *keziov1alpha2.Mac
 // success signal (see Execute's doc comment) - so a phase transition is
 // detected by req.Step differing from the run's current phase, not by
 // req.State alone.
-func applyProgressToDeployRun(run *keziov1alpha2.DeployRun, req agentapi.ProgressRequest) {
+func applyProgressToDeployRun(run *keziov1alpha3.DeployRun, req agentapi.ProgressRequest) {
 	ts := metav1.NewTime(req.Timestamp)
 	// Stamped from this process's clock, not req.Timestamp: lastProgressAt
 	// exists for the deployer's stall deadline, which compares it against
@@ -102,12 +102,12 @@ func applyProgressToDeployRun(run *keziov1alpha2.DeployRun, req agentapi.Progres
 	switch req.State {
 	case agentapi.ProgressStateSucceeded:
 		closeCurrentPhaseTiming(run, ts)
-		if req.Step == keziov1alpha2.DeployRunPhaseSucceeded {
+		if req.Step == keziov1alpha3.DeployRunPhaseSucceeded {
 			setSucceededCondition(run, metav1.ConditionTrue, "DeploySucceeded", progressMessage(req.Message, "deploy completed successfully"))
 		}
 	case agentapi.ProgressStateFailed:
 		closeCurrentPhaseTiming(run, ts)
-		run.Status.Phase = keziov1alpha2.DeployRunPhaseFailed
+		run.Status.Phase = keziov1alpha3.DeployRunPhaseFailed
 		setSucceededCondition(run, metav1.ConditionFalse, "DeployFailed", progressMessage(req.Message, "deploy failed"))
 	}
 }
@@ -119,14 +119,14 @@ func applyProgressToDeployRun(run *keziov1alpha2.DeployRun, req agentapi.Progres
 // before is appended, so the list grows in the order the agent first
 // reported each partition. A report naming no partition leaves the list
 // untouched.
-func applyPartitionProgress(run *keziov1alpha2.DeployRun, partitions []agentapi.ProgressPartition) {
+func applyPartitionProgress(run *keziov1alpha3.DeployRun, partitions []agentapi.ProgressPartition) {
 	for _, p := range partitions {
-		entry := keziov1alpha2.DeployRunPartitionProgress{
+		entry := keziov1alpha3.DeployRunPartitionProgress{
 			Number:    p.Number,
 			Percent:   p.Percent,
 			BytesDone: p.BytesDone,
 		}
-		if i := slices.IndexFunc(run.Status.Partitions, func(e keziov1alpha2.DeployRunPartitionProgress) bool {
+		if i := slices.IndexFunc(run.Status.Partitions, func(e keziov1alpha3.DeployRunPartitionProgress) bool {
 			return e.Number == p.Number
 		}); i >= 0 {
 			run.Status.Partitions[i] = entry
@@ -142,13 +142,13 @@ func applyPartitionProgress(run *keziov1alpha2.DeployRun, partitions []agentapi.
 // (every progress tick during content writing, and a phase's own
 // "succeeded" report) is a no-op here by design - see
 // applyProgressToDeployRun's doc comment.
-func enterPhase(run *keziov1alpha2.DeployRun, step string, ts metav1.Time) {
+func enterPhase(run *keziov1alpha3.DeployRun, step string, ts metav1.Time) {
 	if run.Status.Phase == step {
 		return
 	}
 	closeCurrentPhaseTiming(run, ts)
 	run.Status.Phase = step
-	run.Status.PhaseTimings = append(run.Status.PhaseTimings, keziov1alpha2.DeployRunPhaseTiming{
+	run.Status.PhaseTimings = append(run.Status.PhaseTimings, keziov1alpha3.DeployRunPhaseTiming{
 		Phase:     step,
 		StartedAt: ts,
 	})
@@ -157,7 +157,7 @@ func enterPhase(run *keziov1alpha2.DeployRun, step string, ts metav1.Time) {
 // closeCurrentPhaseTiming sets FinishedAt on the last PhaseTimings entry,
 // if any and not already closed. Idempotent: closing an already-closed
 // entry is a no-op.
-func closeCurrentPhaseTiming(run *keziov1alpha2.DeployRun, ts metav1.Time) {
+func closeCurrentPhaseTiming(run *keziov1alpha3.DeployRun, ts metav1.Time) {
 	n := len(run.Status.PhaseTimings)
 	if n == 0 {
 		return
@@ -168,9 +168,9 @@ func closeCurrentPhaseTiming(run *keziov1alpha2.DeployRun, ts metav1.Time) {
 }
 
 // setSucceededCondition sets DeployRunConditionSucceeded on run.
-func setSucceededCondition(run *keziov1alpha2.DeployRun, status metav1.ConditionStatus, reason, message string) {
+func setSucceededCondition(run *keziov1alpha3.DeployRun, status metav1.ConditionStatus, reason, message string) {
 	apimeta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-		Type:               keziov1alpha2.DeployRunConditionSucceeded,
+		Type:               keziov1alpha3.DeployRunConditionSucceeded,
 		Status:             status,
 		Reason:             reason,
 		Message:            message,

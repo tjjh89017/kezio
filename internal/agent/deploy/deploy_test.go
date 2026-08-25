@@ -25,7 +25,7 @@ import (
 	"testing"
 	"time"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 	"github.com/tjjh89017/kezio/internal/seeder"
 )
@@ -52,7 +52,7 @@ func basicPlan() *agentapi.DeployPlan {
 			{Number: 2, Device: "/dev/sda2", Swap: &agentapi.DeploySwap{UUID: "swap-uuid"}},
 			{Number: 3, Device: "/dev/sda3", Torrent: &agentapi.DeployTorrent{URL: "http://seeder/root.torrent", InfoHash: "deadbeef"}},
 		},
-		AfterDeploy: keziov1alpha2.AfterDeployReboot,
+		AfterDeploy: keziov1alpha3.AfterDeployReboot,
 	}
 }
 
@@ -115,7 +115,7 @@ func TestExecute_HappyPath(t *testing.T) {
 	}
 
 	last := reporter.Reports[len(reporter.Reports)-1]
-	if last.Step != keziov1alpha2.DeployRunPhaseSucceeded || last.State != agentapi.ProgressStateSucceeded {
+	if last.Step != keziov1alpha3.DeployRunPhaseSucceeded || last.State != agentapi.ProgressStateSucceeded {
 		t.Errorf("final report = %+v, want the terminal Succeeded phase", last)
 	}
 	if last.RunName != plan.RunName || last.RunUID != plan.RunUID {
@@ -216,7 +216,7 @@ func TestExecute_TwoDisksTargetingSameDeviceIsRejected(t *testing.T) {
 
 	plan := basicPlan()
 	plan.DataImages = []agentapi.DeployDataImagePlan{{
-		ImageRef:     keziov1alpha2.NameRef{Name: "data-image"},
+		ImageRef:     keziov1alpha3.NameRef{Name: "data-image"},
 		TargetDisk:   plan.TargetDisk,
 		SfdiskScript: fixtureSfdisk,
 		Slots:        []agentapi.DeploySlot{{Number: 1, Device: "/dev/sda1", Mkfs: &agentapi.DeployMkfs{Filesystem: "ext4"}}},
@@ -235,7 +235,7 @@ func TestExecute_DataImageDiskIsWritten(t *testing.T) {
 	plan := basicPlan()
 	plan.Slots = []agentapi.DeploySlot{{Number: 1, Device: "/dev/sda1", Mkfs: &agentapi.DeployMkfs{Filesystem: "ext4"}}}
 	plan.DataImages = []agentapi.DeployDataImagePlan{{
-		ImageRef:     keziov1alpha2.NameRef{Name: "data-image"},
+		ImageRef:     keziov1alpha3.NameRef{Name: "data-image"},
 		TargetDisk:   "/dev/sdb",
 		SfdiskScript: fixtureSfdisk,
 		Slots:        []agentapi.DeploySlot{{Number: 1, Device: "/dev/sdb1", Mkfs: &agentapi.DeployMkfs{Filesystem: "ext4"}}},
@@ -270,12 +270,12 @@ func TestExecute_DataImagesOnlyPlanNoOSImage(t *testing.T) {
 		RunUID:        "uid-1",
 		MachineName:   "node-01",
 		DataImages: []agentapi.DeployDataImagePlan{{
-			ImageRef:     keziov1alpha2.NameRef{Name: "data-image"},
+			ImageRef:     keziov1alpha3.NameRef{Name: "data-image"},
 			TargetDisk:   "/dev/sdb",
 			SfdiskScript: fixtureSfdisk,
 			Slots:        []agentapi.DeploySlot{{Number: 1, Device: "/dev/sdb1", Mkfs: &agentapi.DeployMkfs{Filesystem: "ext4"}}},
 		}},
-		AfterDeploy: keziov1alpha2.AfterDeployPowerOff,
+		AfterDeploy: keziov1alpha3.AfterDeployPowerOff,
 	}
 
 	if err := e.Execute(context.Background(), plan); err != nil {
@@ -335,7 +335,7 @@ func TestExecute_AfterDeployPowerOff(t *testing.T) {
 
 	plan := basicPlan()
 	plan.Slots = []agentapi.DeploySlot{{Number: 1, Device: "/dev/sda1", Mkfs: &agentapi.DeployMkfs{Filesystem: "ext4"}}}
-	plan.AfterDeploy = keziov1alpha2.AfterDeployPowerOff
+	plan.AfterDeploy = keziov1alpha3.AfterDeployPowerOff
 
 	if err := e.Execute(context.Background(), plan); err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -371,7 +371,7 @@ func TestExecute_AfterDeployActionFailureOverridesTerminalReportToFailed(t *test
 
 	var succeededReports, failedReports int
 	for _, r := range reporter.Reports {
-		if r.Step != keziov1alpha2.DeployRunPhaseSucceeded {
+		if r.Step != keziov1alpha3.DeployRunPhaseSucceeded {
 			continue
 		}
 		switch r.State {
@@ -392,8 +392,8 @@ func TestExecute_AfterDeployActionFailureOverridesTerminalReportToFailed(t *test
 	if last.State != agentapi.ProgressStateFailed {
 		t.Fatalf("final report state = %q, want %q", last.State, agentapi.ProgressStateFailed)
 	}
-	if last.Step != keziov1alpha2.DeployRunPhaseSucceeded {
-		t.Errorf("final report step = %q, want %q so applyProgressToDeployRun overwrites the run's already-recorded Succeeded phase", last.Step, keziov1alpha2.DeployRunPhaseSucceeded)
+	if last.Step != keziov1alpha3.DeployRunPhaseSucceeded {
+		t.Errorf("final report step = %q, want %q so applyProgressToDeployRun overwrites the run's already-recorded Succeeded phase", last.Step, keziov1alpha3.DeployRunPhaseSucceeded)
 	}
 }
 

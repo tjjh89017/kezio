@@ -33,7 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/seederdeploy"
 )
 
@@ -50,8 +50,8 @@ func partitionContentSeederReasonTestHash(seq int) string {
 func newIndexedReconcilerWithSeeder(ctx context.Context, seeder ImageSeederConfig) (*PartitionContentReconciler, func()) {
 	c, err := cache.New(cfg, cache.Options{Scheme: k8sClient.Scheme()})
 	Expect(err).NotTo(HaveOccurred())
-	Expect(c.IndexField(ctx, &keziov1alpha2.Image{}, imageContentRefIndex, indexImageContentRefs)).To(Succeed())
-	Expect(c.IndexField(ctx, &keziov1alpha2.Machine{}, machineImageRefIndex, indexMachineImageRefs)).To(Succeed())
+	Expect(c.IndexField(ctx, &keziov1alpha3.Image{}, imageContentRefIndex, indexImageContentRefs)).To(Succeed())
+	Expect(c.IndexField(ctx, &keziov1alpha3.Machine{}, machineImageRefIndex, indexMachineImageRefs)).To(Succeed())
 
 	cacheCtx, cancel := context.WithCancel(ctx)
 	go func() { _ = c.Start(cacheCtx) }()
@@ -62,8 +62,8 @@ func newIndexedReconcilerWithSeeder(ctx context.Context, seeder ImageSeederConfi
 		Cache: &client.CacheOptions{
 			Reader: c,
 			DisableFor: []client.Object{
-				&keziov1alpha2.PartitionContent{},
-				&keziov1alpha2.DeployRun{},
+				&keziov1alpha3.PartitionContent{},
+				&keziov1alpha3.DeployRun{},
 				&corev1.PersistentVolumeClaim{},
 				&batchv1.Job{},
 				&appsv1.Deployment{},
@@ -95,8 +95,8 @@ var _ = Describe("PartitionContent seeder degraded reasons", func() {
 		contentName := "pc-" + partitionContentSeederReasonTestHash(1)
 		pc := createReadyContent(ctx, contentName)
 
-		img := newTestImageWithSlots("image-9001", []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		img := newTestImageWithSlots("image-9001", []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentName}},
 		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
@@ -114,9 +114,9 @@ var _ = Describe("PartitionContent seeder degraded reasons", func() {
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: pcNN})
 		Expect(err).NotTo(HaveOccurred())
 
-		var got keziov1alpha2.PartitionContent
+		var got keziov1alpha3.PartitionContent
 		Expect(k8sClient.Get(ctx, pcNN, &got)).To(Succeed())
-		cond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.PartitionContentConditionSeederDegraded)
+		cond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha3.PartitionContentConditionSeederDegraded)
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
 		Expect(cond.Reason).To(Equal("SeederImageUnconfigured"))
@@ -129,8 +129,8 @@ var _ = Describe("PartitionContent seeder degraded reasons", func() {
 		contentName := "pc-" + partitionContentSeederReasonTestHash(2)
 		pc := createReadyContent(ctx, contentName)
 
-		img := newTestImageWithSlots("image-9002", []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		img := newTestImageWithSlots("image-9002", []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentName}},
 		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
@@ -148,9 +148,9 @@ var _ = Describe("PartitionContent seeder degraded reasons", func() {
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: pcNN})
 		Expect(err).NotTo(HaveOccurred())
 
-		var got keziov1alpha2.PartitionContent
+		var got keziov1alpha3.PartitionContent
 		Expect(k8sClient.Get(ctx, pcNN, &got)).To(Succeed())
-		cond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.PartitionContentConditionSeederDegraded)
+		cond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha3.PartitionContentConditionSeederDegraded)
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
 		Expect(cond.Reason).To(Equal("SeederUnavailable"))
@@ -158,7 +158,7 @@ var _ = Describe("PartitionContent seeder degraded reasons", func() {
 
 	It("reports SeederSubnetRefUnset, naming the Site, when demand comes only from a Site with no seeding Subnet", func() {
 		siteName := "site-9003"
-		site := &keziov1alpha2.Site{
+		site := &keziov1alpha3.Site{
 			ObjectMeta: metav1.ObjectMeta{Name: siteName, Namespace: "default"},
 			// No SeederSubnetRef: this Site runs no seeder at all.
 		}
@@ -170,8 +170,8 @@ var _ = Describe("PartitionContent seeder degraded reasons", func() {
 		contentName := "pc-" + partitionContentSeederReasonTestHash(3)
 		pc := createReadyContent(ctx, contentName)
 
-		img := newTestImageWithSlots("image-9003", []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		img := newTestImageWithSlots("image-9003", []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentName}},
 		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
@@ -187,9 +187,9 @@ var _ = Describe("PartitionContent seeder degraded reasons", func() {
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: pcNN})
 		Expect(err).NotTo(HaveOccurred())
 
-		var got keziov1alpha2.PartitionContent
+		var got keziov1alpha3.PartitionContent
 		Expect(k8sClient.Get(ctx, pcNN, &got)).To(Succeed())
-		cond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.PartitionContentConditionSeederDegraded)
+		cond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha3.PartitionContentConditionSeederDegraded)
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
 		Expect(cond.Reason).To(Equal("SeederSubnetRefUnset"))
@@ -203,8 +203,8 @@ var _ = Describe("PartitionContent seeder degraded reasons", func() {
 		contentName := "pc-" + partitionContentSeederReasonTestHash(4)
 		pc := createReadyContent(ctx, contentName)
 
-		img := newTestImageWithSlots("image-9004", []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		img := newTestImageWithSlots("image-9004", []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentName}},
 		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
@@ -233,9 +233,9 @@ var _ = Describe("PartitionContent seeder degraded reasons", func() {
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: pcNN})
 		Expect(err).NotTo(HaveOccurred())
 
-		var got keziov1alpha2.PartitionContent
+		var got keziov1alpha3.PartitionContent
 		Expect(k8sClient.Get(ctx, pcNN, &got)).To(Succeed())
-		cond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.PartitionContentConditionSeederDegraded)
+		cond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha3.PartitionContentConditionSeederDegraded)
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(cond.Reason).To(Equal("SeederAvailable"))

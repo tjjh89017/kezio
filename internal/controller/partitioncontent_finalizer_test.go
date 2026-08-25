@@ -34,20 +34,20 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // newTestImage builds an (uncreated) Image with a single data slot bound
 // to contentName, in the "default" namespace.
-func newTestImage(name, contentName string) *keziov1alpha2.Image {
-	return &keziov1alpha2.Image{
+func newTestImage(name, contentName string) *keziov1alpha3.Image {
+	return &keziov1alpha3.Image{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-		Spec: keziov1alpha2.ImageSpec{
-			Layout: keziov1alpha2.ImageDiskLayout{
-				PartitionTable: keziov1alpha2.PartitionTableGPT,
+		Spec: keziov1alpha3.ImageSpec{
+			Layout: keziov1alpha3.ImageDiskLayout{
+				PartitionTable: keziov1alpha3.PartitionTableGPT,
 				SfdiskJSON:     `{"partitiontable":{"label":"gpt"}}`,
-				Slots: []keziov1alpha2.ImageSlot{
-					{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+				Slots: []keziov1alpha3.ImageSlot{
+					{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentName}},
 				},
 			},
 		},
@@ -60,16 +60,16 @@ func newTestImage(name, contentName string) *keziov1alpha2.Image {
 // it names are all placeholders: nothing in this suite runs
 // MachineReconciler or the Machine webhook, so none of them need to
 // actually exist or resolve.
-func newTestMachine(name, imageName string) *keziov1alpha2.Machine {
-	return &keziov1alpha2.Machine{
+func newTestMachine(name, imageName string) *keziov1alpha3.Machine {
+	return &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-		Spec: keziov1alpha2.MachineSpec{
-			BMC: keziov1alpha2.MachineBMC{
+		Spec: keziov1alpha3.MachineSpec{
+			BMC: keziov1alpha3.MachineBMC{
 				Address:              "redfish://198.51.100.10/redfish/v1/Systems/1",
-				CredentialsSecretRef: keziov1alpha2.SecretReference{Name: name + "-bmc-creds"},
+				CredentialsSecretRef: keziov1alpha3.SecretReference{Name: name + "-bmc-creds"},
 			},
-			ImageRef:  &keziov1alpha2.NameRef{Name: imageName},
-			SubnetRef: keziov1alpha2.NameRef{Name: name + "-subnet"},
+			ImageRef:  &keziov1alpha3.NameRef{Name: imageName},
+			SubnetRef: keziov1alpha3.NameRef{Name: name + "-subnet"},
 		},
 	}
 }
@@ -79,12 +79,12 @@ func newTestMachine(name, imageName string) *keziov1alpha2.Machine {
 // - an active phase (see isDeployRunActive). spec.machineRef is required
 // by the schema but not meaningful to any caller, so it is a fixed
 // placeholder rather than a parameter.
-func newTestDeployRun(name, imageName string) *keziov1alpha2.DeployRun {
-	return &keziov1alpha2.DeployRun{
+func newTestDeployRun(name, imageName string) *keziov1alpha3.DeployRun {
+	return &keziov1alpha3.DeployRun{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-		Spec: keziov1alpha2.DeployRunSpec{
-			MachineRef: keziov1alpha2.NameRef{Name: "machine-a"},
-			ImageRef:   &keziov1alpha2.NameRef{Name: imageName},
+		Spec: keziov1alpha3.DeployRunSpec{
+			MachineRef: keziov1alpha3.NameRef{Name: "machine-a"},
+			ImageRef:   &keziov1alpha3.NameRef{Name: imageName},
 		},
 	}
 }
@@ -100,8 +100,8 @@ func newTestDeployRun(name, imageName string) *keziov1alpha2.DeployRun {
 func newIndexedReconciler(ctx context.Context, publish PartitionContentPublishConfig) (*PartitionContentReconciler, func()) {
 	c, err := cache.New(cfg, cache.Options{Scheme: k8sClient.Scheme()})
 	Expect(err).NotTo(HaveOccurred())
-	Expect(c.IndexField(ctx, &keziov1alpha2.Image{}, imageContentRefIndex, indexImageContentRefs)).To(Succeed())
-	Expect(c.IndexField(ctx, &keziov1alpha2.Machine{}, machineImageRefIndex, indexMachineImageRefs)).To(Succeed())
+	Expect(c.IndexField(ctx, &keziov1alpha3.Image{}, imageContentRefIndex, indexImageContentRefs)).To(Succeed())
+	Expect(c.IndexField(ctx, &keziov1alpha3.Machine{}, machineImageRefIndex, indexMachineImageRefs)).To(Succeed())
 
 	cacheCtx, cancel := context.WithCancel(ctx)
 	go func() { _ = c.Start(cacheCtx) }()
@@ -112,8 +112,8 @@ func newIndexedReconciler(ctx context.Context, publish PartitionContentPublishCo
 		Cache: &client.CacheOptions{
 			Reader: c,
 			DisableFor: []client.Object{
-				&keziov1alpha2.PartitionContent{},
-				&keziov1alpha2.DeployRun{},
+				&keziov1alpha3.PartitionContent{},
+				&keziov1alpha3.DeployRun{},
 				&corev1.PersistentVolumeClaim{},
 				&batchv1.Job{},
 				&appsv1.Deployment{},
@@ -159,11 +159,11 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.RequeueAfter).To(BeNumerically(">", 0))
 
-		var got keziov1alpha2.PartitionContent
+		var got keziov1alpha3.PartitionContent
 		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
-		Expect(got.Finalizers).To(ContainElement(keziov1alpha2.PartitionContentFinalizer))
+		Expect(got.Finalizers).To(ContainElement(keziov1alpha3.PartitionContentFinalizer))
 
-		cond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.PartitionContentConditionDeletionBlocked)
+		cond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha3.PartitionContentConditionDeletionBlocked)
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
 		Expect(cond.Message).To(ContainSubstring("image/" + img.Name))
@@ -195,10 +195,10 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		var got keziov1alpha2.PartitionContent
+		var got keziov1alpha3.PartitionContent
 		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
-		Expect(got.Finalizers).To(ContainElement(keziov1alpha2.PartitionContentFinalizer))
-		cond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.PartitionContentConditionDeletionBlocked)
+		Expect(got.Finalizers).To(ContainElement(keziov1alpha3.PartitionContentFinalizer))
+		cond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha3.PartitionContentConditionDeletionBlocked)
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Message).To(ContainSubstring("deployrun/" + run.Name))
 	})
@@ -225,7 +225,7 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		err = k8sClient.Get(ctx, nn, &keziov1alpha2.PartitionContent{})
+		err = k8sClient.Get(ctx, nn, &keziov1alpha3.PartitionContent{})
 		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "an unresolvable Image reference on an active run must not block deletion")
 	})
 
@@ -246,7 +246,7 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 
 		run := newTestDeployRun("run-terminal-1", img.Name)
 		Expect(k8sClient.Create(ctx, run)).To(Succeed())
-		run.Status.Phase = keziov1alpha2.DeployRunPhaseSucceeded
+		run.Status.Phase = keziov1alpha3.DeployRunPhaseSucceeded
 		Expect(k8sClient.Status().Update(ctx, run)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, run) })
 
@@ -256,9 +256,9 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		var got keziov1alpha2.PartitionContent
+		var got keziov1alpha3.PartitionContent
 		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
-		cond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.PartitionContentConditionDeletionBlocked)
+		cond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha3.PartitionContentConditionDeletionBlocked)
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Message).To(ContainSubstring("image/" + img.Name))
 		Expect(cond.Message).NotTo(ContainSubstring("deployrun/" + run.Name))
@@ -281,9 +281,9 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 		Expect(k8sClient.Delete(ctx, pc)).To(Succeed())
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
-		var stillBlocked keziov1alpha2.PartitionContent
+		var stillBlocked keziov1alpha3.PartitionContent
 		Expect(k8sClient.Get(ctx, nn, &stillBlocked)).To(Succeed())
-		Expect(stillBlocked.Finalizers).To(ContainElement(keziov1alpha2.PartitionContentFinalizer))
+		Expect(stillBlocked.Finalizers).To(ContainElement(keziov1alpha3.PartitionContentFinalizer))
 
 		Expect(k8sClient.Delete(ctx, img)).To(Succeed())
 
@@ -300,7 +300,7 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 			if err != nil {
 				return err
 			}
-			return k8sClient.Get(ctx, nn, &keziov1alpha2.PartitionContent{})
+			return k8sClient.Get(ctx, nn, &keziov1alpha3.PartitionContent{})
 		}).Should(MatchError(apierrors.IsNotFound, "IsNotFound"))
 	})
 
@@ -337,9 +337,9 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn}) // -> reflects seed demand
 		Expect(err).NotTo(HaveOccurred())
 
-		var readyGot keziov1alpha2.PartitionContent
+		var readyGot keziov1alpha3.PartitionContent
 		Expect(k8sClient.Get(ctx, nn, &readyGot)).To(Succeed())
-		degraded := meta.FindStatusCondition(readyGot.Status.Conditions, keziov1alpha2.PartitionContentConditionSeederDegraded)
+		degraded := meta.FindStatusCondition(readyGot.Status.Conditions, keziov1alpha3.PartitionContentConditionSeederDegraded)
 		Expect(degraded).NotTo(BeNil())
 		Expect(degraded.Status).To(Equal(metav1.ConditionTrue), "demand exists but ImageReconciler owns no seeder Deployment in this suite")
 
@@ -350,9 +350,9 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 		// onDelete returns before ever reaching onChange/reconcileSeeder:
 		// a blocked deletion must not itself change the seed-demand status
 		// reconcileSeeder would otherwise still be reflecting.
-		var got keziov1alpha2.PartitionContent
+		var got keziov1alpha3.PartitionContent
 		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
-		Expect(got.Finalizers).To(ContainElement(keziov1alpha2.PartitionContentFinalizer))
+		Expect(got.Finalizers).To(ContainElement(keziov1alpha3.PartitionContentFinalizer))
 	})
 
 	It("removes the finalizer and the content disappears promptly when nothing references it", func() {
@@ -370,22 +370,22 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		err = k8sClient.Get(ctx, nn, &keziov1alpha2.PartitionContent{})
+		err = k8sClient.Get(ctx, nn, &keziov1alpha3.PartitionContent{})
 		Expect(apierrors.IsNotFound(err)).To(BeTrue())
 	})
 })
 
 func TestMapImageToPartitionContentsDeduplicatesSlotsAndSkipsBlankOnes(t *testing.T) {
 	r := &PartitionContentReconciler{}
-	img := &keziov1alpha2.Image{
+	img := &keziov1alpha3.Image{
 		ObjectMeta: metav1.ObjectMeta{Name: "image-a", Namespace: "ns"},
-		Spec: keziov1alpha2.ImageSpec{
-			Layout: keziov1alpha2.ImageDiskLayout{
-				Slots: []keziov1alpha2.ImageSlot{
-					{Number: 1, Role: keziov1alpha2.PartitionRoleESP, FSType: "vfat"},
-					{Number: 2, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: "pc-a"}},
-					{Number: 3, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: "pc-a"}},
-					{Number: 4, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: "pc-b"}},
+		Spec: keziov1alpha3.ImageSpec{
+			Layout: keziov1alpha3.ImageDiskLayout{
+				Slots: []keziov1alpha3.ImageSlot{
+					{Number: 1, Role: keziov1alpha3.PartitionRoleESP, FSType: "vfat"},
+					{Number: 2, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: "pc-a"}},
+					{Number: 3, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: "pc-a"}},
+					{Number: 4, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: "pc-b"}},
 				},
 			},
 		},

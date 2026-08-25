@@ -19,7 +19,7 @@ package controller
 import (
 	"fmt"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/ingest"
 	"github.com/tjjh89017/kezio/internal/store"
 )
@@ -35,34 +35,34 @@ import (
 // PartitionContent is named for it. Every other partition gets a
 // contentRef and no fsType: restored content already carries its own file
 // system, and a slot may not declare both.
-func importLayout(imp *keziov1alpha2.ImageImport, disk *ingest.ResultDisk) (keziov1alpha2.ImageDiskLayout, error) {
+func importLayout(imp *keziov1alpha3.ImageImport, disk *ingest.ResultDisk) (keziov1alpha3.ImageDiskLayout, error) {
 	if disk.SfdiskJSON == "" {
-		return keziov1alpha2.ImageDiskLayout{}, fmt.Errorf("ingest result carries no partition table dump")
+		return keziov1alpha3.ImageDiskLayout{}, fmt.Errorf("ingest result carries no partition table dump")
 	}
 	if len(disk.Partitions) == 0 {
-		return keziov1alpha2.ImageDiskLayout{}, fmt.Errorf("ingest result carries no partitions")
+		return keziov1alpha3.ImageDiskLayout{}, fmt.Errorf("ingest result carries no partitions")
 	}
 
-	slots := make([]keziov1alpha2.ImageSlot, 0, len(disk.Partitions))
+	slots := make([]keziov1alpha3.ImageSlot, 0, len(disk.Partitions))
 	for _, part := range disk.Partitions {
-		slot := keziov1alpha2.ImageSlot{
+		slot := keziov1alpha3.ImageSlot{
 			Number:    part.Number,
 			Role:      part.Role,
 			TypeGUID:  part.TypeGUID,
 			PartUUID:  part.PartUUID,
 			SizeBytes: part.SizeBytes,
 		}
-		if part.Role == keziov1alpha2.PartitionRoleSwap {
+		if part.Role == keziov1alpha3.PartitionRoleSwap {
 			slot.UUID = part.UUID
 		} else {
-			slot.ContentRef = &keziov1alpha2.NameRef{
+			slot.ContentRef = &keziov1alpha3.NameRef{
 				Name: store.ContentName(imp.Spec.ContentPrefix, part.Number),
 			}
 		}
 		slots = append(slots, slot)
 	}
 
-	return keziov1alpha2.ImageDiskLayout{
+	return keziov1alpha3.ImageDiskLayout{
 		PartitionTable: disk.PartitionTable,
 		SfdiskJSON:     disk.SfdiskJSON,
 		Slots:          slots,

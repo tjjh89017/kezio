@@ -29,7 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/bootd"
 )
 
@@ -51,15 +51,15 @@ const (
 // segment's router is.
 const testGateway = "192.0.2.1"
 
-func testSubnet(namespace string, mutate ...func(*keziov1alpha2.Subnet)) *keziov1alpha2.Subnet {
-	subnet := &keziov1alpha2.Subnet{
+func testSubnet(namespace string, mutate ...func(*keziov1alpha3.Subnet)) *keziov1alpha3.Subnet {
+	subnet := &keziov1alpha3.Subnet{
 		ObjectMeta: metav1.ObjectMeta{Name: testSubnetName, Namespace: namespace},
-		Spec: keziov1alpha2.SubnetSpec{
-			SiteRef:         keziov1alpha2.NameRef{Name: "hq"},
+		Spec: keziov1alpha3.SubnetSpec{
+			SiteRef:         keziov1alpha3.NameRef{Name: "hq"},
 			CIDR:            "192.0.2.0/24",
 			BootdServerIP:   "192.0.2.2",
-			BootdNetworkRef: &keziov1alpha2.NameRef{Name: "boot-nad"},
-			DHCP:            &keziov1alpha2.SubnetDHCP{Mode: keziov1alpha2.SubnetDHCPModeProxy},
+			BootdNetworkRef: &keziov1alpha3.NameRef{Name: "boot-nad"},
+			DHCP:            &keziov1alpha3.SubnetDHCP{Mode: keziov1alpha3.SubnetDHCPModeProxy},
 		},
 	}
 	for _, m := range mutate {
@@ -249,10 +249,10 @@ func TestBuildBootdDeploymentEnv(t *testing.T) {
 	t.Run("lease mode carries all three gateway states", func(t *testing.T) {
 		cfg := BootdDeploymentConfig{Image: "bootd:test", BootArtifactsImage: "boot-artifacts:test"}
 
-		leaseSubnetWithGateway := func(gateway *string) *keziov1alpha2.Subnet {
-			return testSubnet("site-hq", func(s *keziov1alpha2.Subnet) {
-				s.Spec.DHCP = &keziov1alpha2.SubnetDHCP{
-					Mode:    keziov1alpha2.SubnetDHCPModeLease,
+		leaseSubnetWithGateway := func(gateway *string) *keziov1alpha3.Subnet {
+			return testSubnet("site-hq", func(s *keziov1alpha3.Subnet) {
+				s.Spec.DHCP = &keziov1alpha3.SubnetDHCP{
+					Mode:    keziov1alpha3.SubnetDHCPModeLease,
 					Gateway: gateway,
 				}
 			})
@@ -282,9 +282,9 @@ func TestBuildBootdDeploymentEnv(t *testing.T) {
 	})
 
 	t.Run("lease mode carries the range bounds", func(t *testing.T) {
-		leaseSubnet := testSubnet("site-hq", func(s *keziov1alpha2.Subnet) {
-			s.Spec.DHCP = &keziov1alpha2.SubnetDHCP{
-				Mode:            keziov1alpha2.SubnetDHCPModeLease,
+		leaseSubnet := testSubnet("site-hq", func(s *keziov1alpha3.Subnet) {
+			s.Spec.DHCP = &keziov1alpha3.SubnetDHCP{
+				Mode:            keziov1alpha3.SubnetDHCPModeLease,
 				LeaseRangeStart: testLeaseRangeStart,
 				LeaseRangeEnd:   testLeaseRangeEnd,
 			}
@@ -304,9 +304,9 @@ func TestBuildBootdDeploymentEnv(t *testing.T) {
 	})
 
 	t.Run("proxy mode omits range bounds even if the Subnet somehow carries them", func(t *testing.T) {
-		proxySubnet := testSubnet("site-hq", func(s *keziov1alpha2.Subnet) {
-			s.Spec.DHCP = &keziov1alpha2.SubnetDHCP{
-				Mode:            keziov1alpha2.SubnetDHCPModeProxy,
+		proxySubnet := testSubnet("site-hq", func(s *keziov1alpha3.Subnet) {
+			s.Spec.DHCP = &keziov1alpha3.SubnetDHCP{
+				Mode:            keziov1alpha3.SubnetDHCPModeProxy,
 				LeaseRangeStart: testLeaseRangeStart,
 				LeaseRangeEnd:   testLeaseRangeEnd,
 			}
@@ -330,9 +330,9 @@ func TestBuildBootdDeploymentEnv(t *testing.T) {
 // individual keys, so a silently omitted variable shows up as a missing
 // entry.
 func TestBuildBootdDeploymentEnvFullSet(t *testing.T) {
-	subnet := testSubnet("site-hq", func(s *keziov1alpha2.Subnet) {
-		s.Spec.DHCP = &keziov1alpha2.SubnetDHCP{
-			Mode:            keziov1alpha2.SubnetDHCPModeLease,
+	subnet := testSubnet("site-hq", func(s *keziov1alpha3.Subnet) {
+		s.Spec.DHCP = &keziov1alpha3.SubnetDHCP{
+			Mode:            keziov1alpha3.SubnetDHCPModeLease,
 			LeaseRangeStart: testLeaseRangeStart,
 			LeaseRangeEnd:   testLeaseRangeEnd,
 		}
@@ -367,8 +367,8 @@ func TestBuildBootdDeploymentEnvFullSet(t *testing.T) {
 // Multus networks annotation names subnet's own BootdNetworkRef,
 // qualified with the Subnet's namespace.
 func TestBuildBootdDeploymentNADAnnotation(t *testing.T) {
-	subnet := testSubnet("site-hq", func(s *keziov1alpha2.Subnet) {
-		s.Spec.BootdNetworkRef = &keziov1alpha2.NameRef{Name: "boot-nad"}
+	subnet := testSubnet("site-hq", func(s *keziov1alpha3.Subnet) {
+		s.Spec.BootdNetworkRef = &keziov1alpha3.NameRef{Name: "boot-nad"}
 	})
 	cfg := BootdDeploymentConfig{Image: "bootd:test", BootArtifactsImage: "boot-artifacts:test"}
 
@@ -424,7 +424,7 @@ func TestBuildBootdDeploymentNodeSelector(t *testing.T) {
 	cfg := BootdDeploymentConfig{Image: "bootd:test", BootArtifactsImage: "boot-artifacts:test"}
 
 	t.Run("propagates the Subnet's own NodeSelector", func(t *testing.T) {
-		subnet := testSubnet("site-hq", func(s *keziov1alpha2.Subnet) {
+		subnet := testSubnet("site-hq", func(s *keziov1alpha3.Subnet) {
 			s.Spec.NodeSelector = map[string]string{"segment": "rack-1-vlan"}
 		})
 		dep := buildBootdDeployment(subnet, cfg)
@@ -436,7 +436,7 @@ func TestBuildBootdDeploymentNodeSelector(t *testing.T) {
 	})
 
 	t.Run("empty NodeSelector leaves the pod unconstrained, not an empty map", func(t *testing.T) {
-		subnet := testSubnet("site-hq", func(s *keziov1alpha2.Subnet) {
+		subnet := testSubnet("site-hq", func(s *keziov1alpha3.Subnet) {
 			s.Spec.NodeSelector = map[string]string{}
 		})
 		dep := buildBootdDeployment(subnet, cfg)
@@ -672,7 +672,7 @@ func TestBuildBootdDeploymentLabelValues(t *testing.T) {
 	cfg := BootdDeploymentConfig{Image: "bootd:test", BootArtifactsImage: "boot-artifacts:test"}
 
 	rack1 := testSubnet("site-hq")
-	rack2 := testSubnet("site-hq", func(s *keziov1alpha2.Subnet) { s.Name = "rack-2" })
+	rack2 := testSubnet("site-hq", func(s *keziov1alpha3.Subnet) { s.Name = "rack-2" })
 
 	dep1 := buildBootdDeployment(rack1, cfg)
 	dep2 := buildBootdDeployment(rack2, cfg)

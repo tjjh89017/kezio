@@ -28,13 +28,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 func TestStatus_NoDeployRecorded(t *testing.T) {
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-1", Namespace: "default"},
-		Status:     keziov1alpha2.MachineStatus{State: keziov1alpha2.MachineStateAvailable},
+		Status:     keziov1alpha3.MachineStatus{State: keziov1alpha3.MachineStateAvailable},
 	}
 	c := fake.NewClientBuilder().WithScheme(Scheme).WithObjects(machine).Build()
 
@@ -46,22 +46,22 @@ func TestStatus_NoDeployRecorded(t *testing.T) {
 	if !strings.Contains(out.String(), "no deploy recorded") {
 		t.Errorf("output = %q, want it to report no deploy recorded", out.String())
 	}
-	if !strings.Contains(out.String(), keziov1alpha2.MachineStateAvailable) {
+	if !strings.Contains(out.String(), keziov1alpha3.MachineStateAvailable) {
 		t.Errorf("output = %q, want it to report the Machine's state", out.String())
 	}
 }
 
 func TestStatus_PrintsCurrentDeployRunOnce(t *testing.T) {
-	run := &keziov1alpha2.DeployRun{
+	run := &keziov1alpha3.DeployRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-1-abcde", Namespace: "default"},
-		Spec:       keziov1alpha2.DeployRunSpec{MachineRef: keziov1alpha2.NameRef{Name: "node-1"}},
-		Status:     keziov1alpha2.DeployRunStatus{Phase: keziov1alpha2.DeployRunPhaseWritingContent},
+		Spec:       keziov1alpha3.DeployRunSpec{MachineRef: keziov1alpha3.NameRef{Name: "node-1"}},
+		Status:     keziov1alpha3.DeployRunStatus{Phase: keziov1alpha3.DeployRunPhaseWritingContent},
 	}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-1", Namespace: "default"},
-		Status: keziov1alpha2.MachineStatus{
-			State:         keziov1alpha2.MachineStateProvisioning,
-			CurrentRunRef: &keziov1alpha2.NameRef{Name: "node-1-abcde"},
+		Status: keziov1alpha3.MachineStatus{
+			State:         keziov1alpha3.MachineStateProvisioning,
+			CurrentRunRef: &keziov1alpha3.NameRef{Name: "node-1-abcde"},
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(Scheme).WithObjects(machine, run).Build()
@@ -75,7 +75,7 @@ func TestStatus_PrintsCurrentDeployRunOnce(t *testing.T) {
 	if strings.Count(got, "\n") != 1 {
 		t.Fatalf("output = %q, want exactly one line without --watch", got)
 	}
-	if !strings.Contains(got, "node-1-abcde") || !strings.Contains(got, keziov1alpha2.DeployRunPhaseWritingContent) {
+	if !strings.Contains(got, "node-1-abcde") || !strings.Contains(got, keziov1alpha3.DeployRunPhaseWritingContent) {
 		t.Errorf("output = %q, want it to name the DeployRun and its phase", got)
 	}
 }
@@ -85,22 +85,22 @@ func TestStatus_PrintsCurrentDeployRunOnce(t *testing.T) {
 // run: the failed run is what an operator needs, so it must be reported
 // in place of the older successful one.
 func TestStatus_PrintsLastAttemptedDeployRun(t *testing.T) {
-	failedRun := &keziov1alpha2.DeployRun{
+	failedRun := &keziov1alpha3.DeployRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-1-failed", Namespace: "default"},
-		Spec:       keziov1alpha2.DeployRunSpec{MachineRef: keziov1alpha2.NameRef{Name: "node-1"}},
-		Status:     keziov1alpha2.DeployRunStatus{Phase: keziov1alpha2.DeployRunPhaseFailed},
+		Spec:       keziov1alpha3.DeployRunSpec{MachineRef: keziov1alpha3.NameRef{Name: "node-1"}},
+		Status:     keziov1alpha3.DeployRunStatus{Phase: keziov1alpha3.DeployRunPhaseFailed},
 	}
-	successfulRun := &keziov1alpha2.DeployRun{
+	successfulRun := &keziov1alpha3.DeployRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-1-older", Namespace: "default"},
-		Spec:       keziov1alpha2.DeployRunSpec{MachineRef: keziov1alpha2.NameRef{Name: "node-1"}},
-		Status:     keziov1alpha2.DeployRunStatus{Phase: keziov1alpha2.DeployRunPhaseSucceeded},
+		Spec:       keziov1alpha3.DeployRunSpec{MachineRef: keziov1alpha3.NameRef{Name: "node-1"}},
+		Status:     keziov1alpha3.DeployRunStatus{Phase: keziov1alpha3.DeployRunPhaseSucceeded},
 	}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-1", Namespace: "default"},
-		Status: keziov1alpha2.MachineStatus{
-			State:                keziov1alpha2.MachineStateEnrolling,
-			LastAttemptedRunRef:  &keziov1alpha2.NameRef{Name: "node-1-failed"},
-			LastSuccessfulRunRef: &keziov1alpha2.NameRef{Name: "node-1-older"},
+		Status: keziov1alpha3.MachineStatus{
+			State:                keziov1alpha3.MachineStateEnrolling,
+			LastAttemptedRunRef:  &keziov1alpha3.NameRef{Name: "node-1-failed"},
+			LastSuccessfulRunRef: &keziov1alpha3.NameRef{Name: "node-1-older"},
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(Scheme).WithObjects(machine, failedRun, successfulRun).Build()
@@ -146,16 +146,16 @@ func TestStatus_RequiresOut(t *testing.T) {
 // one line per distinct phase (never a duplicate of the immediately
 // preceding line).
 func TestStatus_WatchReachesTerminalState(t *testing.T) {
-	run := &keziov1alpha2.DeployRun{
+	run := &keziov1alpha3.DeployRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-1-abcde", Namespace: "default"},
-		Spec:       keziov1alpha2.DeployRunSpec{MachineRef: keziov1alpha2.NameRef{Name: "node-1"}},
-		Status:     keziov1alpha2.DeployRunStatus{Phase: keziov1alpha2.DeployRunPhaseWritingContent},
+		Spec:       keziov1alpha3.DeployRunSpec{MachineRef: keziov1alpha3.NameRef{Name: "node-1"}},
+		Status:     keziov1alpha3.DeployRunStatus{Phase: keziov1alpha3.DeployRunPhaseWritingContent},
 	}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-1", Namespace: "default"},
-		Status: keziov1alpha2.MachineStatus{
-			State:         keziov1alpha2.MachineStateProvisioning,
-			CurrentRunRef: &keziov1alpha2.NameRef{Name: "node-1-abcde"},
+		Status: keziov1alpha3.MachineStatus{
+			State:         keziov1alpha3.MachineStateProvisioning,
+			CurrentRunRef: &keziov1alpha3.NameRef{Name: "node-1-abcde"},
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(Scheme).WithObjects(machine, run).Build()
@@ -164,9 +164,9 @@ func TestStatus_WatchReachesTerminalState(t *testing.T) {
 	go func() {
 		time.Sleep(5 * time.Millisecond)
 		advance.Do(func() {
-			latest := &keziov1alpha2.DeployRun{}
+			latest := &keziov1alpha3.DeployRun{}
 			_ = c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "node-1-abcde"}, latest)
-			latest.Status.Phase = keziov1alpha2.DeployRunPhaseSucceeded
+			latest.Status.Phase = keziov1alpha3.DeployRunPhaseSucceeded
 			_ = c.Update(context.Background(), latest)
 		})
 	}()
@@ -187,10 +187,10 @@ func TestStatus_WatchReachesTerminalState(t *testing.T) {
 	}
 
 	got := out.String()
-	if !strings.Contains(got, keziov1alpha2.DeployRunPhaseWritingContent) {
+	if !strings.Contains(got, keziov1alpha3.DeployRunPhaseWritingContent) {
 		t.Errorf("output = %q, want it to have reported the initial phase", got)
 	}
-	if !strings.Contains(got, keziov1alpha2.DeployRunPhaseSucceeded) {
+	if !strings.Contains(got, keziov1alpha3.DeployRunPhaseSucceeded) {
 		t.Errorf("output = %q, want it to have reported the terminal phase", got)
 	}
 	lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
@@ -202,16 +202,16 @@ func TestStatus_WatchReachesTerminalState(t *testing.T) {
 }
 
 func TestStatus_WatchCanceledByContext(t *testing.T) {
-	run := &keziov1alpha2.DeployRun{
+	run := &keziov1alpha3.DeployRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-1-abcde", Namespace: "default"},
-		Spec:       keziov1alpha2.DeployRunSpec{MachineRef: keziov1alpha2.NameRef{Name: "node-1"}},
-		Status:     keziov1alpha2.DeployRunStatus{Phase: keziov1alpha2.DeployRunPhaseWritingContent},
+		Spec:       keziov1alpha3.DeployRunSpec{MachineRef: keziov1alpha3.NameRef{Name: "node-1"}},
+		Status:     keziov1alpha3.DeployRunStatus{Phase: keziov1alpha3.DeployRunPhaseWritingContent},
 	}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-1", Namespace: "default"},
-		Status: keziov1alpha2.MachineStatus{
-			State:         keziov1alpha2.MachineStateProvisioning,
-			CurrentRunRef: &keziov1alpha2.NameRef{Name: "node-1-abcde"},
+		Status: keziov1alpha3.MachineStatus{
+			State:         keziov1alpha3.MachineStateProvisioning,
+			CurrentRunRef: &keziov1alpha3.NameRef{Name: "node-1-abcde"},
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(Scheme).WithObjects(machine, run).Build()

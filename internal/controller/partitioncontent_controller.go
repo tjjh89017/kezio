@@ -35,7 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/store"
 )
 
@@ -95,7 +95,7 @@ type PartitionContentReconciler struct {
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *PartitionContentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var pc keziov1alpha2.PartitionContent
+	var pc keziov1alpha3.PartitionContent
 	if err := r.Get(ctx, req.NamespacedName, &pc); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -108,8 +108,8 @@ func (r *PartitionContentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return r.onDelete(ctx, &pc)
 	}
 
-	if !controllerutil.ContainsFinalizer(&pc, keziov1alpha2.PartitionContentFinalizer) {
-		controllerutil.AddFinalizer(&pc, keziov1alpha2.PartitionContentFinalizer)
+	if !controllerutil.ContainsFinalizer(&pc, keziov1alpha3.PartitionContentFinalizer) {
+		controllerutil.AddFinalizer(&pc, keziov1alpha3.PartitionContentFinalizer)
 		if err := r.Update(ctx, &pc); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -125,14 +125,14 @@ func (r *PartitionContentReconciler) Reconcile(ctx context.Context, req ctrl.Req
 // the seeder lifecycle relies on: reaching Ready never re-triggers a
 // second publish Job for the same content. Once Ready, reconcileSeeder
 // takes over instead.
-func (r *PartitionContentReconciler) onChange(ctx context.Context, pc *keziov1alpha2.PartitionContent) (ctrl.Result, error) {
+func (r *PartitionContentReconciler) onChange(ctx context.Context, pc *keziov1alpha3.PartitionContent) (ctrl.Result, error) {
 	pvc, err := r.ensureContentPVC(ctx, pc)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	setPartitionContentValidCondition(pc)
 
-	if pc.Status.State == keziov1alpha2.PartitionContentStateReady {
+	if pc.Status.State == keziov1alpha3.PartitionContentStateReady {
 		return r.reconcileSeeder(ctx, pc)
 	}
 
@@ -172,7 +172,7 @@ func (r *PartitionContentReconciler) onChange(ctx context.Context, pc *keziov1al
 // A Job that succeeded but reported no hash is a failure: without it,
 // nothing downstream can address this content's swarm.
 func (r *PartitionContentReconciler) completePublish(
-	ctx context.Context, pc *keziov1alpha2.PartitionContent, pvc *corev1.PersistentVolumeClaim, job *batchv1.Job,
+	ctx context.Context, pc *keziov1alpha3.PartitionContent, pvc *corev1.PersistentVolumeClaim, job *batchv1.Job,
 ) (ctrl.Result, error) {
 	result, err := readJobResult(ctx, r.Client, pc.Namespace, job)
 	if err != nil {
@@ -197,9 +197,9 @@ func (r *PartitionContentReconciler) completePublish(
 // this object, once the manager is configured and restarted (Publish is
 // read once from the environment at startup - see
 // PartitionContentPublishConfig).
-func (r *PartitionContentReconciler) recordPending(ctx context.Context, pc *keziov1alpha2.PartitionContent, pvc *corev1.PersistentVolumeClaim) (ctrl.Result, error) {
-	pc.Status.State = keziov1alpha2.PartitionContentStatePending
-	pc.Status.PVCRef = &keziov1alpha2.NameRef{Name: pvc.Name}
+func (r *PartitionContentReconciler) recordPending(ctx context.Context, pc *keziov1alpha3.PartitionContent, pvc *corev1.PersistentVolumeClaim) (ctrl.Result, error) {
+	pc.Status.State = keziov1alpha3.PartitionContentStatePending
+	pc.Status.PVCRef = &keziov1alpha3.NameRef{Name: pvc.Name}
 	setPartitionContentReadyCondition(pc, metav1.ConditionFalse,
 		"PublishConfigMissing", "no publish Job image is configured on the manager; content stays Pending until it is")
 	if err := r.applyPartitionContentStatus(ctx, pc); err != nil {
@@ -210,9 +210,9 @@ func (r *PartitionContentReconciler) recordPending(ctx context.Context, pc *kezi
 
 // recordPublishing records Publishing: the publish Job exists and has
 // not yet reported success or failure.
-func (r *PartitionContentReconciler) recordPublishing(ctx context.Context, pc *keziov1alpha2.PartitionContent, pvc *corev1.PersistentVolumeClaim) (ctrl.Result, error) {
-	pc.Status.State = keziov1alpha2.PartitionContentStatePublishing
-	pc.Status.PVCRef = &keziov1alpha2.NameRef{Name: pvc.Name}
+func (r *PartitionContentReconciler) recordPublishing(ctx context.Context, pc *keziov1alpha3.PartitionContent, pvc *corev1.PersistentVolumeClaim) (ctrl.Result, error) {
+	pc.Status.State = keziov1alpha3.PartitionContentStatePublishing
+	pc.Status.PVCRef = &keziov1alpha3.NameRef{Name: pvc.Name}
 	setPartitionContentReadyCondition(pc, metav1.ConditionFalse,
 		"Publishing", "publish job is running")
 	if err := r.applyPartitionContentStatus(ctx, pc); err != nil {
@@ -224,9 +224,9 @@ func (r *PartitionContentReconciler) recordPublishing(ctx context.Context, pc *k
 // recordReady records Ready: the publish Job succeeded, so the content
 // PVC holds a validated torrent.info a seeder at any Site can build a
 // .torrent from, and infoHash names the swarm that content forms.
-func (r *PartitionContentReconciler) recordReady(ctx context.Context, pc *keziov1alpha2.PartitionContent, pvc *corev1.PersistentVolumeClaim, infoHash string) (ctrl.Result, error) {
-	pc.Status.State = keziov1alpha2.PartitionContentStateReady
-	pc.Status.PVCRef = &keziov1alpha2.NameRef{Name: pvc.Name}
+func (r *PartitionContentReconciler) recordReady(ctx context.Context, pc *keziov1alpha3.PartitionContent, pvc *corev1.PersistentVolumeClaim, infoHash string) (ctrl.Result, error) {
+	pc.Status.State = keziov1alpha3.PartitionContentStateReady
+	pc.Status.PVCRef = &keziov1alpha3.NameRef{Name: pvc.Name}
 	pc.Status.InfoHash = infoHash
 	setPartitionContentReadyCondition(pc, metav1.ConditionTrue,
 		"PublishJobSucceeded", "publish job succeeded; torrent.info is present in the content PVC")
@@ -242,15 +242,15 @@ func (r *PartitionContentReconciler) recordReady(ctx context.Context, pc *keziov
 // recordFailed records Failed: the publish Job failed terminally. There
 // is no automatic retry in this item - an operator (or a later item)
 // deleting the failed Job and/or this object is what re-enters the walk.
-func (r *PartitionContentReconciler) recordFailed(ctx context.Context, pc *keziov1alpha2.PartitionContent, job *batchv1.Job) (ctrl.Result, error) {
+func (r *PartitionContentReconciler) recordFailed(ctx context.Context, pc *keziov1alpha3.PartitionContent, job *batchv1.Job) (ctrl.Result, error) {
 	return r.recordFailedMessage(ctx, pc, fmt.Sprintf("publish job %q failed", job.Name))
 }
 
 // recordFailedMessage records Failed with an explicit message: the
 // publish Job failed, or it succeeded but its result could not be
 // trusted.
-func (r *PartitionContentReconciler) recordFailedMessage(ctx context.Context, pc *keziov1alpha2.PartitionContent, message string) (ctrl.Result, error) {
-	pc.Status.State = keziov1alpha2.PartitionContentStateFailed
+func (r *PartitionContentReconciler) recordFailedMessage(ctx context.Context, pc *keziov1alpha3.PartitionContent, message string) (ctrl.Result, error) {
+	pc.Status.State = keziov1alpha3.PartitionContentStateFailed
 	setPartitionContentReadyCondition(pc, metav1.ConditionFalse,
 		"PublishJobFailed", message)
 	onSuccess := func() {
@@ -317,11 +317,11 @@ var machineDemandPredicate = predicate.Or(
 // and its removal must drop that demand too.
 var deployRunDemandPredicate = predicate.Funcs{
 	UpdateFunc: func(e event.UpdateEvent) bool {
-		oldRun, ok := e.ObjectOld.(*keziov1alpha2.DeployRun)
+		oldRun, ok := e.ObjectOld.(*keziov1alpha3.DeployRun)
 		if !ok {
 			return true
 		}
-		newRun, ok := e.ObjectNew.(*keziov1alpha2.DeployRun)
+		newRun, ok := e.ObjectNew.(*keziov1alpha3.DeployRun)
 		if !ok {
 			return true
 		}
@@ -338,12 +338,12 @@ func (r *PartitionContentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&keziov1alpha2.PartitionContent{}, builder.WithPredicates(partitionContentUpdatePredicate)).
+		For(&keziov1alpha3.PartitionContent{}, builder.WithPredicates(partitionContentUpdatePredicate)).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&batchv1.Job{}).
-		Watches(&keziov1alpha2.Image{}, handler.EnqueueRequestsFromMapFunc(r.mapImageToPartitionContents), builder.WithPredicates(imageCreateOrDeleteOnly)).
-		Watches(&keziov1alpha2.Machine{}, handler.EnqueueRequestsFromMapFunc(r.mapMachineToPartitionContents), builder.WithPredicates(machineDemandPredicate)).
-		Watches(&keziov1alpha2.DeployRun{}, handler.EnqueueRequestsFromMapFunc(r.mapDeployRunToPartitionContents), builder.WithPredicates(deployRunDemandPredicate)).
+		Watches(&keziov1alpha3.Image{}, handler.EnqueueRequestsFromMapFunc(r.mapImageToPartitionContents), builder.WithPredicates(imageCreateOrDeleteOnly)).
+		Watches(&keziov1alpha3.Machine{}, handler.EnqueueRequestsFromMapFunc(r.mapMachineToPartitionContents), builder.WithPredicates(machineDemandPredicate)).
+		Watches(&keziov1alpha3.DeployRun{}, handler.EnqueueRequestsFromMapFunc(r.mapDeployRunToPartitionContents), builder.WithPredicates(deployRunDemandPredicate)).
 		Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(r.mapSeederDeploymentToPartitionContents)).
 		Named("partitioncontent").
 		Complete(r)

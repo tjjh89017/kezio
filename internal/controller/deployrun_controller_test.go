@@ -30,15 +30,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 func TestRunsToGC(t *testing.T) {
 	ts := func(offsetSeconds int) metav1.Time {
 		return metav1.NewTime(time.Unix(1_700_000_000+int64(offsetSeconds), 0))
 	}
-	run := func(name string, offsetSeconds int) keziov1alpha2.DeployRun {
-		return keziov1alpha2.DeployRun{
+	run := func(name string, offsetSeconds int) keziov1alpha3.DeployRun {
+		return keziov1alpha3.DeployRun{
 			ObjectMeta: metav1.ObjectMeta{Name: name, CreationTimestamp: ts(offsetSeconds)},
 		}
 	}
@@ -50,21 +50,21 @@ func TestRunsToGC(t *testing.T) {
 
 	cases := []struct {
 		name    string
-		runs    []keziov1alpha2.DeployRun
-		machine keziov1alpha2.Machine
+		runs    []keziov1alpha3.DeployRun
+		machine keziov1alpha3.Machine
 		retain  int
 		now     time.Time // zero means defaultNow
 		want    []string  // names expected in the GC victim list
 	}{
 		{
 			name:   "fewer runs than retain: nothing is GC'd",
-			runs:   []keziov1alpha2.DeployRun{run("r1", 1), run("r2", 2)},
+			runs:   []keziov1alpha3.DeployRun{run("r1", 1), run("r2", 2)},
 			retain: 5,
 			want:   nil,
 		},
 		{
 			name: "keeps the newest N by creationTimestamp, deletes the rest",
-			runs: []keziov1alpha2.DeployRun{
+			runs: []keziov1alpha3.DeployRun{
 				run("r1", 1), run("r2", 2), run("r3", 3),
 				run("r4", 4), run("r5", 5), run("r6", 6), run("r7", 7),
 			},
@@ -73,7 +73,7 @@ func TestRunsToGC(t *testing.T) {
 		},
 		{
 			name: "ties on creationTimestamp break on name, descending",
-			runs: []keziov1alpha2.DeployRun{
+			runs: []keziov1alpha3.DeployRun{
 				run("a", 1), run("b", 1), run("c", 1),
 			},
 			retain: 1,
@@ -83,33 +83,33 @@ func TestRunsToGC(t *testing.T) {
 		},
 		{
 			name: "currentRunRef outside the newest N survives",
-			runs: []keziov1alpha2.DeployRun{
+			runs: []keziov1alpha3.DeployRun{
 				run("old", 1), run("r2", 2), run("r3", 3), run("r4", 4), run("r5", 5), run("r6", 6),
 			},
-			machine: keziov1alpha2.Machine{Status: keziov1alpha2.MachineStatus{
-				CurrentRunRef: &keziov1alpha2.NameRef{Name: "old"},
+			machine: keziov1alpha3.Machine{Status: keziov1alpha3.MachineStatus{
+				CurrentRunRef: &keziov1alpha3.NameRef{Name: "old"},
 			}},
 			retain: 5,
 			want:   nil,
 		},
 		{
 			name: "lastSuccessfulRunRef outside the newest N survives, unprotected older runs still go",
-			runs: []keziov1alpha2.DeployRun{
+			runs: []keziov1alpha3.DeployRun{
 				run("oldest", 1), run("old", 2), run("r3", 3), run("r4", 4), run("r5", 5), run("r6", 6), run("r7", 7),
 			},
-			machine: keziov1alpha2.Machine{Status: keziov1alpha2.MachineStatus{
-				LastSuccessfulRunRef: &keziov1alpha2.NameRef{Name: "old"},
+			machine: keziov1alpha3.Machine{Status: keziov1alpha3.MachineStatus{
+				LastSuccessfulRunRef: &keziov1alpha3.NameRef{Name: "old"},
 			}},
 			retain: 5,
 			want:   []string{"oldest"},
 		},
 		{
 			name: "lastAttemptedRunRef outside the newest N survives",
-			runs: []keziov1alpha2.DeployRun{
+			runs: []keziov1alpha3.DeployRun{
 				run("oldest", 1), run("old", 2), run("r3", 3), run("r4", 4), run("r5", 5), run("r6", 6), run("r7", 7),
 			},
-			machine: keziov1alpha2.Machine{Status: keziov1alpha2.MachineStatus{
-				LastAttemptedRunRef: &keziov1alpha2.NameRef{Name: "old"},
+			machine: keziov1alpha3.Machine{Status: keziov1alpha3.MachineStatus{
+				LastAttemptedRunRef: &keziov1alpha3.NameRef{Name: "old"},
 			}},
 			retain: 5,
 			want:   []string{"oldest"},
@@ -118,7 +118,7 @@ func TestRunsToGC(t *testing.T) {
 			// The window startProvisioningRun opens: the run exists and no
 			// Machine status names it yet. Age alone has to keep it.
 			name: "a run younger than the bound survives with no status naming it",
-			runs: []keziov1alpha2.DeployRun{
+			runs: []keziov1alpha3.DeployRun{
 				run("fresh", 999_600), run("r2", 999_601), run("r3", 999_602),
 				run("r4", 999_603), run("r5", 999_604), run("r6", 999_605),
 			},
@@ -128,7 +128,7 @@ func TestRunsToGC(t *testing.T) {
 		},
 		{
 			name: "a run older than the bound outside the window is still collected",
-			runs: []keziov1alpha2.DeployRun{
+			runs: []keziov1alpha3.DeployRun{
 				run("stale", 1_000), run("r2", 999_601), run("r3", 999_602),
 				run("r4", 999_603), run("r5", 999_604), run("r6", 999_605),
 			},
@@ -163,33 +163,33 @@ var _ = Describe("DeployRun Controller", func() {
 	Context("Retention GC", func() {
 		ctx := context.Background()
 
-		newMachine := func(name string) *keziov1alpha2.Machine {
-			m := &keziov1alpha2.Machine{
+		newMachine := func(name string) *keziov1alpha3.Machine {
+			m := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: fmt.Sprintf("aa:bb:cc:dd:%02x:%02x", GinkgoRandomSeed()%256, (GinkgoRandomSeed()/256)%256),
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, m)).To(Succeed())
 			return m
 		}
 
-		newRun := func(name string, machine *keziov1alpha2.Machine) *keziov1alpha2.DeployRun {
-			r := &keziov1alpha2.DeployRun{
+		newRun := func(name string, machine *keziov1alpha3.Machine) *keziov1alpha3.DeployRun {
+			r := &keziov1alpha3.DeployRun{
 				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-				Spec:       keziov1alpha2.DeployRunSpec{MachineRef: keziov1alpha2.NameRef{Name: machine.Name}},
+				Spec:       keziov1alpha3.DeployRunSpec{MachineRef: keziov1alpha3.NameRef{Name: machine.Name}},
 			}
 			Expect(k8sClient.Create(ctx, r)).To(Succeed())
 			return r
 		}
 
-		remainingNames := func(machine *keziov1alpha2.Machine) []string {
-			var list keziov1alpha2.DeployRunList
+		remainingNames := func(machine *keziov1alpha3.Machine) []string {
+			var list keziov1alpha3.DeployRunList
 			Expect(k8sClient.List(ctx, &list, client.InNamespace("default"))).To(Succeed())
 			var names []string
 			for _, r := range list.Items {
@@ -215,7 +215,7 @@ var _ = Describe("DeployRun Controller", func() {
 
 			otherRun := newRun(fmt.Sprintf("%s-only", machineB.Name), machineB)
 
-			var runs []*keziov1alpha2.DeployRun
+			var runs []*keziov1alpha3.DeployRun
 			for i := 0; i < 7; i++ {
 				runs = append(runs, newRun(fmt.Sprintf("%s-run-%d", machineA.Name, i), machineA))
 				// creationTimestamp has one-second resolution; space the
@@ -235,7 +235,7 @@ var _ = Describe("DeployRun Controller", func() {
 			))
 
 			By("leaving the other machine's DeployRun untouched")
-			var stillThere keziov1alpha2.DeployRun
+			var stillThere keziov1alpha3.DeployRun
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: otherRun.Name, Namespace: "default"}, &stillThere)).To(Succeed())
 		})
 
@@ -249,10 +249,10 @@ var _ = Describe("DeployRun Controller", func() {
 			time.Sleep(1100 * time.Millisecond)
 
 			patch := client.MergeFrom(machine.DeepCopy())
-			machine.Status.LastSuccessfulRunRef = &keziov1alpha2.NameRef{Name: protectedRun.Name}
+			machine.Status.LastSuccessfulRunRef = &keziov1alpha3.NameRef{Name: protectedRun.Name}
 			Expect(k8sClient.Status().Patch(ctx, machine, patch)).To(Succeed())
 
-			var newest *keziov1alpha2.DeployRun
+			var newest *keziov1alpha3.DeployRun
 			for i := 0; i < 5; i++ {
 				newest = newRun(fmt.Sprintf("%s-run-%d", machine.Name, i), machine)
 			}
@@ -276,7 +276,7 @@ var _ = Describe("DeployRun Controller", func() {
 			// Six runs against a retain of 5, and the Machine status names
 			// none of them - exactly the state startProvisioningRun is in
 			// between creating a run and recording it.
-			var runs []*keziov1alpha2.DeployRun
+			var runs []*keziov1alpha3.DeployRun
 			for i := 0; i < 6; i++ {
 				runs = append(runs, newRun(fmt.Sprintf("%s-run-%d", machine.Name, i), machine))
 			}
@@ -300,19 +300,19 @@ var _ = Describe("DeployRun Controller", func() {
 			Name:      resourceName,
 			Namespace: "default",
 		}
-		deployrun := &keziov1alpha2.DeployRun{}
+		deployrun := &keziov1alpha3.DeployRun{}
 
 		BeforeEach(func() {
 			By("creating the custom resource for the Kind DeployRun")
 			err := k8sClient.Get(ctx, typeNamespacedName, deployrun)
 			if err != nil && errors.IsNotFound(err) {
-				resource := &keziov1alpha2.DeployRun{
+				resource := &keziov1alpha3.DeployRun{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					Spec: keziov1alpha2.DeployRunSpec{
-						MachineRef: keziov1alpha2.NameRef{Name: "test-machine"},
+					Spec: keziov1alpha3.DeployRunSpec{
+						MachineRef: keziov1alpha3.NameRef{Name: "test-machine"},
 					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -320,7 +320,7 @@ var _ = Describe("DeployRun Controller", func() {
 		})
 
 		AfterEach(func() {
-			resource := &keziov1alpha2.DeployRun{}
+			resource := &keziov1alpha3.DeployRun{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
 

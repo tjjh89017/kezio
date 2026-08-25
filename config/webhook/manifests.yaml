@@ -10,14 +10,14 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
-      path: /validate-kezio-kojuro-date-v1alpha2-deployrun
+      path: /validate-kezio-kojuro-date-v1alpha3-deployrun
   failurePolicy: Fail
-  name: vdeployrun-v1alpha2.kb.io
+  name: vdeployrun-v1alpha3.kb.io
   rules:
   - apiGroups:
     - kezio.kojuro.date
     apiVersions:
-    - v1alpha2
+    - v1alpha3
     operations:
     - CREATE
     - UPDATE
@@ -30,14 +30,14 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
-      path: /validate-kezio-kojuro-date-v1alpha2-image
+      path: /validate-kezio-kojuro-date-v1alpha3-image
   failurePolicy: Fail
-  name: vimage-v1alpha2.kb.io
+  name: vimage-v1alpha3.kb.io
   rules:
   - apiGroups:
     - kezio.kojuro.date
     apiVersions:
-    - v1alpha2
+    - v1alpha3
     operations:
     - CREATE
     - UPDATE
@@ -50,14 +50,14 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
-      path: /validate-kezio-kojuro-date-v1alpha2-machine
+      path: /validate-kezio-kojuro-date-v1alpha3-machine
   failurePolicy: Fail
-  name: vmachine-v1alpha2.kb.io
+  name: vmachine-v1alpha3.kb.io
   rules:
   - apiGroups:
     - kezio.kojuro.date
     apiVersions:
-    - v1alpha2
+    - v1alpha3
     operations:
     - CREATE
     - UPDATE
@@ -70,14 +70,14 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
-      path: /validate-kezio-kojuro-date-v1alpha2-machinehardware
+      path: /validate-kezio-kojuro-date-v1alpha3-machinehardware
   failurePolicy: Fail
-  name: vmachinehardware-v1alpha2.kb.io
+  name: vmachinehardware-v1alpha3.kb.io
   rules:
   - apiGroups:
     - kezio.kojuro.date
     apiVersions:
-    - v1alpha2
+    - v1alpha3
     operations:
     - CREATE
     - UPDATE
@@ -90,14 +90,14 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
-      path: /validate-kezio-kojuro-date-v1alpha2-partitioncontent
+      path: /validate-kezio-kojuro-date-v1alpha3-partitioncontent
   failurePolicy: Fail
-  name: vpartitioncontent-v1alpha2.kb.io
+  name: vpartitioncontent-v1alpha3.kb.io
   rules:
   - apiGroups:
     - kezio.kojuro.date
     apiVersions:
-    - v1alpha2
+    - v1alpha3
     operations:
     - CREATE
     - UPDATE
@@ -110,14 +110,14 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
-      path: /validate-kezio-kojuro-date-v1alpha2-posthook
+      path: /validate-kezio-kojuro-date-v1alpha3-posthook
   failurePolicy: Fail
-  name: vposthook-v1alpha2.kb.io
+  name: vposthook-v1alpha3.kb.io
   rules:
   - apiGroups:
     - kezio.kojuro.date
     apiVersions:
-    - v1alpha2
+    - v1alpha3
     operations:
     - CREATE
     - UPDATE
@@ -130,14 +130,14 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
-      path: /validate-kezio-kojuro-date-v1alpha2-site
+      path: /validate-kezio-kojuro-date-v1alpha3-site
   failurePolicy: Fail
-  name: vsite-v1alpha2.kb.io
+  name: vsite-v1alpha3.kb.io
   rules:
   - apiGroups:
     - kezio.kojuro.date
     apiVersions:
-    - v1alpha2
+    - v1alpha3
     operations:
     - CREATE
     - UPDATE
@@ -150,14 +150,14 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
-      path: /validate-kezio-kojuro-date-v1alpha2-subnet
+      path: /validate-kezio-kojuro-date-v1alpha3-subnet
   failurePolicy: Fail
-  name: vsubnet-v1alpha2.kb.io
+  name: vsubnet-v1alpha3.kb.io
   rules:
   - apiGroups:
     - kezio.kojuro.date
     apiVersions:
-    - v1alpha2
+    - v1alpha3
     operations:
     - CREATE
     - UPDATE

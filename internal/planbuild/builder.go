@@ -37,7 +37,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 	"github.com/tjjh89017/kezio/internal/diskmatch"
 	"github.com/tjjh89017/kezio/internal/posthookdefaults"
@@ -80,8 +80,8 @@ type LeecherEzioConfig struct {
 // while Build assembles its DeploySlot list and, for the OS image only,
 // contributes to hook templating.
 type resolvedImage struct {
-	ref        keziov1alpha2.NameRef
-	image      *keziov1alpha2.Image
+	ref        keziov1alpha3.NameRef
+	image      *keziov1alpha3.Image
 	targetDisk string
 	slots      []agentapi.DeploySlot
 }
@@ -90,7 +90,7 @@ type resolvedImage struct {
 // into a DeployPlan for run, plus the Snapshot run's spec must record.
 // See the package doc comment for how Build's error types map to a
 // deployer Outcome.
-func (b *Builder) Build(ctx context.Context, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun) (*agentapi.DeployPlan, Snapshot, error) {
+func (b *Builder) Build(ctx context.Context, machine *keziov1alpha3.Machine, run *keziov1alpha3.DeployRun) (*agentapi.DeployPlan, Snapshot, error) {
 	if machine.Spec.ImageRef == nil && len(machine.Spec.DataImages) == 0 {
 		return nil, Snapshot{}, &ValidationError{Reason: "machine has neither an OS image nor data images to deploy"}
 	}
@@ -170,8 +170,8 @@ func (b *Builder) Build(ctx context.Context, machine *keziov1alpha2.Machine, run
 
 // getMachineHardware fetches the MachineHardware object inspection wrote
 // for machine, name-aligned with it in the same namespace.
-func (b *Builder) getMachineHardware(ctx context.Context, machine *keziov1alpha2.Machine) (*keziov1alpha2.MachineHardware, error) {
-	hw := &keziov1alpha2.MachineHardware{}
+func (b *Builder) getMachineHardware(ctx context.Context, machine *keziov1alpha3.Machine) (*keziov1alpha3.MachineHardware, error) {
+	hw := &keziov1alpha3.MachineHardware{}
 	key := client.ObjectKey{Namespace: machine.Namespace, Name: machine.Name}
 	if err := b.Client.Get(ctx, key, hw); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -186,17 +186,17 @@ func (b *Builder) getMachineHardware(ctx context.Context, machine *keziov1alpha2
 // against disks, and builds its DeploySlot list. site lazily resolves the
 // deploying Machine's own seeder placement, threaded through to every
 // content slot this Image builds.
-func (b *Builder) resolveImage(ctx context.Context, defaultNS string, ref keziov1alpha2.NameRef, hints *keziov1alpha2.TargetDiskHints, disks []keziov1alpha2.MachineHardwareDisk, label string, site *lazySiteResolution) (*resolvedImage, error) {
+func (b *Builder) resolveImage(ctx context.Context, defaultNS string, ref keziov1alpha3.NameRef, hints *keziov1alpha3.TargetDiskHints, disks []keziov1alpha3.MachineHardwareDisk, label string, site *lazySiteResolution) (*resolvedImage, error) {
 	ns := resolveNamespace(ref, defaultNS)
 
-	image := &keziov1alpha2.Image{}
+	image := &keziov1alpha3.Image{}
 	if err := b.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: ref.Name}, image); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, &NotReadyError{Reason: fmt.Sprintf("%s: image %s/%s not found", label, ns, ref.Name)}
 		}
 		return nil, fmt.Errorf("%s: get image %s/%s: %w", label, ns, ref.Name, err)
 	}
-	if image.Status.State != keziov1alpha2.ImageStateReady {
+	if image.Status.State != keziov1alpha3.ImageStateReady {
 		return nil, &NotReadyError{Reason: fmt.Sprintf("%s: image %s/%s is not Ready yet", label, ns, ref.Name)}
 	}
 
@@ -217,7 +217,7 @@ func (b *Builder) resolveImage(ctx context.Context, defaultNS string, ref keziov
 // diskmatch.CheckDistinct's identity check. deviceName always matches
 // exactly one entry in disks: it was itself read off one of them by
 // resolveImage just before this is called.
-func diskForSelection(disks []keziov1alpha2.MachineHardwareDisk, deviceName string) *keziov1alpha2.MachineHardwareDisk {
+func diskForSelection(disks []keziov1alpha3.MachineHardwareDisk, deviceName string) *keziov1alpha3.MachineHardwareDisk {
 	for i := range disks {
 		if disks[i].DeviceName == deviceName {
 			return &disks[i]
@@ -240,14 +240,14 @@ func diskForSelection(disks []keziov1alpha2.MachineHardwareDisk, deviceName stri
 // contract it completes at its after-deploy power state with no OS to
 // boot, so the shipped default hook's boot-entry builtins (mkswap,
 // efibootmgr) would have no OS ESP to act on.
-func (b *Builder) resolveMachineHooks(ctx context.Context, machine *keziov1alpha2.Machine, osImage *resolvedImage) ([]agentapi.ResolvedHook, error) {
+func (b *Builder) resolveMachineHooks(ctx context.Context, machine *keziov1alpha3.Machine, osImage *resolvedImage) ([]agentapi.ResolvedHook, error) {
 	shared, err := mergeParams(imageParamsOf(osImage), machine.Spec.Params)
 	if err != nil {
 		return nil, &ValidationError{Reason: fmt.Sprintf("merging posthook params: %v", err)}
 	}
 
 	var imageName, targetDisk, imageOSFamily, imageNS string
-	var imageRefs []keziov1alpha2.NameRef
+	var imageRefs []keziov1alpha3.NameRef
 	if osImage != nil {
 		imageName = osImage.image.Name
 		targetDisk = osImage.targetDisk
@@ -257,9 +257,9 @@ func (b *Builder) resolveMachineHooks(ctx context.Context, machine *keziov1alpha
 	}
 	// Set after merging so a declared param can never shadow a reserved
 	// name.
-	shared[keziov1alpha2.PostHookReservedParamMachineName] = machine.Name
-	shared[keziov1alpha2.PostHookReservedParamImageName] = imageName
-	shared[keziov1alpha2.PostHookReservedParamTargetDisk] = targetDisk
+	shared[keziov1alpha3.PostHookReservedParamMachineName] = machine.Name
+	shared[keziov1alpha3.PostHookReservedParamImageName] = imageName
+	shared[keziov1alpha3.PostHookReservedParamTargetDisk] = targetDisk
 
 	defaults := deriveBuiltinDefaults(osImage)
 
@@ -273,8 +273,8 @@ func (b *Builder) resolveMachineHooks(ctx context.Context, machine *keziov1alpha
 	case len(machine.Spec.PostHookRefs) > 0:
 		machineHooks, err = b.resolveHooks(ctx, machine.Namespace, machine.Spec.PostHookRefs, shared, defaults, imageOSFamily)
 	case len(imageRefs) == 0 && osImage != nil:
-		defaultRef := keziov1alpha2.NameRef{Name: posthookdefaults.DefaultFinalizeHookName}
-		machineHooks, err = b.resolveHooks(ctx, b.ManagerNamespace, []keziov1alpha2.NameRef{defaultRef}, shared, defaults, imageOSFamily)
+		defaultRef := keziov1alpha3.NameRef{Name: posthookdefaults.DefaultFinalizeHookName}
+		machineHooks, err = b.resolveHooks(ctx, b.ManagerNamespace, []keziov1alpha3.NameRef{defaultRef}, shared, defaults, imageOSFamily)
 	}
 	if err != nil {
 		return nil, err
@@ -304,7 +304,7 @@ func deriveBuiltinDefaults(osImage *resolvedImage) builtinDefaults {
 	d := builtinDefaults{disk: osImage.targetDisk}
 	slots := osImage.image.Spec.Layout.Slots
 	for _, s := range slots {
-		if s.Role == keziov1alpha2.PartitionRoleESP {
+		if s.Role == keziov1alpha3.PartitionRoleESP {
 			d.espPartition = s.Number
 			break
 		}
@@ -329,7 +329,7 @@ func imageParamsOf(osImage *resolvedImage) *apiextensionsv1.JSON {
 // machine.spec.ezio or that field itself is unset - the "only the fields
 // actually set override the layer above" contract seeder.ResolveMaxUploads
 // implements.
-func machineEzioMaxUploads(machine *keziov1alpha2.Machine) *int32 {
+func machineEzioMaxUploads(machine *keziov1alpha3.Machine) *int32 {
 	if machine.Spec.Ezio == nil {
 		return nil
 	}
@@ -338,7 +338,7 @@ func machineEzioMaxUploads(machine *keziov1alpha2.Machine) *int32 {
 
 // machineEzioMaxConnections is machineEzioMaxUploads's max_connections
 // counterpart.
-func machineEzioMaxConnections(machine *keziov1alpha2.Machine) *int32 {
+func machineEzioMaxConnections(machine *keziov1alpha3.Machine) *int32 {
 	if machine.Spec.Ezio == nil {
 		return nil
 	}
@@ -346,12 +346,12 @@ func machineEzioMaxConnections(machine *keziov1alpha2.Machine) *int32 {
 }
 
 // effectiveAfterDeploy returns machine's AfterDeploy, treating an unset
-// value as keziov1alpha2.AfterDeployReboot (the CRD schema's own
+// value as keziov1alpha3.AfterDeployReboot (the CRD schema's own
 // default, which a fake or unit-test client that skips defaulting webhooks
 // may not have applied).
-func effectiveAfterDeploy(machine *keziov1alpha2.Machine) string {
+func effectiveAfterDeploy(machine *keziov1alpha3.Machine) string {
 	if machine.Spec.AfterDeploy == "" {
-		return keziov1alpha2.AfterDeployReboot
+		return keziov1alpha3.AfterDeployReboot
 	}
 	return machine.Spec.AfterDeploy
 }
@@ -360,12 +360,12 @@ func effectiveAfterDeploy(machine *keziov1alpha2.Machine) string {
 // one DeployRunResolvedDisk per resolved image (OS first, then
 // dataImages, in order) and the hash of every resolved hook.
 func (b *Builder) buildSnapshot(osImage *resolvedImage, dataImages []*resolvedImage, hooks []agentapi.ResolvedHook) (Snapshot, error) {
-	disks := make([]keziov1alpha2.DeployRunResolvedDisk, 0, 1+len(dataImages))
+	disks := make([]keziov1alpha3.DeployRunResolvedDisk, 0, 1+len(dataImages))
 	if osImage != nil {
-		disks = append(disks, keziov1alpha2.DeployRunResolvedDisk{ImageRef: osImage.ref, TargetDisk: osImage.targetDisk})
+		disks = append(disks, keziov1alpha3.DeployRunResolvedDisk{ImageRef: osImage.ref, TargetDisk: osImage.targetDisk})
 	}
 	for _, di := range dataImages {
-		disks = append(disks, keziov1alpha2.DeployRunResolvedDisk{ImageRef: di.ref, TargetDisk: di.targetDisk})
+		disks = append(disks, keziov1alpha3.DeployRunResolvedDisk{ImageRef: di.ref, TargetDisk: di.targetDisk})
 	}
 
 	hash, err := hooksHash(hooks)

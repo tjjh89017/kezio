@@ -39,7 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/deployer"
 	"github.com/tjjh89017/kezio/internal/planbuild"
 )
@@ -71,18 +71,18 @@ func TestMachineControllerGoSourceDoesNotImportBMC(t *testing.T) {
 func TestRestartOnFailure(t *testing.T) {
 	cases := []struct {
 		name   string
-		status keziov1alpha2.MachineStatus
+		status keziov1alpha3.MachineStatus
 		want   bool
 	}{
-		{"zero value status", keziov1alpha2.MachineStatus{}, false},
-		{"OK with stale Restart errorType", keziov1alpha2.MachineStatus{OperationalStatus: keziov1alpha2.MachineOperationalStatusOK, ErrorType: keziov1alpha2.MachineErrorTypeRestart}, false},
-		{"error with Restart errorType", keziov1alpha2.MachineStatus{OperationalStatus: keziov1alpha2.MachineOperationalStatusError, ErrorType: keziov1alpha2.MachineErrorTypeRestart}, true},
-		{"error with Transient errorType", keziov1alpha2.MachineStatus{OperationalStatus: keziov1alpha2.MachineOperationalStatusError, ErrorType: keziov1alpha2.MachineErrorTypeTransient}, false},
-		{"error with unrecognized errorType", keziov1alpha2.MachineStatus{OperationalStatus: keziov1alpha2.MachineOperationalStatusError, ErrorType: keziov1alpha2.MachineErrorType("bogus")}, false},
+		{"zero value status", keziov1alpha3.MachineStatus{}, false},
+		{"OK with stale Restart errorType", keziov1alpha3.MachineStatus{OperationalStatus: keziov1alpha3.MachineOperationalStatusOK, ErrorType: keziov1alpha3.MachineErrorTypeRestart}, false},
+		{"error with Restart errorType", keziov1alpha3.MachineStatus{OperationalStatus: keziov1alpha3.MachineOperationalStatusError, ErrorType: keziov1alpha3.MachineErrorTypeRestart}, true},
+		{"error with Transient errorType", keziov1alpha3.MachineStatus{OperationalStatus: keziov1alpha3.MachineOperationalStatusError, ErrorType: keziov1alpha3.MachineErrorTypeTransient}, false},
+		{"error with unrecognized errorType", keziov1alpha3.MachineStatus{OperationalStatus: keziov1alpha3.MachineOperationalStatusError, ErrorType: keziov1alpha3.MachineErrorType("bogus")}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			machine := &keziov1alpha2.Machine{Status: tc.status}
+			machine := &keziov1alpha3.Machine{Status: tc.status}
 			if got := restartOnFailure(machine); got != tc.want {
 				t.Errorf("restartOnFailure() = %v, want %v", got, tc.want)
 			}
@@ -93,19 +93,19 @@ func TestRestartOnFailure(t *testing.T) {
 func TestHasUnknownErrorType(t *testing.T) {
 	cases := []struct {
 		name   string
-		status keziov1alpha2.MachineStatus
+		status keziov1alpha3.MachineStatus
 		want   bool
 	}{
-		{"zero value status", keziov1alpha2.MachineStatus{}, false},
-		{"OK with bogus errorType", keziov1alpha2.MachineStatus{OperationalStatus: keziov1alpha2.MachineOperationalStatusOK, ErrorType: keziov1alpha2.MachineErrorType("bogus")}, false},
-		{"error with empty errorType", keziov1alpha2.MachineStatus{OperationalStatus: keziov1alpha2.MachineOperationalStatusError}, false},
-		{"error with Transient errorType", keziov1alpha2.MachineStatus{OperationalStatus: keziov1alpha2.MachineOperationalStatusError, ErrorType: keziov1alpha2.MachineErrorTypeTransient}, false},
-		{"error with Restart errorType", keziov1alpha2.MachineStatus{OperationalStatus: keziov1alpha2.MachineOperationalStatusError, ErrorType: keziov1alpha2.MachineErrorTypeRestart}, false},
-		{"error with unrecognized errorType", keziov1alpha2.MachineStatus{OperationalStatus: keziov1alpha2.MachineOperationalStatusError, ErrorType: keziov1alpha2.MachineErrorType("bogus")}, true},
+		{"zero value status", keziov1alpha3.MachineStatus{}, false},
+		{"OK with bogus errorType", keziov1alpha3.MachineStatus{OperationalStatus: keziov1alpha3.MachineOperationalStatusOK, ErrorType: keziov1alpha3.MachineErrorType("bogus")}, false},
+		{"error with empty errorType", keziov1alpha3.MachineStatus{OperationalStatus: keziov1alpha3.MachineOperationalStatusError}, false},
+		{"error with Transient errorType", keziov1alpha3.MachineStatus{OperationalStatus: keziov1alpha3.MachineOperationalStatusError, ErrorType: keziov1alpha3.MachineErrorTypeTransient}, false},
+		{"error with Restart errorType", keziov1alpha3.MachineStatus{OperationalStatus: keziov1alpha3.MachineOperationalStatusError, ErrorType: keziov1alpha3.MachineErrorTypeRestart}, false},
+		{"error with unrecognized errorType", keziov1alpha3.MachineStatus{OperationalStatus: keziov1alpha3.MachineOperationalStatusError, ErrorType: keziov1alpha3.MachineErrorType("bogus")}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			machine := &keziov1alpha2.Machine{Status: tc.status}
+			machine := &keziov1alpha3.Machine{Status: tc.status}
 			if got := hasUnknownErrorType(machine); got != tc.want {
 				t.Errorf("hasUnknownErrorType() = %v, want %v", got, tc.want)
 			}
@@ -114,43 +114,43 @@ func TestHasUnknownErrorType(t *testing.T) {
 }
 
 func TestShouldProvision(t *testing.T) {
-	image1 := keziov1alpha2.NameRef{Name: "image-1"}
-	image2 := keziov1alpha2.NameRef{Name: "image-2"}
-	data1 := []keziov1alpha2.MachineDataImage{{ImageRef: keziov1alpha2.NameRef{Name: "data-1"}}}
-	data2 := []keziov1alpha2.MachineDataImage{
-		{ImageRef: keziov1alpha2.NameRef{Name: "data-1"}},
-		{ImageRef: keziov1alpha2.NameRef{Name: "data-2"}},
+	image1 := keziov1alpha3.NameRef{Name: "image-1"}
+	image2 := keziov1alpha3.NameRef{Name: "image-2"}
+	data1 := []keziov1alpha3.MachineDataImage{{ImageRef: keziov1alpha3.NameRef{Name: "data-1"}}}
+	data2 := []keziov1alpha3.MachineDataImage{
+		{ImageRef: keziov1alpha3.NameRef{Name: "data-1"}},
+		{ImageRef: keziov1alpha3.NameRef{Name: "data-2"}},
 	}
 
 	cases := []struct {
 		name      string
-		spec      keziov1alpha2.MachineSpec
-		lastRun   *keziov1alpha2.DeployRun
+		spec      keziov1alpha3.MachineSpec
+		lastRun   *keziov1alpha3.DeployRun
 		hooksHash string
 		want      bool
 	}{
 		{
 			name:    "empty payload, no last run, never triggers",
-			spec:    keziov1alpha2.MachineSpec{},
+			spec:    keziov1alpha3.MachineSpec{},
 			lastRun: nil,
 			want:    false,
 		},
 		{
 			name:    "non-empty payload, no last run, triggers once",
-			spec:    keziov1alpha2.MachineSpec{ImageRef: &image1},
+			spec:    keziov1alpha3.MachineSpec{ImageRef: &image1},
 			lastRun: nil,
 			want:    true,
 		},
 		{
 			name:    "dataImages-only payload, no last run, triggers",
-			spec:    keziov1alpha2.MachineSpec{DataImages: data1},
+			spec:    keziov1alpha3.MachineSpec{DataImages: data1},
 			lastRun: nil,
 			want:    true,
 		},
 		{
 			name: "identical subset does not trigger",
-			spec: keziov1alpha2.MachineSpec{ImageRef: &image1, DataImages: data1},
-			lastRun: &keziov1alpha2.DeployRun{Spec: keziov1alpha2.DeployRunSpec{
+			spec: keziov1alpha3.MachineSpec{ImageRef: &image1, DataImages: data1},
+			lastRun: &keziov1alpha3.DeployRun{Spec: keziov1alpha3.DeployRunSpec{
 				ImageRef:   &image1,
 				DataImages: data1,
 			}},
@@ -158,8 +158,8 @@ func TestShouldProvision(t *testing.T) {
 		},
 		{
 			name: "imageRef change triggers",
-			spec: keziov1alpha2.MachineSpec{ImageRef: &image2, DataImages: data1},
-			lastRun: &keziov1alpha2.DeployRun{Spec: keziov1alpha2.DeployRunSpec{
+			spec: keziov1alpha3.MachineSpec{ImageRef: &image2, DataImages: data1},
+			lastRun: &keziov1alpha3.DeployRun{Spec: keziov1alpha3.DeployRunSpec{
 				ImageRef:   &image1,
 				DataImages: data1,
 			}},
@@ -167,8 +167,8 @@ func TestShouldProvision(t *testing.T) {
 		},
 		{
 			name: "dataImages addition triggers",
-			spec: keziov1alpha2.MachineSpec{ImageRef: &image1, DataImages: data2},
-			lastRun: &keziov1alpha2.DeployRun{Spec: keziov1alpha2.DeployRunSpec{
+			spec: keziov1alpha3.MachineSpec{ImageRef: &image1, DataImages: data2},
+			lastRun: &keziov1alpha3.DeployRun{Spec: keziov1alpha3.DeployRunSpec{
 				ImageRef:   &image1,
 				DataImages: data1,
 			}},
@@ -176,8 +176,8 @@ func TestShouldProvision(t *testing.T) {
 		},
 		{
 			name: "dataImages removal triggers",
-			spec: keziov1alpha2.MachineSpec{ImageRef: &image1, DataImages: data1},
-			lastRun: &keziov1alpha2.DeployRun{Spec: keziov1alpha2.DeployRunSpec{
+			spec: keziov1alpha3.MachineSpec{ImageRef: &image1, DataImages: data1},
+			lastRun: &keziov1alpha3.DeployRun{Spec: keziov1alpha3.DeployRunSpec{
 				ImageRef:   &image1,
 				DataImages: data2,
 			}},
@@ -185,11 +185,11 @@ func TestShouldProvision(t *testing.T) {
 		},
 		{
 			name: "resolvedDisks-only difference does not trigger",
-			spec: keziov1alpha2.MachineSpec{ImageRef: &image1, DataImages: data1},
-			lastRun: &keziov1alpha2.DeployRun{Spec: keziov1alpha2.DeployRunSpec{
+			spec: keziov1alpha3.MachineSpec{ImageRef: &image1, DataImages: data1},
+			lastRun: &keziov1alpha3.DeployRun{Spec: keziov1alpha3.DeployRunSpec{
 				ImageRef:   &image1,
 				DataImages: data1,
-				ResolvedDisks: []keziov1alpha2.DeployRunResolvedDisk{
+				ResolvedDisks: []keziov1alpha3.DeployRunResolvedDisk{
 					{ImageRef: image1, TargetDisk: "/dev/sda"},
 				},
 			}},
@@ -197,14 +197,14 @@ func TestShouldProvision(t *testing.T) {
 		},
 		{
 			name:    "empty payload never triggers even against a non-empty last run",
-			spec:    keziov1alpha2.MachineSpec{},
-			lastRun: &keziov1alpha2.DeployRun{Spec: keziov1alpha2.DeployRunSpec{ImageRef: &image1, DataImages: data1}},
+			spec:    keziov1alpha3.MachineSpec{},
+			lastRun: &keziov1alpha3.DeployRun{Spec: keziov1alpha3.DeployRunSpec{ImageRef: &image1, DataImages: data1}},
 			want:    false,
 		},
 		{
 			name: "hooksHash change alone triggers, imageRef/dataImages unchanged",
-			spec: keziov1alpha2.MachineSpec{ImageRef: &image1, DataImages: data1},
-			lastRun: &keziov1alpha2.DeployRun{Spec: keziov1alpha2.DeployRunSpec{
+			spec: keziov1alpha3.MachineSpec{ImageRef: &image1, DataImages: data1},
+			lastRun: &keziov1alpha3.DeployRun{Spec: keziov1alpha3.DeployRunSpec{
 				ImageRef:   &image1,
 				DataImages: data1,
 				HooksHash:  "old-hash",
@@ -214,8 +214,8 @@ func TestShouldProvision(t *testing.T) {
 		},
 		{
 			name: "identical hooksHash does not trigger",
-			spec: keziov1alpha2.MachineSpec{ImageRef: &image1, DataImages: data1},
-			lastRun: &keziov1alpha2.DeployRun{Spec: keziov1alpha2.DeployRunSpec{
+			spec: keziov1alpha3.MachineSpec{ImageRef: &image1, DataImages: data1},
+			lastRun: &keziov1alpha3.DeployRun{Spec: keziov1alpha3.DeployRunSpec{
 				ImageRef:   &image1,
 				DataImages: data1,
 				HooksHash:  "same-hash",
@@ -226,7 +226,7 @@ func TestShouldProvision(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			machine := &keziov1alpha2.Machine{Spec: tc.spec}
+			machine := &keziov1alpha3.Machine{Spec: tc.spec}
 			if got := shouldProvision(machine, tc.lastRun, tc.hooksHash); got != tc.want {
 				t.Errorf("shouldProvision() = %v, want %v", got, tc.want)
 			}
@@ -235,33 +235,33 @@ func TestShouldProvision(t *testing.T) {
 }
 
 func TestReInspectAcceptable(t *testing.T) {
-	image := keziov1alpha2.NameRef{Name: "test-image"}
-	emptyPayload := keziov1alpha2.MachineSpec{}
-	setPayload := keziov1alpha2.MachineSpec{ImageRef: &image}
+	image := keziov1alpha3.NameRef{Name: "test-image"}
+	emptyPayload := keziov1alpha3.MachineSpec{}
+	setPayload := keziov1alpha3.MachineSpec{ImageRef: &image}
 
 	states := []string{
 		"",
-		keziov1alpha2.MachineStateEnrolling,
-		keziov1alpha2.MachineStateInspecting,
-		keziov1alpha2.MachineStateAvailable,
-		keziov1alpha2.MachineStateProvisioning,
-		keziov1alpha2.MachineStateProvisioned,
+		keziov1alpha3.MachineStateEnrolling,
+		keziov1alpha3.MachineStateInspecting,
+		keziov1alpha3.MachineStateAvailable,
+		keziov1alpha3.MachineStateProvisioning,
+		keziov1alpha3.MachineStateProvisioned,
 	}
 
 	for _, state := range states {
 		for _, tc := range []struct {
 			payloadName string
-			spec        keziov1alpha2.MachineSpec
+			spec        keziov1alpha3.MachineSpec
 		}{
 			{"empty payload", emptyPayload},
 			{"set payload", setPayload},
 		} {
-			want := state == keziov1alpha2.MachineStateAvailable ||
-				(state == keziov1alpha2.MachineStateProvisioned && tc.payloadName == "empty payload")
+			want := state == keziov1alpha3.MachineStateAvailable ||
+				(state == keziov1alpha3.MachineStateProvisioned && tc.payloadName == "empty payload")
 			t.Run(fmt.Sprintf("state=%q/%s", state, tc.payloadName), func(t *testing.T) {
-				machine := &keziov1alpha2.Machine{
+				machine := &keziov1alpha3.Machine{
 					Spec:   tc.spec,
-					Status: keziov1alpha2.MachineStatus{State: state},
+					Status: keziov1alpha3.MachineStatus{State: state},
 				}
 				if got := reInspectAcceptable(machine); got != want {
 					t.Errorf("reInspectAcceptable() = %v, want %v", got, want)
@@ -277,14 +277,14 @@ func TestReInspectAcceptable(t *testing.T) {
 // without running ImageReconciler - this file only exercises
 // MachineReconciler, which never writes Image status.
 func ensureReadyTestImage(ctx context.Context, name string) {
-	img := newTestImageWithSlots(name, []keziov1alpha2.ImageSlot{})
+	img := newTestImageWithSlots(name, []keziov1alpha3.ImageSlot{})
 	if err := k8sClient.Create(ctx, img); err != nil {
 		Expect(errors.IsAlreadyExists(err)).To(BeTrue())
 	}
 	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, img)).To(Succeed())
-	img.Status.State = keziov1alpha2.ImageStateReady
+	img.Status.State = keziov1alpha3.ImageStateReady
 	meta.SetStatusCondition(&img.Status.Conditions, metav1.Condition{
-		Type:               keziov1alpha2.ImageConditionReady,
+		Type:               keziov1alpha3.ImageConditionReady,
 		Status:             metav1.ConditionTrue,
 		ObservedGeneration: img.Generation,
 		Reason:             "Ready",
@@ -337,24 +337,24 @@ var _ = Describe("Machine Controller", func() {
 			Name:      resourceName,
 			Namespace: "default",
 		}
-		machine := &keziov1alpha2.Machine{}
+		machine := &keziov1alpha3.Machine{}
 
 		BeforeEach(func() {
 			By("creating the custom resource for the Kind Machine")
 			err := k8sClient.Get(ctx, typeNamespacedName, machine)
 			if err != nil && errors.IsNotFound(err) {
-				resource := &keziov1alpha2.Machine{
+				resource := &keziov1alpha3.Machine{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					Spec: keziov1alpha2.MachineSpec{
-						BMC: keziov1alpha2.MachineBMC{
+					Spec: keziov1alpha3.MachineSpec{
+						BMC: keziov1alpha3.MachineBMC{
 							Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-							CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+							CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 						},
 						BootMACAddress: "aa:bb:cc:dd:ee:01",
-						SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+						SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -362,7 +362,7 @@ var _ = Describe("Machine Controller", func() {
 		})
 
 		AfterEach(func() {
-			resource := &keziov1alpha2.Machine{}
+			resource := &keziov1alpha3.Machine{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -395,9 +395,9 @@ var _ = Describe("Machine Controller", func() {
 				result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 				Expect(err).NotTo(HaveOccurred())
 				if result.RequeueAfter == 0 {
-					var m keziov1alpha2.Machine
+					var m keziov1alpha3.Machine
 					Expect(k8sClient.Get(ctx, name, &m)).To(Succeed())
-					if m.Status.State == keziov1alpha2.MachineStateProvisioned {
+					if m.Status.State == keziov1alpha3.MachineStateProvisioned {
 						return
 					}
 				}
@@ -406,19 +406,19 @@ var _ = Describe("Machine Controller", func() {
 
 		BeforeEach(func() {
 			machineName = fmt.Sprintf("walk-%d", GinkgoRandomSeed())
-			imageRef := keziov1alpha2.NameRef{Name: "test-image"}
-			resource := &keziov1alpha2.Machine{
+			imageRef := keziov1alpha3.NameRef{Name: "test-image"}
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      machineName,
 					Namespace: "default",
 				},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:02",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 					ImageRef:       &imageRef,
 				},
 			}
@@ -426,7 +426,7 @@ var _ = Describe("Machine Controller", func() {
 		})
 
 		AfterEach(func() {
-			resource := &keziov1alpha2.Machine{}
+			resource := &keziov1alpha3.Machine{}
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
 			if err := k8sClient.Get(ctx, name, resource); err == nil {
 				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
@@ -448,21 +448,21 @@ var _ = Describe("Machine Controller", func() {
 			By("walking the state machine to completion")
 			reconcileUntilStable(reconciler, name)
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioned))
-			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateProvisioned))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusOK))
 			Expect(machine.Status.LastSuccessfulRunRef).NotTo(BeNil())
 			Expect(machine.Status.CurrentRunRef).NotTo(BeNil())
 
-			var hw keziov1alpha2.MachineHardware
+			var hw keziov1alpha3.MachineHardware
 			Expect(k8sClient.Get(ctx, name, &hw)).To(Succeed())
 			Expect(hw.Spec.Disks).NotTo(BeEmpty())
 
-			var run keziov1alpha2.DeployRun
+			var run keziov1alpha3.DeployRun
 			runName := types.NamespacedName{Name: machine.Status.LastSuccessfulRunRef.Name, Namespace: "default"}
 			Expect(k8sClient.Get(ctx, runName, &run)).To(Succeed())
-			Expect(run.Status.Phase).To(Equal(keziov1alpha2.DeployRunPhaseSucceeded))
+			Expect(run.Status.Phase).To(Equal(keziov1alpha3.DeployRunPhaseSucceeded))
 			Expect(run.Status.PhaseTimings).NotTo(BeEmpty())
 			for _, timing := range run.Status.PhaseTimings {
 				Expect(timing.StartedAt).NotTo(BeZero())
@@ -471,35 +471,35 @@ var _ = Describe("Machine Controller", func() {
 			Expect(run.Spec.ImageRef.Name).To(Equal("test-image"))
 
 			By("changing spec.imageRef and confirming a second DeployRun is created")
-			newImageRef := keziov1alpha2.NameRef{Name: "other-image"}
+			newImageRef := keziov1alpha3.NameRef{Name: "other-image"}
 			machine.Spec.ImageRef = &newImageRef
 			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
 
 			reconcileUntilStable(reconciler, name)
 
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioned))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateProvisioned))
 			Expect(machine.Status.LastSuccessfulRunRef.Name).NotTo(Equal(run.Name))
 
-			var secondRun keziov1alpha2.DeployRun
+			var secondRun keziov1alpha3.DeployRun
 			secondRunName := types.NamespacedName{Name: machine.Status.LastSuccessfulRunRef.Name, Namespace: "default"}
 			Expect(k8sClient.Get(ctx, secondRunName, &secondRun)).To(Succeed())
 			Expect(secondRun.Spec.ImageRef.Name).To(Equal("other-image"))
 			By("adding a dataImages entry and confirming a third DeployRun is created")
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 			thirdRunPredecessor := machine.Status.LastSuccessfulRunRef.Name
-			machine.Spec.DataImages = []keziov1alpha2.MachineDataImage{
-				{ImageRef: keziov1alpha2.NameRef{Name: "data-image-1"}},
+			machine.Spec.DataImages = []keziov1alpha3.MachineDataImage{
+				{ImageRef: keziov1alpha3.NameRef{Name: "data-image-1"}},
 			}
 			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
 
 			reconcileUntilStable(reconciler, name)
 
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioned))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateProvisioned))
 			Expect(machine.Status.LastSuccessfulRunRef.Name).NotTo(Equal(thirdRunPredecessor))
 
-			var thirdRun keziov1alpha2.DeployRun
+			var thirdRun keziov1alpha3.DeployRun
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: machine.Status.LastSuccessfulRunRef.Name, Namespace: "default"}, &thirdRun)).To(Succeed())
 			Expect(thirdRun.Spec.DataImages).To(HaveLen(1))
 
@@ -511,10 +511,10 @@ var _ = Describe("Machine Controller", func() {
 			reconcileUntilStable(reconciler, name)
 
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioned))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateProvisioned))
 			Expect(machine.Status.LastSuccessfulRunRef.Name).NotTo(Equal(fourthRunPredecessor))
 
-			var fourthRun keziov1alpha2.DeployRun
+			var fourthRun keziov1alpha3.DeployRun
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: machine.Status.LastSuccessfulRunRef.Name, Namespace: "default"}, &fourthRun)).To(Succeed())
 			Expect(fourthRun.Spec.DataImages).To(BeEmpty())
 		})
@@ -529,9 +529,9 @@ var _ = Describe("Machine Controller", func() {
 				result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 				Expect(err).NotTo(HaveOccurred())
 				if result.RequeueAfter == 0 {
-					var m keziov1alpha2.Machine
+					var m keziov1alpha3.Machine
 					Expect(k8sClient.Get(ctx, name, &m)).To(Succeed())
-					if m.Status.State == keziov1alpha2.MachineStateProvisioned {
+					if m.Status.State == keziov1alpha3.MachineStateProvisioned {
 						return
 					}
 				}
@@ -540,19 +540,19 @@ var _ = Describe("Machine Controller", func() {
 
 		BeforeEach(func() {
 			machineName = fmt.Sprintf("trigger-%d", time.Now().UnixNano())
-			imageRef := keziov1alpha2.NameRef{Name: "test-image"}
-			resource := &keziov1alpha2.Machine{
+			imageRef := keziov1alpha3.NameRef{Name: "test-image"}
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      machineName,
 					Namespace: "default",
 				},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:0d",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 					ImageRef:       &imageRef,
 				},
 			}
@@ -560,7 +560,7 @@ var _ = Describe("Machine Controller", func() {
 		})
 
 		AfterEach(func() {
-			resource := &keziov1alpha2.Machine{}
+			resource := &keziov1alpha3.Machine{}
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
 			if err := k8sClient.Get(ctx, name, resource); err == nil {
 				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
@@ -579,7 +579,7 @@ var _ = Describe("Machine Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			reconcileUntilStable(reconciler, name)
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 			firstRunName := machine.Status.LastSuccessfulRunRef.Name
 
@@ -601,7 +601,7 @@ var _ = Describe("Machine Controller", func() {
 			Expect(result).To(Equal(reconcile.Result{}))
 
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioned))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateProvisioned))
 			Expect(machine.Status.LastSuccessfulRunRef.Name).To(Equal(firstRunName))
 			Expect(machine.Status.CurrentRunRef.Name).To(Equal(firstRunName))
 		})
@@ -618,19 +618,19 @@ var _ = Describe("Machine Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			reconcileUntilStable(reconciler, name)
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 			firstRunName := machine.Status.LastSuccessfulRunRef.Name
 
 			By("deleting the run the status still references")
-			staleRun := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: firstRunName, Namespace: "default"}}
+			staleRun := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: firstRunName, Namespace: "default"}}
 			Expect(k8sClient.Delete(ctx, staleRun)).To(Succeed())
 
 			By("reconciling: no error, and the machine redeploys exactly once")
 			reconcileUntilStable(reconciler, name)
 
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioned))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateProvisioned))
 			Expect(machine.Status.LastSuccessfulRunRef.Name).NotTo(Equal(firstRunName))
 			secondRunName := machine.Status.LastSuccessfulRunRef.Name
 
@@ -650,15 +650,15 @@ var _ = Describe("Machine Controller", func() {
 		It("sets operationalStatus=delayed without touching state, errorType, or errorCount, and requeues after the fixed interval", func() {
 			machineName := fmt.Sprintf("delayed-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:0a",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -677,10 +677,10 @@ var _ = Describe("Machine Controller", func() {
 			var calls int
 			delayingDeployer := &deployer.FakeDeployer{
 				Client: k8sClient,
-				InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+				InspectFunc: func(context.Context, *keziov1alpha3.Machine, bool) (deployer.Result, error) {
 					calls++
 					if calls == 1 {
-						return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeTransient, ErrorMessage: "boom"}, nil
+						return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha3.MachineErrorTypeTransient, ErrorMessage: "boom"}, nil
 					}
 					return deployer.Result{Outcome: deployer.Delayed}, nil
 				},
@@ -693,9 +693,9 @@ var _ = Describe("Machine Controller", func() {
 				Expect(err).NotTo(HaveOccurred())
 			}
 
-			var mid keziov1alpha2.Machine
+			var mid keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &mid)).To(Succeed())
-			Expect(mid.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusError))
+			Expect(mid.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusError))
 			Expect(mid.Status.ErrorCount).To(Equal(int32(1)))
 
 			By("reconciling the Delayed outcome")
@@ -703,26 +703,26 @@ var _ = Describe("Machine Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(Equal(delayedRequeueInterval))
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
-			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusDelayed))
-			Expect(machine.Status.ErrorType).To(Equal(keziov1alpha2.MachineErrorTypeTransient), "delayed must not clear a prior error's errorType")
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateInspecting))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusDelayed))
+			Expect(machine.Status.ErrorType).To(Equal(keziov1alpha3.MachineErrorTypeTransient), "delayed must not clear a prior error's errorType")
 			Expect(machine.Status.ErrorCount).To(Equal(int32(1)), "delayed must not increase errorCount")
 		})
 
 		It("clears delayed back to OK when a subsequent Continuing outcome arrives in the same state", func() {
 			machineName := fmt.Sprintf("delayed-clears-continuing-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:0b",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -733,7 +733,7 @@ var _ = Describe("Machine Controller", func() {
 			var calls int
 			scriptedDeployer := &deployer.FakeDeployer{
 				Client: k8sClient,
-				InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+				InspectFunc: func(context.Context, *keziov1alpha3.Machine, bool) (deployer.Result, error) {
 					calls++
 					switch calls {
 					case 1:
@@ -753,32 +753,32 @@ var _ = Describe("Machine Controller", func() {
 				Expect(err).NotTo(HaveOccurred())
 			}
 
-			var mid keziov1alpha2.Machine
+			var mid keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &mid)).To(Succeed())
-			Expect(mid.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusDelayed))
+			Expect(mid.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusDelayed))
 
 			By("reconciling the Continuing outcome that follows")
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 			Expect(err).NotTo(HaveOccurred())
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
-			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateInspecting))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusOK))
 		})
 
 		It("clears delayed back to OK and lets the walk proceed once the deployer succeeds", func() {
 			machineName := fmt.Sprintf("delayed-clears-success-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:0c",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -789,7 +789,7 @@ var _ = Describe("Machine Controller", func() {
 			var calls int
 			scriptedDeployer := &deployer.FakeDeployer{
 				Client: k8sClient,
-				InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+				InspectFunc: func(context.Context, *keziov1alpha3.Machine, bool) (deployer.Result, error) {
 					calls++
 					if calls == 1 {
 						return deployer.Result{Outcome: deployer.Delayed}, nil
@@ -805,19 +805,19 @@ var _ = Describe("Machine Controller", func() {
 				Expect(err).NotTo(HaveOccurred())
 			}
 
-			var mid keziov1alpha2.Machine
+			var mid keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &mid)).To(Succeed())
-			Expect(mid.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
-			Expect(mid.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusDelayed))
+			Expect(mid.Status.State).To(Equal(keziov1alpha3.MachineStateInspecting))
+			Expect(mid.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusDelayed))
 
 			By("reconciling the successful retry that exits Inspecting")
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 			Expect(err).NotTo(HaveOccurred())
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable))
-			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateAvailable))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusOK))
 			Expect(machine.Status.ErrorCount).To(Equal(int32(0)))
 		})
 	})
@@ -828,22 +828,22 @@ var _ = Describe("Machine Controller", func() {
 		It("still walks Enrolling to Provisioned, proving subnetRef/postHookRefs/dataImages are never resolved", func() {
 			machineName := fmt.Sprintf("unresolved-refs-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:04",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "no-such-subnet"},
-					PostHookRefs:   []keziov1alpha2.NameRef{{Name: "no-such-hook"}},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "no-such-subnet"},
+					PostHookRefs:   []keziov1alpha3.NameRef{{Name: "no-such-hook"}},
 					// DataImages, unlike ImageRef, is not gated on any
 					// referenced Image's readiness in this stage - it keeps
 					// the deploy payload non-empty (so shouldProvision fires)
 					// without exercising the new imageRef gate this test
 					// predates.
-					DataImages: []keziov1alpha2.MachineDataImage{{ImageRef: keziov1alpha2.NameRef{Name: "no-such-data-image"}}},
+					DataImages: []keziov1alpha3.MachineDataImage{{ImageRef: keziov1alpha3.NameRef{Name: "no-such-data-image"}}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -863,18 +863,18 @@ var _ = Describe("Machine Controller", func() {
 				result, rerr := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 				Expect(rerr).NotTo(HaveOccurred())
 				if result.RequeueAfter == 0 {
-					var m keziov1alpha2.Machine
+					var m keziov1alpha3.Machine
 					Expect(k8sClient.Get(ctx, name, &m)).To(Succeed())
-					if m.Status.State == keziov1alpha2.MachineStateProvisioned {
+					if m.Status.State == keziov1alpha3.MachineStateProvisioned {
 						break
 					}
 				}
 			}
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioned))
-			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateProvisioned))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusOK))
 		})
 	})
 
@@ -889,33 +889,33 @@ var _ = Describe("Machine Controller", func() {
 		newGatedMachine := func(machineName, imageName string) types.NamespacedName {
 			GinkgoHelper()
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: fmt.Sprintf("aa:bb:cc:dd:80:%02x", time.Now().UnixNano()%256),
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, resource)).To(Succeed()) })
 
 			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}}
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			for i := 0; i < 20; i++ {
 				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 				Expect(err).NotTo(HaveOccurred())
 				Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-				if machine.Status.State == keziov1alpha2.MachineStateAvailable {
+				if machine.Status.State == keziov1alpha3.MachineStateAvailable {
 					break
 				}
 			}
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateAvailable))
 
-			machine.Spec.ImageRef = &keziov1alpha2.NameRef{Name: imageName}
+			machine.Spec.ImageRef = &keziov1alpha3.NameRef{Name: imageName}
 			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
 			return name
 		}
@@ -935,12 +935,12 @@ var _ = Describe("Machine Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(Equal(delayedRequeueInterval))
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable), "the gate must never advance state on its own")
-			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusDelayed))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateAvailable), "the gate must never advance state on its own")
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusDelayed))
 			Expect(machine.Status.ErrorCount).To(Equal(int32(0)), "an unresolved image reference is a delay, not an error")
-			progressing := meta.FindStatusCondition(machine.Status.Conditions, keziov1alpha2.MachineConditionProgressing)
+			progressing := meta.FindStatusCondition(machine.Status.Conditions, keziov1alpha3.MachineConditionProgressing)
 			Expect(progressing).NotTo(BeNil())
 			Expect(progressing.Status).To(Equal(metav1.ConditionFalse))
 			Expect(progressing.Reason).To(Equal("ImageNotFound"))
@@ -948,7 +948,7 @@ var _ = Describe("Machine Controller", func() {
 
 		It("delays when the referenced Image exists but has no Ready condition yet", func() {
 			imageName := fmt.Sprintf("gate-notready-image-%d", GinkgoRandomSeed())
-			Expect(k8sClient.Create(ctx, newTestImageWithSlots(imageName, []keziov1alpha2.ImageSlot{}))).To(Succeed())
+			Expect(k8sClient.Create(ctx, newTestImageWithSlots(imageName, []keziov1alpha3.ImageSlot{}))).To(Succeed())
 
 			name := newGatedMachine(fmt.Sprintf("gate-notready-%d", GinkgoRandomSeed()), imageName)
 			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}}
@@ -957,18 +957,18 @@ var _ = Describe("Machine Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).NotTo(BeZero())
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusDelayed))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusDelayed))
 			Expect(machine.Status.ErrorCount).To(Equal(int32(0)))
 		})
 
 		It("delays when the referenced Image's Ready condition is stale (observedGeneration behind)", func() {
 			imageName := fmt.Sprintf("gate-stale-image-%d", GinkgoRandomSeed())
-			img := newTestImageWithSlots(imageName, []keziov1alpha2.ImageSlot{})
+			img := newTestImageWithSlots(imageName, []keziov1alpha3.ImageSlot{})
 			Expect(k8sClient.Create(ctx, img)).To(Succeed())
 			meta.SetStatusCondition(&img.Status.Conditions, metav1.Condition{
-				Type:               keziov1alpha2.ImageConditionReady,
+				Type:               keziov1alpha3.ImageConditionReady,
 				Status:             metav1.ConditionTrue,
 				ObservedGeneration: img.Generation - 1,
 				Reason:             "Stale",
@@ -982,11 +982,11 @@ var _ = Describe("Machine Controller", func() {
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 			Expect(err).NotTo(HaveOccurred())
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusDelayed))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusDelayed))
 			Expect(machine.Status.ErrorCount).To(Equal(int32(0)))
-			progressing := meta.FindStatusCondition(machine.Status.Conditions, keziov1alpha2.MachineConditionProgressing)
+			progressing := meta.FindStatusCondition(machine.Status.Conditions, keziov1alpha3.MachineConditionProgressing)
 			Expect(progressing).NotTo(BeNil())
 			Expect(progressing.Reason).To(Equal("ImageStatusStale"))
 		})
@@ -998,17 +998,17 @@ var _ = Describe("Machine Controller", func() {
 			name := newGatedMachine(fmt.Sprintf("gate-ready-%d", GinkgoRandomSeed()), imageName)
 			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}}
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			for i := 0; i < 20; i++ {
 				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 				Expect(err).NotTo(HaveOccurred())
 				Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-				if machine.Status.State == keziov1alpha2.MachineStateProvisioning || machine.Status.State == keziov1alpha2.MachineStateProvisioned {
+				if machine.Status.State == keziov1alpha3.MachineStateProvisioning || machine.Status.State == keziov1alpha3.MachineStateProvisioned {
 					break
 				}
 			}
-			Expect(machine.Status.State).To(BeElementOf(keziov1alpha2.MachineStateProvisioning, keziov1alpha2.MachineStateProvisioned))
-			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+			Expect(machine.Status.State).To(BeElementOf(keziov1alpha3.MachineStateProvisioning, keziov1alpha3.MachineStateProvisioned))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusOK))
 			Expect(machine.Status.CurrentRunRef).NotTo(BeNil())
 		})
 	})
@@ -1022,9 +1022,9 @@ var _ = Describe("Machine Controller", func() {
 				result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 				Expect(err).NotTo(HaveOccurred())
 				if result.RequeueAfter == 0 {
-					var m keziov1alpha2.Machine
+					var m keziov1alpha3.Machine
 					Expect(k8sClient.Get(ctx, name, &m)).To(Succeed())
-					if m.Status.State == keziov1alpha2.MachineStateProvisioned {
+					if m.Status.State == keziov1alpha3.MachineStateProvisioned {
 						return
 					}
 				}
@@ -1033,48 +1033,48 @@ var _ = Describe("Machine Controller", func() {
 
 		It("records ResolvedDisks and HooksHash on the created DeployRun, and a PostHook edit triggers a fresh run", func() {
 			imageName := fmt.Sprintf("builder-snapshot-image-%d", GinkgoRandomSeed())
-			img := newTestImageWithSlots(imageName, []keziov1alpha2.ImageSlot{
-				{Number: 1, Role: keziov1alpha2.PartitionRoleESP, FSType: "vfat"},
-				{Number: 2, Role: keziov1alpha2.PartitionRoleData, FSType: "ext4"},
+			img := newTestImageWithSlots(imageName, []keziov1alpha3.ImageSlot{
+				{Number: 1, Role: keziov1alpha3.PartitionRoleESP, FSType: "vfat"},
+				{Number: 2, Role: keziov1alpha3.PartitionRoleData, FSType: "ext4"},
 			})
 			Expect(k8sClient.Create(ctx, img)).To(Succeed())
-			img.Status.State = keziov1alpha2.ImageStateReady
+			img.Status.State = keziov1alpha3.ImageStateReady
 			meta.SetStatusCondition(&img.Status.Conditions, metav1.Condition{
-				Type: keziov1alpha2.ImageConditionReady, Status: metav1.ConditionTrue,
+				Type: keziov1alpha3.ImageConditionReady, Status: metav1.ConditionTrue,
 				ObservedGeneration: img.Generation, Reason: "Ready", Message: "test fixture",
 			})
 			Expect(k8sClient.Status().Update(ctx, img)).To(Succeed())
 
 			hookName := fmt.Sprintf("builder-snapshot-hook-%d", GinkgoRandomSeed())
-			hook := &keziov1alpha2.PostHook{
+			hook := &keziov1alpha3.PostHook{
 				ObjectMeta: metav1.ObjectMeta{Name: hookName, Namespace: "default"},
-				Spec: keziov1alpha2.PostHookSpec{
-					Steps: []keziov1alpha2.PostHookStep{{
-						OSFamily: keziov1alpha2.OSFamilyLinux,
-						Builtin:  &keziov1alpha2.PostHookBuiltinStep{Name: keziov1alpha2.BuiltinStepMkswap},
+				Spec: keziov1alpha3.PostHookSpec{
+					Steps: []keziov1alpha3.PostHookStep{{
+						OSFamily: keziov1alpha3.OSFamilyLinux,
+						Builtin:  &keziov1alpha3.PostHookBuiltinStep{Name: keziov1alpha3.BuiltinStepMkswap},
 					}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, hook)).To(Succeed())
 			meta.SetStatusCondition(&hook.Status.Conditions, metav1.Condition{
-				Type: keziov1alpha2.PostHookConditionValid, Status: metav1.ConditionTrue, Reason: "TestFixture", Message: "fixture",
+				Type: keziov1alpha3.PostHookConditionValid, Status: metav1.ConditionTrue, Reason: "TestFixture", Message: "fixture",
 			})
 			Expect(k8sClient.Status().Update(ctx, hook)).To(Succeed())
 
 			machineName := fmt.Sprintf("builder-snapshot-machine-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			imageRef := keziov1alpha2.NameRef{Name: imageName}
-			resource := &keziov1alpha2.Machine{
+			imageRef := keziov1alpha3.NameRef{Name: imageName}
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: fmt.Sprintf("aa:bb:cc:dd:90:%02x", GinkgoRandomSeed()%256),
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 					ImageRef:       &imageRef,
-					PostHookRefs:   []keziov1alpha2.NameRef{{Name: hookName}},
+					PostHookRefs:   []keziov1alpha3.NameRef{{Name: hookName}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -1091,37 +1091,37 @@ var _ = Describe("Machine Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			reconcileUntilStable(reconciler, name)
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioned))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateProvisioned))
 			firstRunName := machine.Status.LastSuccessfulRunRef.Name
 
-			var firstRun keziov1alpha2.DeployRun
+			var firstRun keziov1alpha3.DeployRun
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: firstRunName, Namespace: "default"}, &firstRun)).To(Succeed())
 			Expect(firstRun.Spec.ResolvedDisks).NotTo(BeEmpty())
 			Expect(firstRun.Spec.ResolvedDisks[0].TargetDisk).To(Equal("/dev/vda"))
 			Expect(firstRun.Spec.HooksHash).NotTo(BeEmpty())
 
 			By("editing the referenced PostHook: the hooksHash changes, triggering a fresh run with the same imageRef/dataImages")
-			var freshHook keziov1alpha2.PostHook
+			var freshHook keziov1alpha3.PostHook
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: hookName, Namespace: "default"}, &freshHook)).To(Succeed())
-			freshHook.Spec.Steps = append(freshHook.Spec.Steps, keziov1alpha2.PostHookStep{
-				OSFamily: keziov1alpha2.OSFamilyLinux,
-				Builtin:  &keziov1alpha2.PostHookBuiltinStep{Name: keziov1alpha2.BuiltinStepGrowLastPartition},
+			freshHook.Spec.Steps = append(freshHook.Spec.Steps, keziov1alpha3.PostHookStep{
+				OSFamily: keziov1alpha3.OSFamilyLinux,
+				Builtin:  &keziov1alpha3.PostHookBuiltinStep{Name: keziov1alpha3.BuiltinStepGrowLastPartition},
 			})
 			Expect(k8sClient.Update(ctx, &freshHook)).To(Succeed())
 			meta.SetStatusCondition(&freshHook.Status.Conditions, metav1.Condition{
-				Type: keziov1alpha2.PostHookConditionValid, Status: metav1.ConditionTrue, Reason: "TestFixture", Message: "fixture",
+				Type: keziov1alpha3.PostHookConditionValid, Status: metav1.ConditionTrue, Reason: "TestFixture", Message: "fixture",
 			})
 			Expect(k8sClient.Status().Update(ctx, &freshHook)).To(Succeed())
 
 			reconcileUntilStable(reconciler, name)
 
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioned))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateProvisioned))
 			Expect(machine.Status.LastSuccessfulRunRef.Name).NotTo(Equal(firstRunName), "a PostHook-only change must still trigger a fresh DeployRun")
 
-			var secondRun keziov1alpha2.DeployRun
+			var secondRun keziov1alpha3.DeployRun
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: machine.Status.LastSuccessfulRunRef.Name, Namespace: "default"}, &secondRun)).To(Succeed())
 			Expect(secondRun.Spec.HooksHash).NotTo(Equal(firstRun.Spec.HooksHash))
 			Expect(secondRun.Spec.ImageRef.Name).To(Equal(imageName))
@@ -1130,17 +1130,17 @@ var _ = Describe("Machine Controller", func() {
 		It("never reaches Provisioning when a dataImages entry names a nonexistent Image", func() {
 			machineName := fmt.Sprintf("builder-missing-dataimage-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: fmt.Sprintf("aa:bb:cc:dd:91:%02x", GinkgoRandomSeed()%256),
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
-					DataImages: []keziov1alpha2.MachineDataImage{
-						{ImageRef: keziov1alpha2.NameRef{Name: "no-such-data-image"}},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
+					DataImages: []keziov1alpha3.MachineDataImage{
+						{ImageRef: keziov1alpha3.NameRef{Name: "no-such-data-image"}},
 					},
 				},
 			}
@@ -1161,17 +1161,17 @@ var _ = Describe("Machine Controller", func() {
 			jitter = func(d time.Duration) time.Duration { return d }
 			DeferCleanup(func() { jitter = origJitter })
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			for i := 0; i < 20; i++ {
 				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 				Expect(err).NotTo(HaveOccurred())
 				Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-				if machine.Status.State == keziov1alpha2.MachineStateAvailable && machine.Status.OperationalStatus == keziov1alpha2.MachineOperationalStatusDelayed {
+				if machine.Status.State == keziov1alpha3.MachineStateAvailable && machine.Status.OperationalStatus == keziov1alpha3.MachineOperationalStatusDelayed {
 					break
 				}
 			}
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable), "an unresolvable dataImages entry must never advance state into Provisioning")
-			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusDelayed))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateAvailable), "an unresolvable dataImages entry must never advance state into Provisioning")
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusDelayed))
 			Expect(machine.Status.ErrorCount).To(Equal(int32(0)), "an unresolved dataImages reference is a delay, not an error")
 			Expect(machine.Status.CurrentRunRef).To(BeNil())
 		})
@@ -1183,15 +1183,15 @@ var _ = Describe("Machine Controller", func() {
 		It("records errorType/errorMessage/errorCount without changing state", func() {
 			machineName := fmt.Sprintf("fail-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:03",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -1201,8 +1201,8 @@ var _ = Describe("Machine Controller", func() {
 
 			failingDeployer := &deployer.FakeDeployer{
 				Client: k8sClient,
-				InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
-					return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeTransient, ErrorMessage: "boom"}, nil
+				InspectFunc: func(context.Context, *keziov1alpha3.Machine, bool) (deployer.Result, error) {
+					return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha3.MachineErrorTypeTransient, ErrorMessage: "boom"}, nil
 				},
 			}
 			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: failingDeployer}
@@ -1215,11 +1215,11 @@ var _ = Describe("Machine Controller", func() {
 			}
 			Expect(result.RequeueAfter).To(Equal(failedRequeueInterval))
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
-			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusError))
-			Expect(machine.Status.ErrorType).To(Equal(keziov1alpha2.MachineErrorTypeTransient))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateInspecting))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusError))
+			Expect(machine.Status.ErrorType).To(Equal(keziov1alpha3.MachineErrorTypeTransient))
 			Expect(machine.Status.ErrorMessage).To(Equal("boom"))
 			Expect(machine.Status.ErrorCount).To(Equal(int32(1)))
 		})
@@ -1227,15 +1227,15 @@ var _ = Describe("Machine Controller", func() {
 		It("passes restartOnFailure=true into the next Inspect call after a MachineErrorTypeRestart failure", func() {
 			machineName := fmt.Sprintf("restart-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:05",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -1246,10 +1246,10 @@ var _ = Describe("Machine Controller", func() {
 			var seenRestartOnFailure []bool
 			fakeDeployer := &deployer.FakeDeployer{
 				Client: k8sClient,
-				InspectFunc: func(_ context.Context, _ *keziov1alpha2.Machine, restartOnFailure bool) (deployer.Result, error) {
+				InspectFunc: func(_ context.Context, _ *keziov1alpha3.Machine, restartOnFailure bool) (deployer.Result, error) {
 					seenRestartOnFailure = append(seenRestartOnFailure, restartOnFailure)
 					if len(seenRestartOnFailure) == 1 {
-						return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeRestart, ErrorMessage: "boom"}, nil
+						return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha3.MachineErrorTypeRestart, ErrorMessage: "boom"}, nil
 					}
 					return deployer.Result{Outcome: deployer.Complete}, nil
 				},
@@ -1266,10 +1266,10 @@ var _ = Describe("Machine Controller", func() {
 			Expect(seenRestartOnFailure[0]).To(BeFalse(), "the first Inspect call has no prior error, so restartOnFailure must be false")
 			Expect(seenRestartOnFailure[1]).To(BeTrue(), "the retry after a MachineErrorTypeRestart failure must ask the deployer to restart")
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable))
-			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateAvailable))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusOK))
 		})
 
 		It("clears the error and passes restartOnFailure=false on the call after a Restart retry reports Continuing", func() {
@@ -1285,15 +1285,15 @@ var _ = Describe("Machine Controller", func() {
 			// proves that does not happen.
 			machineName := fmt.Sprintf("restart-continuing-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:08",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -1304,11 +1304,11 @@ var _ = Describe("Machine Controller", func() {
 			var seenRestartOnFailure []bool
 			fakeDeployer := &deployer.FakeDeployer{
 				Client: k8sClient,
-				InspectFunc: func(_ context.Context, _ *keziov1alpha2.Machine, restartOnFailure bool) (deployer.Result, error) {
+				InspectFunc: func(_ context.Context, _ *keziov1alpha3.Machine, restartOnFailure bool) (deployer.Result, error) {
 					seenRestartOnFailure = append(seenRestartOnFailure, restartOnFailure)
 					switch len(seenRestartOnFailure) {
 					case 1:
-						return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeRestart, ErrorMessage: "boom"}, nil
+						return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha3.MachineErrorTypeRestart, ErrorMessage: "boom"}, nil
 					case 2:
 						// The restart retry itself only re-arms; it has not
 						// registered yet.
@@ -1329,9 +1329,9 @@ var _ = Describe("Machine Controller", func() {
 			Expect(seenRestartOnFailure[0]).To(BeFalse())
 			Expect(seenRestartOnFailure[1]).To(BeTrue(), "the retry after a MachineErrorTypeRestart failure must ask the deployer to restart")
 
-			var afterRestartRetry keziov1alpha2.Machine
+			var afterRestartRetry keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &afterRestartRetry)).To(Succeed())
-			Expect(afterRestartRetry.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK),
+			Expect(afterRestartRetry.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusOK),
 				"the restart retry succeeded (Continuing, not Failed): operationalStatus must clear immediately so restartOnFailure does not stay true forever")
 			Expect(afterRestartRetry.Status.ErrorCount).To(Equal(int32(1)),
 				"errorCount is not a success/failure toggle - a restart is a discarded attempt at the same unfinished goal, not a success, so it stays as backoff/observability evidence")
@@ -1347,15 +1347,15 @@ var _ = Describe("Machine Controller", func() {
 		It("increases errorCount monotonically across N consecutive failures without ever changing state", func() {
 			machineName := fmt.Sprintf("monotonic-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:06",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -1366,9 +1366,9 @@ var _ = Describe("Machine Controller", func() {
 			var failCount int
 			failingDeployer := &deployer.FakeDeployer{
 				Client: k8sClient,
-				InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+				InspectFunc: func(context.Context, *keziov1alpha3.Machine, bool) (deployer.Result, error) {
 					failCount++
-					return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeTransient, ErrorMessage: "boom"}, nil
+					return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha3.MachineErrorTypeTransient, ErrorMessage: "boom"}, nil
 				},
 			}
 			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: failingDeployer}
@@ -1384,9 +1384,9 @@ var _ = Describe("Machine Controller", func() {
 				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 				Expect(err).NotTo(HaveOccurred())
 
-				var machine keziov1alpha2.Machine
+				var machine keziov1alpha3.Machine
 				Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-				Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
+				Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateInspecting))
 				Expect(machine.Status.ErrorCount).To(Equal(int32(failCount)), "errorCount must equal the number of consecutive failures seen so far")
 			}
 		})
@@ -1394,15 +1394,15 @@ var _ = Describe("Machine Controller", func() {
 		It("does not reset errorCount or operationalStatus on Continuing/Busy outcomes within the same state", func() {
 			machineName := fmt.Sprintf("no-reset-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:07",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -1414,15 +1414,15 @@ var _ = Describe("Machine Controller", func() {
 			// Failed outcomes: neither must touch errorCount/operationalStatus,
 			// since only a state transition may clear them.
 			outcomes := []deployer.Result{
-				{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeTransient, ErrorMessage: "first failure"},
+				{Outcome: deployer.Failed, ErrorType: keziov1alpha3.MachineErrorTypeTransient, ErrorMessage: "first failure"},
 				{Outcome: deployer.Continuing},
 				{Outcome: deployer.Busy, RequeueAfter: time.Millisecond},
-				{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeTransient, ErrorMessage: "second failure"},
+				{Outcome: deployer.Failed, ErrorType: keziov1alpha3.MachineErrorTypeTransient, ErrorMessage: "second failure"},
 			}
 			var idx int
 			scriptedDeployer := &deployer.FakeDeployer{
 				Client: k8sClient,
-				InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+				InspectFunc: func(context.Context, *keziov1alpha3.Machine, bool) (deployer.Result, error) {
 					result := outcomes[idx]
 					idx++
 					return result, nil
@@ -1436,10 +1436,10 @@ var _ = Describe("Machine Controller", func() {
 				Expect(err).NotTo(HaveOccurred())
 			}
 
-			var mid keziov1alpha2.Machine
+			var mid keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &mid)).To(Succeed())
-			Expect(mid.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
-			Expect(mid.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusError))
+			Expect(mid.Status.State).To(Equal(keziov1alpha3.MachineStateInspecting))
+			Expect(mid.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusError))
 			Expect(mid.Status.ErrorCount).To(Equal(int32(1)))
 
 			By("reconciling the remaining scripted outcomes: Continuing, Busy, then a second Failed")
@@ -1448,10 +1448,10 @@ var _ = Describe("Machine Controller", func() {
 				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 				Expect(err).NotTo(HaveOccurred())
 
-				var machine keziov1alpha2.Machine
+				var machine keziov1alpha3.Machine
 				Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-				Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
-				Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusError))
+				Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateInspecting))
+				Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusError))
 				Expect(machine.Status.ErrorCount).To(Equal(want))
 			}
 		})
@@ -1459,15 +1459,15 @@ var _ = Describe("Machine Controller", func() {
 		It("resets errorCount and operationalStatus to OK when the machine transitions out of the failed state", func() {
 			machineName := fmt.Sprintf("reset-on-exit-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:08",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -1478,10 +1478,10 @@ var _ = Describe("Machine Controller", func() {
 			var calls int
 			recoveringDeployer := &deployer.FakeDeployer{
 				Client: k8sClient,
-				InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+				InspectFunc: func(context.Context, *keziov1alpha3.Machine, bool) (deployer.Result, error) {
 					calls++
 					if calls == 1 {
-						return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeTransient, ErrorMessage: "boom"}, nil
+						return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha3.MachineErrorTypeTransient, ErrorMessage: "boom"}, nil
 					}
 					return deployer.Result{Outcome: deployer.Complete}, nil
 				},
@@ -1494,35 +1494,35 @@ var _ = Describe("Machine Controller", func() {
 				Expect(err).NotTo(HaveOccurred())
 			}
 
-			var mid keziov1alpha2.Machine
+			var mid keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &mid)).To(Succeed())
-			Expect(mid.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
-			Expect(mid.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusError))
+			Expect(mid.Status.State).To(Equal(keziov1alpha3.MachineStateInspecting))
+			Expect(mid.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusError))
 			Expect(mid.Status.ErrorCount).To(Equal(int32(1)))
 
 			By("reconciling the successful retry that exits Inspecting")
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 			Expect(err).NotTo(HaveOccurred())
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable))
-			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateAvailable))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusOK))
 			Expect(machine.Status.ErrorCount).To(Equal(int32(0)))
 		})
 
 		It("re-enrolls a machine carrying an unrecognized errorType and walks it back to a good state", func() {
 			machineName := fmt.Sprintf("corrupt-errortype-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:09",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -1533,10 +1533,10 @@ var _ = Describe("Machine Controller", func() {
 			var calls int
 			recoveringDeployer := &deployer.FakeDeployer{
 				Client: k8sClient,
-				InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+				InspectFunc: func(context.Context, *keziov1alpha3.Machine, bool) (deployer.Result, error) {
 					calls++
 					if calls == 1 {
-						return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorType("bogus"), ErrorMessage: "corrupt"}, nil
+						return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha3.MachineErrorType("bogus"), ErrorMessage: "corrupt"}, nil
 					}
 					return deployer.Result{Outcome: deployer.Complete}, nil
 				},
@@ -1549,21 +1549,21 @@ var _ = Describe("Machine Controller", func() {
 				Expect(err).NotTo(HaveOccurred())
 			}
 
-			var mid keziov1alpha2.Machine
+			var mid keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &mid)).To(Succeed())
-			Expect(mid.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
-			Expect(mid.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusError))
-			Expect(mid.Status.ErrorType).To(Equal(keziov1alpha2.MachineErrorType("bogus")))
+			Expect(mid.Status.State).To(Equal(keziov1alpha3.MachineStateInspecting))
+			Expect(mid.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusError))
+			Expect(mid.Status.ErrorType).To(Equal(keziov1alpha3.MachineErrorType("bogus")))
 			Expect(mid.Status.ErrorCount).To(Equal(int32(1)))
 
 			By("reconciling once more: the unrecognized errorType sends the machine back to Enrolling")
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 			Expect(err).NotTo(HaveOccurred())
 
-			var reenrolled keziov1alpha2.Machine
+			var reenrolled keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &reenrolled)).To(Succeed())
-			Expect(reenrolled.Status.State).To(Equal(keziov1alpha2.MachineStateEnrolling))
-			Expect(reenrolled.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+			Expect(reenrolled.Status.State).To(Equal(keziov1alpha3.MachineStateEnrolling))
+			Expect(reenrolled.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusOK))
 			Expect(reenrolled.Status.ErrorCount).To(Equal(int32(0)))
 
 			By("walking the rest of the way back to a good state")
@@ -1572,10 +1572,10 @@ var _ = Describe("Machine Controller", func() {
 				Expect(err).NotTo(HaveOccurred())
 			}
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable))
-			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateAvailable))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusOK))
 			Expect(machine.Status.ErrorCount).To(Equal(int32(0)))
 		})
 	})
@@ -1586,16 +1586,16 @@ var _ = Describe("Machine Controller", func() {
 		It("re-enrolls the machine and clears the dangling currentRunRef", func() {
 			machineName := fmt.Sprintf("unknown-errortype-provisioning-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			imageRef := keziov1alpha2.NameRef{Name: "test-image"}
-			resource := &keziov1alpha2.Machine{
+			imageRef := keziov1alpha3.NameRef{Name: "test-image"}
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:0f",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 					ImageRef:       &imageRef,
 				},
 			}
@@ -1608,36 +1608,36 @@ var _ = Describe("Machine Controller", func() {
 			// Never completes on its own: keeps the machine parked in
 			// Provisioning with a stable currentRunRef until the test scripts
 			// the unrecognized-errorType failure.
-			fakeDeployer.ProvisionFunc = func(context.Context, *keziov1alpha2.Machine, *keziov1alpha2.DeployRun, bool) (deployer.Result, error) {
+			fakeDeployer.ProvisionFunc = func(context.Context, *keziov1alpha3.Machine, *keziov1alpha3.DeployRun, bool) (deployer.Result, error) {
 				return deployer.Result{Outcome: deployer.Continuing}, nil
 			}
 			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: fakeDeployer}
 
 			By("walking to Provisioning with a currentRunRef set, and no further")
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			for i := 0; i < 50; i++ {
 				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 				Expect(err).NotTo(HaveOccurred())
 				Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-				if machine.Status.State == keziov1alpha2.MachineStateProvisioning && machine.Status.CurrentRunRef != nil {
+				if machine.Status.State == keziov1alpha3.MachineStateProvisioning && machine.Status.CurrentRunRef != nil {
 					break
 				}
 			}
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioning))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateProvisioning))
 			Expect(machine.Status.CurrentRunRef).NotTo(BeNil())
 			danglingRunName := machine.Status.CurrentRunRef.Name
 
 			By("the deployer reports an unrecognized errorType mid-run")
-			fakeDeployer.ProvisionFunc = func(context.Context, *keziov1alpha2.Machine, *keziov1alpha2.DeployRun, bool) (deployer.Result, error) {
-				return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorType("bogus"), ErrorMessage: "corrupt"}, nil
+			fakeDeployer.ProvisionFunc = func(context.Context, *keziov1alpha3.Machine, *keziov1alpha3.DeployRun, bool) (deployer.Result, error) {
+				return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha3.MachineErrorType("bogus"), ErrorMessage: "corrupt"}, nil
 			}
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioning))
-			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusError))
-			Expect(machine.Status.ErrorType).To(Equal(keziov1alpha2.MachineErrorType("bogus")))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateProvisioning))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusError))
+			Expect(machine.Status.ErrorType).To(Equal(keziov1alpha3.MachineErrorType("bogus")))
 			Expect(machine.Status.CurrentRunRef).NotTo(BeNil())
 			Expect(machine.Status.CurrentRunRef.Name).To(Equal(danglingRunName), "the run reference is still live until the fallback fires")
 
@@ -1645,10 +1645,10 @@ var _ = Describe("Machine Controller", func() {
 			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 			Expect(err).NotTo(HaveOccurred())
 
-			var reenrolled keziov1alpha2.Machine
+			var reenrolled keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &reenrolled)).To(Succeed())
-			Expect(reenrolled.Status.State).To(Equal(keziov1alpha2.MachineStateEnrolling))
-			Expect(reenrolled.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+			Expect(reenrolled.Status.State).To(Equal(keziov1alpha3.MachineStateEnrolling))
+			Expect(reenrolled.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusOK))
 			Expect(reenrolled.Status.ErrorCount).To(Equal(int32(0)))
 			Expect(reenrolled.Status.CurrentRunRef).To(BeNil(), "a dangling ref would leave the orphaned DeployRun mistaken for a live provisioning run")
 
@@ -1659,13 +1659,13 @@ var _ = Describe("Machine Controller", func() {
 				Expect(err).NotTo(HaveOccurred())
 				if result.RequeueAfter == 0 {
 					Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-					if machine.Status.State == keziov1alpha2.MachineStateProvisioned {
+					if machine.Status.State == keziov1alpha3.MachineStateProvisioned {
 						break
 					}
 				}
 			}
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioned))
-			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateProvisioned))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusOK))
 			Expect(machine.Status.CurrentRunRef).NotTo(BeNil())
 			Expect(machine.Status.CurrentRunRef.Name).NotTo(Equal(danglingRunName))
 		})
@@ -1677,16 +1677,16 @@ var _ = Describe("Machine Controller", func() {
 		It("records the failure without changing state, then recovers by creating a fresh run and completing", func() {
 			machineName := fmt.Sprintf("current-run-deleted-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			imageRef := keziov1alpha2.NameRef{Name: "test-image"}
-			resource := &keziov1alpha2.Machine{
+			imageRef := keziov1alpha3.NameRef{Name: "test-image"}
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:0e",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 					ImageRef:       &imageRef,
 				},
 			}
@@ -1699,27 +1699,27 @@ var _ = Describe("Machine Controller", func() {
 			// Never completes on its own: keeps the machine parked in
 			// Provisioning with a stable currentRunRef until the test
 			// deletes that run out from under it.
-			fakeDeployer.ProvisionFunc = func(context.Context, *keziov1alpha2.Machine, *keziov1alpha2.DeployRun, bool) (deployer.Result, error) {
+			fakeDeployer.ProvisionFunc = func(context.Context, *keziov1alpha3.Machine, *keziov1alpha3.DeployRun, bool) (deployer.Result, error) {
 				return deployer.Result{Outcome: deployer.Continuing}, nil
 			}
 			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: fakeDeployer}
 
 			By("walking to Provisioning with a currentRunRef set, and no further")
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			for i := 0; i < 50; i++ {
 				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 				Expect(err).NotTo(HaveOccurred())
 				Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-				if machine.Status.State == keziov1alpha2.MachineStateProvisioning && machine.Status.CurrentRunRef != nil {
+				if machine.Status.State == keziov1alpha3.MachineStateProvisioning && machine.Status.CurrentRunRef != nil {
 					break
 				}
 			}
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioning))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateProvisioning))
 			Expect(machine.Status.CurrentRunRef).NotTo(BeNil())
 			firstRunName := machine.Status.CurrentRunRef.Name
 
 			By("deleting the current run out from under the machine")
-			currentRun := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: firstRunName, Namespace: "default"}}
+			currentRun := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: firstRunName, Namespace: "default"}}
 			Expect(k8sClient.Delete(ctx, currentRun)).To(Succeed())
 
 			By("reconciling: the deletion is reported as a failure, state stays Provisioning")
@@ -1727,9 +1727,9 @@ var _ = Describe("Machine Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioning))
-			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusError))
-			Expect(machine.Status.ErrorType).To(Equal(keziov1alpha2.MachineErrorTypeRestart))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateProvisioning))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusError))
+			Expect(machine.Status.ErrorType).To(Equal(keziov1alpha3.MachineErrorTypeRestart))
 			Expect(machine.Status.CurrentRunRef).To(BeNil())
 
 			By("recovering: the next reconcile starts a fresh run and it completes normally")
@@ -1739,14 +1739,14 @@ var _ = Describe("Machine Controller", func() {
 				Expect(err).NotTo(HaveOccurred())
 				if result.RequeueAfter == 0 {
 					Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-					if machine.Status.State == keziov1alpha2.MachineStateProvisioned {
+					if machine.Status.State == keziov1alpha3.MachineStateProvisioned {
 						break
 					}
 				}
 			}
 
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioned))
-			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateProvisioned))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusOK))
 			Expect(machine.Status.CurrentRunRef).NotTo(BeNil())
 			Expect(machine.Status.CurrentRunRef.Name).NotTo(Equal(firstRunName))
 			Expect(machine.Status.LastSuccessfulRunRef).NotTo(BeNil())
@@ -1760,16 +1760,16 @@ var _ = Describe("Machine Controller", func() {
 		It("names the failed run in lastAttemptedRunRef, and updates both run references once a later run succeeds", func() {
 			machineName := fmt.Sprintf("last-attempted-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			imageRef := keziov1alpha2.NameRef{Name: "test-image"}
-			resource := &keziov1alpha2.Machine{
+			imageRef := keziov1alpha3.NameRef{Name: "test-image"}
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: fmt.Sprintf("aa:bb:cc:dd:93:%02x", GinkgoRandomSeed()%256),
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 					ImageRef:       &imageRef,
 				},
 			}
@@ -1780,11 +1780,11 @@ var _ = Describe("Machine Controller", func() {
 			parkProvision := false
 			passthrough := &deployer.FakeDeployer{Client: k8sClient}
 			fakeDeployer := &deployer.FakeDeployer{Client: k8sClient}
-			fakeDeployer.ProvisionFunc = func(c context.Context, m *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun, restarting bool) (deployer.Result, error) {
+			fakeDeployer.ProvisionFunc = func(c context.Context, m *keziov1alpha3.Machine, run *keziov1alpha3.DeployRun, restarting bool) (deployer.Result, error) {
 				switch {
 				case failNextProvision:
 					failNextProvision = false
-					return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeTransient, ErrorMessage: "boom"}, nil
+					return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha3.MachineErrorTypeTransient, ErrorMessage: "boom"}, nil
 				case parkProvision:
 					return deployer.Result{Outcome: deployer.Continuing}, nil
 				default:
@@ -1793,9 +1793,9 @@ var _ = Describe("Machine Controller", func() {
 			}
 			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: fakeDeployer}
 
-			reconcileUntil := func(description string, cond func(*keziov1alpha2.Machine) bool) *keziov1alpha2.Machine {
+			reconcileUntil := func(description string, cond func(*keziov1alpha3.Machine) bool) *keziov1alpha3.Machine {
 				GinkgoHelper()
-				machine := &keziov1alpha2.Machine{}
+				machine := &keziov1alpha3.Machine{}
 				for range 60 {
 					_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 					Expect(err).NotTo(HaveOccurred())
@@ -1809,9 +1809,9 @@ var _ = Describe("Machine Controller", func() {
 			}
 
 			By("failing the first provisioning attempt")
-			machine := reconcileUntil("a recorded provisioning failure", func(m *keziov1alpha2.Machine) bool {
-				return m.Status.State == keziov1alpha2.MachineStateProvisioning &&
-					m.Status.OperationalStatus == keziov1alpha2.MachineOperationalStatusError
+			machine := reconcileUntil("a recorded provisioning failure", func(m *keziov1alpha3.Machine) bool {
+				return m.Status.State == keziov1alpha3.MachineStateProvisioning &&
+					m.Status.OperationalStatus == keziov1alpha3.MachineOperationalStatusError
 			})
 			Expect(machine.Status.LastAttemptedRunRef).NotTo(BeNil(), "a failed attempt must leave a reference to the run that failed")
 			Expect(machine.Status.CurrentRunRef).NotTo(BeNil())
@@ -1820,8 +1820,8 @@ var _ = Describe("Machine Controller", func() {
 			firstRun := machine.Status.LastAttemptedRunRef.Name
 
 			By("retrying the same run to success")
-			machine = reconcileUntil("Provisioned", func(m *keziov1alpha2.Machine) bool {
-				return m.Status.State == keziov1alpha2.MachineStateProvisioned
+			machine = reconcileUntil("Provisioned", func(m *keziov1alpha3.Machine) bool {
+				return m.Status.State == keziov1alpha3.MachineStateProvisioned
 			})
 			Expect(machine.Status.LastSuccessfulRunRef).NotTo(BeNil())
 			Expect(machine.Status.LastSuccessfulRunRef.Name).To(Equal(firstRun))
@@ -1830,11 +1830,11 @@ var _ = Describe("Machine Controller", func() {
 			By("starting a second run and holding it in flight")
 			parkProvision = true
 			Expect(k8sClient.Get(ctx, name, machine)).To(Succeed())
-			newImageRef := keziov1alpha2.NameRef{Name: "other-image"}
+			newImageRef := keziov1alpha3.NameRef{Name: "other-image"}
 			machine.Spec.ImageRef = &newImageRef
 			Expect(k8sClient.Update(ctx, machine)).To(Succeed())
 
-			machine = reconcileUntil("a second run in flight", func(m *keziov1alpha2.Machine) bool {
+			machine = reconcileUntil("a second run in flight", func(m *keziov1alpha3.Machine) bool {
 				return m.Status.CurrentRunRef != nil && m.Status.CurrentRunRef.Name != firstRun
 			})
 			secondRun := machine.Status.CurrentRunRef.Name
@@ -1843,7 +1843,7 @@ var _ = Describe("Machine Controller", func() {
 
 			By("completing the second run")
 			parkProvision = false
-			machine = reconcileUntil("the second run recorded as successful", func(m *keziov1alpha2.Machine) bool {
+			machine = reconcileUntil("the second run recorded as successful", func(m *keziov1alpha3.Machine) bool {
 				return m.Status.LastSuccessfulRunRef != nil && m.Status.LastSuccessfulRunRef.Name == secondRun
 			})
 			Expect(machine.Status.LastAttemptedRunRef.Name).To(Equal(secondRun))
@@ -1890,15 +1890,15 @@ var _ = Describe("Machine Controller", func() {
 
 			machineName := fmt.Sprintf("creds-tried-good-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: secretName},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: secretName},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:10",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -1907,7 +1907,7 @@ var _ = Describe("Machine Controller", func() {
 			var calls int
 			trackingDeployer := &deployer.FakeDeployer{
 				Client: k8sClient,
-				InspectFunc: func(_ context.Context, m *keziov1alpha2.Machine, _ bool) (deployer.Result, error) {
+				InspectFunc: func(_ context.Context, m *keziov1alpha3.Machine, _ bool) (deployer.Result, error) {
 					calls++
 					// The attempt must see triedCredentials already recorded for
 					// this secret before the deployer is called.
@@ -1927,7 +1927,7 @@ var _ = Describe("Machine Controller", func() {
 			var current corev1.Secret
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: "default"}, &current)).To(Succeed())
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 			Expect(machine.Status.TriedCredentials.SecretRef.Name).To(Equal(secretName))
 			Expect(machine.Status.TriedCredentials.ResourceVersion).To(Equal(current.ResourceVersion))
@@ -1943,16 +1943,16 @@ var _ = Describe("Machine Controller", func() {
 
 			machineName := fmt.Sprintf("creds-mismatch-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			imageRef := keziov1alpha2.NameRef{Name: "test-image"}
-			resource := &keziov1alpha2.Machine{
+			imageRef := keziov1alpha3.NameRef{Name: "test-image"}
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: secretName},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: secretName},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:11",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 					ImageRef:       &imageRef,
 				},
 			}
@@ -1962,14 +1962,14 @@ var _ = Describe("Machine Controller", func() {
 			var provisionCalls int
 			var blockProvisioning bool
 			fakeDeployer := &deployer.FakeDeployer{Client: k8sClient}
-			fakeDeployer.ProvisionFunc = func(pctx context.Context, m *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun, restart bool) (deployer.Result, error) {
+			fakeDeployer.ProvisionFunc = func(pctx context.Context, m *keziov1alpha3.Machine, run *keziov1alpha3.DeployRun, restart bool) (deployer.Result, error) {
 				provisionCalls++
 				if blockProvisioning {
 					// A Failed outcome - not a transient error - keeps this
 					// attempt from recording goodCredentials, so the test can
 					// observe the mismatch-cleared state before the next
 					// successful attempt re-establishes it.
-					return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeTransient, ErrorMessage: "blocked"}, nil
+					return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha3.MachineErrorTypeTransient, ErrorMessage: "blocked"}, nil
 				}
 				fakeDeployer.ProvisionFunc = nil
 				return (&deployer.FakeDeployer{Client: k8sClient}).Provision(pctx, m, run, restart)
@@ -1977,7 +1977,7 @@ var _ = Describe("Machine Controller", func() {
 			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: fakeDeployer}
 
 			By("walking to Available, which records goodCredentials from the Inspect attempt")
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			for i := 0; i < 50; i++ {
 				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 				Expect(err).NotTo(HaveOccurred())
@@ -1996,7 +1996,7 @@ var _ = Describe("Machine Controller", func() {
 				Expect(err).NotTo(HaveOccurred())
 			}
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioning))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateProvisioning))
 			stateBeforeMismatch := machine.Status.State
 
 			By("changing the secret so its resourceVersion no longer matches goodCredentials")
@@ -2021,12 +2021,12 @@ var _ = Describe("Machine Controller", func() {
 				Expect(err).NotTo(HaveOccurred())
 				if result.RequeueAfter == 0 {
 					Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-					if machine.Status.State == keziov1alpha2.MachineStateProvisioned {
+					if machine.Status.State == keziov1alpha3.MachineStateProvisioned {
 						break
 					}
 				}
 			}
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioned))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateProvisioned))
 			Expect(machine.Status.GoodCredentials.SecretRef).NotTo(BeNil())
 			Expect(machine.Status.GoodCredentials.ResourceVersion).To(Equal(live.ResourceVersion))
 		})
@@ -2034,15 +2034,15 @@ var _ = Describe("Machine Controller", func() {
 		It("requeues after credentialsSecretAbsentRequeueInterval, marks delayed, and never escalates to an error when the credentials secret does not exist", func() {
 			machineName := fmt.Sprintf("creds-absent-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "no-such-secret"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "no-such-secret"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:12",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -2063,10 +2063,10 @@ var _ = Describe("Machine Controller", func() {
 			}
 			Expect(result.RequeueAfter).To(Equal(credentialsSecretAbsentRequeueInterval))
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
-			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusDelayed))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateInspecting))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusDelayed))
 			Expect(machine.Status.ErrorCount).To(Equal(int32(0)))
 			Expect(machine.Status.TriedCredentials.SecretRef).To(BeNil())
 			Expect(machine.Status.GoodCredentials.SecretRef).To(BeNil())
@@ -2075,15 +2075,15 @@ var _ = Describe("Machine Controller", func() {
 		It("does not requeue when credentialsSecretRef.Name is empty, and waits for a spec edit instead", func() {
 			machineName := fmt.Sprintf("creds-spec-invalid-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: ""},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: ""},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:13",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -2092,16 +2092,16 @@ var _ = Describe("Machine Controller", func() {
 			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}}
 
 			By("reconciling through the finalizer add and the Enrolling to Inspecting transition")
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			for i := 0; i < 10; i++ {
 				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 				Expect(err).NotTo(HaveOccurred())
 				Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-				if machine.Status.State == keziov1alpha2.MachineStateInspecting {
+				if machine.Status.State == keziov1alpha3.MachineStateInspecting {
 					break
 				}
 			}
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateInspecting))
 
 			By("reconciling the blocked Inspecting step: no requeue, no error, no error escalation")
 			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
@@ -2109,8 +2109,8 @@ var _ = Describe("Machine Controller", func() {
 			Expect(result).To(Equal(reconcile.Result{}))
 
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
-			Expect(machine.Status.OperationalStatus).NotTo(Equal(keziov1alpha2.MachineOperationalStatusError))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateInspecting))
+			Expect(machine.Status.OperationalStatus).NotTo(Equal(keziov1alpha3.MachineOperationalStatusError))
 			Expect(machine.Status.ErrorCount).To(Equal(int32(0)))
 			Expect(machine.Status.TriedCredentials.SecretRef).To(BeNil())
 		})
@@ -2123,15 +2123,15 @@ var _ = Describe("Machine Controller", func() {
 
 			machineName := fmt.Sprintf("creds-claim-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: secretName},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: secretName},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:14",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -2143,7 +2143,7 @@ var _ = Describe("Machine Controller", func() {
 			var calls int
 			scriptedDeployer := &deployer.FakeDeployer{
 				Client: k8sClient,
-				InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+				InspectFunc: func(context.Context, *keziov1alpha3.Machine, bool) (deployer.Result, error) {
 					calls++
 					if calls == 1 {
 						return deployer.Result{Outcome: deployer.Continuing}, nil
@@ -2162,8 +2162,8 @@ var _ = Describe("Machine Controller", func() {
 
 			var claimed corev1.Secret
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: "default"}, &claimed)).To(Succeed())
-			Expect(claimed.Labels).To(HaveKeyWithValue(keziov1alpha2.MachineCredentialsSecretLabel, annotationValueTrue))
-			Expect(claimed.Finalizers).To(ContainElement(keziov1alpha2.MachineCredentialsSecretFinalizer))
+			Expect(claimed.Labels).To(HaveKeyWithValue(keziov1alpha3.MachineCredentialsSecretLabel, annotationValueTrue))
+			Expect(claimed.Finalizers).To(ContainElement(keziov1alpha3.MachineCredentialsSecretFinalizer))
 
 			var ownerFound bool
 			for _, ref := range claimed.OwnerReferences {
@@ -2182,7 +2182,7 @@ var _ = Describe("Machine Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(calls).To(Equal(2))
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 			Expect(machine.Status.TriedCredentials.ResourceVersion).To(Equal(claimed.ResourceVersion))
 		})
@@ -2195,15 +2195,15 @@ var _ = Describe("Machine Controller", func() {
 
 			machineName := fmt.Sprintf("creds-release-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: secretName},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: secretName},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:15",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -2220,10 +2220,10 @@ var _ = Describe("Machine Controller", func() {
 					break
 				}
 			}
-			Expect(claimed.Finalizers).To(ContainElement(keziov1alpha2.MachineCredentialsSecretFinalizer))
+			Expect(claimed.Finalizers).To(ContainElement(keziov1alpha3.MachineCredentialsSecretFinalizer))
 
 			By("deleting the Machine and reconciling its delete walk to completion")
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, &machine)).To(Succeed())
 
@@ -2240,14 +2240,14 @@ var _ = Describe("Machine Controller", func() {
 
 			var released corev1.Secret
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: "default"}, &released)).To(Succeed())
-			Expect(released.Finalizers).NotTo(ContainElement(keziov1alpha2.MachineCredentialsSecretFinalizer))
+			Expect(released.Finalizers).NotTo(ContainElement(keziov1alpha3.MachineCredentialsSecretFinalizer))
 		})
 	})
 
 	Context("Machine delete walk", func() {
 		ctx := context.Background()
 
-		reconcileUntilGone := func(reconciler *MachineReconciler, name types.NamespacedName, machine *keziov1alpha2.Machine) bool {
+		reconcileUntilGone := func(reconciler *MachineReconciler, name types.NamespacedName, machine *keziov1alpha3.Machine) bool {
 			GinkgoHelper()
 			for i := 0; i < 20; i++ {
 				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
@@ -2262,15 +2262,15 @@ var _ = Describe("Machine Controller", func() {
 		It("walks deprovision then power-off, in order, before releasing the Machine", func() {
 			machineName := fmt.Sprintf("delete-walk-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:20",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -2278,11 +2278,11 @@ var _ = Describe("Machine Controller", func() {
 			var order []string
 			fakeDeployer := &deployer.FakeDeployer{
 				Client: k8sClient,
-				DeprovisionFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+				DeprovisionFunc: func(context.Context, *keziov1alpha3.Machine, bool) (deployer.Result, error) {
 					order = append(order, "deprovision")
 					return deployer.Result{Outcome: deployer.Complete}, nil
 				},
-				PowerOffFunc: func(context.Context, *keziov1alpha2.Machine) (deployer.Result, error) {
+				PowerOffFunc: func(context.Context, *keziov1alpha3.Machine) (deployer.Result, error) {
 					order = append(order, "power-off")
 					return deployer.Result{Outcome: deployer.Complete}, nil
 				},
@@ -2295,7 +2295,7 @@ var _ = Describe("Machine Controller", func() {
 				Expect(err).NotTo(HaveOccurred())
 			}
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, &machine)).To(Succeed())
 
@@ -2308,15 +2308,15 @@ var _ = Describe("Machine Controller", func() {
 		It("gives up a stage after errorCount exceeds 3, advances anyway, and bumps the give-up metric", func() {
 			machineName := fmt.Sprintf("delete-giveup-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:21",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -2325,9 +2325,9 @@ var _ = Describe("Machine Controller", func() {
 			fakeDeployer := &deployer.FakeDeployer{
 				Client: k8sClient,
 				// Models a dead BMC: deprovision never succeeds on its own.
-				DeprovisionFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+				DeprovisionFunc: func(context.Context, *keziov1alpha3.Machine, bool) (deployer.Result, error) {
 					deprovisionCalls++
-					return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeTransient, ErrorMessage: "dead bmc"}, nil
+					return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha3.MachineErrorTypeTransient, ErrorMessage: "dead bmc"}, nil
 				},
 			}
 			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: fakeDeployer}
@@ -2337,7 +2337,7 @@ var _ = Describe("Machine Controller", func() {
 				Expect(err).NotTo(HaveOccurred())
 			}
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, &machine)).To(Succeed())
 
@@ -2355,15 +2355,15 @@ var _ = Describe("Machine Controller", func() {
 		It("clears delayed back to OK when a subsequent Continuing outcome arrives during a delete stage", func() {
 			machineName := fmt.Sprintf("delete-delayed-clears-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:23",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -2371,7 +2371,7 @@ var _ = Describe("Machine Controller", func() {
 			var calls int
 			fakeDeployer := &deployer.FakeDeployer{
 				Client: k8sClient,
-				DeprovisionFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+				DeprovisionFunc: func(context.Context, *keziov1alpha3.Machine, bool) (deployer.Result, error) {
 					calls++
 					switch calls {
 					case 1:
@@ -2382,7 +2382,7 @@ var _ = Describe("Machine Controller", func() {
 						return deployer.Result{Outcome: deployer.Complete}, nil
 					}
 				},
-				PowerOffFunc: func(context.Context, *keziov1alpha2.Machine) (deployer.Result, error) {
+				PowerOffFunc: func(context.Context, *keziov1alpha3.Machine) (deployer.Result, error) {
 					return deployer.Result{Outcome: deployer.Complete}, nil
 				},
 			}
@@ -2394,7 +2394,7 @@ var _ = Describe("Machine Controller", func() {
 				Expect(err).NotTo(HaveOccurred())
 			}
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, &machine)).To(Succeed())
 
@@ -2404,17 +2404,17 @@ var _ = Describe("Machine Controller", func() {
 				Expect(err).NotTo(HaveOccurred())
 			}
 
-			var mid keziov1alpha2.Machine
+			var mid keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &mid)).To(Succeed())
-			Expect(mid.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusDelayed))
+			Expect(mid.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusDelayed))
 
 			By("reconciling the Continuing outcome that follows")
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 			Expect(err).NotTo(HaveOccurred())
 
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateDeprovisioning))
-			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateDeprovisioning))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusOK))
 
 			By("reconciling the delete walk to completion")
 			gone := reconcileUntilGone(reconciler, name, &machine)
@@ -2424,15 +2424,15 @@ var _ = Describe("Machine Controller", func() {
 		It("does not block deletion when the BMC credentials secret is missing", func() {
 			machineName := fmt.Sprintf("delete-no-secret-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "no-such-secret-for-delete"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "no-such-secret-for-delete"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:22",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -2445,9 +2445,9 @@ var _ = Describe("Machine Controller", func() {
 				Expect(err).NotTo(HaveOccurred())
 			}
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusDelayed))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusDelayed))
 
 			Expect(k8sClient.Delete(ctx, &machine)).To(Succeed())
 
@@ -2463,19 +2463,19 @@ var _ = Describe("Machine Controller", func() {
 		It("returns immediately: no finalizer, no status write, no requeue", func() {
 			machineName := fmt.Sprintf("paused-new-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:        machineName,
 					Namespace:   "default",
-					Annotations: map[string]string{keziov1alpha2.MachineAnnotationPaused: ""},
+					Annotations: map[string]string{keziov1alpha3.MachineAnnotationPaused: ""},
 				},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:30",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -2489,7 +2489,7 @@ var _ = Describe("Machine Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result).To(Equal(reconcile.Result{}))
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 			Expect(machine.Finalizers).To(BeEmpty(), "paused must return before the finalizer is added")
 			Expect(machine.Status.State).To(BeEmpty(), "paused must return before any status write")
@@ -2498,15 +2498,15 @@ var _ = Describe("Machine Controller", func() {
 		It("blocks the delete walk while paused, and resumes deletion once unpaused", func() {
 			machineName := fmt.Sprintf("paused-delete-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:31",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -2517,12 +2517,12 @@ var _ = Describe("Machine Controller", func() {
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 			Expect(err).NotTo(HaveOccurred())
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Finalizers).To(ContainElement(keziov1alpha2.MachineFinalizer))
+			Expect(machine.Finalizers).To(ContainElement(keziov1alpha3.MachineFinalizer))
 
 			By("pausing, then deleting")
-			machine.Annotations = map[string]string{keziov1alpha2.MachineAnnotationPaused: ""}
+			machine.Annotations = map[string]string{keziov1alpha3.MachineAnnotationPaused: ""}
 			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, &machine)).To(Succeed())
 
@@ -2557,15 +2557,15 @@ var _ = Describe("Machine Controller", func() {
 		It("sets operationalStatus=detached, freezes state, skips deployer calls, and resumes once removed", func() {
 			machineName := fmt.Sprintf("detached-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:32",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -2576,7 +2576,7 @@ var _ = Describe("Machine Controller", func() {
 			var inspectCalls int
 			fakeDeployer := &deployer.FakeDeployer{
 				Client: k8sClient,
-				InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+				InspectFunc: func(context.Context, *keziov1alpha3.Machine, bool) (deployer.Result, error) {
 					inspectCalls++
 					return deployer.Result{Outcome: deployer.Complete}, nil
 				},
@@ -2587,9 +2587,9 @@ var _ = Describe("Machine Controller", func() {
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 			Expect(err).NotTo(HaveOccurred())
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			machine.Annotations = map[string]string{keziov1alpha2.MachineAnnotationDetached: ""}
+			machine.Annotations = map[string]string{keziov1alpha3.MachineAnnotationDetached: ""}
 			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
 
 			By("reconciling while detached: state stays frozen and the deployer is never called")
@@ -2598,7 +2598,7 @@ var _ = Describe("Machine Controller", func() {
 				Expect(err).NotTo(HaveOccurred())
 			}
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusDetached))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusDetached))
 			Expect(machine.Status.State).To(BeEmpty(), "detached must freeze state progress")
 			Expect(inspectCalls).To(Equal(0), "detached must never call the deployer")
 
@@ -2606,28 +2606,28 @@ var _ = Describe("Machine Controller", func() {
 			machine.Annotations = nil
 			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
 
-			for i := 0; i < 10 && machine.Status.State != keziov1alpha2.MachineStateAvailable; i++ {
+			for i := 0; i < 10 && machine.Status.State != keziov1alpha3.MachineStateAvailable; i++ {
 				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 				Expect(err).NotTo(HaveOccurred())
 				Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 			}
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable))
-			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateAvailable))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusOK))
 			Expect(inspectCalls).To(Equal(1))
 		})
 
 		It("skips deprovision and power-off on delete while detached", func() {
 			machineName := fmt.Sprintf("detached-delete-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:33",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -2635,11 +2635,11 @@ var _ = Describe("Machine Controller", func() {
 			var deprovisionCalls, powerOffCalls int
 			fakeDeployer := &deployer.FakeDeployer{
 				Client: k8sClient,
-				DeprovisionFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+				DeprovisionFunc: func(context.Context, *keziov1alpha3.Machine, bool) (deployer.Result, error) {
 					deprovisionCalls++
 					return deployer.Result{Outcome: deployer.Complete}, nil
 				},
-				PowerOffFunc: func(context.Context, *keziov1alpha2.Machine) (deployer.Result, error) {
+				PowerOffFunc: func(context.Context, *keziov1alpha3.Machine) (deployer.Result, error) {
 					powerOffCalls++
 					return deployer.Result{Outcome: deployer.Complete}, nil
 				},
@@ -2650,11 +2650,11 @@ var _ = Describe("Machine Controller", func() {
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 			Expect(err).NotTo(HaveOccurred())
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 
 			By("detaching, then deleting")
-			machine.Annotations = map[string]string{keziov1alpha2.MachineAnnotationDetached: ""}
+			machine.Annotations = map[string]string{keziov1alpha3.MachineAnnotationDetached: ""}
 			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, &machine)).To(Succeed())
 
@@ -2679,22 +2679,22 @@ var _ = Describe("Machine Controller", func() {
 		It("calls Deployer.Reboot with hard=true when any holder asks for hard, and clears only the suffixless annotation", func() {
 			machineName := fmt.Sprintf("reboot-multi-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      machineName,
 					Namespace: "default",
 					Annotations: map[string]string{
-						keziov1alpha2.MachineAnnotationRebootPrefix:        `{"mode":"soft"}`,
-						keziov1alpha2.MachineAnnotationRebootPrefix + "-a": `{"mode":"hard"}`,
+						keziov1alpha3.MachineAnnotationRebootPrefix:        `{"mode":"soft"}`,
+						keziov1alpha3.MachineAnnotationRebootPrefix + "-a": `{"mode":"hard"}`,
 					},
 				},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:34",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -2706,7 +2706,7 @@ var _ = Describe("Machine Controller", func() {
 			var lastHard bool
 			fakeDeployer := &deployer.FakeDeployer{
 				Client: k8sClient,
-				RebootFunc: func(_ context.Context, _ *keziov1alpha2.Machine, hard bool) (deployer.Result, error) {
+				RebootFunc: func(_ context.Context, _ *keziov1alpha3.Machine, hard bool) (deployer.Result, error) {
 					rebootCalls++
 					lastHard = hard
 					return deployer.Result{Outcome: deployer.Complete}, nil
@@ -2724,10 +2724,10 @@ var _ = Describe("Machine Controller", func() {
 			Expect(rebootCalls).To(Equal(1))
 			Expect(lastHard).To(BeTrue())
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Annotations).NotTo(HaveKey(keziov1alpha2.MachineAnnotationRebootPrefix))
-			Expect(machine.Annotations).To(HaveKey(keziov1alpha2.MachineAnnotationRebootPrefix + "-a"))
+			Expect(machine.Annotations).NotTo(HaveKey(keziov1alpha3.MachineAnnotationRebootPrefix))
+			Expect(machine.Annotations).To(HaveKey(keziov1alpha3.MachineAnnotationRebootPrefix + "-a"))
 			Expect(machine.Status.State).To(BeEmpty(), "the remaining suffixed hold keeps the machine rebooting instead of progressing")
 
 			By("the suffixed hold keeps triggering Reboot on every subsequent reconcile")
@@ -2739,30 +2739,30 @@ var _ = Describe("Machine Controller", func() {
 			machine.Annotations = nil
 			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
 
-			for i := 0; i < 10 && machine.Status.State != keziov1alpha2.MachineStateAvailable; i++ {
+			for i := 0; i < 10 && machine.Status.State != keziov1alpha3.MachineStateAvailable; i++ {
 				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 				Expect(err).NotTo(HaveOccurred())
 				Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 			}
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateAvailable))
 		})
 
 		It("treats invalid JSON as a soft reboot request but still honors it, clearing the suffixless annotation after acting", func() {
 			machineName := fmt.Sprintf("reboot-invalid-json-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:        machineName,
 					Namespace:   "default",
-					Annotations: map[string]string{keziov1alpha2.MachineAnnotationRebootPrefix: `{not json`},
+					Annotations: map[string]string{keziov1alpha3.MachineAnnotationRebootPrefix: `{not json`},
 				},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:35",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -2774,7 +2774,7 @@ var _ = Describe("Machine Controller", func() {
 			var lastHard bool
 			fakeDeployer := &deployer.FakeDeployer{
 				Client: k8sClient,
-				RebootFunc: func(_ context.Context, _ *keziov1alpha2.Machine, hard bool) (deployer.Result, error) {
+				RebootFunc: func(_ context.Context, _ *keziov1alpha3.Machine, hard bool) (deployer.Result, error) {
 					rebootCalls++
 					lastHard = hard
 					return deployer.Result{Outcome: deployer.Complete}, nil
@@ -2790,16 +2790,16 @@ var _ = Describe("Machine Controller", func() {
 			Expect(rebootCalls).To(Equal(1))
 			Expect(lastHard).To(BeFalse(), "invalid JSON must be treated as a soft reboot request")
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Annotations).NotTo(HaveKey(keziov1alpha2.MachineAnnotationRebootPrefix), "the suffixless annotation is cleared once acted on, even though its value was invalid")
+			Expect(machine.Annotations).NotTo(HaveKey(keziov1alpha3.MachineAnnotationRebootPrefix), "the suffixless annotation is cleared once acted on, even though its value was invalid")
 		})
 	})
 
 	Context("re-inspect annotation", func() {
 		reconcileUntilState := func(reconciler *MachineReconciler, name types.NamespacedName, want string) {
 			GinkgoHelper()
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			for i := 0; i < 20; i++ {
 				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 				Expect(err).NotTo(HaveOccurred())
@@ -2813,19 +2813,19 @@ var _ = Describe("Machine Controller", func() {
 
 		newBareMachine := func(machineName string, annotations map[string]string) types.NamespacedName {
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:        machineName,
 					Namespace:   "default",
 					Annotations: annotations,
 				},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:40",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -2835,20 +2835,20 @@ var _ = Describe("Machine Controller", func() {
 			return name
 		}
 
-		newMachineWithImage := func(machineName, bootMAC string, imageRef keziov1alpha2.NameRef) types.NamespacedName {
+		newMachineWithImage := func(machineName, bootMAC string, imageRef keziov1alpha3.NameRef) types.NamespacedName {
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      machineName,
 					Namespace: "default",
 				},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: bootMAC,
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 					ImageRef:       &imageRef,
 				},
 			}
@@ -2861,7 +2861,7 @@ var _ = Describe("Machine Controller", func() {
 
 		countRunsForMachine := func(machineName string) int {
 			GinkgoHelper()
-			var runs keziov1alpha2.DeployRunList
+			var runs keziov1alpha3.DeployRunList
 			Expect(k8sClient.List(ctx, &runs, client.InNamespace("default"))).To(Succeed())
 			count := 0
 			for _, run := range runs.Items {
@@ -2880,40 +2880,40 @@ var _ = Describe("Machine Controller", func() {
 			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}, Recorder: recorder}
 
 			By("walking to Available with an empty deploy payload")
-			reconcileUntilState(reconciler, name, keziov1alpha2.MachineStateAvailable)
+			reconcileUntilState(reconciler, name, keziov1alpha3.MachineStateAvailable)
 
-			var firstHW keziov1alpha2.MachineHardware
+			var firstHW keziov1alpha3.MachineHardware
 			Expect(k8sClient.Get(ctx, name, &firstHW)).To(Succeed())
 			Expect(firstHW.UID).NotTo(BeEmpty())
 
 			By("setting the re-inspect annotation")
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			machine.Annotations = map[string]string{keziov1alpha2.MachineAnnotationReInspect: ""}
+			machine.Annotations = map[string]string{keziov1alpha3.MachineAnnotationReInspect: ""}
 			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
 
 			By("reconciling once: the annotation is consumed and the machine moves to Inspecting")
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Annotations).NotTo(HaveKey(keziov1alpha2.MachineAnnotationReInspect))
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
+			Expect(machine.Annotations).NotTo(HaveKey(keziov1alpha3.MachineAnnotationReInspect))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateInspecting))
 			Expect(<-recorder.Events).To(ContainSubstring("ReInspectAccepted"))
 
 			By("MachineHardware was deleted, not merely left in place")
-			Expect(errors.IsNotFound(k8sClient.Get(ctx, name, &keziov1alpha2.MachineHardware{}))).To(BeTrue())
+			Expect(errors.IsNotFound(k8sClient.Get(ctx, name, &keziov1alpha3.MachineHardware{}))).To(BeTrue())
 
 			By("walking back to Available recreates MachineHardware with a new UID")
-			reconcileUntilState(reconciler, name, keziov1alpha2.MachineStateAvailable)
+			reconcileUntilState(reconciler, name, keziov1alpha3.MachineStateAvailable)
 
-			var secondHW keziov1alpha2.MachineHardware
+			var secondHW keziov1alpha3.MachineHardware
 			Expect(k8sClient.Get(ctx, name, &secondHW)).To(Succeed())
 			Expect(secondHW.UID).NotTo(Equal(firstHW.UID), "re-inspection must recreate MachineHardware, not patch it")
 		})
 
 		It("outside Available: consumes the annotation and emits a refused event without touching MachineHardware", func() {
 			machineName := fmt.Sprintf("reinspect-refused-%d", GinkgoRandomSeed())
-			name := newBareMachine(machineName, map[string]string{keziov1alpha2.MachineAnnotationReInspect: ""})
+			name := newBareMachine(machineName, map[string]string{keziov1alpha3.MachineAnnotationReInspect: ""})
 
 			recorder := record.NewFakeRecorder(10)
 			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}, Recorder: recorder}
@@ -2926,54 +2926,54 @@ var _ = Describe("Machine Controller", func() {
 			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 			Expect(err).NotTo(HaveOccurred())
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Annotations).NotTo(HaveKey(keziov1alpha2.MachineAnnotationReInspect), "the annotation is consumed even on refusal")
+			Expect(machine.Annotations).NotTo(HaveKey(keziov1alpha3.MachineAnnotationReInspect), "the annotation is consumed even on refusal")
 			Expect(<-recorder.Events).To(ContainSubstring("ReInspectRefused"))
-			Expect(errors.IsNotFound(k8sClient.Get(ctx, name, &keziov1alpha2.MachineHardware{}))).To(BeTrue(), "a refused re-inspect must never touch MachineHardware")
+			Expect(errors.IsNotFound(k8sClient.Get(ctx, name, &keziov1alpha3.MachineHardware{}))).To(BeTrue(), "a refused re-inspect must never touch MachineHardware")
 
 			By("the walk still completes normally once the annotation is gone")
-			reconcileUntilState(reconciler, name, keziov1alpha2.MachineStateAvailable)
+			reconcileUntilState(reconciler, name, keziov1alpha3.MachineStateAvailable)
 		})
 
 		It("in Provisioned with an empty deploy payload: accepts, walks Inspecting to Available, and stays there", func() {
 			machineName := fmt.Sprintf("reinspect-provisioned-empty-%d", GinkgoRandomSeed())
-			imageRef := keziov1alpha2.NameRef{Name: "reinspect-image"}
+			imageRef := keziov1alpha3.NameRef{Name: "reinspect-image"}
 			name := newMachineWithImage(machineName, "aa:bb:cc:dd:ee:50", imageRef)
 
 			recorder := record.NewFakeRecorder(10)
 			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}, Recorder: recorder}
 
 			By("walking to Provisioned with a set deploy payload")
-			reconcileUntilState(reconciler, name, keziov1alpha2.MachineStateProvisioned)
+			reconcileUntilState(reconciler, name, keziov1alpha3.MachineStateProvisioned)
 			Expect(countRunsForMachine(machineName)).To(Equal(1))
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 			firstRunRef := machine.Status.LastSuccessfulRunRef.Name
 			Expect(machine.Status.CurrentRunRef.Name).To(Equal(firstRunRef))
 
-			var firstHW keziov1alpha2.MachineHardware
+			var firstHW keziov1alpha3.MachineHardware
 			Expect(k8sClient.Get(ctx, name, &firstHW)).To(Succeed())
 
 			By("clearing the deploy payload and setting the re-inspect annotation")
 			machine.Spec.ImageRef = nil
-			machine.Annotations = map[string]string{keziov1alpha2.MachineAnnotationReInspect: ""}
+			machine.Annotations = map[string]string{keziov1alpha3.MachineAnnotationReInspect: ""}
 			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
 
 			By("reconciling once: the annotation is consumed and the machine moves to Inspecting")
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Annotations).NotTo(HaveKey(keziov1alpha2.MachineAnnotationReInspect))
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
+			Expect(machine.Annotations).NotTo(HaveKey(keziov1alpha3.MachineAnnotationReInspect))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateInspecting))
 			Expect(<-recorder.Events).To(ContainSubstring("ReInspectAccepted"))
-			Expect(errors.IsNotFound(k8sClient.Get(ctx, name, &keziov1alpha2.MachineHardware{}))).To(BeTrue())
+			Expect(errors.IsNotFound(k8sClient.Get(ctx, name, &keziov1alpha3.MachineHardware{}))).To(BeTrue())
 
 			By("walking back to Available recreates MachineHardware with a new UID")
-			reconcileUntilState(reconciler, name, keziov1alpha2.MachineStateAvailable)
+			reconcileUntilState(reconciler, name, keziov1alpha3.MachineStateAvailable)
 
-			var secondHW keziov1alpha2.MachineHardware
+			var secondHW keziov1alpha3.MachineHardware
 			Expect(k8sClient.Get(ctx, name, &secondHW)).To(Succeed())
 			Expect(secondHW.UID).NotTo(Equal(firstHW.UID), "re-inspection must recreate MachineHardware, not patch it")
 
@@ -2984,7 +2984,7 @@ var _ = Describe("Machine Controller", func() {
 				Expect(result.RequeueAfter).To(BeZero())
 			}
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateAvailable))
 			Expect(countRunsForMachine(machineName)).To(Equal(1), "no spurious DeployRun on the way back to Available")
 
 			By("run history survives the re-inspection untouched")
@@ -2994,37 +2994,37 @@ var _ = Describe("Machine Controller", func() {
 
 		It("in Provisioned with a set deploy payload: refuses re-inspection and leaves state and MachineHardware untouched", func() {
 			machineName := fmt.Sprintf("reinspect-provisioned-set-%d", GinkgoRandomSeed())
-			imageRef := keziov1alpha2.NameRef{Name: "reinspect-image"}
+			imageRef := keziov1alpha3.NameRef{Name: "reinspect-image"}
 			name := newMachineWithImage(machineName, "aa:bb:cc:dd:ee:51", imageRef)
 
 			recorder := record.NewFakeRecorder(10)
 			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}, Recorder: recorder}
 
 			By("walking to Provisioned with a set deploy payload")
-			reconcileUntilState(reconciler, name, keziov1alpha2.MachineStateProvisioned)
+			reconcileUntilState(reconciler, name, keziov1alpha3.MachineStateProvisioned)
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 			firstRunRef := machine.Status.LastSuccessfulRunRef.Name
 
-			var firstHW keziov1alpha2.MachineHardware
+			var firstHW keziov1alpha3.MachineHardware
 			Expect(k8sClient.Get(ctx, name, &firstHW)).To(Succeed())
 
 			By("setting the re-inspect annotation while the deploy payload stays set")
-			machine.Annotations = map[string]string{keziov1alpha2.MachineAnnotationReInspect: ""}
+			machine.Annotations = map[string]string{keziov1alpha3.MachineAnnotationReInspect: ""}
 			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
 
 			By("reconciling once: the annotation is consumed and refused")
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Annotations).NotTo(HaveKey(keziov1alpha2.MachineAnnotationReInspect))
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateProvisioned))
+			Expect(machine.Annotations).NotTo(HaveKey(keziov1alpha3.MachineAnnotationReInspect))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateProvisioned))
 			event := <-recorder.Events
 			Expect(event).To(ContainSubstring("ReInspectRefused"))
 			Expect(event).To(ContainSubstring(`re-inspect annotation refused: machine is in state "Provisioned"; re-inspect is accepted in "Available", or in "Provisioned" with an empty deploy payload`))
 
-			var secondHW keziov1alpha2.MachineHardware
+			var secondHW keziov1alpha3.MachineHardware
 			Expect(k8sClient.Get(ctx, name, &secondHW)).To(Succeed())
 			Expect(secondHW.UID).To(Equal(firstHW.UID), "a refused re-inspect must never touch MachineHardware")
 			Expect(machine.Status.LastSuccessfulRunRef.Name).To(Equal(firstRunRef))
@@ -3036,19 +3036,19 @@ var _ = Describe("Machine Controller", func() {
 		It("skips Inspecting: no MachineHardware is created, and the walk still reaches Available", func() {
 			machineName := fmt.Sprintf("inspect-disable-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:        machineName,
 					Namespace:   "default",
-					Annotations: map[string]string{keziov1alpha2.MachineAnnotationInspectDisable: annotationValueTrue},
+					Annotations: map[string]string{keziov1alpha3.MachineAnnotationInspectDisable: annotationValueTrue},
 				},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:41",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -3059,32 +3059,32 @@ var _ = Describe("Machine Controller", func() {
 			var inspectCalls int
 			fakeDeployer := &deployer.FakeDeployer{
 				Client: k8sClient,
-				InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+				InspectFunc: func(context.Context, *keziov1alpha3.Machine, bool) (deployer.Result, error) {
 					inspectCalls++
 					return deployer.Result{Outcome: deployer.Complete}, nil
 				},
 			}
 			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: fakeDeployer}
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			for i := 0; i < 20; i++ {
 				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 				Expect(err).NotTo(HaveOccurred())
 				Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-				if machine.Status.State == keziov1alpha2.MachineStateAvailable {
+				if machine.Status.State == keziov1alpha3.MachineStateAvailable {
 					break
 				}
 			}
-			Expect(machine.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable))
+			Expect(machine.Status.State).To(Equal(keziov1alpha3.MachineStateAvailable))
 			Expect(inspectCalls).To(Equal(0), "inspect-disable must skip the deployer's Inspect step entirely")
-			Expect(errors.IsNotFound(k8sClient.Get(ctx, name, &keziov1alpha2.MachineHardware{}))).To(BeTrue())
+			Expect(errors.IsNotFound(k8sClient.Get(ctx, name, &keziov1alpha3.MachineHardware{}))).To(BeTrue())
 		})
 	})
 
 	Context("status-loss hold", func() {
 		reconcileUntilState := func(reconciler *MachineReconciler, name types.NamespacedName, want string) {
 			GinkgoHelper()
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			for i := 0; i < 20; i++ {
 				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 				Expect(err).NotTo(HaveOccurred())
@@ -3098,7 +3098,7 @@ var _ = Describe("Machine Controller", func() {
 
 		countRunsForMachine := func(machineName string) int {
 			GinkgoHelper()
-			var runs keziov1alpha2.DeployRunList
+			var runs keziov1alpha3.DeployRunList
 			Expect(k8sClient.List(ctx, &runs, client.InNamespace("default"))).To(Succeed())
 			count := 0
 			for _, run := range runs.Items {
@@ -3112,16 +3112,16 @@ var _ = Describe("Machine Controller", func() {
 		It("provisions a freshly created Machine with imageRef already set, without any operator action", func() {
 			machineName := fmt.Sprintf("statusloss-fresh-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			imageRef := keziov1alpha2.NameRef{Name: "fresh-image"}
-			resource := &keziov1alpha2.Machine{
+			imageRef := keziov1alpha3.NameRef{Name: "fresh-image"}
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:60",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 					ImageRef:       &imageRef,
 				},
 			}
@@ -3134,27 +3134,27 @@ var _ = Describe("Machine Controller", func() {
 			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}, Recorder: recorder}
 
 			By("a Machine created with imageRef set is empty status + set imageRef on its first reconcile, exactly like a status-loss shape - it must still provision on its own")
-			reconcileUntilState(reconciler, name, keziov1alpha2.MachineStateProvisioned)
+			reconcileUntilState(reconciler, name, keziov1alpha3.MachineStateProvisioned)
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(meta.IsStatusConditionTrue(machine.Status.Conditions, keziov1alpha2.MachineConditionStatusLossHold)).To(BeFalse())
+			Expect(meta.IsStatusConditionTrue(machine.Status.Conditions, keziov1alpha3.MachineConditionStatusLossHold)).To(BeFalse())
 			Expect(countRunsForMachine(machineName)).To(Equal(1))
 		})
 
 		It("holds a Machine whose status was reset but whose DeployRuns still exist, until the confirm annotation is set", func() {
 			machineName := fmt.Sprintf("statusloss-restored-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			imageRef := keziov1alpha2.NameRef{Name: "restored-image"}
-			resource := &keziov1alpha2.Machine{
+			imageRef := keziov1alpha3.NameRef{Name: "restored-image"}
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:61",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 					ImageRef:       &imageRef,
 				},
 			}
@@ -3167,13 +3167,13 @@ var _ = Describe("Machine Controller", func() {
 			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: &deployer.FakeDeployer{Client: k8sClient}, Recorder: recorder}
 
 			By("walking the machine to Provisioned once, the way a real deployment would")
-			reconcileUntilState(reconciler, name, keziov1alpha2.MachineStateProvisioned)
+			reconcileUntilState(reconciler, name, keziov1alpha3.MachineStateProvisioned)
 			Expect(countRunsForMachine(machineName)).To(Equal(1))
 
 			By("simulating a status-only restore: status is wiped back to zero, spec (including the DeployRun-owning history) is untouched")
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			machine.Status = keziov1alpha2.MachineStatus{}
+			machine.Status = keziov1alpha3.MachineStatus{}
 			Expect(k8sClient.Status().Update(ctx, &machine)).To(Succeed())
 
 			By("reconciling: the machine must enter the hold instead of silently re-enrolling/re-provisioning")
@@ -3181,7 +3181,7 @@ var _ = Describe("Machine Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 			Expect(machine.Status.State).To(BeEmpty(), "a held machine must not advance past its empty state")
-			Expect(meta.IsStatusConditionTrue(machine.Status.Conditions, keziov1alpha2.MachineConditionStatusLossHold)).To(BeTrue())
+			Expect(meta.IsStatusConditionTrue(machine.Status.Conditions, keziov1alpha3.MachineConditionStatusLossHold)).To(BeTrue())
 			Expect(<-recorder.Events).To(ContainSubstring("StatusLossHold"))
 
 			By("reconciling again while held: no new DeployRun, no requeue, no repeated event")
@@ -3193,13 +3193,13 @@ var _ = Describe("Machine Controller", func() {
 
 			By("confirming the hold releases it and the machine resumes the normal walk, re-provisioning")
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			machine.Annotations = map[string]string{keziov1alpha2.MachineAnnotationConfirmStatusLoss: ""}
+			machine.Annotations = map[string]string{keziov1alpha3.MachineAnnotationConfirmStatusLoss: ""}
 			Expect(k8sClient.Update(ctx, &machine)).To(Succeed())
 
-			reconcileUntilState(reconciler, name, keziov1alpha2.MachineStateProvisioned)
+			reconcileUntilState(reconciler, name, keziov1alpha3.MachineStateProvisioned)
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Annotations).NotTo(HaveKey(keziov1alpha2.MachineAnnotationConfirmStatusLoss), "the confirm annotation is consumed once acted on")
-			Expect(meta.IsStatusConditionTrue(machine.Status.Conditions, keziov1alpha2.MachineConditionStatusLossHold)).To(BeFalse())
+			Expect(machine.Annotations).NotTo(HaveKey(keziov1alpha3.MachineAnnotationConfirmStatusLoss), "the confirm annotation is consumed once acted on")
+			Expect(meta.IsStatusConditionTrue(machine.Status.Conditions, keziov1alpha3.MachineConditionStatusLossHold)).To(BeFalse())
 			Expect(countRunsForMachine(machineName)).To(Equal(2), "confirmation resumes the walk, which re-provisions since no successful run is on record")
 		})
 
@@ -3217,16 +3217,16 @@ var _ = Describe("Machine Controller", func() {
 		It("requeues explicitly at every forward-walk transition, and stops requeueing once idle", func() {
 			machineName := fmt.Sprintf("hygiene-forward-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			imageRef := keziov1alpha2.NameRef{Name: "test-image"}
-			resource := &keziov1alpha2.Machine{
+			imageRef := keziov1alpha3.NameRef{Name: "test-image"}
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:70",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 					ImageRef:       &imageRef,
 				},
 			}
@@ -3235,10 +3235,10 @@ var _ = Describe("Machine Controller", func() {
 
 			oneShotDeployer := &deployer.FakeDeployer{
 				Client: k8sClient,
-				InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+				InspectFunc: func(context.Context, *keziov1alpha3.Machine, bool) (deployer.Result, error) {
 					return deployer.Result{Outcome: deployer.Complete}, nil
 				},
-				ProvisionFunc: func(context.Context, *keziov1alpha2.Machine, *keziov1alpha2.DeployRun, bool) (deployer.Result, error) {
+				ProvisionFunc: func(context.Context, *keziov1alpha3.Machine, *keziov1alpha3.DeployRun, bool) (deployer.Result, error) {
 					return deployer.Result{Outcome: deployer.Complete}, nil
 				},
 			}
@@ -3250,7 +3250,7 @@ var _ = Describe("Machine Controller", func() {
 				Expect(err).NotTo(HaveOccurred())
 				Expect(result).To(Equal(reconcile.Result{Requeue: true}))
 				if wantState != "" {
-					var machine keziov1alpha2.Machine
+					var machine keziov1alpha3.Machine
 					Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 					Expect(machine.Status.State).To(Equal(wantState))
 				}
@@ -3259,15 +3259,15 @@ var _ = Describe("Machine Controller", func() {
 			By("adding the finalizer")
 			step("")
 			By("empty status -> Enrolling")
-			step(keziov1alpha2.MachineStateEnrolling)
+			step(keziov1alpha3.MachineStateEnrolling)
 			By("Enrolling -> Inspecting")
-			step(keziov1alpha2.MachineStateInspecting)
+			step(keziov1alpha3.MachineStateInspecting)
 			By("Inspecting Complete -> Available")
-			step(keziov1alpha2.MachineStateAvailable)
+			step(keziov1alpha3.MachineStateAvailable)
 			By("Available, shouldProvision true -> Provisioning")
-			step(keziov1alpha2.MachineStateProvisioning)
+			step(keziov1alpha3.MachineStateProvisioning)
 			By("Provisioning Complete -> Provisioned")
-			step(keziov1alpha2.MachineStateProvisioned)
+			step(keziov1alpha3.MachineStateProvisioned)
 
 			By("Provisioned, shouldProvision false -> idle, no requeue")
 			result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
@@ -3278,25 +3278,25 @@ var _ = Describe("Machine Controller", func() {
 		It("requeues explicitly at every delete-walk stage transition", func() {
 			machineName := fmt.Sprintf("hygiene-delete-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:71",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 
 			fakeDeployer := &deployer.FakeDeployer{
 				Client: k8sClient,
-				DeprovisionFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+				DeprovisionFunc: func(context.Context, *keziov1alpha3.Machine, bool) (deployer.Result, error) {
 					return deployer.Result{Outcome: deployer.Complete}, nil
 				},
-				PowerOffFunc: func(context.Context, *keziov1alpha2.Machine) (deployer.Result, error) {
+				PowerOffFunc: func(context.Context, *keziov1alpha3.Machine) (deployer.Result, error) {
 					return deployer.Result{Outcome: deployer.Complete}, nil
 				},
 			}
@@ -3308,7 +3308,7 @@ var _ = Describe("Machine Controller", func() {
 
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			step := func(wantState string) {
 				GinkgoHelper()
 				result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
@@ -3319,9 +3319,9 @@ var _ = Describe("Machine Controller", func() {
 			}
 
 			By("deletionTimestamp set -> entering Deprovisioning")
-			step(keziov1alpha2.MachineStateDeprovisioning)
+			step(keziov1alpha3.MachineStateDeprovisioning)
 			By("Deprovisioning Complete -> PoweringOff")
-			step(keziov1alpha2.MachineStatePoweringOff)
+			step(keziov1alpha3.MachineStatePoweringOff)
 
 			By("PoweringOff Complete -> release: the Machine is gone")
 			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
@@ -3332,19 +3332,19 @@ var _ = Describe("Machine Controller", func() {
 		It("requeues explicitly when the detached annotation is cleared, resuming the walk", func() {
 			machineName := fmt.Sprintf("hygiene-detached-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:        machineName,
 					Namespace:   "default",
-					Annotations: map[string]string{keziov1alpha2.MachineAnnotationDetached: ""},
+					Annotations: map[string]string{keziov1alpha3.MachineAnnotationDetached: ""},
 				},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:72",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -3359,9 +3359,9 @@ var _ = Describe("Machine Controller", func() {
 			By("reconciling while detached: freezes with no crash")
 			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 			Expect(err).NotTo(HaveOccurred())
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusDetached))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusDetached))
 
 			By("clearing the annotation and reconciling: requeues explicitly to resume the walk")
 			machine.Annotations = nil
@@ -3371,7 +3371,7 @@ var _ = Describe("Machine Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result).To(Equal(reconcile.Result{Requeue: true}))
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
-			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+			Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusOK))
 		})
 	})
 
@@ -3381,15 +3381,15 @@ var _ = Describe("Machine Controller", func() {
 		It("stamps status writes with the controller's field owner, with no ownership conflict across repeated reconciles", func() {
 			machineName := fmt.Sprintf("ssa-owner-%d", GinkgoRandomSeed())
 			name := types.NamespacedName{Name: machineName, Namespace: "default"}
-			resource := &keziov1alpha2.Machine{
+			resource := &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-				Spec: keziov1alpha2.MachineSpec{
-					BMC: keziov1alpha2.MachineBMC{
+				Spec: keziov1alpha3.MachineSpec{
+					BMC: keziov1alpha3.MachineBMC{
 						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+						CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 					},
 					BootMACAddress: "aa:bb:cc:dd:ee:70",
-					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -3403,7 +3403,7 @@ var _ = Describe("Machine Controller", func() {
 				Expect(err).NotTo(HaveOccurred())
 			}
 
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 
 			var statusManagers []string

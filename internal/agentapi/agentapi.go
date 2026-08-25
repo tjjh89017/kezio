@@ -22,7 +22,7 @@ limitations under the License.
 // stays free of everything the manager process needs (client-go,
 // controller-runtime, and their transitive weight) that a binary running
 // in a minimal live environment has no use for. The one exception is
-// api/v1alpha2 itself: RegisterRequest reuses MachineHardwareSpec
+// api/v1alpha3 itself: RegisterRequest reuses MachineHardwareSpec
 // directly rather than a parallel DTO, since the two are the same data
 // by construction and a second type would only be able to drift out of
 // sync with the first; that package imports nothing beyond
@@ -34,7 +34,7 @@ import (
 	"fmt"
 	"time"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // RegisterPath, NextPath, and ProgressPath are the HTTP routes the agent
@@ -72,7 +72,7 @@ const AgentSchemaVersionHeader = "X-Kezio-Agent-Schema-Version"
 type RegisterRequest struct {
 	// Hardware is the reported inventory, stored verbatim as the
 	// same-name MachineHardware's spec.
-	Hardware keziov1alpha2.MachineHardwareSpec `json:"hardware"`
+	Hardware keziov1alpha3.MachineHardwareSpec `json:"hardware"`
 }
 
 // RegisterResponse is the POST /agent/register success response.
@@ -124,7 +124,7 @@ type ErrorResponse struct {
 
 // DeploySlot is one partition to write as part of a DeployPlan: exactly
 // one of Torrent, Mkfs, or Swap is set, mirroring the mutual exclusion
-// keziov1alpha2.ImageSlot's own content/fsType fields already enforce on
+// keziov1alpha3.ImageSlot's own content/fsType fields already enforce on
 // the CR side.
 type DeploySlot struct {
 	// Number is the partition number (1-based, as sfdisk and the kernel
@@ -170,22 +170,22 @@ type DeploySwap struct {
 }
 
 // DeployDataImagePlan is one non-OS image's plan within a DeployPlan,
-// mirroring keziov1alpha2.MachineDataImage's per-image grouping so the
+// mirroring keziov1alpha3.MachineDataImage's per-image grouping so the
 // wire shape and the DeployRun snapshot it is built from do not drift.
 type DeployDataImagePlan struct {
 	// ImageRef names the Image this plan deploys.
-	ImageRef keziov1alpha2.NameRef `json:"imageRef"`
+	ImageRef keziov1alpha3.NameRef `json:"imageRef"`
 	// TargetDisk is the resolved device path this image writes to.
 	TargetDisk string `json:"targetDisk"`
 	// SfdiskScript is this image's sfdisk JSON dump, in the same format
-	// keziov1alpha2.ImageDiskLayout.SfdiskJSON carries.
+	// keziov1alpha3.ImageDiskLayout.SfdiskJSON carries.
 	SfdiskScript string `json:"sfdiskScript"`
 	// Slots is the ordered list of partitions to write on TargetDisk.
 	Slots []DeploySlot `json:"slots"`
 }
 
 // Hook step type values for ResolvedHookStep.Type, mirroring
-// keziov1alpha2's PostHookStepType* constants (the CRD-side step kind
+// keziov1alpha3's PostHookStepType* constants (the CRD-side step kind
 // constants).
 const (
 	// HookStepTypeBuiltin means Builtin names the step to run.
@@ -263,7 +263,7 @@ type DeployPlan struct {
 	// example "/dev/nvme0n1".
 	TargetDisk string `json:"targetDisk"`
 	// SfdiskScript is the OS image's sfdisk JSON dump, in the same format
-	// keziov1alpha2.ImageDiskLayout.SfdiskJSON carries. The agent applies
+	// keziov1alpha3.ImageDiskLayout.SfdiskJSON carries. The agent applies
 	// it to TargetDisk (`sfdisk <TargetDisk>`) to recreate the partition
 	// table before touching any individual slot.
 	SfdiskScript string `json:"sfdiskScript"`
@@ -273,11 +273,11 @@ type DeployPlan struct {
 	// same order.
 	DataImages []DeployDataImagePlan `json:"dataImages,omitempty"`
 	// Hooks is every PostHook attached to this deploy, fully resolved, in
-	// the order keziov1alpha2.MachineSpec.PostHookRefs' doc comment fixes
+	// the order keziov1alpha3.MachineSpec.PostHookRefs' doc comment fixes
 	// (the OS Image's own postHookRefs first, then the Machine's own).
 	Hooks []ResolvedHook `json:"hooks,omitempty"`
 	// AfterDeploy is what the agent does once every slot above has been
-	// written and every hook has run: keziov1alpha2.AfterDeployReboot or
+	// written and every hook has run: keziov1alpha3.AfterDeployReboot or
 	// AfterDeployPowerOff.
 	AfterDeploy string `json:"afterDeploy"`
 	// MaxUploads is the ezio AddTorrent max_uploads value every torrent
@@ -300,7 +300,7 @@ func (p DeployPlan) Validate() error {
 		return fmt.Errorf("schemaVersion %d does not match the agent wire schema version %d", p.SchemaVersion, AgentSchemaVersion)
 	}
 	// TargetDisk/Slots are empty together exactly when the plan deploys no
-	// OS image (a dataImages-only run, see keziov1alpha2.MachineSpec.
+	// OS image (a dataImages-only run, see keziov1alpha3.MachineSpec.
 	// ImageRef's doc comment) - that is a legitimate plan, not a
 	// malformed one, so only a plan with one set but not the other, or
 	// with Slots itself malformed, is rejected here.
@@ -391,7 +391,7 @@ type ProgressRequest struct {
 	// RunUID is the DeployRun's UID, matching DeployPlan.RunUID.
 	RunUID string `json:"runUID"`
 	// Step names the deploy sub-step this report reflects, for example
-	// keziov1alpha2.DeployRunPhaseWritingContent.
+	// keziov1alpha3.DeployRunPhaseWritingContent.
 	Step string `json:"step"`
 	// State is one of the ProgressState* constants.
 	State string `json:"state"`
@@ -417,7 +417,7 @@ type ProgressRequest struct {
 }
 
 // ProgressPartition is one partition's progress within a ProgressRequest,
-// mirroring keziov1alpha2.DeployRunPartitionProgress (the shape the
+// mirroring keziov1alpha3.DeployRunPartitionProgress (the shape the
 // controller records it in) field for field.
 type ProgressPartition struct {
 	// Number is the partition number, matching the DeploySlot.Number this

@@ -23,7 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/sitederive"
 )
 
@@ -45,12 +45,12 @@ type seederSiteDemand struct {
 // directly against a plain, uncached client with no field indexer
 // registered (see image_controller_test.go/image_ingest_test.go), so it
 // must not depend on one being present.
-func machinesReferencingImage(ctx context.Context, c client.Client, image client.ObjectKey) ([]keziov1alpha2.Machine, error) {
-	var list keziov1alpha2.MachineList
+func machinesReferencingImage(ctx context.Context, c client.Client, image client.ObjectKey) ([]keziov1alpha3.Machine, error) {
+	var list keziov1alpha3.MachineList
 	if err := c.List(ctx, &list, client.InNamespace(image.Namespace)); err != nil {
 		return nil, err
 	}
-	live := make([]keziov1alpha2.Machine, 0, len(list.Items))
+	live := make([]keziov1alpha3.Machine, 0, len(list.Items))
 	for i := range list.Items {
 		m := &list.Items[i]
 		if !m.DeletionTimestamp.IsZero() {
@@ -80,7 +80,7 @@ func machinesReferencingImage(ctx context.Context, c client.Client, image client
 // there would otherwise wait forever with nothing pointing at the cause,
 // so callers surface it distinctly (see ImageConditionSeederDegraded).
 // The returned slice is sorted and deduplicated.
-func seederDemandBySite(ctx context.Context, c client.Client, machines map[client.ObjectKey]*keziov1alpha2.Machine) (map[string]*seederSiteDemand, []string) {
+func seederDemandBySite(ctx context.Context, c client.Client, machines map[client.ObjectKey]*keziov1alpha3.Machine) (map[string]*seederSiteDemand, []string) {
 	demand := make(map[string]*seederSiteDemand)
 	noSeeder := make(map[string]bool)
 	log := logf.FromContext(ctx)

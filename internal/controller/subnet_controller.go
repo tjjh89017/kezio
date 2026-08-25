@@ -37,7 +37,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/nadvalidate"
 	"github.com/tjjh89017/kezio/internal/sitederive"
 	"github.com/tjjh89017/kezio/internal/subnetvalidate"
@@ -94,7 +94,7 @@ type SubnetReconciler struct {
 // and would otherwise risk stranding the Subnet in Terminating if this
 // controller is uninstalled or crash-loops.
 func (r *SubnetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	subnet := &keziov1alpha2.Subnet{}
+	subnet := &keziov1alpha3.Subnet{}
 	if err := r.Get(ctx, req.NamespacedName, subnet); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -108,7 +108,7 @@ func (r *SubnetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 // onDelete is a no-op: garbage collection removes the bootd Deployment
 // via its owner reference once the API server accepts the delete.
-func (r *SubnetReconciler) onDelete(ctx context.Context, _ *keziov1alpha2.Subnet) (ctrl.Result, error) {
+func (r *SubnetReconciler) onDelete(ctx context.Context, _ *keziov1alpha3.Subnet) (ctrl.Result, error) {
 	_ = logf.FromContext(ctx)
 	return ctrl.Result{}, nil
 }
@@ -134,7 +134,7 @@ type subnetCheck struct {
 // segment regardless of whether the Site it claims to belong to still
 // exists, and Ready already carries that same "misconfigured but still
 // serving" meaning for every other non-blocking Violation.
-func (r *SubnetReconciler) onChange(ctx context.Context, subnet *keziov1alpha2.Subnet) (ctrl.Result, error) {
+func (r *SubnetReconciler) onChange(ctx context.Context, subnet *keziov1alpha3.Subnet) (ctrl.Result, error) {
 	checks, err := r.runNADChecks(ctx, subnet)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -161,7 +161,7 @@ func (r *SubnetReconciler) onChange(ctx context.Context, subnet *keziov1alpha2.S
 	checks = append(checks, subnetCheck{result: bootdServerIPResult, blocks: true})
 
 	var leaseRangeViolation bool
-	if subnet.Spec.DHCP.Mode == keziov1alpha2.SubnetDHCPModeLease {
+	if subnet.Spec.DHCP.Mode == keziov1alpha3.SubnetDHCPModeLease {
 		leaseRangeResult := subnetvalidate.CheckDHCPLeaseRange(subnet.Spec.CIDR, subnet.Spec.DHCP.LeaseRangeStart, subnet.Spec.DHCP.LeaseRangeEnd)
 		leaseRangeViolation = leaseRangeResult.Verdict == nadvalidate.Violation
 		checks = append(checks, subnetCheck{result: leaseRangeResult, blocks: true})
@@ -248,7 +248,7 @@ func (r *SubnetReconciler) onChange(ctx context.Context, subnet *keziov1alpha2.S
 // target name is not controlled by subnet (no matching owner reference).
 // When true, the returned Deployment is left exactly as found: it is
 // never adopted or overwritten even though its name matches.
-func (r *SubnetReconciler) reconcileBootdDeployment(ctx context.Context, subnet *keziov1alpha2.Subnet) (dep *appsv1.Deployment, unowned bool, err error) {
+func (r *SubnetReconciler) reconcileBootdDeployment(ctx context.Context, subnet *keziov1alpha3.Subnet) (dep *appsv1.Deployment, unowned bool, err error) {
 	desired := buildBootdDeployment(subnet, r.BootdDeployment)
 	if err := ctrl.SetControllerReference(subnet, desired, r.Scheme); err != nil {
 		return nil, false, fmt.Errorf("set owner reference on bootd deployment: %w", err)
@@ -288,7 +288,7 @@ func (r *SubnetReconciler) reconcileBootdDeployment(ctx context.Context, subnet 
 // Namespace watch and per-namespace ServiceAccount events would run far
 // more often than this rare misconfiguration warrants. onChange instead
 // returns bootdNamespacePrerequisiteRequeueAfter on a Violation here.
-func (r *SubnetReconciler) checkBootdNamespacePrerequisites(ctx context.Context, subnet *keziov1alpha2.Subnet) ([]subnetCheck, error) {
+func (r *SubnetReconciler) checkBootdNamespacePrerequisites(ctx context.Context, subnet *keziov1alpha3.Subnet) ([]subnetCheck, error) {
 	var checks []subnetCheck
 
 	ns := &corev1.Namespace{}
@@ -340,8 +340,8 @@ func (r *SubnetReconciler) checkBootdNamespacePrerequisites(ctx context.Context,
 //
 // Subnets are listed cluster-wide. Ties are broken by namespace then
 // name, so the reported "other party" is deterministic across reconciles.
-func (r *SubnetReconciler) findBootdNetworkCollision(ctx context.Context, subnet *keziov1alpha2.Subnet) (*keziov1alpha2.Subnet, error) {
-	var subnets keziov1alpha2.SubnetList
+func (r *SubnetReconciler) findBootdNetworkCollision(ctx context.Context, subnet *keziov1alpha3.Subnet) (*keziov1alpha3.Subnet, error) {
+	var subnets keziov1alpha3.SubnetList
 	if err := r.List(ctx, &subnets); err != nil {
 		return nil, fmt.Errorf("list subnets: %w", err)
 	}
@@ -349,7 +349,7 @@ func (r *SubnetReconciler) findBootdNetworkCollision(ctx context.Context, subnet
 	ns := resolveNamespace(*subnet.Spec.BootdNetworkRef, subnet.Namespace)
 	name := subnet.Spec.BootdNetworkRef.Name
 
-	var other *keziov1alpha2.Subnet
+	var other *keziov1alpha3.Subnet
 	for i := range subnets.Items {
 		candidate := &subnets.Items[i]
 		if candidate.UID == subnet.UID {
@@ -386,7 +386,7 @@ func (r *SubnetReconciler) findBootdNetworkCollision(ctx context.Context, subnet
 // would fail the shared manager entirely. Trade-off: a newly created NAD
 // does not requeue its waiting Subnet promptly; recovery waits for the
 // manager's default resync or another event touching the Subnet.
-func (r *SubnetReconciler) runNADChecks(ctx context.Context, subnet *keziov1alpha2.Subnet) ([]subnetCheck, error) {
+func (r *SubnetReconciler) runNADChecks(ctx context.Context, subnet *keziov1alpha3.Subnet) ([]subnetCheck, error) {
 	var checks []subnetCheck
 
 	if subnet.Spec.HasBootPlane() {
@@ -439,11 +439,11 @@ func (r *SubnetReconciler) runNADChecks(ctx context.Context, subnet *keziov1alph
 //
 // Never blocking: subnet's own bootd Deployment does not depend on the
 // Site existing, only Site-scoped features (seeder/tracker placement) do.
-func (r *SubnetReconciler) checkSiteRef(ctx context.Context, subnet *keziov1alpha2.Subnet) (subnetCheck, error) {
+func (r *SubnetReconciler) checkSiteRef(ctx context.Context, subnet *keziov1alpha3.Subnet) (subnetCheck, error) {
 	ref := subnet.Spec.SiteRef
 	ns := resolveNamespace(ref, subnet.Namespace)
 
-	site := &keziov1alpha2.Site{}
+	site := &keziov1alpha3.Site{}
 	err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: ref.Name}, site)
 	switch {
 	case err == nil:
@@ -469,7 +469,7 @@ func (r *SubnetReconciler) checkSiteRef(ctx context.Context, subnet *keziov1alph
 // to a config string before handing it to internal/nadvalidate. A failure
 // to read spec.config out of an otherwise-fetched NAD is wrapped in
 // nadContentError so callers can tell it apart from a Get failure.
-func fetchNADConfig(ctx context.Context, c client.Client, ref keziov1alpha2.NameRef, defaultNS string) (string, error) {
+func fetchNADConfig(ctx context.Context, c client.Client, ref keziov1alpha3.NameRef, defaultNS string) (string, error) {
 	ns := resolveNamespace(ref, defaultNS)
 	nad := &unstructured.Unstructured{}
 	nad.SetGroupVersionKind(networkAttachmentDefinitionGVK)
@@ -541,7 +541,7 @@ func indeterminateFromFetchErr(reasonPrefix, what string, err error) nadvalidate
 // replica. It is CheckSeederStaticMultiImage's concurrentImages input:
 // this Subnet's own NAD is what a static multi-image address pool
 // actually constrains, so only seeders sharing it count.
-func (r *SubnetReconciler) concurrentSeederDeployments(ctx context.Context, subnet *keziov1alpha2.Subnet) (int, error) {
+func (r *SubnetReconciler) concurrentSeederDeployments(ctx context.Context, subnet *keziov1alpha3.Subnet) (int, error) {
 	var deployments appsv1.DeploymentList
 	if err := r.List(ctx, &deployments, client.InNamespace(subnet.Namespace), client.MatchingLabels{
 		partitionContentAppComponentLabel: partitionContentSeederComponentValue,
@@ -578,7 +578,7 @@ func (r *SubnetReconciler) concurrentSeederDeployments(ctx context.Context, subn
 // reported: each independently keeps Ready False, so any pick is a
 // truthful explanation, and fixing them one at a time still converges on
 // Ready=True.
-func (r *SubnetReconciler) updateSubnetConditions(ctx context.Context, subnet *keziov1alpha2.Subnet, checks []subnetCheck, hasBootPlane, depConfigured, depAvailable bool, depReason, depMessage string) error {
+func (r *SubnetReconciler) updateSubnetConditions(ctx context.Context, subnet *keziov1alpha3.Subnet, checks []subnetCheck, hasBootPlane, depConfigured, depAvailable bool, depReason, depMessage string) error {
 	var violation, indeterminate *subnetCheck
 	for i := range checks {
 		c := &checks[i]
@@ -602,7 +602,7 @@ func (r *SubnetReconciler) updateSubnetConditions(ctx context.Context, subnet *k
 		validStatus, validReason, validMessage = metav1.ConditionUnknown, indeterminate.result.Reason, indeterminate.result.Message
 	}
 	apimeta.SetStatusCondition(&subnet.Status.Conditions, metav1.Condition{
-		Type:               keziov1alpha2.SubnetConditionValid,
+		Type:               keziov1alpha3.SubnetConditionValid,
 		Status:             validStatus,
 		Reason:             validReason,
 		Message:            validMessage,
@@ -623,7 +623,7 @@ func (r *SubnetReconciler) updateSubnetConditions(ctx context.Context, subnet *k
 		readyStatus, readyReason, readyMessage = metav1.ConditionUnknown, indeterminate.result.Reason, indeterminate.result.Message
 	}
 	apimeta.SetStatusCondition(&subnet.Status.Conditions, metav1.Condition{
-		Type:               keziov1alpha2.SubnetConditionReady,
+		Type:               keziov1alpha3.SubnetConditionReady,
 		Status:             readyStatus,
 		Reason:             readyReason,
 		Message:            readyMessage,
@@ -643,11 +643,11 @@ func (r *SubnetReconciler) updateSubnetConditions(ctx context.Context, subnet *k
 // Subnet back through the workqueue for checkSiteRef to catch. Mirrors
 // SiteReconciler.mapSubnetToSite in the opposite direction.
 func (r *SubnetReconciler) mapSiteToSubnets(ctx context.Context, obj client.Object) []reconcile.Request {
-	site, ok := obj.(*keziov1alpha2.Site)
+	site, ok := obj.(*keziov1alpha3.Site)
 	if !ok {
 		return nil
 	}
-	var subnets keziov1alpha2.SubnetList
+	var subnets keziov1alpha3.SubnetList
 	if err := r.List(ctx, &subnets, client.InNamespace(site.Namespace)); err != nil {
 		return nil
 	}
@@ -670,9 +670,9 @@ func (r *SubnetReconciler) mapSiteToSubnets(ctx context.Context, obj client.Obje
 // deletion, which checkSiteRef must surface as Valid=False.
 func (r *SubnetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&keziov1alpha2.Subnet{}).
+		For(&keziov1alpha3.Subnet{}).
 		Owns(&appsv1.Deployment{}).
-		Watches(&keziov1alpha2.Site{}, handler.EnqueueRequestsFromMapFunc(r.mapSiteToSubnets)).
+		Watches(&keziov1alpha3.Site{}, handler.EnqueueRequestsFromMapFunc(r.mapSiteToSubnets)).
 		Named("subnet").
 		Complete(r)
 }

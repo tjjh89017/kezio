@@ -1,0 +1,10 @@
+apiVersion: kezio.kojuro.date/v1alpha3
+kind: DeployRun
+metadata:
+  labels:
+    app.kubernetes.io/name: kezio
+    app.kubernetes.io/managed-by: kustomize
+  name: deployrun-sample
+spec:
+  machineRef:
+    name: machine-sample

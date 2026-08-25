@@ -33,7 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // imageStaleContentRequeueInterval is how soon the reconciler retries
@@ -78,7 +78,7 @@ type ImageReconciler struct {
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *ImageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var image keziov1alpha2.Image
+	var image keziov1alpha3.Image
 	if err := r.Get(ctx, req.NamespacedName, &image); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -93,8 +93,8 @@ func (r *ImageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 // reconcileImageSeeder takes over instead, since seed-demand keeps
 // changing (Machines coming and going) long after an Image itself
 // reaches Ready.
-func (r *ImageReconciler) onChange(ctx context.Context, image *keziov1alpha2.Image) (ctrl.Result, error) {
-	if image.Status.State == keziov1alpha2.ImageStateReady {
+func (r *ImageReconciler) onChange(ctx context.Context, image *keziov1alpha3.Image) (ctrl.Result, error) {
+	if image.Status.State == keziov1alpha3.ImageStateReady {
 		return r.reconcileImageSeeder(ctx, image)
 	}
 
@@ -152,11 +152,11 @@ var partitionContentStatusChangedPredicate = predicate.Funcs{
 	CreateFunc: func(event.CreateEvent) bool { return true },
 	DeleteFunc: func(event.DeleteEvent) bool { return true },
 	UpdateFunc: func(e event.UpdateEvent) bool {
-		oldPC, ok := e.ObjectOld.(*keziov1alpha2.PartitionContent)
+		oldPC, ok := e.ObjectOld.(*keziov1alpha3.PartitionContent)
 		if !ok {
 			return true
 		}
-		newPC, ok := e.ObjectNew.(*keziov1alpha2.PartitionContent)
+		newPC, ok := e.ObjectNew.(*keziov1alpha3.PartitionContent)
 		if !ok {
 			return true
 		}
@@ -176,11 +176,11 @@ var partitionContentStatusChangedPredicate = predicate.Funcs{
 // aggregateSlotContents), but the index and this reverse lookup only key
 // on content name within the content's namespace.
 func (r *ImageReconciler) mapPartitionContentToImages(ctx context.Context, obj client.Object) []reconcile.Request {
-	pc, ok := obj.(*keziov1alpha2.PartitionContent)
+	pc, ok := obj.(*keziov1alpha3.PartitionContent)
 	if !ok {
 		return nil
 	}
-	var images keziov1alpha2.ImageList
+	var images keziov1alpha3.ImageList
 	if err := r.List(ctx, &images, client.InNamespace(pc.Namespace), client.MatchingFields{imageContentRefIndex: pc.Name}); err != nil {
 		return nil
 	}
@@ -198,7 +198,7 @@ func (r *ImageReconciler) mapPartitionContentToImages(ctx context.Context, obj c
 // via its own spec.imageRef/dataImages - no PartitionContent indirection
 // needed, since seeder demand is now grouped at the Image level.
 func (r *ImageReconciler) mapMachineToImages(_ context.Context, obj client.Object) []reconcile.Request {
-	machine, ok := obj.(*keziov1alpha2.Machine)
+	machine, ok := obj.(*keziov1alpha3.Machine)
 	if !ok {
 		return nil
 	}
@@ -213,7 +213,7 @@ func (r *ImageReconciler) mapMachineToImages(_ context.Context, obj client.Objec
 // mapDeployRunToImages maps a DeployRun event to a reconcile request per
 // Image its resolved snapshot names.
 func (r *ImageReconciler) mapDeployRunToImages(_ context.Context, obj client.Object) []reconcile.Request {
-	run, ok := obj.(*keziov1alpha2.DeployRun)
+	run, ok := obj.(*keziov1alpha3.DeployRun)
 	if !ok {
 		return nil
 	}
@@ -231,13 +231,13 @@ func (r *ImageReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&keziov1alpha2.Image{}, builder.WithPredicates(imageUpdatePredicate)).
+		For(&keziov1alpha3.Image{}, builder.WithPredicates(imageUpdatePredicate)).
 		Owns(&batchv1.Job{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&appsv1.Deployment{}).
-		Watches(&keziov1alpha2.PartitionContent{}, handler.EnqueueRequestsFromMapFunc(r.mapPartitionContentToImages), builder.WithPredicates(partitionContentStatusChangedPredicate)).
-		Watches(&keziov1alpha2.Machine{}, handler.EnqueueRequestsFromMapFunc(r.mapMachineToImages), builder.WithPredicates(machineDemandPredicate)).
-		Watches(&keziov1alpha2.DeployRun{}, handler.EnqueueRequestsFromMapFunc(r.mapDeployRunToImages), builder.WithPredicates(deployRunDemandPredicate)).
+		Watches(&keziov1alpha3.PartitionContent{}, handler.EnqueueRequestsFromMapFunc(r.mapPartitionContentToImages), builder.WithPredicates(partitionContentStatusChangedPredicate)).
+		Watches(&keziov1alpha3.Machine{}, handler.EnqueueRequestsFromMapFunc(r.mapMachineToImages), builder.WithPredicates(machineDemandPredicate)).
+		Watches(&keziov1alpha3.DeployRun{}, handler.EnqueueRequestsFromMapFunc(r.mapDeployRunToImages), builder.WithPredicates(deployRunDemandPredicate)).
 		Named("image").
 		Complete(r)
 }

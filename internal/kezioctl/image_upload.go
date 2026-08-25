@@ -30,7 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // imageImportWaitPollInterval is how often ImageUpload's --wait re-checks
@@ -83,7 +83,7 @@ type ImageUploadOptions struct {
 // ImageUploadResult reports what ImageUpload created.
 type ImageUploadResult struct {
 	Upload UploadResponse
-	Import *keziov1alpha2.ImageImport
+	Import *keziov1alpha3.ImageImport
 }
 
 // ImageUpload implements `kezioctl image upload`: it streams opts.File to
@@ -135,13 +135,13 @@ func ImageUpload(ctx context.Context, httpClient *http.Client, k8sClient client.
 		contentPrefix = opts.Name
 	}
 
-	imp := &keziov1alpha2.ImageImport{
+	imp := &keziov1alpha3.ImageImport{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      opts.Name,
 			Namespace: opts.Namespace,
 		},
-		Spec: keziov1alpha2.ImageImportSpec{
-			Source: keziov1alpha2.ImportSource{
+		Spec: keziov1alpha3.ImageImportSpec{
+			Source: keziov1alpha3.ImportSource{
 				URL:      uploadResp.URL,
 				Checksum: uploadResp.Checksum,
 			},
@@ -253,7 +253,7 @@ func waitForImportedImage(ctx context.Context, c client.Client, opts ImageUpload
 // read failure: the caller's select turns it into the timeout or
 // cancellation message.
 func observeImportWait(ctx context.Context, c client.Client, opts ImageUploadOptions, imageName string) (importWaitState, error) {
-	imp := &keziov1alpha2.ImageImport{}
+	imp := &keziov1alpha3.ImageImport{}
 	importKey := client.ObjectKey{Namespace: opts.Namespace, Name: opts.Name}
 	importState := "absent"
 	switch err := c.Get(ctx, importKey, imp); {
@@ -272,7 +272,7 @@ func observeImportWait(ctx context.Context, c client.Client, opts ImageUploadOpt
 		return importWaitState{}, fmt.Errorf("get ImageImport %s/%s: %w", opts.Namespace, opts.Name, err)
 	}
 
-	image := &keziov1alpha2.Image{}
+	image := &keziov1alpha3.Image{}
 	imageKey := client.ObjectKey{Namespace: opts.Namespace, Name: imageName}
 	imageState := "absent"
 	imageFound := false
@@ -290,16 +290,16 @@ func observeImportWait(ctx context.Context, c client.Client, opts ImageUploadOpt
 			opts.Namespace, opts.Name, importState, opts.Namespace, imageName, imageState),
 	}
 	switch {
-	case imageFound && image.Status.State == keziov1alpha2.ImageStateReady:
+	case imageFound && image.Status.State == keziov1alpha3.ImageStateReady:
 		state.ready = true
-	case imp.Status.State == keziov1alpha2.ImageImportStateFailed:
+	case imp.Status.State == keziov1alpha3.ImageImportStateFailed:
 		state.failure = fmt.Errorf("imageimport %s/%s failed: %s",
 			opts.Namespace, opts.Name,
-			conditionDetail(imp.Status.Conditions, keziov1alpha2.ImageImportConditionReady))
-	case imageFound && image.Status.State == keziov1alpha2.ImageStateFailed:
+			conditionDetail(imp.Status.Conditions, keziov1alpha3.ImageImportConditionReady))
+	case imageFound && image.Status.State == keziov1alpha3.ImageStateFailed:
 		state.failure = fmt.Errorf("image %s/%s failed: %s",
 			opts.Namespace, imageName,
-			conditionDetail(image.Status.Conditions, keziov1alpha2.ImageConditionReady))
+			conditionDetail(image.Status.Conditions, keziov1alpha3.ImageConditionReady))
 	}
 	return state, nil
 }

@@ -24,7 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // imageContentRefIndex is the field index name registered on Image for
@@ -47,7 +47,7 @@ var (
 // reconcilers' SetupWithManager call it or in what order.
 func ensureImageContentRefIndex(mgr ctrl.Manager) error {
 	imageContentRefIndexOnce.Do(func() {
-		imageContentRefIndexErr = mgr.GetFieldIndexer().IndexField(context.Background(), &keziov1alpha2.Image{}, imageContentRefIndex, indexImageContentRefs)
+		imageContentRefIndexErr = mgr.GetFieldIndexer().IndexField(context.Background(), &keziov1alpha3.Image{}, imageContentRefIndex, indexImageContentRefs)
 	})
 	return imageContentRefIndexErr
 }
@@ -55,7 +55,7 @@ func ensureImageContentRefIndex(mgr ctrl.Manager) error {
 // indexImageContentRefs extracts every PartitionContent name referenced by
 // obj's slots, for imageContentRefIndex.
 func indexImageContentRefs(obj client.Object) []string {
-	image, ok := obj.(*keziov1alpha2.Image)
+	image, ok := obj.(*keziov1alpha3.Image)
 	if !ok {
 		return nil
 	}
@@ -64,7 +64,7 @@ func indexImageContentRefs(obj client.Object) []string {
 
 // imageContentRefNames returns the (deduplicated) PartitionContent names
 // image's slots reference.
-func imageContentRefNames(image *keziov1alpha2.Image) []string {
+func imageContentRefNames(image *keziov1alpha3.Image) []string {
 	seen := make(map[string]bool, len(image.Spec.Layout.Slots))
 	names := make([]string, 0, len(image.Spec.Layout.Slots))
 	for _, slot := range image.Spec.Layout.Slots {
@@ -79,7 +79,7 @@ func imageContentRefNames(image *keziov1alpha2.Image) []string {
 
 // imageReferencesContent reports whether any of image's slots reference
 // the PartitionContent named contentName.
-func imageReferencesContent(image *keziov1alpha2.Image, contentName string) bool {
+func imageReferencesContent(image *keziov1alpha3.Image, contentName string) bool {
 	for _, slot := range image.Spec.Layout.Slots {
 		if slot.ContentRef != nil && slot.ContentRef.Name == contentName {
 			return true
@@ -99,7 +99,7 @@ func imageReferencesContent(image *keziov1alpha2.Image, contentName string) bool
 // namespace but the Image's own, so a referenced PartitionContent always
 // lives alongside the Image that references it.
 func (r *PartitionContentReconciler) mapImageToPartitionContents(_ context.Context, obj client.Object) []reconcile.Request {
-	image, ok := obj.(*keziov1alpha2.Image)
+	image, ok := obj.(*keziov1alpha3.Image)
 	if !ok {
 		return nil
 	}

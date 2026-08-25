@@ -22,7 +22,7 @@ import (
 	"strings"
 	"testing"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 )
 
@@ -121,7 +121,7 @@ func TestRunScriptStep_PassesPlanDevicesInTheEnvironment(t *testing.T) {
 	e, runner := newHooksExecutor()
 	plan := basicPlan()
 	plan.DataImages = []agentapi.DeployDataImagePlan{{
-		ImageRef:     keziov1alpha2.NameRef{Name: "data"},
+		ImageRef:     keziov1alpha3.NameRef{Name: "data"},
 		TargetDisk:   "/dev/sdb",
 		SfdiskScript: fixtureSfdisk,
 		Slots:        []agentapi.DeploySlot{{Number: 1, Device: "/dev/sdb1", Mkfs: &agentapi.DeployMkfs{Filesystem: "ext4"}}},
@@ -181,7 +181,7 @@ func TestRunBuiltinMkswap_RunsAgainstEverySwapSlotAcrossDisks(t *testing.T) {
 	e, runner := newHooksExecutor()
 	plan := basicPlan()
 	plan.DataImages = []agentapi.DeployDataImagePlan{{
-		ImageRef:     keziov1alpha2.NameRef{Name: "data"},
+		ImageRef:     keziov1alpha3.NameRef{Name: "data"},
 		TargetDisk:   "/dev/sdb",
 		SfdiskScript: fixtureSfdisk,
 		Slots:        []agentapi.DeploySlot{{Number: 1, Device: "/dev/sdb1", Swap: &agentapi.DeploySwap{UUID: "data-swap"}}},

@@ -31,39 +31,39 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 )
 
 func newProgressTestClient(t *testing.T, objs ...client.Object) client.Client {
 	t.Helper()
 	scheme := apimachineryruntime.NewScheme()
-	if err := keziov1alpha2.AddToScheme(scheme); err != nil {
+	if err := keziov1alpha3.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
 	}
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&keziov1alpha2.DeployRun{}).
+		WithStatusSubresource(&keziov1alpha3.DeployRun{}).
 		WithObjects(objs...).
 		Build()
 }
 
 const progressTestRunName = "m1-run1"
 
-func newProgressTestMachine() *keziov1alpha2.Machine {
-	return &keziov1alpha2.Machine{
+func newProgressTestMachine() *keziov1alpha3.Machine {
+	return &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: "default"},
-		Status: keziov1alpha2.MachineStatus{
-			CurrentRunRef: &keziov1alpha2.NameRef{Name: progressTestRunName},
+		Status: keziov1alpha3.MachineStatus{
+			CurrentRunRef: &keziov1alpha3.NameRef{Name: progressTestRunName},
 		},
 	}
 }
 
-func newProgressTestRun(t *testing.T, c client.Client) *keziov1alpha2.DeployRun {
+func newProgressTestRun(t *testing.T, c client.Client) *keziov1alpha3.DeployRun {
 	t.Helper()
-	run := &keziov1alpha2.DeployRun{
+	run := &keziov1alpha3.DeployRun{
 		ObjectMeta: metav1.ObjectMeta{Name: progressTestRunName, Namespace: "default"},
-		Spec:       keziov1alpha2.DeployRunSpec{MachineRef: keziov1alpha2.NameRef{Name: "m1"}},
+		Spec:       keziov1alpha3.DeployRunSpec{MachineRef: keziov1alpha3.NameRef{Name: "m1"}},
 	}
 	if err := c.Create(context.Background(), run); err != nil {
 		t.Fatalf("create DeployRun: %v", err)
@@ -79,19 +79,19 @@ func TestPersistProgress_RunningOpensPhaseTiming(t *testing.T) {
 
 	req := agentapi.ProgressRequest{
 		RunName: run.Name, RunUID: string(run.UID),
-		Step: keziov1alpha2.DeployRunPhasePartitioning, State: agentapi.ProgressStateRunning,
+		Step: keziov1alpha3.DeployRunPhasePartitioning, State: agentapi.ProgressStateRunning,
 		Timestamp: time.Now(),
 	}
 	if err := s.persistProgress(context.Background(), machine, req); err != nil {
 		t.Fatalf("persistProgress: %v", err)
 	}
 
-	var stored keziov1alpha2.DeployRun
+	var stored keziov1alpha3.DeployRun
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(run), &stored); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if stored.Status.Phase != keziov1alpha2.DeployRunPhasePartitioning {
-		t.Fatalf("Phase = %q, want %q", stored.Status.Phase, keziov1alpha2.DeployRunPhasePartitioning)
+	if stored.Status.Phase != keziov1alpha3.DeployRunPhasePartitioning {
+		t.Fatalf("Phase = %q, want %q", stored.Status.Phase, keziov1alpha3.DeployRunPhasePartitioning)
 	}
 	if len(stored.Status.PhaseTimings) != 1 || stored.Status.PhaseTimings[0].FinishedAt != nil {
 		t.Fatalf("PhaseTimings = %+v, want one open entry", stored.Status.PhaseTimings)
@@ -107,7 +107,7 @@ func TestPersistProgress_RepeatedRunningDoesNotDuplicateTiming(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		req := agentapi.ProgressRequest{
 			RunName: run.Name, RunUID: string(run.UID),
-			Step: keziov1alpha2.DeployRunPhaseWritingContent, State: agentapi.ProgressStateRunning,
+			Step: keziov1alpha3.DeployRunPhaseWritingContent, State: agentapi.ProgressStateRunning,
 			Timestamp: time.Now(),
 		}
 		if err := s.persistProgress(context.Background(), machine, req); err != nil {
@@ -115,7 +115,7 @@ func TestPersistProgress_RepeatedRunningDoesNotDuplicateTiming(t *testing.T) {
 		}
 	}
 
-	var stored keziov1alpha2.DeployRun
+	var stored keziov1alpha3.DeployRun
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(run), &stored); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -134,9 +134,9 @@ func TestPersistProgress_PhaseTransitionClosesPreviousTiming(t *testing.T) {
 		step  string
 		state string
 	}{
-		{keziov1alpha2.DeployRunPhasePartitioning, agentapi.ProgressStateRunning},
-		{keziov1alpha2.DeployRunPhasePartitioning, agentapi.ProgressStateSucceeded},
-		{keziov1alpha2.DeployRunPhaseWritingContent, agentapi.ProgressStateRunning},
+		{keziov1alpha3.DeployRunPhasePartitioning, agentapi.ProgressStateRunning},
+		{keziov1alpha3.DeployRunPhasePartitioning, agentapi.ProgressStateSucceeded},
+		{keziov1alpha3.DeployRunPhaseWritingContent, agentapi.ProgressStateRunning},
 	}
 	for _, st := range steps {
 		req := agentapi.ProgressRequest{RunName: run.Name, RunUID: string(run.UID), Step: st.step, State: st.state, Timestamp: time.Now()}
@@ -145,12 +145,12 @@ func TestPersistProgress_PhaseTransitionClosesPreviousTiming(t *testing.T) {
 		}
 	}
 
-	var stored keziov1alpha2.DeployRun
+	var stored keziov1alpha3.DeployRun
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(run), &stored); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if stored.Status.Phase != keziov1alpha2.DeployRunPhaseWritingContent {
-		t.Fatalf("Phase = %q, want %q", stored.Status.Phase, keziov1alpha2.DeployRunPhaseWritingContent)
+	if stored.Status.Phase != keziov1alpha3.DeployRunPhaseWritingContent {
+		t.Fatalf("Phase = %q, want %q", stored.Status.Phase, keziov1alpha3.DeployRunPhaseWritingContent)
 	}
 	if len(stored.Status.PhaseTimings) != 2 {
 		t.Fatalf("PhaseTimings = %+v, want two entries", stored.Status.PhaseTimings)
@@ -171,21 +171,21 @@ func TestPersistProgress_TerminalSucceededSetsPhaseAndCondition(t *testing.T) {
 
 	req := agentapi.ProgressRequest{
 		RunName: run.Name, RunUID: string(run.UID),
-		Step: keziov1alpha2.DeployRunPhaseSucceeded, State: agentapi.ProgressStateSucceeded,
+		Step: keziov1alpha3.DeployRunPhaseSucceeded, State: agentapi.ProgressStateSucceeded,
 		Timestamp: time.Now(),
 	}
 	if err := s.persistProgress(context.Background(), machine, req); err != nil {
 		t.Fatalf("persistProgress: %v", err)
 	}
 
-	var stored keziov1alpha2.DeployRun
+	var stored keziov1alpha3.DeployRun
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(run), &stored); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if stored.Status.Phase != keziov1alpha2.DeployRunPhaseSucceeded {
-		t.Fatalf("Phase = %q, want %q", stored.Status.Phase, keziov1alpha2.DeployRunPhaseSucceeded)
+	if stored.Status.Phase != keziov1alpha3.DeployRunPhaseSucceeded {
+		t.Fatalf("Phase = %q, want %q", stored.Status.Phase, keziov1alpha3.DeployRunPhaseSucceeded)
 	}
-	cond := apimeta.FindStatusCondition(stored.Status.Conditions, keziov1alpha2.DeployRunConditionSucceeded)
+	cond := apimeta.FindStatusCondition(stored.Status.Conditions, keziov1alpha3.DeployRunConditionSucceeded)
 	if cond == nil || cond.Status != metav1.ConditionTrue {
 		t.Fatalf("Succeeded condition = %+v, want True", cond)
 	}
@@ -199,7 +199,7 @@ func TestPersistProgress_FailedSetsPhaseFailedWithMessage(t *testing.T) {
 
 	req := agentapi.ProgressRequest{
 		RunName: run.Name, RunUID: string(run.UID),
-		Step: keziov1alpha2.DeployRunPhasePartitioning, State: agentapi.ProgressStateFailed,
+		Step: keziov1alpha3.DeployRunPhasePartitioning, State: agentapi.ProgressStateFailed,
 		Message:   "sfdisk rejected the partition table",
 		Timestamp: time.Now(),
 	}
@@ -207,14 +207,14 @@ func TestPersistProgress_FailedSetsPhaseFailedWithMessage(t *testing.T) {
 		t.Fatalf("persistProgress: %v", err)
 	}
 
-	var stored keziov1alpha2.DeployRun
+	var stored keziov1alpha3.DeployRun
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(run), &stored); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if stored.Status.Phase != keziov1alpha2.DeployRunPhaseFailed {
-		t.Fatalf("Phase = %q, want %q", stored.Status.Phase, keziov1alpha2.DeployRunPhaseFailed)
+	if stored.Status.Phase != keziov1alpha3.DeployRunPhaseFailed {
+		t.Fatalf("Phase = %q, want %q", stored.Status.Phase, keziov1alpha3.DeployRunPhaseFailed)
 	}
-	cond := apimeta.FindStatusCondition(stored.Status.Conditions, keziov1alpha2.DeployRunConditionSucceeded)
+	cond := apimeta.FindStatusCondition(stored.Status.Conditions, keziov1alpha3.DeployRunConditionSucceeded)
 	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Message != "sfdisk rejected the partition table" {
 		t.Fatalf("Succeeded condition = %+v, want False with the failure message", cond)
 	}
@@ -236,7 +236,7 @@ func TestPersistProgress_PartitionsAreUpsertedByNumber(t *testing.T) {
 	for i, partitions := range reports {
 		req := agentapi.ProgressRequest{
 			RunName: run.Name, RunUID: string(run.UID),
-			Step: keziov1alpha2.DeployRunPhaseWritingContent, State: agentapi.ProgressStateRunning,
+			Step: keziov1alpha3.DeployRunPhaseWritingContent, State: agentapi.ProgressStateRunning,
 			Partitions: partitions,
 			Timestamp:  time.Now(),
 		}
@@ -245,11 +245,11 @@ func TestPersistProgress_PartitionsAreUpsertedByNumber(t *testing.T) {
 		}
 	}
 
-	var stored keziov1alpha2.DeployRun
+	var stored keziov1alpha3.DeployRun
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(run), &stored); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	want := []keziov1alpha2.DeployRunPartitionProgress{
+	want := []keziov1alpha3.DeployRunPartitionProgress{
 		{Number: 1, Percent: 100, BytesDone: 1000},
 		{Number: 3, Percent: 100, BytesDone: 30},
 	}
@@ -272,14 +272,14 @@ func TestPersistProgress_StampsLastProgressAtFromServerClock(t *testing.T) {
 
 	req := agentapi.ProgressRequest{
 		RunName: run.Name, RunUID: string(run.UID),
-		Step: keziov1alpha2.DeployRunPhaseWritingContent, State: agentapi.ProgressStateRunning,
+		Step: keziov1alpha3.DeployRunPhaseWritingContent, State: agentapi.ProgressStateRunning,
 		Timestamp: serverNow.Add(-24 * time.Hour),
 	}
 	if err := s.persistProgress(context.Background(), machine, req); err != nil {
 		t.Fatalf("persistProgress: %v", err)
 	}
 
-	var stored keziov1alpha2.DeployRun
+	var stored keziov1alpha3.DeployRun
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(run), &stored); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -310,12 +310,12 @@ func TestPersistProgress_MissingRunIsNoop(t *testing.T) {
 // -1 means every read, forever.
 type laggingReadClient struct {
 	client.Client
-	stale      *keziov1alpha2.DeployRun
+	stale      *keziov1alpha3.DeployRun
 	staleReads int
 }
 
 func (c *laggingReadClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-	run, ok := obj.(*keziov1alpha2.DeployRun)
+	run, ok := obj.(*keziov1alpha3.DeployRun)
 	if !ok || c.staleReads == 0 || key.Name != c.stale.Name {
 		return c.Client.Get(ctx, key, obj, opts...)
 	}
@@ -328,13 +328,13 @@ func (c *laggingReadClient) Get(ctx context.Context, key client.ObjectKey, obj c
 
 // driveToFinalizing replays the report sequence deploy.Executor.Execute
 // sends before its terminal one, leaving run at the Finalizing phase.
-func driveToFinalizing(t *testing.T, s *Server, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun) {
+func driveToFinalizing(t *testing.T, s *Server, machine *keziov1alpha3.Machine, run *keziov1alpha3.DeployRun) {
 	t.Helper()
 	steps := []struct{ step, state string }{
-		{keziov1alpha2.DeployRunPhaseRunningPostHook, agentapi.ProgressStateRunning},
-		{keziov1alpha2.DeployRunPhaseRunningPostHook, agentapi.ProgressStateSucceeded},
-		{keziov1alpha2.DeployRunPhaseFinalizing, agentapi.ProgressStateRunning},
-		{keziov1alpha2.DeployRunPhaseFinalizing, agentapi.ProgressStateSucceeded},
+		{keziov1alpha3.DeployRunPhaseRunningPostHook, agentapi.ProgressStateRunning},
+		{keziov1alpha3.DeployRunPhaseRunningPostHook, agentapi.ProgressStateSucceeded},
+		{keziov1alpha3.DeployRunPhaseFinalizing, agentapi.ProgressStateRunning},
+		{keziov1alpha3.DeployRunPhaseFinalizing, agentapi.ProgressStateSucceeded},
 	}
 	for _, st := range steps {
 		req := agentapi.ProgressRequest{
@@ -347,25 +347,25 @@ func driveToFinalizing(t *testing.T, s *Server, machine *keziov1alpha2.Machine, 
 	}
 }
 
-func terminalSucceededRequest(run *keziov1alpha2.DeployRun) agentapi.ProgressRequest {
+func terminalSucceededRequest(run *keziov1alpha3.DeployRun) agentapi.ProgressRequest {
 	return agentapi.ProgressRequest{
 		RunName: run.Name, RunUID: string(run.UID),
-		Step: keziov1alpha2.DeployRunPhaseSucceeded, State: agentapi.ProgressStateSucceeded,
+		Step: keziov1alpha3.DeployRunPhaseSucceeded, State: agentapi.ProgressStateSucceeded,
 		Timestamp: time.Now(),
 	}
 }
 
-func assertRunSucceeded(t *testing.T, c client.Client, run *keziov1alpha2.DeployRun) {
+func assertRunSucceeded(t *testing.T, c client.Client, run *keziov1alpha3.DeployRun) {
 	t.Helper()
-	var stored keziov1alpha2.DeployRun
+	var stored keziov1alpha3.DeployRun
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(run), &stored); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if stored.Status.Phase != keziov1alpha2.DeployRunPhaseSucceeded {
+	if stored.Status.Phase != keziov1alpha3.DeployRunPhaseSucceeded {
 		t.Fatalf("Phase = %q, want %q: the terminal report was dropped, so the Machine polls this run forever",
-			stored.Status.Phase, keziov1alpha2.DeployRunPhaseSucceeded)
+			stored.Status.Phase, keziov1alpha3.DeployRunPhaseSucceeded)
 	}
-	cond := apimeta.FindStatusCondition(stored.Status.Conditions, keziov1alpha2.DeployRunConditionSucceeded)
+	cond := apimeta.FindStatusCondition(stored.Status.Conditions, keziov1alpha3.DeployRunConditionSucceeded)
 	if cond == nil || cond.Status != metav1.ConditionTrue {
 		t.Fatalf("Succeeded condition = %+v, want True", cond)
 	}
@@ -382,13 +382,13 @@ func TestPersistProgress_TerminalSucceededSurvivesAStaleRead(t *testing.T) {
 	// yet observed the Finalizing-succeeded write still hands back.
 	s := &Server{Client: c}
 	driveToFinalizing(t, s, machine, run)
-	var stale keziov1alpha2.DeployRun
+	var stale keziov1alpha3.DeployRun
 	if err := c.Get(ctx, client.ObjectKeyFromObject(run), &stale); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	req := agentapi.ProgressRequest{
 		RunName: run.Name, RunUID: string(run.UID),
-		Step: keziov1alpha2.DeployRunPhaseFinalizing, State: agentapi.ProgressStateRunning,
+		Step: keziov1alpha3.DeployRunPhaseFinalizing, State: agentapi.ProgressStateRunning,
 		Partitions: []agentapi.ProgressPartition{{Number: 1, Percent: 100}},
 		Timestamp:  time.Now(),
 	}
@@ -418,13 +418,13 @@ func TestPersistProgress_ExhaustedRetriesReportTheConflict(t *testing.T) {
 
 	s := &Server{Client: c}
 	driveToFinalizing(t, s, machine, run)
-	var stale keziov1alpha2.DeployRun
+	var stale keziov1alpha3.DeployRun
 	if err := c.Get(ctx, client.ObjectKeyFromObject(run), &stale); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	req := agentapi.ProgressRequest{
 		RunName: run.Name, RunUID: string(run.UID),
-		Step: keziov1alpha2.DeployRunPhaseFinalizing, State: agentapi.ProgressStateRunning,
+		Step: keziov1alpha3.DeployRunPhaseFinalizing, State: agentapi.ProgressStateRunning,
 		Partitions: []agentapi.ProgressPartition{{Number: 1, Percent: 100}},
 		Timestamp:  time.Now(),
 	}
@@ -450,13 +450,13 @@ func TestPersistProgress_StaleRunUIDIsNoop(t *testing.T) {
 
 	req := agentapi.ProgressRequest{
 		RunName: run.Name, RunUID: string(types.UID("stale-uid")),
-		Step: keziov1alpha2.DeployRunPhasePartitioning, State: agentapi.ProgressStateRunning, Timestamp: time.Now(),
+		Step: keziov1alpha3.DeployRunPhasePartitioning, State: agentapi.ProgressStateRunning, Timestamp: time.Now(),
 	}
 	if err := s.persistProgress(context.Background(), machine, req); err != nil {
 		t.Fatalf("persistProgress: %v", err)
 	}
 
-	var stored keziov1alpha2.DeployRun
+	var stored keziov1alpha3.DeployRun
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(run), &stored); err != nil {
 		t.Fatalf("Get: %v", err)
 	}

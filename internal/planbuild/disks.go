@@ -19,14 +19,14 @@ package planbuild
 import (
 	"fmt"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/diskmatch"
 )
 
 // resolveDisk matches hints against hardware's inventory, wrapping
 // diskmatch's sentinel errors into a DiskSelectionError labeled for the
 // image/dataImages entry that failed to resolve.
-func resolveDisk(disks []keziov1alpha2.MachineHardwareDisk, hints *keziov1alpha2.TargetDiskHints, label string) (*keziov1alpha2.MachineHardwareDisk, error) {
+func resolveDisk(disks []keziov1alpha3.MachineHardwareDisk, hints *keziov1alpha3.TargetDiskHints, label string) (*keziov1alpha3.MachineHardwareDisk, error) {
 	disk, err := diskmatch.Match(disks, hints)
 	if err != nil {
 		return nil, &DiskSelectionError{Reason: fmt.Sprintf("%s: %v", label, err)}

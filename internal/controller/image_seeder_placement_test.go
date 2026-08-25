@@ -21,7 +21,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/sitederive"
 )
 
@@ -35,8 +35,8 @@ import (
 func TestSeederPodAnnotationsQualifiesBareRefWithSeedingSubnetNamespace(t *testing.T) {
 	res := sitederive.Resolution{
 		HasSeeder:        true,
-		SeederNetworkRef: &keziov1alpha2.NameRef{Name: "seeder-nad"},
-		Subnet: &keziov1alpha2.Subnet{
+		SeederNetworkRef: &keziov1alpha3.NameRef{Name: "seeder-nad"},
+		Subnet: &keziov1alpha3.Subnet{
 			ObjectMeta: metav1.ObjectMeta{Name: "seeding-subnet", Namespace: "site-ns"},
 		},
 	}
@@ -55,8 +55,8 @@ func TestSeederPodAnnotationsQualifiesBareRefWithSeedingSubnetNamespace(t *testi
 func TestSeederPodAnnotationsExplicitRefNamespaceWins(t *testing.T) {
 	res := sitederive.Resolution{
 		HasSeeder:        true,
-		SeederNetworkRef: &keziov1alpha2.NameRef{Namespace: "explicit-ns", Name: "seeder-nad"},
-		Subnet: &keziov1alpha2.Subnet{
+		SeederNetworkRef: &keziov1alpha3.NameRef{Namespace: "explicit-ns", Name: "seeder-nad"},
+		Subnet: &keziov1alpha3.Subnet{
 			ObjectMeta: metav1.ObjectMeta{Name: "seeding-subnet", Namespace: "site-ns"},
 		},
 	}
@@ -75,7 +75,7 @@ func TestSeederPodAnnotationsExplicitRefNamespaceWins(t *testing.T) {
 func TestSeederPodAnnotationsNilWithoutSeederNetworkRef(t *testing.T) {
 	res := sitederive.Resolution{
 		HasSeeder: true,
-		Subnet: &keziov1alpha2.Subnet{
+		Subnet: &keziov1alpha3.Subnet{
 			ObjectMeta: metav1.ObjectMeta{Name: "seeding-subnet", Namespace: "site-ns"},
 		},
 	}

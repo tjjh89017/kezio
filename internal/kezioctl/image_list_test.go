@@ -26,24 +26,24 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 func TestWriteImageList_SingleNamespace(t *testing.T) {
 	notBootable := false
-	images := []keziov1alpha2.Image{
+	images := []keziov1alpha3.Image{
 		{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              "golden",
 				CreationTimestamp: metav1.NewTime(time.Now().Add(-2 * time.Hour)),
 			},
-			Spec: keziov1alpha2.ImageSpec{
-				OSFamily: keziov1alpha2.OSFamilyLinux,
+			Spec: keziov1alpha3.ImageSpec{
+				OSFamily: keziov1alpha3.OSFamilyLinux,
 			},
-			Status: keziov1alpha2.ImageStatus{
-				State: keziov1alpha2.ImageStateReady,
+			Status: keziov1alpha3.ImageStatus{
+				State: keziov1alpha3.ImageStateReady,
 				Conditions: []metav1.Condition{
-					{Type: keziov1alpha2.ImageConditionReady, Status: metav1.ConditionTrue, Reason: "Ready", Message: "ready"},
+					{Type: keziov1alpha3.ImageConditionReady, Status: metav1.ConditionTrue, Reason: "Ready", Message: "ready"},
 				},
 			},
 		},
@@ -52,9 +52,9 @@ func TestWriteImageList_SingleNamespace(t *testing.T) {
 				Name:              "data-disk",
 				CreationTimestamp: metav1.NewTime(time.Now().Add(-30 * time.Second)),
 			},
-			Spec: keziov1alpha2.ImageSpec{
+			Spec: keziov1alpha3.ImageSpec{
 				Bootable: &notBootable,
-				OSFamily: keziov1alpha2.OSFamilyOther,
+				OSFamily: keziov1alpha3.OSFamilyOther,
 			},
 			// Status.State left empty: still Pending, no Ready condition.
 		},
@@ -85,7 +85,7 @@ func TestWriteImageList_SingleNamespace(t *testing.T) {
 }
 
 func TestWriteImageList_AllNamespacesAddsNamespaceColumn(t *testing.T) {
-	images := []keziov1alpha2.Image{
+	images := []keziov1alpha3.Image{
 		{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              "golden",
@@ -110,8 +110,8 @@ func TestWriteImageList_AllNamespacesAddsNamespaceColumn(t *testing.T) {
 }
 
 func TestImageList_RespectsNamespaceScoping(t *testing.T) {
-	imgA := &keziov1alpha2.Image{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "ns-a"}}
-	imgB := &keziov1alpha2.Image{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: "ns-b"}}
+	imgA := &keziov1alpha3.Image{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "ns-a"}}
+	imgB := &keziov1alpha3.Image{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: "ns-b"}}
 	c := fake.NewClientBuilder().WithScheme(Scheme).WithObjects(imgA, imgB).Build()
 
 	got, err := ImageList(context.Background(), c, ImageListOptions{Namespace: "ns-a"})

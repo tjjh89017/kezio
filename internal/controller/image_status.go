@@ -29,7 +29,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // imageControllerFieldOwner is the Server-Side Apply field manager
@@ -44,7 +44,7 @@ const imageControllerFieldOwner = "kezio-image-controller"
 type imageStatusApplyBody struct {
 	metav1.TypeMeta `json:",inline"`
 	Metadata        imageStatusApplyBodyMetadata `json:"metadata,omitempty"`
-	Status          keziov1alpha2.ImageStatus    `json:"status"`
+	Status          keziov1alpha3.ImageStatus    `json:"status"`
 }
 
 // imageStatusApplyBodyMetadata mirrors partitionContentStatusApplyBodyMetadata.
@@ -59,9 +59,9 @@ type imageStatusApplyBodyMetadata struct {
 // mirroring applyPartitionContentStatus (this reconciler emits no
 // Events, so it has no onSuccess callbacks to run after the write
 // succeeds).
-func (r *ImageReconciler) applyImageStatus(ctx context.Context, image *keziov1alpha2.Image) error {
+func (r *ImageReconciler) applyImageStatus(ctx context.Context, image *keziov1alpha3.Image) error {
 	body := imageStatusApplyBody{
-		TypeMeta: metav1.TypeMeta{APIVersion: keziov1alpha2.GroupVersion.String(), Kind: "Image"},
+		TypeMeta: metav1.TypeMeta{APIVersion: keziov1alpha3.GroupVersion.String(), Kind: "Image"},
 		Metadata: imageStatusApplyBodyMetadata{Name: image.Name, Namespace: image.Namespace},
 		Status:   image.Status,
 	}
@@ -79,9 +79,9 @@ func (r *ImageReconciler) applyImageStatus(ctx context.Context, image *keziov1al
 // other reconciler reading this condition must compare
 // ObservedGeneration against this Image's current generation before
 // acting on it.
-func setImageReadyCondition(image *keziov1alpha2.Image, status metav1.ConditionStatus, reason, message string) {
+func setImageReadyCondition(image *keziov1alpha3.Image, status metav1.ConditionStatus, reason, message string) {
 	meta.SetStatusCondition(&image.Status.Conditions, metav1.Condition{
-		Type:               keziov1alpha2.ImageConditionReady,
+		Type:               keziov1alpha3.ImageConditionReady,
 		Status:             status,
 		ObservedGeneration: image.Generation,
 		Reason:             reason,
@@ -92,7 +92,7 @@ func setImageReadyCondition(image *keziov1alpha2.Image, status metav1.ConditionS
 // setImageValidCondition sets the Valid condition on image.Status.Conditions,
 // stamping ObservedGeneration from image.Generation. Ready must never be
 // set True while Valid is False (see recordReady's caller).
-func setImageValidCondition(image *keziov1alpha2.Image, valid bool, problems []string) {
+func setImageValidCondition(image *keziov1alpha3.Image, valid bool, problems []string) {
 	status := metav1.ConditionTrue
 	reason := "SlotSizesOK"
 	message := "every contentRef slot's declared sizeBytes fits its content's lastExtentEnd"
@@ -102,7 +102,7 @@ func setImageValidCondition(image *keziov1alpha2.Image, valid bool, problems []s
 		message = boundedMessage(problems)
 	}
 	meta.SetStatusCondition(&image.Status.Conditions, metav1.Condition{
-		Type:               keziov1alpha2.ImageConditionValid,
+		Type:               keziov1alpha3.ImageConditionValid,
 		Status:             status,
 		ObservedGeneration: image.Generation,
 		Reason:             reason,
@@ -112,8 +112,8 @@ func setImageValidCondition(image *keziov1alpha2.Image, valid bool, problems []s
 
 // recordReady records Ready: every referenced content is Ready (fresh)
 // and every contentRef slot's declared size fits its content.
-func (r *ImageReconciler) recordReady(ctx context.Context, image *keziov1alpha2.Image) error {
-	image.Status.State = keziov1alpha2.ImageStateReady
+func (r *ImageReconciler) recordReady(ctx context.Context, image *keziov1alpha3.Image) error {
+	image.Status.State = keziov1alpha3.ImageStateReady
 	setImageReadyCondition(image, metav1.ConditionTrue, "ContentReady", "every referenced PartitionContent is Ready")
 	if err := r.applyImageStatus(ctx, image); err != nil {
 		return fmt.Errorf("image %q: recording Ready: %w", image.Name, err)
@@ -123,8 +123,8 @@ func (r *ImageReconciler) recordReady(ctx context.Context, image *keziov1alpha2.
 
 // recordPending records Pending for an Image whose referenced content is
 // missing or not yet Ready.
-func (r *ImageReconciler) recordPending(ctx context.Context, image *keziov1alpha2.Image, notReady []string) (ctrl.Result, error) {
-	image.Status.State = keziov1alpha2.ImageStatePending
+func (r *ImageReconciler) recordPending(ctx context.Context, image *keziov1alpha3.Image, notReady []string) (ctrl.Result, error) {
+	image.Status.State = keziov1alpha3.ImageStatePending
 	setImageReadyCondition(image, metav1.ConditionFalse, "ContentNotReady", boundedMessage(notReady))
 	if err := r.applyImageStatus(ctx, image); err != nil {
 		return ctrl.Result{}, fmt.Errorf("image %q: recording Pending: %w", image.Name, err)
@@ -135,8 +135,8 @@ func (r *ImageReconciler) recordPending(ctx context.Context, image *keziov1alpha
 // recordInvalid records Pending for an Image whose referenced content is
 // all present and Ready but fails the slot-size/lastExtentEnd check:
 // Ready must not become True while Valid is False.
-func (r *ImageReconciler) recordInvalid(ctx context.Context, image *keziov1alpha2.Image, invalidSizes []string) (ctrl.Result, error) {
-	image.Status.State = keziov1alpha2.ImageStatePending
+func (r *ImageReconciler) recordInvalid(ctx context.Context, image *keziov1alpha3.Image, invalidSizes []string) (ctrl.Result, error) {
+	image.Status.State = keziov1alpha3.ImageStatePending
 	setImageReadyCondition(image, metav1.ConditionFalse, "Invalid", boundedMessage(invalidSizes))
 	if err := r.applyImageStatus(ctx, image); err != nil {
 		return ctrl.Result{}, fmt.Errorf("image %q: recording Pending (invalid): %w", image.Name, err)
@@ -148,8 +148,8 @@ func (r *ImageReconciler) recordInvalid(ctx context.Context, image *keziov1alpha
 // terminally Failed (fresh status). There is no automatic retry - an
 // operator addressing the failed PartitionContent is what re-enters the
 // walk, mirroring PartitionContentReconciler.recordFailed.
-func (r *ImageReconciler) recordFailed(ctx context.Context, image *keziov1alpha2.Image, failed []string) (ctrl.Result, error) {
-	image.Status.State = keziov1alpha2.ImageStateFailed
+func (r *ImageReconciler) recordFailed(ctx context.Context, image *keziov1alpha3.Image, failed []string) (ctrl.Result, error) {
+	image.Status.State = keziov1alpha3.ImageStateFailed
 	setImageReadyCondition(image, metav1.ConditionFalse, "ContentFailed", boundedMessage(failed))
 	if err := r.applyImageStatus(ctx, image); err != nil {
 		return ctrl.Result{}, fmt.Errorf("image %q: recording Failed: %w", image.Name, err)
@@ -175,7 +175,7 @@ type imageSeederDegradedCause struct {
 // "SeederDegraded" instead, since the condition has room for only one.
 // The condition is removed entirely (never set False) when nothing is
 // wrong - "degraded" does not apply to a healthy seeder plane.
-func (r *ImageReconciler) updateImageSeederCondition(ctx context.Context, image *keziov1alpha2.Image, problems []seederSiteProblem, unsetSeederSubnetSites []string) error {
+func (r *ImageReconciler) updateImageSeederCondition(ctx context.Context, image *keziov1alpha3.Image, problems []seederSiteProblem, unsetSeederSubnetSites []string) error {
 	var foreignOwner, unready []string
 	for _, p := range problems {
 		switch p.kind {
@@ -216,10 +216,10 @@ func (r *ImageReconciler) updateImageSeederCondition(ctx context.Context, image 
 	var changed bool
 	switch len(causes) {
 	case 0:
-		changed = meta.RemoveStatusCondition(&image.Status.Conditions, keziov1alpha2.ImageConditionSeederDegraded)
+		changed = meta.RemoveStatusCondition(&image.Status.Conditions, keziov1alpha3.ImageConditionSeederDegraded)
 	case 1:
 		changed = meta.SetStatusCondition(&image.Status.Conditions, metav1.Condition{
-			Type:               keziov1alpha2.ImageConditionSeederDegraded,
+			Type:               keziov1alpha3.ImageConditionSeederDegraded,
 			Status:             metav1.ConditionTrue,
 			Reason:             causes[0].reason,
 			Message:            causes[0].message,
@@ -231,7 +231,7 @@ func (r *ImageReconciler) updateImageSeederCondition(ctx context.Context, image 
 			messages[i] = c.message
 		}
 		changed = meta.SetStatusCondition(&image.Status.Conditions, metav1.Condition{
-			Type:               keziov1alpha2.ImageConditionSeederDegraded,
+			Type:               keziov1alpha3.ImageConditionSeederDegraded,
 			Status:             metav1.ConditionTrue,
 			Reason:             "SeederDegraded",
 			Message:            strings.Join(messages, "; "),

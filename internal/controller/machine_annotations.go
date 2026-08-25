@@ -25,16 +25,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
-func isPaused(machine *keziov1alpha2.Machine) bool {
-	_, ok := machine.Annotations[keziov1alpha2.MachineAnnotationPaused]
+func isPaused(machine *keziov1alpha3.Machine) bool {
+	_, ok := machine.Annotations[keziov1alpha3.MachineAnnotationPaused]
 	return ok
 }
 
-func isDetached(machine *keziov1alpha2.Machine) bool {
-	_, ok := machine.Annotations[keziov1alpha2.MachineAnnotationDetached]
+func isDetached(machine *keziov1alpha3.Machine) bool {
+	_, ok := machine.Annotations[keziov1alpha3.MachineAnnotationDetached]
 	return ok
 }
 
@@ -43,8 +43,8 @@ func isDetached(machine *keziov1alpha2.Machine) bool {
 // credentials Secret label).
 const annotationValueTrue = "true"
 
-func reInspectRequested(machine *keziov1alpha2.Machine) bool {
-	_, ok := machine.Annotations[keziov1alpha2.MachineAnnotationReInspect]
+func reInspectRequested(machine *keziov1alpha3.Machine) bool {
+	_, ok := machine.Annotations[keziov1alpha3.MachineAnnotationReInspect]
 	return ok
 }
 
@@ -53,15 +53,15 @@ func reInspectRequested(machine *keziov1alpha2.Machine) bool {
 // or malformed value never reaches here on a webhook-admitted Machine, but
 // this stays exact rather than presence-only so a corrupt value does not
 // silently disable inspection.
-func inspectDisabled(machine *keziov1alpha2.Machine) bool {
-	return machine.Annotations[keziov1alpha2.MachineAnnotationInspectDisable] == annotationValueTrue
+func inspectDisabled(machine *keziov1alpha3.Machine) bool {
+	return machine.Annotations[keziov1alpha3.MachineAnnotationInspectDisable] == annotationValueTrue
 }
 
 // isRebootAnnotationKey reports whether key is the suffixless reboot
 // annotation or a "-<client>" suffixed one.
 func isRebootAnnotationKey(key string) bool {
-	return key == keziov1alpha2.MachineAnnotationRebootPrefix ||
-		strings.HasPrefix(key, keziov1alpha2.MachineAnnotationRebootPrefix+"-")
+	return key == keziov1alpha3.MachineAnnotationRebootPrefix ||
+		strings.HasPrefix(key, keziov1alpha3.MachineAnnotationRebootPrefix+"-")
 }
 
 // rebootRequested scans every reboot annotation on machine - suffixless and
@@ -69,7 +69,7 @@ func isRebootAnnotationKey(key string) bool {
 // present, and whether any holder asked for a hard reboot: hard wins across
 // every holder, so one holder asking for hard is enough regardless of what
 // any other holder (including the suffixless form) asked for.
-func rebootRequested(ctx context.Context, machine *keziov1alpha2.Machine) (requested, hard bool) {
+func rebootRequested(ctx context.Context, machine *keziov1alpha3.Machine) (requested, hard bool) {
 	log := logf.FromContext(ctx)
 	for key, value := range machine.Annotations {
 		if !isRebootAnnotationKey(key) {
@@ -83,7 +83,7 @@ func rebootRequested(ctx context.Context, machine *keziov1alpha2.Machine) (reque
 				"machine", machine.Name, "annotation", key, "value", value, "error", err.Error())
 			continue
 		}
-		if args.Mode == keziov1alpha2.MachineRebootModeHard {
+		if args.Mode == keziov1alpha3.MachineRebootModeHard {
 			hard = true
 		}
 	}
@@ -94,13 +94,13 @@ func rebootRequested(ctx context.Context, machine *keziov1alpha2.Machine) (reque
 // is a valid soft request (no arguments given). Invalid JSON is reported as
 // an error; the caller treats that as soft too, but reboot presence itself
 // does not depend on this succeeding.
-func parseRebootAnnotation(value string) (keziov1alpha2.MachineRebootAnnotationArguments, error) {
-	result := keziov1alpha2.MachineRebootAnnotationArguments{Mode: keziov1alpha2.MachineRebootModeSoft}
+func parseRebootAnnotation(value string) (keziov1alpha3.MachineRebootAnnotationArguments, error) {
+	result := keziov1alpha3.MachineRebootAnnotationArguments{Mode: keziov1alpha3.MachineRebootModeSoft}
 	if value == "" {
 		return result, nil
 	}
 	if err := json.Unmarshal([]byte(value), &result); err != nil {
-		return keziov1alpha2.MachineRebootAnnotationArguments{Mode: keziov1alpha2.MachineRebootModeSoft}, err
+		return keziov1alpha3.MachineRebootAnnotationArguments{Mode: keziov1alpha3.MachineRebootModeSoft}, err
 	}
 	return result, nil
 }
@@ -109,12 +109,12 @@ func parseRebootAnnotation(value string) (keziov1alpha2.MachineRebootAnnotationA
 // annotation from machine, once the controller has acted on it. Suffixed
 // forms are a client's own hold and are left untouched - only the client
 // that set one clears it.
-func (r *MachineReconciler) clearSuffixlessRebootAnnotation(ctx context.Context, machine *keziov1alpha2.Machine) error {
-	if _, ok := machine.Annotations[keziov1alpha2.MachineAnnotationRebootPrefix]; !ok {
+func (r *MachineReconciler) clearSuffixlessRebootAnnotation(ctx context.Context, machine *keziov1alpha3.Machine) error {
+	if _, ok := machine.Annotations[keziov1alpha3.MachineAnnotationRebootPrefix]; !ok {
 		return nil
 	}
 	patch := client.MergeFrom(machine.DeepCopy())
-	delete(machine.Annotations, keziov1alpha2.MachineAnnotationRebootPrefix)
+	delete(machine.Annotations, keziov1alpha3.MachineAnnotationRebootPrefix)
 	if err := r.Patch(ctx, machine, patch); err != nil {
 		return fmt.Errorf("machine %q: clearing suffixless reboot annotation: %w", machine.Name, err)
 	}

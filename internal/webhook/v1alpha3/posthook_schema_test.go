@@ -1,0 +1,178 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package v1alpha3
+
+import (
+	"fmt"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
+)
+
+// These specs exercise the CRD schema (kubebuilder markers and CEL rules)
+// through the real envtest apiserver, not the Go type definitions: OpenAPI
+// and CEL validation only run there. The PostHookCustomValidator's own
+// rules are covered in posthook_webhook_test.go instead.
+var _ = Describe("PostHook CRD schema", func() {
+	var postHookCount int
+
+	newPostHook := func() *keziov1alpha3.PostHook {
+		postHookCount++
+		return &keziov1alpha3.PostHook{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("schema-test-posthook-%d", postHookCount),
+				Namespace: "default",
+			},
+			Spec: keziov1alpha3.PostHookSpec{
+				Steps: []keziov1alpha3.PostHookStep{
+					{Builtin: &keziov1alpha3.PostHookBuiltinStep{Name: keziov1alpha3.BuiltinStepInstallRemovableFallback}},
+				},
+			},
+		}
+	}
+
+	It("admits a minimal valid PostHook", func() {
+		Expect(k8sClient.Create(ctx, newPostHook())).To(Succeed())
+	})
+
+	It("rejects an empty steps list", func() {
+		ph := newPostHook()
+		ph.Spec.Steps = nil
+		Expect(k8sClient.Create(ctx, ph)).To(HaveOccurred())
+	})
+
+	It("rejects a step with neither builtin nor script set", func() {
+		ph := newPostHook()
+		ph.Spec.Steps = []keziov1alpha3.PostHookStep{{}}
+		Expect(k8sClient.Create(ctx, ph)).To(HaveOccurred())
+	})
+
+	It("rejects a step with both builtin and script set", func() {
+		ph := newPostHook()
+		ph.Spec.Steps = []keziov1alpha3.PostHookStep{
+			{
+				Builtin: &keziov1alpha3.PostHookBuiltinStep{Name: keziov1alpha3.BuiltinStepMkswap},
+				Script:  &keziov1alpha3.PostHookScriptSource{Script: "echo hi"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ph)).To(HaveOccurred())
+	})
+
+	It("rejects a builtin name outside the enum", func() {
+		ph := newPostHook()
+		ph.Spec.Steps = []keziov1alpha3.PostHookStep{
+			{Builtin: &keziov1alpha3.PostHookBuiltinStep{Name: "not-a-builtin"}},
+		}
+		Expect(k8sClient.Create(ctx, ph)).To(HaveOccurred())
+	})
+
+	It("rejects an osFamily value outside the enum", func() {
+		ph := newPostHook()
+		ph.Spec.Steps = []keziov1alpha3.PostHookStep{
+			{
+				OSFamily: "Plan9",
+				Builtin:  &keziov1alpha3.PostHookBuiltinStep{Name: keziov1alpha3.BuiltinStepInstallRemovableFallback},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ph)).To(HaveOccurred())
+	})
+
+	It("rejects a script source with none of script, configMapRef, or secretRef set", func() {
+		ph := newPostHook()
+		ph.Spec.Steps = []keziov1alpha3.PostHookStep{
+			{Script: &keziov1alpha3.PostHookScriptSource{}},
+		}
+		Expect(k8sClient.Create(ctx, ph)).To(HaveOccurred())
+	})
+
+	It("rejects a script source with both script and configMapRef set", func() {
+		ph := newPostHook()
+		ph.Spec.Steps = []keziov1alpha3.PostHookStep{
+			{Script: &keziov1alpha3.PostHookScriptSource{
+				Script:       "echo hi",
+				ConfigMapRef: &keziov1alpha3.ConfigMapKeyRef{Name: "cm", Key: "run.sh"},
+			}},
+		}
+		Expect(k8sClient.Create(ctx, ph)).To(HaveOccurred())
+	})
+
+	It("admits a script sourced from a secretRef", func() {
+		ph := newPostHook()
+		ph.Spec.Steps = []keziov1alpha3.PostHookStep{
+			{Script: &keziov1alpha3.PostHookScriptSource{
+				SecretRef: &keziov1alpha3.SecretKeyRef{Name: "creds", Key: "token"},
+			}},
+		}
+		Expect(k8sClient.Create(ctx, ph)).To(Succeed())
+	})
+
+	It("rejects a step naming the removed chrootScript kind", func() {
+		ph := newPostHook()
+		obj := &unstructured.Unstructured{Object: map[string]any{
+			"metadata": map[string]any{"name": ph.Name, "namespace": ph.Namespace},
+			"spec": map[string]any{
+				"steps": []any{map[string]any{
+					"chrootScript": map[string]any{"script": "echo hi"},
+				}},
+			},
+		}}
+		obj.SetGroupVersionKind(keziov1alpha3.GroupVersion.WithKind("PostHook"))
+		Expect(k8sClient.Create(ctx, obj)).To(HaveOccurred())
+	})
+
+	It("rejects duplicate param names via the params list-map key", func() {
+		ph := newPostHook()
+		ph.Spec.Params = []keziov1alpha3.PostHookParam{
+			{Name: "a"}, {Name: "a"},
+		}
+		Expect(k8sClient.Create(ctx, ph)).To(HaveOccurred())
+	})
+
+	It("admits params with distinct names and a default", func() {
+		ph := newPostHook()
+		defaultVal := "eth0"
+		ph.Spec.Params = []keziov1alpha3.PostHookParam{
+			{Name: "iface", Default: &defaultVal},
+			{Name: "hostname"},
+		}
+		Expect(k8sClient.Create(ctx, ph)).To(Succeed())
+	})
+
+	It("round-trips a builtin step's params through the schema (not pruned as an unknown field)", func() {
+		ph := newPostHook()
+		ph.Spec.Steps = []keziov1alpha3.PostHookStep{
+			{
+				OSFamily: keziov1alpha3.OSFamilyLinux,
+				Builtin: &keziov1alpha3.PostHookBuiltinStep{
+					Name:   keziov1alpha3.BuiltinStepEfibootmgr,
+					Params: map[string]string{"disk": "/dev/sda", "part": "1"},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ph)).To(Succeed())
+
+		var stored keziov1alpha3.PostHook
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(ph), &stored)).To(Succeed())
+		Expect(stored.Spec.Steps[0].Builtin.Params).To(Equal(map[string]string{"disk": "/dev/sda", "part": "1"}))
+	})
+})

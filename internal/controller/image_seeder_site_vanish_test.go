@@ -28,7 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/seederdeploy"
 )
 
@@ -46,8 +46,8 @@ var _ = Describe("Image Controller seeder demand when a Site vanishes", func() {
 		contentName := "pc-" + imageSeederTestHash(720)
 		createReadyContent(ctx, contentName)
 
-		img := newTestImageWithSlots("image-720", []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		img := newTestImageWithSlots("image-720", []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentName}},
 		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
@@ -79,7 +79,7 @@ var _ = Describe("Image Controller seeder demand when a Site vanishes", func() {
 		// this Site drops to zero exactly as it would if the Machine
 		// itself had been deleted - the grace-period countdown must start,
 		// not an immediate delete.
-		var site keziov1alpha2.Site
+		var site keziov1alpha3.Site
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "site-720", Namespace: "default"}, &site)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, &site)).To(Succeed())
 
@@ -93,9 +93,9 @@ var _ = Describe("Image Controller seeder demand when a Site vanishes", func() {
 		// The Site is recreated mid-grace (a mistaken delete, an apply
 		// race): the same seeding Subnet still names it back, so demand
 		// resolves again and the countdown must cancel.
-		recreatedSite := &keziov1alpha2.Site{
+		recreatedSite := &keziov1alpha3.Site{
 			ObjectMeta: metav1.ObjectMeta{Name: "site-720", Namespace: "default"},
-			Spec:       keziov1alpha2.SiteSpec{SeederSubnetRef: &keziov1alpha2.NameRef{Name: "seed-subnet-720"}},
+			Spec:       keziov1alpha3.SiteSpec{SeederSubnetRef: &keziov1alpha3.NameRef{Name: "seed-subnet-720"}},
 		}
 		Expect(k8sClient.Create(ctx, recreatedSite)).To(Succeed())
 
@@ -132,8 +132,8 @@ var _ = Describe("Image Controller seeder demand when a Site vanishes", func() {
 		contentName := "pc-" + imageSeederTestHash(721)
 		createReadyContent(ctx, contentName)
 
-		img := newTestImageWithSlots("image-721", []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		img := newTestImageWithSlots("image-721", []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentName}},
 		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
@@ -143,7 +143,7 @@ var _ = Describe("Image Controller seeder demand when a Site vanishes", func() {
 		good := newTestMachineOnSubnet("machine-721b", img.Name, "machine-subnet-721b")
 		Expect(k8sClient.Create(ctx, good)).To(Succeed())
 
-		var siteA keziov1alpha2.Site
+		var siteA keziov1alpha3.Site
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "site-721a", Namespace: "default"}, &siteA)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, &siteA)).To(Succeed())
 

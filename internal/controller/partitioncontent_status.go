@@ -26,7 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // partitionContentControllerFieldOwner is the Server-Side Apply field
@@ -43,7 +43,7 @@ const partitionContentControllerFieldOwner = "kezio-partitioncontent-controller"
 type partitionContentStatusApplyBody struct {
 	metav1.TypeMeta `json:",inline"`
 	Metadata        partitionContentStatusApplyBodyMetadata `json:"metadata,omitempty"`
-	Status          keziov1alpha2.PartitionContentStatus    `json:"status"`
+	Status          keziov1alpha3.PartitionContentStatus    `json:"status"`
 }
 
 // partitionContentStatusApplyBodyMetadata mirrors machineStatusApplyBodyMetadata.
@@ -59,9 +59,9 @@ type partitionContentStatusApplyBodyMetadata struct {
 // mirrors; this reconciler is likewise the only writer of
 // PartitionContent.status, so sending the full status on every write is
 // safe here for the same reason.
-func (r *PartitionContentReconciler) applyPartitionContentStatus(ctx context.Context, pc *keziov1alpha2.PartitionContent, onSuccess ...func()) error {
+func (r *PartitionContentReconciler) applyPartitionContentStatus(ctx context.Context, pc *keziov1alpha3.PartitionContent, onSuccess ...func()) error {
 	body := partitionContentStatusApplyBody{
-		TypeMeta: metav1.TypeMeta{APIVersion: keziov1alpha2.GroupVersion.String(), Kind: "PartitionContent"},
+		TypeMeta: metav1.TypeMeta{APIVersion: keziov1alpha3.GroupVersion.String(), Kind: "PartitionContent"},
 		Metadata: partitionContentStatusApplyBodyMetadata{Name: pc.Name, Namespace: pc.Namespace},
 		Status:   pc.Status,
 	}
@@ -84,9 +84,9 @@ func (r *PartitionContentReconciler) applyPartitionContentStatus(ctx context.Con
 // Valid is set by a later item - so this does not take a condition type
 // parameter; setPartitionContentSeederDegradedCondition is the other
 // condition setter this reconciler carries.
-func setPartitionContentReadyCondition(pc *keziov1alpha2.PartitionContent, status metav1.ConditionStatus, reason, message string) {
+func setPartitionContentReadyCondition(pc *keziov1alpha3.PartitionContent, status metav1.ConditionStatus, reason, message string) {
 	meta.SetStatusCondition(&pc.Status.Conditions, metav1.Condition{
-		Type:               keziov1alpha2.PartitionContentConditionReady,
+		Type:               keziov1alpha3.PartitionContentConditionReady,
 		Status:             status,
 		ObservedGeneration: pc.Generation,
 		Reason:             reason,
@@ -104,9 +104,9 @@ func setPartitionContentReadyCondition(pc *keziov1alpha2.PartitionContent, statu
 // contract (see aggregateSlotContents) always finds a Valid condition
 // with a current observedGeneration to check, instead of having to treat
 // "condition absent" as a separate case from "condition stale".
-func setPartitionContentValidCondition(pc *keziov1alpha2.PartitionContent) {
+func setPartitionContentValidCondition(pc *keziov1alpha3.PartitionContent) {
 	meta.SetStatusCondition(&pc.Status.Conditions, metav1.Condition{
-		Type:               keziov1alpha2.PartitionContentConditionValid,
+		Type:               keziov1alpha3.PartitionContentConditionValid,
 		Status:             metav1.ConditionTrue,
 		ObservedGeneration: pc.Generation,
 		Reason:             "SpecValid",
@@ -118,9 +118,9 @@ func setPartitionContentValidCondition(pc *keziov1alpha2.PartitionContent) {
 // condition on pc.Status.Conditions, stamping ObservedGeneration from
 // pc.Generation. See recordSeederStatus for when this is set versus
 // removed entirely.
-func setPartitionContentSeederDegradedCondition(pc *keziov1alpha2.PartitionContent, status metav1.ConditionStatus, reason, message string) {
+func setPartitionContentSeederDegradedCondition(pc *keziov1alpha3.PartitionContent, status metav1.ConditionStatus, reason, message string) {
 	meta.SetStatusCondition(&pc.Status.Conditions, metav1.Condition{
-		Type:               keziov1alpha2.PartitionContentConditionSeederDegraded,
+		Type:               keziov1alpha3.PartitionContentConditionSeederDegraded,
 		Status:             status,
 		ObservedGeneration: pc.Generation,
 		Reason:             reason,
@@ -133,9 +133,9 @@ func setPartitionContentSeederDegradedCondition(pc *keziov1alpha2.PartitionConte
 // pc.Generation. Set only while a delete is actually blocked - onDelete
 // removes it entirely once the finalizer clears (see the type's doc
 // comment for why this is never set False).
-func setPartitionContentDeletionBlockedCondition(pc *keziov1alpha2.PartitionContent, reason, message string) {
+func setPartitionContentDeletionBlockedCondition(pc *keziov1alpha3.PartitionContent, reason, message string) {
 	meta.SetStatusCondition(&pc.Status.Conditions, metav1.Condition{
-		Type:               keziov1alpha2.PartitionContentConditionDeletionBlocked,
+		Type:               keziov1alpha3.PartitionContentConditionDeletionBlocked,
 		Status:             metav1.ConditionTrue,
 		ObservedGeneration: pc.Generation,
 		Reason:             reason,

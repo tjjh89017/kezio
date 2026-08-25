@@ -27,7 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 func TestMachineEnroll_CreatesTheMachine(t *testing.T) {
@@ -54,7 +54,7 @@ func TestMachineEnroll_CreatesTheMachine(t *testing.T) {
 		t.Errorf("SubnetRef.Name = %q, want provisioning", machine.Spec.SubnetRef.Name)
 	}
 
-	stored := &keziov1alpha2.Machine{}
+	stored := &keziov1alpha3.Machine{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "node-1"}, stored); err != nil {
 		t.Fatalf("get created Machine: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestMachineEnroll_CreatesTheMachine(t *testing.T) {
 }
 
 func TestMachineEnroll_AlreadyExists(t *testing.T) {
-	existing := &keziov1alpha2.Machine{ObjectMeta: metav1.ObjectMeta{Name: "dup", Namespace: "default"}}
+	existing := &keziov1alpha3.Machine{ObjectMeta: metav1.ObjectMeta{Name: "dup", Namespace: "default"}}
 	c := fake.NewClientBuilder().WithScheme(Scheme).WithObjects(existing).Build()
 
 	_, err := MachineEnroll(context.Background(), c, MachineEnrollOptions{
@@ -85,20 +85,20 @@ func TestMachineEnroll_AlreadyExists(t *testing.T) {
 // TestMachineEnroll_SurfacesWebhookRejectionReadably simulates the Machine
 // webhook's real rejection of a spec.subnetRef naming a Subnet with no
 // boot half (see validateSubnetRef in
-// internal/webhook/v1alpha2/machine_webhook.go) by having the fake
+// internal/webhook/v1alpha3/machine_webhook.go) by having the fake
 // client's Create return exactly that message, the way a real API server
 // would after webhook admission. kezioctl talks to a real apiserver in
 // production - this asserts MachineEnroll passes that rejection through
 // unmodified rather than swallowing or reformatting it, without needing an
 // envtest webhook server for a CLI-level test.
 func TestMachineEnroll_SurfacesWebhookRejectionReadably(t *testing.T) {
-	const webhookMessage = `admission webhook "vmachine-v1alpha2.kb.io" denied the request: ` +
+	const webhookMessage = `admission webhook "vmachine-v1alpha3.kb.io" denied the request: ` +
 		`spec.subnetRef names Subnet "data-plane-only", which has no boot half ` +
 		`(bootdServerIP/bootdNetworkRef/dhcp): a Machine cannot PXE-boot from a data-plane-only Subnet`
 
 	c := fake.NewClientBuilder().WithScheme(Scheme).WithInterceptorFuncs(interceptor.Funcs{
 		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
-			if _, ok := obj.(*keziov1alpha2.Machine); ok {
+			if _, ok := obj.(*keziov1alpha3.Machine); ok {
 				return errors.New(webhookMessage)
 			}
 			return c.Create(ctx, obj, opts...)

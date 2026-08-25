@@ -31,7 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/ingest"
 	"github.com/tjjh89017/kezio/internal/seederdeploy"
 	"github.com/tjjh89017/kezio/internal/sitederive"
@@ -110,7 +110,7 @@ type seededContent struct {
 // resolve. A Ready content with no recorded info hash is skipped the same
 // way - Ready is written together with the hash, so this only ever sees a
 // stale cache read.
-func (r *ImageReconciler) imageSeededContents(ctx context.Context, image *keziov1alpha2.Image) ([]seededContent, error) {
+func (r *ImageReconciler) imageSeededContents(ctx context.Context, image *keziov1alpha3.Image) ([]seededContent, error) {
 	seen := make(map[string]bool)
 	contents := make([]seededContent, 0, len(image.Spec.Layout.Slots))
 	for _, slot := range image.Spec.Layout.Slots {
@@ -123,14 +123,14 @@ func (r *ImageReconciler) imageSeededContents(ctx context.Context, image *keziov
 		if ns == "" {
 			ns = image.Namespace
 		}
-		var pc keziov1alpha2.PartitionContent
+		var pc keziov1alpha3.PartitionContent
 		if err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: slot.ContentRef.Name}, &pc); err != nil {
 			if apierrors.IsNotFound(err) {
 				continue
 			}
 			return nil, fmt.Errorf("image %q: getting partitioncontent %q: %w", image.Name, slot.ContentRef.Name, err)
 		}
-		if !meta.IsStatusConditionTrue(pc.Status.Conditions, keziov1alpha2.PartitionContentConditionReady) {
+		if !meta.IsStatusConditionTrue(pc.Status.Conditions, keziov1alpha3.PartitionContentConditionReady) {
 			continue
 		}
 		if pc.Status.InfoHash == "" {
@@ -171,7 +171,7 @@ func seederContentVolumeName(infoHash string) string {
 // must never depend on anything that can change after the Deployment is
 // first created - it does not: the name is deterministic from (Image,
 // Site) alone.
-func (r *ImageReconciler) buildImageSeederDeployment(image *keziov1alpha2.Image, siteIdentity string, contents []seededContent, res sitederive.Resolution) *appsv1.Deployment {
+func (r *ImageReconciler) buildImageSeederDeployment(image *keziov1alpha3.Image, siteIdentity string, contents []seededContent, res sitederive.Resolution) *appsv1.Deployment {
 	name := seederdeploy.Name(image.Name, siteIdentity)
 	labels := map[string]string{
 		partitionContentAppNameLabel:      partitionContentAppNameValue,
@@ -300,7 +300,7 @@ func (r *ImageReconciler) buildImageSeederDeployment(image *keziov1alpha2.Image,
 // PartitionContentReconciler (to read seeder availability for its own
 // status.seeders[] reflection) - both take image (and this Client) rather
 // than a receiver, so neither reconciler needs the other's type.
-func listImageSeederDeployments(ctx context.Context, c client.Client, image *keziov1alpha2.Image) (map[string]*appsv1.Deployment, error) {
+func listImageSeederDeployments(ctx context.Context, c client.Client, image *keziov1alpha3.Image) (map[string]*appsv1.Deployment, error) {
 	var deployments appsv1.DeploymentList
 	if err := c.List(ctx, &deployments, client.InNamespace(image.Namespace), client.MatchingLabels{
 		partitionContentAppComponentLabel: partitionContentSeederComponentValue,

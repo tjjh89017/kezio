@@ -27,7 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // FakeFailAnnotation is a test-only override, read only by FakeDeployer's
@@ -61,7 +61,7 @@ const FakeDisksAnnotation = "kezio.kojuro.date/fake-disks"
 // fakeSingleDisk is the default synthetic inventory: one plausible but
 // otherwise featureless disk, unchanged since before FakeDisksAnnotation
 // existed.
-var fakeSingleDisk = []keziov1alpha2.MachineHardwareDisk{
+var fakeSingleDisk = []keziov1alpha3.MachineHardwareDisk{
 	{
 		DeviceName: "/dev/vda",
 		SizeBytes:  32 << 30, // 32Gi, an arbitrary but plausible fake disk size.
@@ -74,7 +74,7 @@ var fakeSingleDisk = []keziov1alpha2.MachineHardwareDisk{
 // (a unique disambiguating match), or a hint that matches neither (no
 // match). Both share Rotational=false so a "rotational: false" hint alone
 // is deliberately ambiguous between them.
-var fakeTwoDisks = []keziov1alpha2.MachineHardwareDisk{
+var fakeTwoDisks = []keziov1alpha3.MachineHardwareDisk{
 	{
 		DeviceName:   "/dev/vda",
 		SizeBytes:    32 << 30, // 32Gi
@@ -102,7 +102,7 @@ func boolPtr(v bool) *bool { return &v }
 // fakeDisks selects Inspect's synthetic disk inventory for machine:
 // fakeTwoDisks when FakeDisksAnnotation is exactly "2", fakeSingleDisk
 // otherwise (absent, or any other value).
-func fakeDisks(machine *keziov1alpha2.Machine) []keziov1alpha2.MachineHardwareDisk {
+func fakeDisks(machine *keziov1alpha3.Machine) []keziov1alpha3.MachineHardwareDisk {
 	if machine.Annotations[FakeDisksAnnotation] == "2" {
 		return fakeTwoDisks
 	}
@@ -114,7 +114,7 @@ func fakeDisks(machine *keziov1alpha2.Machine) []keziov1alpha2.MachineHardwareDi
 // default behavior. The second return value is false when the annotation is
 // absent, names a different step, or has failed to parse - each of those
 // falls through to the default behavior unchanged.
-func fakeFailOverride(machine *keziov1alpha2.Machine, step string) (Result, bool) {
+func fakeFailOverride(machine *keziov1alpha3.Machine, step string) (Result, bool) {
 	raw, ok := machine.Annotations[FakeFailAnnotation]
 	if !ok {
 		return Result{}, false
@@ -133,7 +133,7 @@ func fakeFailOverride(machine *keziov1alpha2.Machine, step string) (Result, bool
 
 	return Result{
 		Outcome:      Failed,
-		ErrorType:    keziov1alpha2.MachineErrorTypeTransient,
+		ErrorType:    keziov1alpha3.MachineErrorTypeTransient,
 		ErrorMessage: fmt.Sprintf("fake deployer: scripted failure via %s=%q", FakeFailAnnotation, raw),
 	}, true
 }
@@ -142,12 +142,12 @@ func fakeFailOverride(machine *keziov1alpha2.Machine, step string) (Result, bool
 // DeployRun through by default, one phase per call. It excludes
 // DeployRunPhaseFailed: the default fake never fails on its own.
 var deployRunPhaseOrder = []string{
-	keziov1alpha2.DeployRunPhasePending,
-	keziov1alpha2.DeployRunPhasePartitioning,
-	keziov1alpha2.DeployRunPhaseWritingContent,
-	keziov1alpha2.DeployRunPhaseRunningPostHook,
-	keziov1alpha2.DeployRunPhaseFinalizing,
-	keziov1alpha2.DeployRunPhaseSucceeded,
+	keziov1alpha3.DeployRunPhasePending,
+	keziov1alpha3.DeployRunPhasePartitioning,
+	keziov1alpha3.DeployRunPhaseWritingContent,
+	keziov1alpha3.DeployRunPhaseRunningPostHook,
+	keziov1alpha3.DeployRunPhaseFinalizing,
+	keziov1alpha3.DeployRunPhaseSucceeded,
 }
 
 // FakeDeployer is a Deployer that never dials real hardware and never
@@ -165,15 +165,15 @@ type FakeDeployer struct {
 	Client client.Client
 
 	// InspectFunc, when set, replaces the default Inspect behavior.
-	InspectFunc func(ctx context.Context, machine *keziov1alpha2.Machine, restartOnFailure bool) (Result, error)
+	InspectFunc func(ctx context.Context, machine *keziov1alpha3.Machine, restartOnFailure bool) (Result, error)
 	// ProvisionFunc, when set, replaces the default Provision behavior.
-	ProvisionFunc func(ctx context.Context, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun, restartOnFailure bool) (Result, error)
+	ProvisionFunc func(ctx context.Context, machine *keziov1alpha3.Machine, run *keziov1alpha3.DeployRun, restartOnFailure bool) (Result, error)
 	// DeprovisionFunc, when set, replaces the default Deprovision behavior.
-	DeprovisionFunc func(ctx context.Context, machine *keziov1alpha2.Machine, restartOnFailure bool) (Result, error)
+	DeprovisionFunc func(ctx context.Context, machine *keziov1alpha3.Machine, restartOnFailure bool) (Result, error)
 	// PowerOffFunc, when set, replaces the default PowerOff behavior.
-	PowerOffFunc func(ctx context.Context, machine *keziov1alpha2.Machine) (Result, error)
+	PowerOffFunc func(ctx context.Context, machine *keziov1alpha3.Machine) (Result, error)
 	// RebootFunc, when set, replaces the default Reboot behavior.
-	RebootFunc func(ctx context.Context, machine *keziov1alpha2.Machine, hard bool) (Result, error)
+	RebootFunc func(ctx context.Context, machine *keziov1alpha3.Machine, hard bool) (Result, error)
 }
 
 var _ Deployer = (*FakeDeployer)(nil)
@@ -182,20 +182,20 @@ var _ Deployer = (*FakeDeployer)(nil)
 // stub: it fabricates one disk (two, opt-in via FakeDisksAnnotation) and
 // one NIC rather than reading real hardware, and never resolves
 // machine.spec.subnetRef (Subnet does not exist yet in this stage).
-func (f *FakeDeployer) Inspect(ctx context.Context, machine *keziov1alpha2.Machine, restartOnFailure bool) (Result, error) {
+func (f *FakeDeployer) Inspect(ctx context.Context, machine *keziov1alpha3.Machine, restartOnFailure bool) (Result, error) {
 	if f.InspectFunc != nil {
 		return f.InspectFunc(ctx, machine, restartOnFailure)
 	}
 
-	hw := &keziov1alpha2.MachineHardware{
+	hw := &keziov1alpha3.MachineHardware{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            machine.Name,
 			Namespace:       machine.Namespace,
 			OwnerReferences: []metav1.OwnerReference{machineOwnerReference(machine)},
 		},
-		Spec: keziov1alpha2.MachineHardwareSpec{
+		Spec: keziov1alpha3.MachineHardwareSpec{
 			Disks: fakeDisks(machine),
-			Nics: []keziov1alpha2.MachineHardwareNIC{
+			Nics: []keziov1alpha3.MachineHardwareNIC{
 				{Name: "eth0", MACAddress: machine.Spec.BootMACAddress},
 			},
 			MemoryBytes: 4 << 30, // 4Gi
@@ -215,7 +215,7 @@ func (f *FakeDeployer) Inspect(ctx context.Context, machine *keziov1alpha2.Machi
 // each step, and never resolves machine.spec.imageRef/dataImages/
 // postHookRefs (Image and PostHook do not exist yet in this stage) - it
 // treats every run as trivially deployable.
-func (f *FakeDeployer) Provision(ctx context.Context, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun, restartOnFailure bool) (Result, error) {
+func (f *FakeDeployer) Provision(ctx context.Context, machine *keziov1alpha3.Machine, run *keziov1alpha3.DeployRun, restartOnFailure bool) (Result, error) {
 	if f.ProvisionFunc != nil {
 		return f.ProvisionFunc(ctx, machine, run, restartOnFailure)
 	}
@@ -233,7 +233,7 @@ func (f *FakeDeployer) Provision(ctx context.Context, machine *keziov1alpha2.Mac
 		run.Status.PhaseTimings[n-1].FinishedAt = &now
 	}
 	run.Status.Phase = next
-	run.Status.PhaseTimings = append(run.Status.PhaseTimings, keziov1alpha2.DeployRunPhaseTiming{
+	run.Status.PhaseTimings = append(run.Status.PhaseTimings, keziov1alpha3.DeployRunPhaseTiming{
 		Phase:     next,
 		StartedAt: now,
 	})
@@ -241,7 +241,7 @@ func (f *FakeDeployer) Provision(ctx context.Context, machine *keziov1alpha2.Mac
 	if done {
 		run.Status.PhaseTimings[len(run.Status.PhaseTimings)-1].FinishedAt = &now
 		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-			Type:               keziov1alpha2.DeployRunConditionSucceeded,
+			Type:               keziov1alpha3.DeployRunConditionSucceeded,
 			Status:             metav1.ConditionTrue,
 			Reason:             "FakeDeploySucceeded",
 			Message:            "fake deployer completed this run without touching real hardware",
@@ -262,7 +262,7 @@ func (f *FakeDeployer) Provision(ctx context.Context, machine *keziov1alpha2.Mac
 // Deprovision implements Deployer. The default behavior is an instant
 // Complete: this stage has no deployer-managed deployed state (no real BMC
 // or agent session) for the default fake to tear down.
-func (f *FakeDeployer) Deprovision(ctx context.Context, machine *keziov1alpha2.Machine, restartOnFailure bool) (Result, error) {
+func (f *FakeDeployer) Deprovision(ctx context.Context, machine *keziov1alpha3.Machine, restartOnFailure bool) (Result, error) {
 	if f.DeprovisionFunc != nil {
 		return f.DeprovisionFunc(ctx, machine, restartOnFailure)
 	}
@@ -274,7 +274,7 @@ func (f *FakeDeployer) Deprovision(ctx context.Context, machine *keziov1alpha2.M
 
 // PowerOff implements Deployer. The default behavior is an instant
 // Complete: the default fake never dials a real BMC to change power state.
-func (f *FakeDeployer) PowerOff(ctx context.Context, machine *keziov1alpha2.Machine) (Result, error) {
+func (f *FakeDeployer) PowerOff(ctx context.Context, machine *keziov1alpha3.Machine) (Result, error) {
 	if f.PowerOffFunc != nil {
 		return f.PowerOffFunc(ctx, machine)
 	}
@@ -283,7 +283,7 @@ func (f *FakeDeployer) PowerOff(ctx context.Context, machine *keziov1alpha2.Mach
 
 // Reboot implements Deployer. The default behavior is an instant Complete:
 // the default fake never dials a real BMC to reboot the machine.
-func (f *FakeDeployer) Reboot(ctx context.Context, machine *keziov1alpha2.Machine, hard bool) (Result, error) {
+func (f *FakeDeployer) Reboot(ctx context.Context, machine *keziov1alpha3.Machine, hard bool) (Result, error) {
 	if f.RebootFunc != nil {
 		return f.RebootFunc(ctx, machine, hard)
 	}
@@ -315,11 +315,11 @@ func nextDeployRunPhase(current string) (next string, done bool, err error) {
 // the MachineHardware it writes. Built by hand instead of through
 // controllerutil.SetControllerReference so the fake needs no
 // runtime.Scheme dependency.
-func machineOwnerReference(machine *keziov1alpha2.Machine) metav1.OwnerReference {
+func machineOwnerReference(machine *keziov1alpha3.Machine) metav1.OwnerReference {
 	blockOwnerDeletion := true
 	controller := true
 	return metav1.OwnerReference{
-		APIVersion:         keziov1alpha2.GroupVersion.String(),
+		APIVersion:         keziov1alpha3.GroupVersion.String(),
 		Kind:               "Machine",
 		Name:               machine.Name,
 		UID:                machine.UID,

@@ -21,7 +21,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // NewAbortDecider builds an AbortDecider backed by c: it asks the agent
@@ -53,7 +53,7 @@ func NewAbortDecider(c client.Client) AbortDecider {
 		if ns == "" {
 			ns = machine.Namespace
 		}
-		var run keziov1alpha2.DeployRun
+		var run keziov1alpha3.DeployRun
 		if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: runName}, &run); err != nil {
 			return true
 		}
@@ -66,13 +66,13 @@ func NewAbortDecider(c client.Client) AbortDecider {
 
 // findMachineByName returns the single Machine named name, or nil when
 // there is none or more than one - see NewAbortDecider's doc comment.
-func findMachineByName(ctx context.Context, c client.Client, name string) (*keziov1alpha2.Machine, error) {
-	var list keziov1alpha2.MachineList
+func findMachineByName(ctx context.Context, c client.Client, name string) (*keziov1alpha3.Machine, error) {
+	var list keziov1alpha3.MachineList
 	if err := c.List(ctx, &list); err != nil {
 		return nil, err
 	}
 
-	var found *keziov1alpha2.Machine
+	var found *keziov1alpha3.Machine
 	for i := range list.Items {
 		if list.Items[i].Name != name {
 			continue

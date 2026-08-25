@@ -1,0 +1,13 @@
+apiVersion: kezio.kojuro.date/v1alpha3
+kind: ImageImport
+metadata:
+  labels:
+    app.kubernetes.io/name: kezio
+    app.kubernetes.io/managed-by: kustomize
+  name: imageimport-sample
+spec:
+  source:
+    url: kezio-staged://ubuntu-2404-golden
+    checksum: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  imageName: ubuntu-2404
+  contentPrefix: ubuntu-2404

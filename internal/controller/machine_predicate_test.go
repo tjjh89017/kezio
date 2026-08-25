@@ -22,54 +22,54 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 func TestMachineUpdatePredicateUpdate(t *testing.T) {
-	base := func() *keziov1alpha2.Machine {
-		return &keziov1alpha2.Machine{
+	base := func() *keziov1alpha3.Machine {
+		return &keziov1alpha3.Machine{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:            "m",
 				Generation:      1,
-				Finalizers:      []string{keziov1alpha2.MachineFinalizer},
+				Finalizers:      []string{keziov1alpha3.MachineFinalizer},
 				Annotations:     map[string]string{"a": "1"},
 				ResourceVersion: "1",
 			},
-			Status: keziov1alpha2.MachineStatus{State: keziov1alpha2.MachineStateEnrolling},
+			Status: keziov1alpha3.MachineStatus{State: keziov1alpha3.MachineStateEnrolling},
 		}
 	}
 
 	cases := []struct {
 		name  string
-		newer func(*keziov1alpha2.Machine)
+		newer func(*keziov1alpha3.Machine)
 		want  bool
 	}{
 		{
 			name: "status-only self-write does not trigger",
-			newer: func(m *keziov1alpha2.Machine) {
-				m.Status.State = keziov1alpha2.MachineStateInspecting
+			newer: func(m *keziov1alpha3.Machine) {
+				m.Status.State = keziov1alpha3.MachineStateInspecting
 				m.ResourceVersion = "2"
 			},
 			want: false,
 		},
 		{
 			name:  "generation bump triggers",
-			newer: func(m *keziov1alpha2.Machine) { m.Generation = 2 },
+			newer: func(m *keziov1alpha3.Machine) { m.Generation = 2 },
 			want:  true,
 		},
 		{
 			name:  "annotation change triggers",
-			newer: func(m *keziov1alpha2.Machine) { m.Annotations["a"] = "2" },
+			newer: func(m *keziov1alpha3.Machine) { m.Annotations["a"] = "2" },
 			want:  true,
 		},
 		{
 			name:  "finalizers change triggers",
-			newer: func(m *keziov1alpha2.Machine) { m.Finalizers = append(m.Finalizers, "extra/finalizer") },
+			newer: func(m *keziov1alpha3.Machine) { m.Finalizers = append(m.Finalizers, "extra/finalizer") },
 			want:  true,
 		},
 		{
 			name:  "no change at all does not trigger",
-			newer: func(*keziov1alpha2.Machine) {},
+			newer: func(*keziov1alpha3.Machine) {},
 			want:  false,
 		},
 	}
@@ -89,7 +89,7 @@ func TestMachineUpdatePredicateUpdate(t *testing.T) {
 }
 
 func TestMachineUpdatePredicateLeavesOtherEventsUnfiltered(t *testing.T) {
-	m := &keziov1alpha2.Machine{ObjectMeta: metav1.ObjectMeta{Name: "m"}}
+	m := &keziov1alpha3.Machine{ObjectMeta: metav1.ObjectMeta{Name: "m"}}
 
 	if !machineUpdatePredicate.Create(event.CreateEvent{Object: m}) {
 		t.Error("Create event must not be filtered")
@@ -117,8 +117,8 @@ func TestFinalizersChangedPredicateUpdate(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			oldObj := &keziov1alpha2.Machine{ObjectMeta: metav1.ObjectMeta{Finalizers: tc.old}}
-			newObj := &keziov1alpha2.Machine{ObjectMeta: metav1.ObjectMeta{Finalizers: tc.new}}
+			oldObj := &keziov1alpha3.Machine{ObjectMeta: metav1.ObjectMeta{Finalizers: tc.old}}
+			newObj := &keziov1alpha3.Machine{ObjectMeta: metav1.ObjectMeta{Finalizers: tc.new}}
 			got := finalizersChangedPredicate.Update(event.UpdateEvent{ObjectOld: oldObj, ObjectNew: newObj})
 			if got != tc.want {
 				t.Errorf("finalizersChangedPredicate.Update() = %v, want %v", got, tc.want)
@@ -128,7 +128,7 @@ func TestFinalizersChangedPredicateUpdate(t *testing.T) {
 }
 
 func TestDeployRunDeletionOnlyPredicate(t *testing.T) {
-	run := &keziov1alpha2.DeployRun{}
+	run := &keziov1alpha3.DeployRun{}
 
 	if deployRunDeletionOnly.Create(event.CreateEvent{Object: run}) {
 		t.Error("Create must be filtered out")

@@ -22,7 +22,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 func TestNewAbortDecider_MissingMachineAborts(t *testing.T) {
@@ -35,7 +35,7 @@ func TestNewAbortDecider_MissingMachineAborts(t *testing.T) {
 }
 
 func TestNewAbortDecider_NoCurrentRunRefAborts(t *testing.T) {
-	machine := &keziov1alpha2.Machine{ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: "default"}}
+	machine := &keziov1alpha3.Machine{ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: "default"}}
 	c := newProgressTestClient(t, machine)
 	decide := NewAbortDecider(c)
 
@@ -45,9 +45,9 @@ func TestNewAbortDecider_NoCurrentRunRefAborts(t *testing.T) {
 }
 
 func TestNewAbortDecider_DifferentCurrentRunAborts(t *testing.T) {
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: "default"},
-		Status:     keziov1alpha2.MachineStatus{CurrentRunRef: &keziov1alpha2.NameRef{Name: "run2"}},
+		Status:     keziov1alpha3.MachineStatus{CurrentRunRef: &keziov1alpha3.NameRef{Name: "run2"}},
 	}
 	c := newProgressTestClient(t, machine)
 	decide := NewAbortDecider(c)
@@ -58,9 +58,9 @@ func TestNewAbortDecider_DifferentCurrentRunAborts(t *testing.T) {
 }
 
 func TestNewAbortDecider_MissingDeployRunAborts(t *testing.T) {
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: "default"},
-		Status:     keziov1alpha2.MachineStatus{CurrentRunRef: &keziov1alpha2.NameRef{Name: "run1"}},
+		Status:     keziov1alpha3.MachineStatus{CurrentRunRef: &keziov1alpha3.NameRef{Name: "run1"}},
 	}
 	c := newProgressTestClient(t, machine)
 	decide := NewAbortDecider(c)
@@ -71,11 +71,11 @@ func TestNewAbortDecider_MissingDeployRunAborts(t *testing.T) {
 }
 
 func TestNewAbortDecider_DeletingDeployRunAborts(t *testing.T) {
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: "default"},
-		Status:     keziov1alpha2.MachineStatus{CurrentRunRef: &keziov1alpha2.NameRef{Name: "run1"}},
+		Status:     keziov1alpha3.MachineStatus{CurrentRunRef: &keziov1alpha3.NameRef{Name: "run1"}},
 	}
-	run := &keziov1alpha2.DeployRun{
+	run := &keziov1alpha3.DeployRun{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "run1", Namespace: "default",
 			Finalizers:        []string{"kezio.kojuro.date/test-hold"},
@@ -91,11 +91,11 @@ func TestNewAbortDecider_DeletingDeployRunAborts(t *testing.T) {
 }
 
 func TestNewAbortDecider_LiveCurrentRunContinues(t *testing.T) {
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: "default"},
-		Status:     keziov1alpha2.MachineStatus{CurrentRunRef: &keziov1alpha2.NameRef{Name: "run1"}},
+		Status:     keziov1alpha3.MachineStatus{CurrentRunRef: &keziov1alpha3.NameRef{Name: "run1"}},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", Namespace: "default"}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", Namespace: "default"}}
 	c := newProgressTestClient(t, machine, run)
 	decide := NewAbortDecider(c)
 

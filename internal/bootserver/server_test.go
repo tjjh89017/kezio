@@ -34,25 +34,25 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // newTestServer builds a Server backed by a fake client seeded with
 // machines, indexed the same way SetupFieldIndexer configures a real
 // manager cache. artifactsDir may be "" for tests that never touch the
 // artifacts endpoint.
-func newTestServer(t *testing.T, artifactsDir string, machines ...*keziov1alpha2.Machine) (*Server, client.Client) {
+func newTestServer(t *testing.T, artifactsDir string, machines ...*keziov1alpha3.Machine) (*Server, client.Client) {
 	t.Helper()
 
 	scheme := runtime.NewScheme()
-	if err := keziov1alpha2.AddToScheme(scheme); err != nil {
+	if err := keziov1alpha3.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
 	}
 
 	builder := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithIndex(&keziov1alpha2.Machine{}, MachineBootMACIndexField, IndexMachineBootMAC).
-		WithStatusSubresource(&keziov1alpha2.Machine{})
+		WithIndex(&keziov1alpha3.Machine{}, MachineBootMACIndexField, IndexMachineBootMAC).
+		WithStatusSubresource(&keziov1alpha3.Machine{})
 	for _, m := range machines {
 		builder = builder.WithObjects(m)
 	}
@@ -72,19 +72,19 @@ func newTestServer(t *testing.T, artifactsDir string, machines ...*keziov1alpha2
 // pass their own literal instead of going through newTestMachine.
 const testMAC = "aa:bb:cc:dd:ee:01"
 
-func newTestMachine(state string) *keziov1alpha2.Machine {
+func newTestMachine(state string) *keziov1alpha3.Machine {
 	const name = "node-01"
-	return &keziov1alpha2.Machine{
+	return &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec: keziov1alpha2.MachineSpec{
-			BMC: keziov1alpha2.MachineBMC{
+		Spec: keziov1alpha3.MachineSpec{
+			BMC: keziov1alpha3.MachineBMC{
 				Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-				CredentialsSecretRef: keziov1alpha2.SecretReference{Name: name + "-bmc"},
+				CredentialsSecretRef: keziov1alpha3.SecretReference{Name: name + "-bmc"},
 			},
 			BootMACAddress: testMAC,
-			SubnetRef:      keziov1alpha2.NameRef{Name: name + "-subnet"},
+			SubnetRef:      keziov1alpha3.NameRef{Name: name + "-subnet"},
 		},
-		Status: keziov1alpha2.MachineStatus{
+		Status: keziov1alpha3.MachineStatus{
 			State: state,
 		},
 	}
@@ -92,30 +92,30 @@ func newTestMachine(state string) *keziov1alpha2.Machine {
 
 // newTestSubnetWithBootPlane builds the Subnet newTestMachine's SubnetRef
 // names, with a boot half (BootdServerIP set) at bootdIP.
-func newTestSubnetWithBootPlane(bootdIP string) *keziov1alpha2.Subnet {
-	return &keziov1alpha2.Subnet{
+func newTestSubnetWithBootPlane(bootdIP string) *keziov1alpha3.Subnet {
+	return &keziov1alpha3.Subnet{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-01-subnet"},
-		Spec: keziov1alpha2.SubnetSpec{
-			SiteRef:       keziov1alpha2.NameRef{Name: "site"},
+		Spec: keziov1alpha3.SubnetSpec{
+			SiteRef:       keziov1alpha3.NameRef{Name: "site"},
 			CIDR:          "192.0.2.0/24",
 			BootdServerIP: bootdIP,
-			BootdNetworkRef: &keziov1alpha2.NameRef{
+			BootdNetworkRef: &keziov1alpha3.NameRef{
 				Name: "kezio-boot-network",
 			},
-			DHCP: &keziov1alpha2.SubnetDHCP{Mode: keziov1alpha2.SubnetDHCPModeProxy},
+			DHCP: &keziov1alpha3.SubnetDHCP{Mode: keziov1alpha3.SubnetDHCPModeProxy},
 		},
 	}
 }
 
 // newTestSubnetNoBootPlane builds the same Subnet name with only a seeder
 // half declared - HasBootPlane() is false.
-func newTestSubnetNoBootPlane() *keziov1alpha2.Subnet {
-	return &keziov1alpha2.Subnet{
+func newTestSubnetNoBootPlane() *keziov1alpha3.Subnet {
+	return &keziov1alpha3.Subnet{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-01-subnet"},
-		Spec: keziov1alpha2.SubnetSpec{
-			SiteRef: keziov1alpha2.NameRef{Name: "site"},
+		Spec: keziov1alpha3.SubnetSpec{
+			SiteRef: keziov1alpha3.NameRef{Name: "site"},
 			CIDR:    "192.0.2.0/24",
-			SeederNetworkRef: &keziov1alpha2.NameRef{
+			SeederNetworkRef: &keziov1alpha3.NameRef{
 				Name: "kezio-seeder-network",
 			},
 		},
@@ -150,7 +150,7 @@ func extractToken(t *testing.T, body string) string {
 // name must behave exactly like the colon-form route, and every other
 // search name must 404 so the search proceeds to (or past) it.
 func TestHandleHTTPBootGrubSearch(t *testing.T) {
-	machine := newTestMachine(keziov1alpha2.MachineStateInspecting)
+	machine := newTestMachine(keziov1alpha3.MachineStateInspecting)
 	s, _ := newTestServer(t, t.TempDir(), machine)
 	handler := s.Handler()
 
@@ -213,7 +213,7 @@ func TestHandleHTTPBootGrubSearch(t *testing.T) {
 }
 
 func TestHandleGrubConfig_NetBootNeededMintsAndRotatesToken(t *testing.T) {
-	machine := newTestMachine(keziov1alpha2.MachineStateInspecting)
+	machine := newTestMachine(keziov1alpha3.MachineStateInspecting)
 	s, c := newTestServer(t, t.TempDir(), machine)
 	handler := s.Handler()
 
@@ -233,7 +233,7 @@ func TestHandleGrubConfig_NetBootNeededMintsAndRotatesToken(t *testing.T) {
 	}
 	firstToken := extractToken(t, body)
 
-	var stored keziov1alpha2.Machine
+	var stored keziov1alpha3.Machine
 	if err := c.Get(context.Background(), types.NamespacedName{Name: machine.Name}, &stored); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestHandleGrubConfig_NetBootNeededMintsAndRotatesToken(t *testing.T) {
 		t.Fatalf("token did not rotate across fetches")
 	}
 
-	var stored2 keziov1alpha2.Machine
+	var stored2 keziov1alpha3.Machine
 	if err := c.Get(context.Background(), types.NamespacedName{Name: machine.Name}, &stored2); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestHandleGrubConfig_NetBootNeededMintsAndRotatesToken(t *testing.T) {
 // instead of the manager-wide Config.ServerURL/AgentServerURL - the
 // address a machine on an isolated Site can actually reach.
 func TestHandleGrubConfig_SubnetWithBootPlaneOverridesBaseURL(t *testing.T) {
-	machine := newTestMachine(keziov1alpha2.MachineStateInspecting)
+	machine := newTestMachine(keziov1alpha3.MachineStateInspecting)
 	subnet := newTestSubnetWithBootPlane("192.0.2.2")
 	s, _ := newTestServer(t, t.TempDir(), machine)
 	if err := s.Client.Create(context.Background(), subnet); err != nil {
@@ -306,7 +306,7 @@ func TestHandleGrubConfig_SubnetWithBootPlaneOverridesBaseURL(t *testing.T) {
 // override must not fire, and the manager-wide Config.ServerURL/
 // AgentServerURL still apply, same as an unresolved SubnetRef.
 func TestHandleGrubConfig_SubnetWithoutBootPlaneFallsBackToManagerWideURL(t *testing.T) {
-	machine := newTestMachine(keziov1alpha2.MachineStateInspecting)
+	machine := newTestMachine(keziov1alpha3.MachineStateInspecting)
 	subnet := newTestSubnetNoBootPlane()
 	s, _ := newTestServer(t, t.TempDir(), machine)
 	if err := s.Client.Create(context.Background(), subnet); err != nil {
@@ -329,7 +329,7 @@ func TestHandleGrubConfig_SubnetWithoutBootPlaneFallsBackToManagerWideURL(t *tes
 // Subnet): a Machine referencing a Subnet that does not exist must still
 // net boot, using the manager-wide URL, not fail the request.
 func TestHandleGrubConfig_DanglingSubnetRefFallsBackToManagerWideURL(t *testing.T) {
-	machine := newTestMachine(keziov1alpha2.MachineStateInspecting)
+	machine := newTestMachine(keziov1alpha3.MachineStateInspecting)
 	s, _ := newTestServer(t, t.TempDir(), machine)
 
 	rec := httptest.NewRecorder()
@@ -345,27 +345,27 @@ func TestHandleGrubConfig_DanglingSubnetRefFallsBackToManagerWideURL(t *testing.
 func TestHandleGrubConfig_BootLocalCases(t *testing.T) {
 	cases := []struct {
 		name     string
-		machines []*keziov1alpha2.Machine
+		machines []*keziov1alpha3.Machine
 		reqMAC   string
 	}{
 		{
 			name:     "provisioned machine boots local disk",
-			machines: []*keziov1alpha2.Machine{newTestMachine(keziov1alpha2.MachineStateProvisioned)},
+			machines: []*keziov1alpha3.Machine{newTestMachine(keziov1alpha3.MachineStateProvisioned)},
 			reqMAC:   "aa:bb:cc:dd:ee:01",
 		},
 		{
 			name:     "available machine boots local disk",
-			machines: []*keziov1alpha2.Machine{newTestMachine(keziov1alpha2.MachineStateAvailable)},
+			machines: []*keziov1alpha3.Machine{newTestMachine(keziov1alpha3.MachineStateAvailable)},
 			reqMAC:   "aa:bb:cc:dd:ee:01",
 		},
 		{
 			name:     "enrolling machine boots local disk",
-			machines: []*keziov1alpha2.Machine{newTestMachine(keziov1alpha2.MachineStateEnrolling)},
+			machines: []*keziov1alpha3.Machine{newTestMachine(keziov1alpha3.MachineStateEnrolling)},
 			reqMAC:   "aa:bb:cc:dd:ee:01",
 		},
 		{
 			// A machine mid provisioning-failure retry stays State
-			// Provisioning in v1alpha2 (see needsNetBoot's doc comment),
+			// Provisioning in v1alpha3 (see needsNetBoot's doc comment),
 			// so this exercises the same "still net booting" branch as
 			// MachineStateProvisioning without a separate error state to
 			// construct.
@@ -411,7 +411,7 @@ func TestHandleGrubConfig_BootLocalCases(t *testing.T) {
 // live-environment config or a token, regardless of what other machines
 // exist.
 func TestHandleGrubConfig_UnknownMACYieldsLocalBoot(t *testing.T) {
-	machine := newTestMachine(keziov1alpha2.MachineStateInspecting)
+	machine := newTestMachine(keziov1alpha3.MachineStateInspecting)
 	s, c := newTestServer(t, "", machine)
 
 	rec := httptest.NewRecorder()
@@ -423,7 +423,7 @@ func TestHandleGrubConfig_UnknownMACYieldsLocalBoot(t *testing.T) {
 		t.Fatalf("body = %q, want the fixed bootLocalConfig with no token", body)
 	}
 
-	var stored keziov1alpha2.Machine
+	var stored keziov1alpha3.Machine
 	if err := c.Get(context.Background(), types.NamespacedName{Name: machine.Name}, &stored); err != nil {
 		t.Fatalf("Get: %v", err)
 	}

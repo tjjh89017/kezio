@@ -65,7 +65,7 @@ runs:
       run: |
         set -euo pipefail
         cat <<EOF | kubectl apply -f -
-        apiVersion: kezio.kojuro.date/v1alpha2
+        apiVersion: kezio.kojuro.date/v1alpha3
         kind: Image
         metadata:
           name: ${IMAGE_NAME}
@@ -114,7 +114,7 @@ runs:
       run: |
         set -euo pipefail
         cat <<EOF | kubectl apply -f -
-        apiVersion: kezio.kojuro.date/v1alpha2
+        apiVersion: kezio.kojuro.date/v1alpha3
         kind: Machine
         metadata:
           name: ${MACHINE_NAME}
@@ -222,7 +222,7 @@ runs:
       run: |
         set -euo pipefail
         cat <<EOF | kubectl apply -f -
-        apiVersion: kezio.kojuro.date/v1alpha2
+        apiVersion: kezio.kojuro.date/v1alpha3
         kind: Machine
         metadata:
           name: ${MACHINE_NAME}
@@ -309,7 +309,7 @@ runs:
       run: |
         set -euo pipefail
         cat <<EOF | kubectl apply -f -
-        apiVersion: kezio.kojuro.date/v1alpha2
+        apiVersion: kezio.kojuro.date/v1alpha3
         kind: Machine
         metadata:
           name: ${MACHINE_NAME}

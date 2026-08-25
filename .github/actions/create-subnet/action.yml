@@ -173,7 +173,7 @@ runs:
         fi
 
         subnet_yaml="$(cat <<EOF
-        apiVersion: kezio.kojuro.date/v1alpha2
+        apiVersion: kezio.kojuro.date/v1alpha3
         kind: Subnet
         metadata:
           name: ${NAME}

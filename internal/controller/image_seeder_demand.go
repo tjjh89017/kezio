@@ -22,7 +22,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // imageSeedDemandBySite groups image's current seed-demand Machines by
@@ -33,7 +33,7 @@ import (
 // second return value names every Site among those Machines that
 // declares no seederSubnetRef at all - see seederDemandBySite's doc
 // comment.
-func (r *ImageReconciler) imageSeedDemandBySite(ctx context.Context, image *keziov1alpha2.Image) (map[string]*seederSiteDemand, []string, error) {
+func (r *ImageReconciler) imageSeedDemandBySite(ctx context.Context, image *keziov1alpha3.Image) (map[string]*seederSiteDemand, []string, error) {
 	machines, err := r.demandMachinesForImage(ctx, image)
 	if err != nil {
 		return nil, nil, err
@@ -50,8 +50,8 @@ func (r *ImageReconciler) imageSeedDemandBySite(ctx context.Context, image *kezi
 // Mirrors PartitionContentReconciler's own resolveSeedDemand/
 // activeDeployRunsReferencing shape, one level up (Image-direct rather
 // than through a referenced PartitionContent).
-func (r *ImageReconciler) demandMachinesForImage(ctx context.Context, image *keziov1alpha2.Image) (map[client.ObjectKey]*keziov1alpha2.Machine, error) {
-	seen := make(map[client.ObjectKey]*keziov1alpha2.Machine)
+func (r *ImageReconciler) demandMachinesForImage(ctx context.Context, image *keziov1alpha3.Image) (map[client.ObjectKey]*keziov1alpha3.Machine, error) {
+	seen := make(map[client.ObjectKey]*keziov1alpha3.Machine)
 
 	live, err := machinesReferencingImage(ctx, r.Client, client.ObjectKey{Namespace: image.Namespace, Name: image.Name})
 	if err != nil {
@@ -61,7 +61,7 @@ func (r *ImageReconciler) demandMachinesForImage(ctx context.Context, image *kez
 		seen[client.ObjectKeyFromObject(&live[i])] = &live[i]
 	}
 
-	var runs keziov1alpha2.DeployRunList
+	var runs keziov1alpha3.DeployRunList
 	if err := r.List(ctx, &runs, client.InNamespace(image.Namespace)); err != nil {
 		return nil, fmt.Errorf("image %q: listing deploy runs: %w", image.Name, err)
 	}
@@ -78,7 +78,7 @@ func (r *ImageReconciler) demandMachinesForImage(ctx context.Context, image *kez
 		if _, ok := seen[key]; ok {
 			continue
 		}
-		var m keziov1alpha2.Machine
+		var m keziov1alpha3.Machine
 		if err := r.Get(ctx, key, &m); err != nil {
 			// Deleted/unresolvable machine: no Site to attribute demand
 			// to, and nothing this reconcile can act on.
@@ -92,7 +92,7 @@ func (r *ImageReconciler) demandMachinesForImage(ctx context.Context, image *kez
 
 // deployRunNamesImage reports whether run's resolved snapshot
 // (deployRunImageNames) names image.
-func deployRunNamesImage(run *keziov1alpha2.DeployRun, image *keziov1alpha2.Image) bool {
+func deployRunNamesImage(run *keziov1alpha3.DeployRun, image *keziov1alpha3.Image) bool {
 	for _, key := range deployRunImageNames(run) {
 		if key.Namespace == image.Namespace && key.Name == image.Name {
 			return true

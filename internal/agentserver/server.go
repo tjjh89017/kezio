@@ -36,7 +36,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 	"github.com/tjjh89017/kezio/internal/bootserver"
 	"github.com/tjjh89017/kezio/internal/planbuild"
@@ -245,7 +245,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	key := client.ObjectKeyFromObject(machine)
 	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		current := &keziov1alpha2.Machine{}
+		current := &keziov1alpha3.Machine{}
 		if err := s.Client.Get(ctx, key, current); err != nil {
 			return err
 		}
@@ -270,14 +270,14 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 // minted session, and the single-use boot token's invalidation. Callers
 // persist the result. It never touches machine.status.hardware - that is
 // MachineHardware, a separate object ensureMachineHardware writes.
-func ingestRegistration(machine *keziov1alpha2.Machine, sessionHash string, now time.Time, sessionTTL time.Duration) {
+func ingestRegistration(machine *keziov1alpha3.Machine, sessionHash string, now time.Time, sessionTTL time.Duration) {
 	if machine.Status.NetBoot != nil {
 		machine.Status.NetBoot.TokenHash = ""
 	}
 	machine.Status.AgentSession = newAgentSessionStatus(sessionHash, now, sessionTTL)
 
 	apimeta.SetStatusCondition(&machine.Status.Conditions, metav1.Condition{
-		Type:               keziov1alpha2.MachineConditionAgentRegistered,
+		Type:               keziov1alpha3.MachineConditionAgentRegistered,
 		Status:             metav1.ConditionTrue,
 		Reason:             "Registered",
 		Message:            "kezio-agent registered and reported its hardware inventory",
@@ -292,13 +292,13 @@ func ingestRegistration(machine *keziov1alpha2.Machine, sessionHash string, now 
 // or mints a session, so a failure here (a transient API error) leaves
 // the token valid for the agent to simply retry the whole registration,
 // instead of ending up consumed with no inventory ever recorded.
-func (s *Server) ensureMachineHardware(ctx context.Context, machine *keziov1alpha2.Machine, hardware keziov1alpha2.MachineHardwareSpec) error {
+func (s *Server) ensureMachineHardware(ctx context.Context, machine *keziov1alpha3.Machine, hardware keziov1alpha3.MachineHardwareSpec) error {
 	key := client.ObjectKey{Name: machine.Name, Namespace: machine.Namespace}
-	hw := &keziov1alpha2.MachineHardware{}
+	hw := &keziov1alpha3.MachineHardware{}
 	err := s.Client.Get(ctx, key, hw)
 	switch {
 	case apierrors.IsNotFound(err):
-		hw = &keziov1alpha2.MachineHardware{
+		hw = &keziov1alpha3.MachineHardware{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:            machine.Name,
 				Namespace:       machine.Namespace,
@@ -321,11 +321,11 @@ func (s *Server) ensureMachineHardware(ctx context.Context, machine *keziov1alph
 // through controllerutil.SetControllerReference so this package needs no
 // runtime.Scheme dependency, matching internal/deployer.FakeDeployer's
 // own MachineHardware owner reference.
-func machineOwnerReference(machine *keziov1alpha2.Machine) metav1.OwnerReference {
+func machineOwnerReference(machine *keziov1alpha3.Machine) metav1.OwnerReference {
 	blockOwnerDeletion := true
 	controller := true
 	return metav1.OwnerReference{
-		APIVersion:         keziov1alpha2.GroupVersion.String(),
+		APIVersion:         keziov1alpha3.GroupVersion.String(),
 		Kind:               "Machine",
 		Name:               machine.Name,
 		UID:                machine.UID,
@@ -386,7 +386,7 @@ func (s *Server) handleNext(w http.ResponseWriter, r *http.Request) {
 // momentary API error) or because the Machine/DeployRun genuinely is not
 // ready, and either way the correct agent-facing answer is the same
 // ActionWait a still-Pending run would get.
-func (s *Server) resolveDeployPlan(ctx context.Context, machine *keziov1alpha2.Machine, log logr.Logger) *agentapi.DeployPlan {
+func (s *Server) resolveDeployPlan(ctx context.Context, machine *keziov1alpha3.Machine, log logr.Logger) *agentapi.DeployPlan {
 	if s.PlanBuilder == nil || machine.Status.CurrentRunRef == nil {
 		return nil
 	}
@@ -413,12 +413,12 @@ func (s *Server) resolveDeployPlan(ctx context.Context, machine *keziov1alpha2.M
 // getCurrentRun resolves machine.status.currentRunRef to its DeployRun,
 // defaulting to machine's own namespace when the ref carries none - the
 // same convention internal/controller.MachineReconciler.getRun uses.
-func (s *Server) getCurrentRun(ctx context.Context, machine *keziov1alpha2.Machine) (*keziov1alpha2.DeployRun, error) {
+func (s *Server) getCurrentRun(ctx context.Context, machine *keziov1alpha3.Machine) (*keziov1alpha3.DeployRun, error) {
 	ns := machine.Status.CurrentRunRef.Namespace
 	if ns == "" {
 		ns = machine.Namespace
 	}
-	var run keziov1alpha2.DeployRun
+	var run keziov1alpha3.DeployRun
 	if err := s.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: machine.Status.CurrentRunRef.Name}, &run); err != nil {
 		return nil, err
 	}
@@ -432,11 +432,11 @@ func (s *Server) getCurrentRun(ctx context.Context, machine *keziov1alpha2.Machi
 // validated the plan yet) and the two terminal phases both report false.
 func deployRunExpectsAgent(phase string) bool {
 	switch phase {
-	case keziov1alpha2.DeployRunPhasePending,
-		keziov1alpha2.DeployRunPhasePartitioning,
-		keziov1alpha2.DeployRunPhaseWritingContent,
-		keziov1alpha2.DeployRunPhaseRunningPostHook,
-		keziov1alpha2.DeployRunPhaseFinalizing:
+	case keziov1alpha3.DeployRunPhasePending,
+		keziov1alpha3.DeployRunPhasePartitioning,
+		keziov1alpha3.DeployRunPhaseWritingContent,
+		keziov1alpha3.DeployRunPhaseRunningPostHook,
+		keziov1alpha3.DeployRunPhaseFinalizing:
 		return true
 	default:
 		return false
@@ -449,10 +449,10 @@ func deployRunExpectsAgent(phase string) bool {
 // (nil, nil) - not an error - for no match, an expired match, or more
 // than one match: every one of those is treated identically by the
 // caller.
-func (s *Server) lookupMachineByToken(ctx context.Context, token string) (*keziov1alpha2.Machine, error) {
+func (s *Server) lookupMachineByToken(ctx context.Context, token string) (*keziov1alpha3.Machine, error) {
 	hash := bootserver.HashToken(token)
 
-	var list keziov1alpha2.MachineList
+	var list keziov1alpha3.MachineList
 	if err := s.Client.List(ctx, &list, client.MatchingFields{MachineTokenHashIndexField: hash}); err != nil {
 		return nil, err
 	}
@@ -473,10 +473,10 @@ func (s *Server) lookupMachineByToken(ctx context.Context, token string) (*kezio
 // returns (nil, nil) - not an error - for no match, an expired match, or
 // more than one match, the same undifferentiated-401 shape
 // lookupMachineByToken uses.
-func (s *Server) lookupMachineBySession(ctx context.Context, token string) (*keziov1alpha2.Machine, error) {
+func (s *Server) lookupMachineBySession(ctx context.Context, token string) (*keziov1alpha3.Machine, error) {
 	hash := bootserver.HashToken(token)
 
-	var list keziov1alpha2.MachineList
+	var list keziov1alpha3.MachineList
 	if err := s.Client.List(ctx, &list, client.MatchingFields{MachineSessionTokenHashIndexField: hash}); err != nil {
 		return nil, err
 	}

@@ -28,7 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // retainedRunsPerMachine is how many of a Machine's newest DeployRuns
@@ -79,7 +79,7 @@ func (r *DeployRunReconciler) now() time.Time {
 func (r *DeployRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	var run keziov1alpha2.DeployRun
+	var run keziov1alpha3.DeployRun
 	if err := r.Get(ctx, req.NamespacedName, &run); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -88,19 +88,19 @@ func (r *DeployRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if machineNamespace == "" {
 		machineNamespace = run.Namespace
 	}
-	var machine keziov1alpha2.Machine
+	var machine keziov1alpha3.Machine
 	if err := r.Get(ctx, client.ObjectKey{Namespace: machineNamespace, Name: run.Spec.MachineRef.Name}, &machine); err != nil {
 		// A missing Machine leaves nothing to protect and no per-machine
 		// retention to enforce; its DeployRuns are already owner-ref GC'd.
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	var runList keziov1alpha2.DeployRunList
+	var runList keziov1alpha3.DeployRunList
 	if err := r.List(ctx, &runList, client.InNamespace(run.Namespace)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("listing DeployRuns in namespace %q: %w", run.Namespace, err)
 	}
 
-	var siblings []keziov1alpha2.DeployRun
+	var siblings []keziov1alpha3.DeployRun
 	for _, item := range runList.Items {
 		if item.Spec.MachineRef.Name == machine.Name {
 			siblings = append(siblings, item)
@@ -125,10 +125,10 @@ func (r *DeployRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 // it simply survives alongside the newest retain, so the kept count can
 // exceed retain when a protected run is old, or when a run too young to
 // collect sorts outside the window.
-func runsToGC(runs []keziov1alpha2.DeployRun, machine *keziov1alpha2.Machine, retain int, now time.Time) []keziov1alpha2.DeployRun {
+func runsToGC(runs []keziov1alpha3.DeployRun, machine *keziov1alpha3.Machine, retain int, now time.Time) []keziov1alpha3.DeployRun {
 	protected := protectedRunNames(machine)
 
-	ordered := make([]keziov1alpha2.DeployRun, len(runs))
+	ordered := make([]keziov1alpha3.DeployRun, len(runs))
 	copy(ordered, runs)
 	sort.Slice(ordered, func(i, j int) bool {
 		ti, tj := ordered[i].CreationTimestamp, ordered[j].CreationTimestamp
@@ -140,7 +140,7 @@ func runsToGC(runs []keziov1alpha2.DeployRun, machine *keziov1alpha2.Machine, re
 		return ordered[i].Name > ordered[j].Name
 	})
 
-	victims := make([]keziov1alpha2.DeployRun, 0, max(len(ordered)-retain, 0))
+	victims := make([]keziov1alpha3.DeployRun, 0, max(len(ordered)-retain, 0))
 	for i, candidate := range ordered {
 		if i < retain {
 			continue
@@ -156,7 +156,7 @@ func runsToGC(runs []keziov1alpha2.DeployRun, machine *keziov1alpha2.Machine, re
 	return victims
 }
 
-func protectedRunNames(machine *keziov1alpha2.Machine) map[string]bool {
+func protectedRunNames(machine *keziov1alpha3.Machine) map[string]bool {
 	protected := make(map[string]bool, 3)
 	if machine.Status.CurrentRunRef != nil {
 		protected[machine.Status.CurrentRunRef.Name] = true
@@ -173,7 +173,7 @@ func protectedRunNames(machine *keziov1alpha2.Machine) map[string]bool {
 // SetupWithManager sets up the controller with the Manager.
 func (r *DeployRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&keziov1alpha2.DeployRun{}).
+		For(&keziov1alpha3.DeployRun{}).
 		Named("deployrun").
 		Complete(r)
 }

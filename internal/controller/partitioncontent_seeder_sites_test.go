@@ -26,7 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/seederdeploy"
 )
 
@@ -63,13 +63,13 @@ var _ = Describe("PartitionContent status.seeders[] site keys and machine counts
 		contentName := "pc-" + partitionContentSeederSiteTestHash(1)
 		pc := createReadyContent(ctx, contentName)
 
-		img := newTestImageWithSlots("image-9501", []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		img := newTestImageWithSlots("image-9501", []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentName}},
 		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
-		for _, m := range []*keziov1alpha2.Machine{
+		for _, m := range []*keziov1alpha3.Machine{
 			newTestMachineOnSubnet("machine-9501a", img.Name, "machine-subnet-9501a"),
 			newTestMachineOnSubnet("machine-9501b", img.Name, "machine-subnet-9501b"),
 		} {
@@ -90,9 +90,9 @@ var _ = Describe("PartitionContent status.seeders[] site keys and machine counts
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: pcNN})
 		Expect(err).NotTo(HaveOccurred())
 
-		var got keziov1alpha2.PartitionContent
+		var got keziov1alpha3.PartitionContent
 		Expect(k8sClient.Get(ctx, pcNN, &got)).To(Succeed())
-		Expect(got.Status.Seeders).To(ConsistOf(keziov1alpha2.PartitionContentSeederSite{
+		Expect(got.Status.Seeders).To(ConsistOf(keziov1alpha3.PartitionContentSeederSite{
 			Site: siteIdentity, MachineCount: 2,
 		}))
 	})
@@ -106,13 +106,13 @@ var _ = Describe("PartitionContent status.seeders[] site keys and machine counts
 		contentName := "pc-" + partitionContentSeederSiteTestHash(2)
 		pc := createReadyContent(ctx, contentName)
 
-		img := newTestImageWithSlots("image-9502", []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		img := newTestImageWithSlots("image-9502", []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentName}},
 		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
 
-		for _, m := range []*keziov1alpha2.Machine{
+		for _, m := range []*keziov1alpha3.Machine{
 			newTestMachineOnSubnet("machine-9502x", img.Name, "machine-subnet-9502x"),
 			newTestMachineOnSubnet("machine-9502y", img.Name, "machine-subnet-9502y"),
 		} {
@@ -134,11 +134,11 @@ var _ = Describe("PartitionContent status.seeders[] site keys and machine counts
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: pcNN})
 		Expect(err).NotTo(HaveOccurred())
 
-		var got keziov1alpha2.PartitionContent
+		var got keziov1alpha3.PartitionContent
 		Expect(k8sClient.Get(ctx, pcNN, &got)).To(Succeed())
 		Expect(got.Status.Seeders).To(ConsistOf(
-			keziov1alpha2.PartitionContentSeederSite{Site: siteXIdentity, MachineCount: 1},
-			keziov1alpha2.PartitionContentSeederSite{Site: siteYIdentity, MachineCount: 1},
+			keziov1alpha3.PartitionContentSeederSite{Site: siteXIdentity, MachineCount: 1},
+			keziov1alpha3.PartitionContentSeederSite{Site: siteYIdentity, MachineCount: 1},
 		))
 	})
 })

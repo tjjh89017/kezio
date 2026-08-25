@@ -27,7 +27,7 @@ import (
 	"strings"
 	"time"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 )
 
@@ -69,7 +69,7 @@ type RegisterResult struct {
 // authenticating with the single-use boot token. It returns the machine
 // name the controller resolved the token to and the session token that
 // authenticates subsequent Next calls.
-func (c *Client) Register(ctx context.Context, token string, hardware keziov1alpha2.MachineHardwareSpec) (RegisterResult, error) {
+func (c *Client) Register(ctx context.Context, token string, hardware keziov1alpha3.MachineHardwareSpec) (RegisterResult, error) {
 	body, err := json.Marshal(agentapi.RegisterRequest{Hardware: hardware})
 	if err != nil {
 		return RegisterResult{}, fmt.Errorf("encoding registration request: %w", err)

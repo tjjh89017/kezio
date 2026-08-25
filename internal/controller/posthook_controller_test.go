@@ -28,7 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // posthookTestName returns a distinct PostHook name per seq, so each test
@@ -38,15 +38,15 @@ func posthookTestName(seq int) string {
 	return fmt.Sprintf("posthook-test-%d", seq)
 }
 
-func newTestPostHook(name string) *keziov1alpha2.PostHook {
-	return &keziov1alpha2.PostHook{
+func newTestPostHook(name string) *keziov1alpha3.PostHook {
+	return &keziov1alpha3.PostHook{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: "default",
 		},
-		Spec: keziov1alpha2.PostHookSpec{
-			Steps: []keziov1alpha2.PostHookStep{
-				{Builtin: &keziov1alpha2.PostHookBuiltinStep{Name: keziov1alpha2.BuiltinStepInstallRemovableFallback}},
+		Spec: keziov1alpha3.PostHookSpec{
+			Steps: []keziov1alpha3.PostHookStep{
+				{Builtin: &keziov1alpha3.PostHookBuiltinStep{Name: keziov1alpha3.BuiltinStepInstallRemovableFallback}},
 			},
 		},
 	}
@@ -74,16 +74,16 @@ var _ = Describe("PostHook Controller", func() {
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		var got keziov1alpha2.PostHook
+		var got keziov1alpha3.PostHook
 		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
 		Expect(got.Status.ObservedGeneration).To(Equal(got.Generation))
 
-		validCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.PostHookConditionValid)
+		validCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha3.PostHookConditionValid)
 		Expect(validCond).NotTo(BeNil())
 		Expect(validCond.Status).To(Equal(metav1.ConditionTrue))
 		Expect(validCond.ObservedGeneration).To(Equal(got.Generation))
 
-		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.PostHookConditionReady)
+		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha3.PostHookConditionReady)
 		Expect(readyCond).NotTo(BeNil())
 		Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
 		Expect(readyCond.ObservedGeneration).To(Equal(got.Generation))
@@ -97,8 +97,8 @@ var _ = Describe("PostHook Controller", func() {
 		// reconciler's own posthookvalidate.Validate call.
 		name := posthookTestName(2)
 		ph := newTestPostHook(name)
-		ph.Spec.Steps = []keziov1alpha2.PostHookStep{
-			{Builtin: &keziov1alpha2.PostHookBuiltinStep{Name: keziov1alpha2.BuiltinStepMkswap}},
+		ph.Spec.Steps = []keziov1alpha3.PostHookStep{
+			{Builtin: &keziov1alpha3.PostHookBuiltinStep{Name: keziov1alpha3.BuiltinStepMkswap}},
 		}
 		Expect(k8sClient.Create(ctx, ph)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, ph) })
@@ -108,14 +108,14 @@ var _ = Describe("PostHook Controller", func() {
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		var got keziov1alpha2.PostHook
+		var got keziov1alpha3.PostHook
 		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
-		validCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.PostHookConditionValid)
+		validCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha3.PostHookConditionValid)
 		Expect(validCond).NotTo(BeNil())
 		Expect(validCond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(validCond.Reason).To(Equal("InvalidSpec"))
 
-		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.PostHookConditionReady)
+		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha3.PostHookConditionReady)
 		Expect(readyCond).NotTo(BeNil())
 		Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(readyCond.Reason).To(Equal("InvalidSpec"))
@@ -124,8 +124,8 @@ var _ = Describe("PostHook Controller", func() {
 	It("records SourceMissing when a step's secretRef names a Secret that does not exist, then flips to True once it is created", func() {
 		name := posthookTestName(3)
 		ph := newTestPostHook(name)
-		ph.Spec.Steps = []keziov1alpha2.PostHookStep{
-			{Script: &keziov1alpha2.PostHookScriptSource{SecretRef: &keziov1alpha2.SecretKeyRef{Name: "posthook-test-secret-3", Key: "run.sh"}}},
+		ph.Spec.Steps = []keziov1alpha3.PostHookStep{
+			{Script: &keziov1alpha3.PostHookScriptSource{SecretRef: &keziov1alpha3.SecretKeyRef{Name: "posthook-test-secret-3", Key: "run.sh"}}},
 		}
 		Expect(k8sClient.Create(ctx, ph)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, ph) })
@@ -135,13 +135,13 @@ var _ = Describe("PostHook Controller", func() {
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		var missing keziov1alpha2.PostHook
+		var missing keziov1alpha3.PostHook
 		Expect(k8sClient.Get(ctx, nn, &missing)).To(Succeed())
-		validCond := meta.FindStatusCondition(missing.Status.Conditions, keziov1alpha2.PostHookConditionValid)
+		validCond := meta.FindStatusCondition(missing.Status.Conditions, keziov1alpha3.PostHookConditionValid)
 		Expect(validCond).NotTo(BeNil())
 		Expect(validCond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(validCond.Reason).To(Equal("SourceMissing"))
-		readyCond := meta.FindStatusCondition(missing.Status.Conditions, keziov1alpha2.PostHookConditionReady)
+		readyCond := meta.FindStatusCondition(missing.Status.Conditions, keziov1alpha3.PostHookConditionReady)
 		Expect(readyCond).NotTo(BeNil())
 		Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(readyCond.Reason).To(Equal("SourceMissing"))
@@ -156,12 +156,12 @@ var _ = Describe("PostHook Controller", func() {
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		var resolved keziov1alpha2.PostHook
+		var resolved keziov1alpha3.PostHook
 		Expect(k8sClient.Get(ctx, nn, &resolved)).To(Succeed())
-		validCond = meta.FindStatusCondition(resolved.Status.Conditions, keziov1alpha2.PostHookConditionValid)
+		validCond = meta.FindStatusCondition(resolved.Status.Conditions, keziov1alpha3.PostHookConditionValid)
 		Expect(validCond).NotTo(BeNil())
 		Expect(validCond.Status).To(Equal(metav1.ConditionTrue))
-		readyCond = meta.FindStatusCondition(resolved.Status.Conditions, keziov1alpha2.PostHookConditionReady)
+		readyCond = meta.FindStatusCondition(resolved.Status.Conditions, keziov1alpha3.PostHookConditionReady)
 		Expect(readyCond).NotTo(BeNil())
 		Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
 	})
@@ -177,22 +177,22 @@ var _ = Describe("PostHook Controller", func() {
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		var firstPass keziov1alpha2.PostHook
+		var firstPass keziov1alpha3.PostHook
 		Expect(k8sClient.Get(ctx, nn, &firstPass)).To(Succeed())
 		firstGeneration := firstPass.Status.ObservedGeneration
 
-		firstPass.Spec.Params = []keziov1alpha2.PostHookParam{{Name: "greeting"}}
+		firstPass.Spec.Params = []keziov1alpha3.PostHookParam{{Name: "greeting"}}
 		Expect(k8sClient.Update(ctx, &firstPass)).To(Succeed())
 
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		var secondPass keziov1alpha2.PostHook
+		var secondPass keziov1alpha3.PostHook
 		Expect(k8sClient.Get(ctx, nn, &secondPass)).To(Succeed())
 		Expect(secondPass.Generation).To(BeNumerically(">", firstGeneration))
 		Expect(secondPass.Status.ObservedGeneration).To(Equal(secondPass.Generation))
 
-		validCond := meta.FindStatusCondition(secondPass.Status.Conditions, keziov1alpha2.PostHookConditionValid)
+		validCond := meta.FindStatusCondition(secondPass.Status.Conditions, keziov1alpha3.PostHookConditionValid)
 		Expect(validCond).NotTo(BeNil())
 		Expect(validCond.ObservedGeneration).To(Equal(secondPass.Generation))
 	})

@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"strings"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // defaultSectorSize is the sector size sfdisk assumes when its JSON dump
@@ -72,7 +72,7 @@ type sfdiskPartition struct {
 // disk-level facts plus one ParsedPartition per partition, in the order
 // sfdisk reported them (ascending start offset).
 type ParsedDisk struct {
-	PartitionTable string // keziov1alpha2.PartitionTableGPT or PartitionTableMBR
+	PartitionTable string // keziov1alpha3.PartitionTableGPT or PartitionTableMBR
 	DiskGUID       string
 	SectorSize     int64
 	Partitions     []ParsedPartition
@@ -106,10 +106,10 @@ func ParseSfdiskJSON(data []byte) (*ParsedDisk, error) {
 	table := dump.PartitionTable
 	var partitionTable string
 	switch strings.ToLower(table.Label) {
-	case keziov1alpha2.PartitionTableGPT:
-		partitionTable = keziov1alpha2.PartitionTableGPT
+	case keziov1alpha3.PartitionTableGPT:
+		partitionTable = keziov1alpha3.PartitionTableGPT
 	case "dos", "mbr":
-		partitionTable = keziov1alpha2.PartitionTableMBR
+		partitionTable = keziov1alpha3.PartitionTableMBR
 	default:
 		return nil, fmt.Errorf("unsupported partition table label %q", table.Label)
 	}
@@ -123,7 +123,7 @@ func ParseSfdiskJSON(data []byte) (*ParsedDisk, error) {
 		PartitionTable: partitionTable,
 		SectorSize:     sectorSize,
 	}
-	if partitionTable == keziov1alpha2.PartitionTableGPT {
+	if partitionTable == keziov1alpha3.PartitionTableGPT {
 		disk.DiskGUID = table.ID
 	}
 

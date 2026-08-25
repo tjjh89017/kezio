@@ -38,7 +38,7 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 	"github.com/tjjh89017/kezio/internal/posthookdefaults"
 	"github.com/tjjh89017/kezio/internal/seeder"
@@ -63,7 +63,7 @@ func TestBuilder_Build_Envtest(t *testing.T) {
 	}
 
 	testScheme := scheme.Scheme
-	if err := keziov1alpha2.AddToScheme(testScheme); err != nil {
+	if err := keziov1alpha3.AddToScheme(testScheme); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
 	}
 
@@ -194,17 +194,17 @@ func testImageHooksResolveBeforeMachineHooks(t *testing.T, fx *fixtures) {
 	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
 	fx.mustCreatePostHook(ns, "image-hook", scriptHookSpec("from-image"))
 	fx.mustCreatePostHook(ns, "machine-hook", scriptHookSpec("from-machine"))
-	image := fx.mustCreateImageWithHooks(ns, blankDataLayout(), []keziov1alpha2.NameRef{{Name: "image-hook"}})
+	image := fx.mustCreateImageWithHooks(ns, blankDataLayout(), []keziov1alpha3.NameRef{{Name: "image-hook"}})
 
 	b := &Builder{Client: fx.client}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha2.MachineSpec{
-			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
-			PostHookRefs: []keziov1alpha2.NameRef{{Name: "machine-hook"}},
+		Spec: keziov1alpha3.MachineSpec{
+			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha3.NameRef{{Name: "machine-hook"}},
 		},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	plan, _, err := b.Build(context.Background(), machine, run)
 	if err != nil {
@@ -225,14 +225,14 @@ func testDefaultHookNotAttachedWhenImageHasHooks(t *testing.T, fx *fixtures) {
 	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
 	fx.mustCreatePostHook(mgrNS, posthookdefaults.DefaultFinalizeHookName, posthookdefaults.Spec())
 	fx.mustCreatePostHook(ns, "image-hook", scriptHookSpec("from-image"))
-	image := fx.mustCreateImageWithHooks(ns, blankDataLayout(), []keziov1alpha2.NameRef{{Name: "image-hook"}})
+	image := fx.mustCreateImageWithHooks(ns, blankDataLayout(), []keziov1alpha3.NameRef{{Name: "image-hook"}})
 
 	b := &Builder{Client: fx.client, ManagerNamespace: mgrNS}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: image.Name}},
+		Spec:       keziov1alpha3.MachineSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	plan, _, err := b.Build(context.Background(), machine, run)
 	if err != nil {
@@ -246,23 +246,23 @@ func testDefaultHookNotAttachedWhenImageHasHooks(t *testing.T, fx *fixtures) {
 func testMachineHookIncompatibleOSFamilyIsValidationError(t *testing.T, fx *fixtures) {
 	ns := fx.mustCreateNamespace()
 	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
-	fx.mustCreatePostHook(ns, "windows-hook", keziov1alpha2.PostHookSpec{
-		Steps: []keziov1alpha2.PostHookStep{{
-			OSFamily: keziov1alpha2.OSFamilyWindows,
-			Script:   &keziov1alpha2.PostHookScriptSource{Script: "echo hi"},
+	fx.mustCreatePostHook(ns, "windows-hook", keziov1alpha3.PostHookSpec{
+		Steps: []keziov1alpha3.PostHookStep{{
+			OSFamily: keziov1alpha3.OSFamilyWindows,
+			Script:   &keziov1alpha3.PostHookScriptSource{Script: "echo hi"},
 		}},
 	})
 	image := fx.mustCreateImage(ns, blankDataLayout()) // OSFamily defaults to Linux
 
 	b := &Builder{Client: fx.client}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha2.MachineSpec{
-			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
-			PostHookRefs: []keziov1alpha2.NameRef{{Name: "windows-hook"}},
+		Spec: keziov1alpha3.MachineSpec{
+			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha3.NameRef{{Name: "windows-hook"}},
 		},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	_, _, err := b.Build(context.Background(), machine, run)
 	var valErr *ValidationError
@@ -279,20 +279,20 @@ func testHooksHashChangesWithImageHooks(t *testing.T, fx *fixtures) {
 	ns := fx.mustCreateNamespace()
 	fx.mustCreatePostHook(ns, "image-hook", scriptHookSpec("from-image"))
 	fx.mustCreatePostHook(ns, posthookdefaults.DefaultFinalizeHookName, posthookdefaults.Spec())
-	withHooks := fx.mustCreateImageWithHooks(ns, blankDataLayout(), []keziov1alpha2.NameRef{{Name: "image-hook"}})
+	withHooks := fx.mustCreateImageWithHooks(ns, blankDataLayout(), []keziov1alpha3.NameRef{{Name: "image-hook"}})
 	withoutHooks := fx.mustCreateImageWithHooksNamed(ns, "img2", blankDataLayout(), nil)
 
 	// withoutHooks has no postHookRefs of its own, so Build substitutes the
 	// shipped default hook (from the manager namespace) for it - the very
 	// difference this test exercises against withHooks' explicit hook.
 	b := &Builder{Client: fx.client, ManagerNamespace: ns}
-	buildFor := func(image *keziov1alpha2.Image, machineName string) string {
-		machine := &keziov1alpha2.Machine{
+	buildFor := func(image *keziov1alpha3.Image, machineName string) string {
+		machine := &keziov1alpha3.Machine{
 			ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: ns},
-			Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: image.Name}},
+			Spec:       keziov1alpha3.MachineSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}},
 		}
 		fx.mustCreateMachineHardwareNamed(ns, machineName, oneDisk("/dev/vda"))
-		run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run-" + machineName, UID: types.UID("uid-" + machineName)}}
+		run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run-" + machineName, UID: types.UID("uid-" + machineName)}}
 		_, snap, err := b.Build(context.Background(), machine, run)
 		if err != nil {
 			t.Fatalf("Build(%s): %v", machineName, err)
@@ -311,23 +311,23 @@ func testConfigMapScriptSourceResolvesAndTemplates(t *testing.T, fx *fixtures) {
 	ns := fx.mustCreateNamespace()
 	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
 	fx.mustCreateConfigMap(ns, "script-cm", map[string]string{"script.sh": "echo {{ .machineName }}"})
-	fx.mustCreatePostHook(ns, "cm-hook", keziov1alpha2.PostHookSpec{
-		Steps: []keziov1alpha2.PostHookStep{{
-			OSFamily: keziov1alpha2.OSFamilyLinux,
-			Script:   &keziov1alpha2.PostHookScriptSource{ConfigMapRef: &keziov1alpha2.ConfigMapKeyRef{Name: "script-cm", Key: "script.sh"}},
+	fx.mustCreatePostHook(ns, "cm-hook", keziov1alpha3.PostHookSpec{
+		Steps: []keziov1alpha3.PostHookStep{{
+			OSFamily: keziov1alpha3.OSFamilyLinux,
+			Script:   &keziov1alpha3.PostHookScriptSource{ConfigMapRef: &keziov1alpha3.ConfigMapKeyRef{Name: "script-cm", Key: "script.sh"}},
 		}},
 	})
 	image := fx.mustCreateImage(ns, blankDataLayout())
 
 	b := &Builder{Client: fx.client}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha2.MachineSpec{
-			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
-			PostHookRefs: []keziov1alpha2.NameRef{{Name: "cm-hook"}},
+		Spec: keziov1alpha3.MachineSpec{
+			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha3.NameRef{{Name: "cm-hook"}},
 		},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	plan, _, err := b.Build(context.Background(), machine, run)
 	if err != nil {
@@ -343,23 +343,23 @@ func testSecretScriptSourceResolvesAndTemplates(t *testing.T, fx *fixtures) {
 	ns := fx.mustCreateNamespace()
 	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
 	fx.mustCreateSecret(ns, "script-secret", map[string][]byte{"script.sh": []byte("echo {{ .machineName }}")})
-	fx.mustCreatePostHook(ns, "secret-hook", keziov1alpha2.PostHookSpec{
-		Steps: []keziov1alpha2.PostHookStep{{
-			OSFamily: keziov1alpha2.OSFamilyLinux,
-			Script:   &keziov1alpha2.PostHookScriptSource{SecretRef: &keziov1alpha2.SecretKeyRef{Name: "script-secret", Key: "script.sh"}},
+	fx.mustCreatePostHook(ns, "secret-hook", keziov1alpha3.PostHookSpec{
+		Steps: []keziov1alpha3.PostHookStep{{
+			OSFamily: keziov1alpha3.OSFamilyLinux,
+			Script:   &keziov1alpha3.PostHookScriptSource{SecretRef: &keziov1alpha3.SecretKeyRef{Name: "script-secret", Key: "script.sh"}},
 		}},
 	})
 	image := fx.mustCreateImage(ns, blankDataLayout())
 
 	b := &Builder{Client: fx.client}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha2.MachineSpec{
-			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
-			PostHookRefs: []keziov1alpha2.NameRef{{Name: "secret-hook"}},
+		Spec: keziov1alpha3.MachineSpec{
+			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha3.NameRef{{Name: "secret-hook"}},
 		},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	plan, _, err := b.Build(context.Background(), machine, run)
 	if err != nil {
@@ -374,23 +374,23 @@ func testSecretScriptSourceResolvesAndTemplates(t *testing.T, fx *fixtures) {
 func testConfigMapScriptSourceMissingConfigMapIsNotReady(t *testing.T, fx *fixtures) {
 	ns := fx.mustCreateNamespace()
 	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
-	fx.mustCreatePostHook(ns, "cm-hook", keziov1alpha2.PostHookSpec{
-		Steps: []keziov1alpha2.PostHookStep{{
-			OSFamily: keziov1alpha2.OSFamilyLinux,
-			Script:   &keziov1alpha2.PostHookScriptSource{ConfigMapRef: &keziov1alpha2.ConfigMapKeyRef{Name: "does-not-exist", Key: "script.sh"}},
+	fx.mustCreatePostHook(ns, "cm-hook", keziov1alpha3.PostHookSpec{
+		Steps: []keziov1alpha3.PostHookStep{{
+			OSFamily: keziov1alpha3.OSFamilyLinux,
+			Script:   &keziov1alpha3.PostHookScriptSource{ConfigMapRef: &keziov1alpha3.ConfigMapKeyRef{Name: "does-not-exist", Key: "script.sh"}},
 		}},
 	})
 	image := fx.mustCreateImage(ns, blankDataLayout())
 
 	b := &Builder{Client: fx.client}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha2.MachineSpec{
-			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
-			PostHookRefs: []keziov1alpha2.NameRef{{Name: "cm-hook"}},
+		Spec: keziov1alpha3.MachineSpec{
+			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha3.NameRef{{Name: "cm-hook"}},
 		},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	_, _, err := b.Build(context.Background(), machine, run)
 	var notReady *NotReadyError
@@ -403,23 +403,23 @@ func testConfigMapScriptSourceMissingKeyIsNotReady(t *testing.T, fx *fixtures) {
 	ns := fx.mustCreateNamespace()
 	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
 	fx.mustCreateConfigMap(ns, "script-cm", map[string]string{"other-key": "echo hi"})
-	fx.mustCreatePostHook(ns, "cm-hook", keziov1alpha2.PostHookSpec{
-		Steps: []keziov1alpha2.PostHookStep{{
-			OSFamily: keziov1alpha2.OSFamilyLinux,
-			Script:   &keziov1alpha2.PostHookScriptSource{ConfigMapRef: &keziov1alpha2.ConfigMapKeyRef{Name: "script-cm", Key: "script.sh"}},
+	fx.mustCreatePostHook(ns, "cm-hook", keziov1alpha3.PostHookSpec{
+		Steps: []keziov1alpha3.PostHookStep{{
+			OSFamily: keziov1alpha3.OSFamilyLinux,
+			Script:   &keziov1alpha3.PostHookScriptSource{ConfigMapRef: &keziov1alpha3.ConfigMapKeyRef{Name: "script-cm", Key: "script.sh"}},
 		}},
 	})
 	image := fx.mustCreateImage(ns, blankDataLayout())
 
 	b := &Builder{Client: fx.client}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha2.MachineSpec{
-			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
-			PostHookRefs: []keziov1alpha2.NameRef{{Name: "cm-hook"}},
+		Spec: keziov1alpha3.MachineSpec{
+			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha3.NameRef{{Name: "cm-hook"}},
 		},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	_, _, err := b.Build(context.Background(), machine, run)
 	var notReady *NotReadyError
@@ -431,23 +431,23 @@ func testConfigMapScriptSourceMissingKeyIsNotReady(t *testing.T, fx *fixtures) {
 func testSecretScriptSourceMissingSecretIsNotReady(t *testing.T, fx *fixtures) {
 	ns := fx.mustCreateNamespace()
 	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
-	fx.mustCreatePostHook(ns, "secret-hook", keziov1alpha2.PostHookSpec{
-		Steps: []keziov1alpha2.PostHookStep{{
-			OSFamily: keziov1alpha2.OSFamilyLinux,
-			Script:   &keziov1alpha2.PostHookScriptSource{SecretRef: &keziov1alpha2.SecretKeyRef{Name: "does-not-exist", Key: "script.sh"}},
+	fx.mustCreatePostHook(ns, "secret-hook", keziov1alpha3.PostHookSpec{
+		Steps: []keziov1alpha3.PostHookStep{{
+			OSFamily: keziov1alpha3.OSFamilyLinux,
+			Script:   &keziov1alpha3.PostHookScriptSource{SecretRef: &keziov1alpha3.SecretKeyRef{Name: "does-not-exist", Key: "script.sh"}},
 		}},
 	})
 	image := fx.mustCreateImage(ns, blankDataLayout())
 
 	b := &Builder{Client: fx.client}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha2.MachineSpec{
-			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
-			PostHookRefs: []keziov1alpha2.NameRef{{Name: "secret-hook"}},
+		Spec: keziov1alpha3.MachineSpec{
+			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha3.NameRef{{Name: "secret-hook"}},
 		},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	_, _, err := b.Build(context.Background(), machine, run)
 	var notReady *NotReadyError
@@ -460,23 +460,23 @@ func testSecretScriptSourceMissingKeyIsNotReady(t *testing.T, fx *fixtures) {
 	ns := fx.mustCreateNamespace()
 	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
 	fx.mustCreateSecret(ns, "script-secret", map[string][]byte{"other-key": []byte("echo hi")})
-	fx.mustCreatePostHook(ns, "secret-hook", keziov1alpha2.PostHookSpec{
-		Steps: []keziov1alpha2.PostHookStep{{
-			OSFamily: keziov1alpha2.OSFamilyLinux,
-			Script:   &keziov1alpha2.PostHookScriptSource{SecretRef: &keziov1alpha2.SecretKeyRef{Name: "script-secret", Key: "script.sh"}},
+	fx.mustCreatePostHook(ns, "secret-hook", keziov1alpha3.PostHookSpec{
+		Steps: []keziov1alpha3.PostHookStep{{
+			OSFamily: keziov1alpha3.OSFamilyLinux,
+			Script:   &keziov1alpha3.PostHookScriptSource{SecretRef: &keziov1alpha3.SecretKeyRef{Name: "script-secret", Key: "script.sh"}},
 		}},
 	})
 	image := fx.mustCreateImage(ns, blankDataLayout())
 
 	b := &Builder{Client: fx.client}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha2.MachineSpec{
-			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
-			PostHookRefs: []keziov1alpha2.NameRef{{Name: "secret-hook"}},
+		Spec: keziov1alpha3.MachineSpec{
+			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha3.NameRef{{Name: "secret-hook"}},
 		},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	_, _, err := b.Build(context.Background(), machine, run)
 	var notReady *NotReadyError
@@ -495,22 +495,22 @@ func testSeederDeploymentMissingIsNotReady(t *testing.T, fx *fixtures) {
 	hash := fixtureInfoHash("seeder-missing-deployment")
 	fx.mustCreatePartitionContentReady(ns, hash)
 
-	layout := keziov1alpha2.ImageDiskLayout{
-		PartitionTable: keziov1alpha2.PartitionTableGPT,
+	layout := keziov1alpha3.ImageDiskLayout{
+		PartitionTable: keziov1alpha3.PartitionTableGPT,
 		SfdiskJSON:     `{"partitiontable":{}}`,
-		Slots: []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: fixtureContentName(hash)}},
+		Slots: []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: fixtureContentName(hash)}},
 		},
 	}
 	image := fx.mustCreateImage(ns, layout)
 	subnetRef, _ := fx.mustCreateSite(ns)
 
 	b := &Builder{Client: fx.client}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: image.Name}, SubnetRef: subnetRef},
+		Spec:       keziov1alpha3.MachineSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}, SubnetRef: subnetRef},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	_, _, err := b.Build(context.Background(), machine, run)
 	var notReady *NotReadyError
@@ -529,11 +529,11 @@ func testSeederPodNoIPIsNotReady(t *testing.T, fx *fixtures) {
 	hash := fixtureInfoHash("seeder-no-podip")
 	fx.mustCreatePartitionContentReady(ns, hash)
 
-	layout := keziov1alpha2.ImageDiskLayout{
-		PartitionTable: keziov1alpha2.PartitionTableGPT,
+	layout := keziov1alpha3.ImageDiskLayout{
+		PartitionTable: keziov1alpha3.PartitionTableGPT,
 		SfdiskJSON:     `{"partitiontable":{}}`,
-		Slots: []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: fixtureContentName(hash)}},
+		Slots: []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: fixtureContentName(hash)}},
 		},
 	}
 	image := fx.mustCreateImage(ns, layout)
@@ -541,11 +541,11 @@ func testSeederPodNoIPIsNotReady(t *testing.T, fx *fixtures) {
 	fx.mustCreateSeederPodNoIP(ns, image.Name, siteIdentity)
 
 	b := &Builder{Client: fx.client}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: image.Name}, SubnetRef: subnetRef},
+		Spec:       keziov1alpha3.MachineSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}, SubnetRef: subnetRef},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	_, _, err := b.Build(context.Background(), machine, run)
 	var notReady *NotReadyError
@@ -561,11 +561,11 @@ func testMachineHardwareMissingIsNotReady(t *testing.T, fx *fixtures) {
 	image := fx.mustCreateImage(ns, blankDataLayout())
 
 	b := &Builder{Client: fx.client}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: image.Name}},
+		Spec:       keziov1alpha3.MachineSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	_, _, err := b.Build(context.Background(), machine, run)
 	var notReady *NotReadyError
@@ -580,11 +580,11 @@ func testImageMissingIsNotReady(t *testing.T, fx *fixtures) {
 	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
 
 	b := &Builder{Client: fx.client}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: "does-not-exist"}},
+		Spec:       keziov1alpha3.MachineSpec{ImageRef: &keziov1alpha3.NameRef{Name: "does-not-exist"}},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	_, _, err := b.Build(context.Background(), machine, run)
 	var notReady *NotReadyError
@@ -602,11 +602,11 @@ func testImageNotReadyYetIsNotReady(t *testing.T, fx *fixtures) {
 	image := fx.mustCreateImagePending(ns, blankDataLayout())
 
 	b := &Builder{Client: fx.client}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: image.Name}},
+		Spec:       keziov1alpha3.MachineSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	_, _, err := b.Build(context.Background(), machine, run)
 	var notReady *NotReadyError
@@ -623,14 +623,14 @@ func testPostHookMissingIsNotReady(t *testing.T, fx *fixtures) {
 	image := fx.mustCreateImage(ns, blankDataLayout())
 
 	b := &Builder{Client: fx.client}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha2.MachineSpec{
-			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
-			PostHookRefs: []keziov1alpha2.NameRef{{Name: "does-not-exist"}},
+		Spec: keziov1alpha3.MachineSpec{
+			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha3.NameRef{{Name: "does-not-exist"}},
 		},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	_, _, err := b.Build(context.Background(), machine, run)
 	var notReady *NotReadyError
@@ -649,14 +649,14 @@ func testPostHookNotValidYetIsNotReady(t *testing.T, fx *fixtures) {
 	fx.mustCreatePostHookPending(ns, "pending-hook", scriptHookSpec("pending"))
 
 	b := &Builder{Client: fx.client}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha2.MachineSpec{
-			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
-			PostHookRefs: []keziov1alpha2.NameRef{{Name: "pending-hook"}},
+		Spec: keziov1alpha3.MachineSpec{
+			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha3.NameRef{{Name: "pending-hook"}},
 		},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	_, _, err := b.Build(context.Background(), machine, run)
 	var notReady *NotReadyError
@@ -675,14 +675,14 @@ func testOSAndDataImageSameDiskIsDiskSelectionError(t *testing.T, fx *fixtures) 
 	image := fx.mustCreateImage(ns, blankDataLayout())
 
 	b := &Builder{Client: fx.client}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha2.MachineSpec{
-			ImageRef:   &keziov1alpha2.NameRef{Name: image.Name},
-			DataImages: []keziov1alpha2.MachineDataImage{{ImageRef: keziov1alpha2.NameRef{Name: image.Name}}},
+		Spec: keziov1alpha3.MachineSpec{
+			ImageRef:   &keziov1alpha3.NameRef{Name: image.Name},
+			DataImages: []keziov1alpha3.MachineDataImage{{ImageRef: keziov1alpha3.NameRef{Name: image.Name}}},
 		},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	_, _, err := b.Build(context.Background(), machine, run)
 	var diskErr *DiskSelectionError
@@ -703,19 +703,19 @@ func testEzioTuningChain(t *testing.T, fx *fixtures) {
 	ns := fx.mustCreateNamespace()
 	image := fx.mustCreateImage(ns, blankDataLayout())
 
-	newMachine := func(name string, ezio *keziov1alpha2.MachineEzioTuning) *keziov1alpha2.Machine {
+	newMachine := func(name string, ezio *keziov1alpha3.MachineEzioTuning) *keziov1alpha3.Machine {
 		fx.mustCreateMachineHardwareNamed(ns, name, oneDisk("/dev/vda"))
-		return &keziov1alpha2.Machine{
+		return &keziov1alpha3.Machine{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-			Spec: keziov1alpha2.MachineSpec{
-				DataImages: []keziov1alpha2.MachineDataImage{{ImageRef: keziov1alpha2.NameRef{Name: image.Name}}},
+			Spec: keziov1alpha3.MachineSpec{
+				DataImages: []keziov1alpha3.MachineDataImage{{ImageRef: keziov1alpha3.NameRef{Name: image.Name}}},
 				Ezio:       ezio,
 			},
 		}
 	}
-	build := func(b *Builder, m *keziov1alpha2.Machine) *agentapi.DeployPlan {
+	build := func(b *Builder, m *keziov1alpha3.Machine) *agentapi.DeployPlan {
 		t.Helper()
-		run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run-" + m.Name, UID: types.UID("uid-" + m.Name)}}
+		run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run-" + m.Name, UID: types.UID("uid-" + m.Name)}}
 		plan, _, err := b.Build(context.Background(), m, run)
 		if err != nil {
 			t.Fatalf("Build(%s): %v", m.Name, err)
@@ -741,7 +741,7 @@ func testEzioTuningChain(t *testing.T, fx *fixtures) {
 	}
 
 	// Per-Machine override wins over the cluster default, fully set.
-	full := build(&Builder{Client: fx.client, LeecherEzio: clusterCfg}, newMachine("ezio-full-override", &keziov1alpha2.MachineEzioTuning{
+	full := build(&Builder{Client: fx.client, LeecherEzio: clusterCfg}, newMachine("ezio-full-override", &keziov1alpha3.MachineEzioTuning{
 		MaxUploads:     &uploadsOverride,
 		MaxConnections: int32ptr(90),
 	}))
@@ -751,7 +751,7 @@ func testEzioTuningChain(t *testing.T, fx *fixtures) {
 
 	// Partial per-Machine override: only MaxUploads is set, so
 	// MaxConnections must still fall back to the cluster default.
-	partial := build(&Builder{Client: fx.client, LeecherEzio: clusterCfg}, newMachine("ezio-partial-override", &keziov1alpha2.MachineEzioTuning{
+	partial := build(&Builder{Client: fx.client, LeecherEzio: clusterCfg}, newMachine("ezio-partial-override", &keziov1alpha3.MachineEzioTuning{
 		MaxUploads: &uploadsOverride,
 	}))
 	if partial.MaxUploads != 5 {
@@ -776,13 +776,13 @@ func testDataImagesOnlyNoDefaultHook(t *testing.T, fx *fixtures) {
 	image := fx.mustCreateImage(ns, blankDataLayout())
 
 	b := &Builder{Client: fx.client, ManagerNamespace: mgrNS}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha2.MachineSpec{
-			DataImages: []keziov1alpha2.MachineDataImage{{ImageRef: keziov1alpha2.NameRef{Name: image.Name}}},
+		Spec: keziov1alpha3.MachineSpec{
+			DataImages: []keziov1alpha3.MachineDataImage{{ImageRef: keziov1alpha3.NameRef{Name: image.Name}}},
 		},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	plan, _, err := b.Build(context.Background(), machine, run)
 	if err != nil {
@@ -800,23 +800,23 @@ func testDataImagesOnlyNoDefaultHook(t *testing.T, fx *fixtures) {
 func testDataImagesOnlyExplicitEfibootmgrIsValidationError(t *testing.T, fx *fixtures) {
 	ns := fx.mustCreateNamespace()
 	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
-	fx.mustCreatePostHook(ns, "hook", keziov1alpha2.PostHookSpec{
-		Steps: []keziov1alpha2.PostHookStep{{
-			OSFamily: keziov1alpha2.OSFamilyLinux,
-			Builtin:  &keziov1alpha2.PostHookBuiltinStep{Name: keziov1alpha2.BuiltinStepEfibootmgr},
+	fx.mustCreatePostHook(ns, "hook", keziov1alpha3.PostHookSpec{
+		Steps: []keziov1alpha3.PostHookStep{{
+			OSFamily: keziov1alpha3.OSFamilyLinux,
+			Builtin:  &keziov1alpha3.PostHookBuiltinStep{Name: keziov1alpha3.BuiltinStepEfibootmgr},
 		}},
 	})
 	image := fx.mustCreateImage(ns, blankDataLayout())
 
 	b := &Builder{Client: fx.client}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha2.MachineSpec{
-			DataImages:   []keziov1alpha2.MachineDataImage{{ImageRef: keziov1alpha2.NameRef{Name: image.Name}}},
-			PostHookRefs: []keziov1alpha2.NameRef{{Name: "hook"}},
+		Spec: keziov1alpha3.MachineSpec{
+			DataImages:   []keziov1alpha3.MachineDataImage{{ImageRef: keziov1alpha3.NameRef{Name: image.Name}}},
+			PostHookRefs: []keziov1alpha3.NameRef{{Name: "hook"}},
 		},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	_, _, err := b.Build(context.Background(), machine, run)
 	var valErr *ValidationError
@@ -830,22 +830,22 @@ func testDefaultHookDerivesBuiltinParams(t *testing.T, fx *fixtures) {
 	mgrNS := fx.mustCreateNamespace()
 	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
 	fx.mustCreatePostHook(mgrNS, posthookdefaults.DefaultFinalizeHookName, posthookdefaults.Spec())
-	layout := keziov1alpha2.ImageDiskLayout{
-		PartitionTable: keziov1alpha2.PartitionTableGPT,
+	layout := keziov1alpha3.ImageDiskLayout{
+		PartitionTable: keziov1alpha3.PartitionTableGPT,
 		SfdiskJSON:     `{"partitiontable":{}}`,
-		Slots: []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleESP, FSType: "vfat"},
-			{Number: 2, Role: keziov1alpha2.PartitionRoleData, FSType: "ext4"},
+		Slots: []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleESP, FSType: "vfat"},
+			{Number: 2, Role: keziov1alpha3.PartitionRoleData, FSType: "ext4"},
 		},
 	}
 	image := fx.mustCreateImage(ns, layout)
 
 	b := &Builder{Client: fx.client, ManagerNamespace: mgrNS}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: image.Name}},
+		Spec:       keziov1alpha3.MachineSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	plan, _, err := b.Build(context.Background(), machine, run)
 	if err != nil {
@@ -857,7 +857,7 @@ func testDefaultHookDerivesBuiltinParams(t *testing.T, fx *fixtures) {
 	var efibootmgr *agentapi.ResolvedHookStep
 	for _, hook := range plan.Hooks {
 		for i, step := range hook.Steps {
-			if step.Builtin == keziov1alpha2.BuiltinStepEfibootmgr {
+			if step.Builtin == keziov1alpha3.BuiltinStepEfibootmgr {
 				efibootmgr = &hook.Steps[i]
 			}
 		}
@@ -872,20 +872,20 @@ func testDefaultHookDerivesBuiltinParams(t *testing.T, fx *fixtures) {
 
 func testBuiltinParamOverride(t *testing.T, fx *fixtures) {
 	ns := fx.mustCreateNamespace()
-	layout := keziov1alpha2.ImageDiskLayout{
-		PartitionTable: keziov1alpha2.PartitionTableGPT,
+	layout := keziov1alpha3.ImageDiskLayout{
+		PartitionTable: keziov1alpha3.PartitionTableGPT,
 		SfdiskJSON:     `{"partitiontable":{}}`,
-		Slots: []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleESP, FSType: "vfat"},
-			{Number: 2, Role: keziov1alpha2.PartitionRoleData, FSType: "ext4"},
+		Slots: []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleESP, FSType: "vfat"},
+			{Number: 2, Role: keziov1alpha3.PartitionRoleData, FSType: "ext4"},
 		},
 	}
 	image := fx.mustCreateImage(ns, layout)
-	fx.mustCreatePostHook(ns, "hook", keziov1alpha2.PostHookSpec{
-		Steps: []keziov1alpha2.PostHookStep{{
-			OSFamily: keziov1alpha2.OSFamilyLinux,
-			Builtin: &keziov1alpha2.PostHookBuiltinStep{
-				Name:   keziov1alpha2.BuiltinStepEfibootmgr,
+	fx.mustCreatePostHook(ns, "hook", keziov1alpha3.PostHookSpec{
+		Steps: []keziov1alpha3.PostHookStep{{
+			OSFamily: keziov1alpha3.OSFamilyLinux,
+			Builtin: &keziov1alpha3.PostHookBuiltinStep{
+				Name:   keziov1alpha3.BuiltinStepEfibootmgr,
 				Params: map[string]string{"part": "9"},
 			},
 		}},
@@ -893,14 +893,14 @@ func testBuiltinParamOverride(t *testing.T, fx *fixtures) {
 	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
 
 	b := &Builder{Client: fx.client}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha2.MachineSpec{
-			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
-			PostHookRefs: []keziov1alpha2.NameRef{{Name: "hook"}},
+		Spec: keziov1alpha3.MachineSpec{
+			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha3.NameRef{{Name: "hook"}},
 		},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	plan, _, err := b.Build(context.Background(), machine, run)
 	if err != nil {
@@ -923,30 +923,30 @@ func testBuiltinMissingESPIsValidationError(t *testing.T, fx *fixtures) {
 	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
 	// blankDataLayout no longer works here for demonstrating the missing-ESP
 	// case (it now carries an ESP slot); this layout carries none.
-	layout := keziov1alpha2.ImageDiskLayout{
-		PartitionTable: keziov1alpha2.PartitionTableGPT,
+	layout := keziov1alpha3.ImageDiskLayout{
+		PartitionTable: keziov1alpha3.PartitionTableGPT,
 		SfdiskJSON:     `{"partitiontable":{}}`,
-		Slots: []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, FSType: "ext4"},
+		Slots: []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, FSType: "ext4"},
 		},
 	}
 	image := fx.mustCreateImage(ns, layout)
-	fx.mustCreatePostHook(ns, "hook", keziov1alpha2.PostHookSpec{
-		Steps: []keziov1alpha2.PostHookStep{{
-			OSFamily: keziov1alpha2.OSFamilyLinux,
-			Builtin:  &keziov1alpha2.PostHookBuiltinStep{Name: keziov1alpha2.BuiltinStepEfibootmgr},
+	fx.mustCreatePostHook(ns, "hook", keziov1alpha3.PostHookSpec{
+		Steps: []keziov1alpha3.PostHookStep{{
+			OSFamily: keziov1alpha3.OSFamilyLinux,
+			Builtin:  &keziov1alpha3.PostHookBuiltinStep{Name: keziov1alpha3.BuiltinStepEfibootmgr},
 		}},
 	})
 
 	b := &Builder{Client: fx.client}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha2.MachineSpec{
-			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
-			PostHookRefs: []keziov1alpha2.NameRef{{Name: "hook"}},
+		Spec: keziov1alpha3.MachineSpec{
+			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha3.NameRef{{Name: "hook"}},
 		},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	_, _, err := b.Build(context.Background(), machine, run)
 	var valErr *ValidationError
@@ -963,13 +963,13 @@ func testDefaultHookAttached(t *testing.T, fx *fixtures) {
 	image := fx.mustCreateImage(ns, blankDataLayout())
 
 	b := &Builder{Client: fx.client, ManagerNamespace: mgrNS}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha2.MachineSpec{
-			ImageRef: &keziov1alpha2.NameRef{Name: image.Name},
+		Spec: keziov1alpha3.MachineSpec{
+			ImageRef: &keziov1alpha3.NameRef{Name: image.Name},
 		},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	plan, _, err := b.Build(context.Background(), machine, run)
 	if err != nil {
@@ -993,14 +993,14 @@ func testExplicitHookRefsHonored(t *testing.T, fx *fixtures) {
 	image := fx.mustCreateImage(ns, blankDataLayout())
 
 	b := &Builder{Client: fx.client, ManagerNamespace: mgrNS}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha2.MachineSpec{
-			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
-			PostHookRefs: []keziov1alpha2.NameRef{{Name: "hook-a"}, {Name: "hook-b"}},
+		Spec: keziov1alpha3.MachineSpec{
+			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha3.NameRef{{Name: "hook-a"}, {Name: "hook-b"}},
 		},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	plan, _, err := b.Build(context.Background(), machine, run)
 	if err != nil {
@@ -1013,27 +1013,27 @@ func testExplicitHookRefsHonored(t *testing.T, fx *fixtures) {
 
 func testParamsMergeOrder(t *testing.T, fx *fixtures) {
 	ns := fx.mustCreateNamespace()
-	spec := keziov1alpha2.PostHookSpec{
-		Params: []keziov1alpha2.PostHookParam{{Name: "greeting", Default: strPtr("from-posthook")}},
-		Steps: []keziov1alpha2.PostHookStep{{
-			OSFamily: keziov1alpha2.OSFamilyLinux,
-			Script:   &keziov1alpha2.PostHookScriptSource{Script: "echo {{ .greeting }}"},
+	spec := keziov1alpha3.PostHookSpec{
+		Params: []keziov1alpha3.PostHookParam{{Name: "greeting", Default: strPtr("from-posthook")}},
+		Steps: []keziov1alpha3.PostHookStep{{
+			OSFamily: keziov1alpha3.OSFamilyLinux,
+			Script:   &keziov1alpha3.PostHookScriptSource{Script: "echo {{ .greeting }}"},
 		}},
 	}
 	fx.mustCreatePostHook(ns, "hook", spec)
 	image := fx.mustCreateImageWithParams(ns, blankDataLayout(), rawJSON(t, map[string]string{"greeting": "from-image"}))
 
 	b := &Builder{Client: fx.client}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha2.MachineSpec{
-			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
-			PostHookRefs: []keziov1alpha2.NameRef{{Name: "hook"}},
+		Spec: keziov1alpha3.MachineSpec{
+			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha3.NameRef{{Name: "hook"}},
 			Params:       rawJSON(t, map[string]string{"greeting": "from-machine"}),
 		},
 	}
 	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	plan, _, err := b.Build(context.Background(), machine, run)
 	if err != nil {
@@ -1047,22 +1047,22 @@ func testParamsMergeOrder(t *testing.T, fx *fixtures) {
 
 func testAmbiguousDiskHints(t *testing.T, fx *fixtures) {
 	ns := fx.mustCreateNamespace()
-	fx.mustCreateMachineHardware(ns, []keziov1alpha2.MachineHardwareDisk{
+	fx.mustCreateMachineHardware(ns, []keziov1alpha3.MachineHardwareDisk{
 		{DeviceName: "/dev/vda", SizeBytes: 10 << 30},
 		{DeviceName: "/dev/vdb", SizeBytes: 10 << 30},
 	})
 	image := fx.mustCreateImage(ns, blankDataLayout())
 
 	b := &Builder{Client: fx.client}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha2.MachineSpec{
-			ImageRef: &keziov1alpha2.NameRef{Name: image.Name},
+		Spec: keziov1alpha3.MachineSpec{
+			ImageRef: &keziov1alpha3.NameRef{Name: image.Name},
 			// No hints: two disks are present, so "the only disk" fallback
 			// is ambiguous.
 		},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	_, _, err := b.Build(context.Background(), machine, run)
 	var diskErr *DiskSelectionError
@@ -1073,7 +1073,7 @@ func testAmbiguousDiskHints(t *testing.T, fx *fixtures) {
 
 func testUnambiguousDiskHints(t *testing.T, fx *fixtures) {
 	ns := fx.mustCreateNamespace()
-	fx.mustCreateMachineHardware(ns, []keziov1alpha2.MachineHardwareDisk{
+	fx.mustCreateMachineHardware(ns, []keziov1alpha3.MachineHardwareDisk{
 		{DeviceName: "/dev/vda", SizeBytes: 10 << 30},
 		{DeviceName: "/dev/vdb", SizeBytes: 20 << 30, SerialNumber: "SN-B"},
 	})
@@ -1081,14 +1081,14 @@ func testUnambiguousDiskHints(t *testing.T, fx *fixtures) {
 	fx.mustCreatePostHook(ns, posthookdefaults.DefaultFinalizeHookName, posthookdefaults.Spec())
 
 	b := &Builder{Client: fx.client, ManagerNamespace: ns}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha2.MachineSpec{
-			ImageRef:   &keziov1alpha2.NameRef{Name: image.Name},
-			TargetDisk: &keziov1alpha2.TargetDiskHints{SerialNumber: "SN-B"},
+		Spec: keziov1alpha3.MachineSpec{
+			ImageRef:   &keziov1alpha3.NameRef{Name: image.Name},
+			TargetDisk: &keziov1alpha3.TargetDiskHints{SerialNumber: "SN-B"},
 		},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	plan, snap, err := b.Build(context.Background(), machine, run)
 	if err != nil {
@@ -1109,13 +1109,13 @@ func testSlotClassification(t *testing.T, fx *fixtures) {
 	hash := fixtureInfoHash("slot-classification")
 	fx.mustCreatePartitionContentReady(ns, hash)
 
-	layout := keziov1alpha2.ImageDiskLayout{
-		PartitionTable: keziov1alpha2.PartitionTableGPT,
+	layout := keziov1alpha3.ImageDiskLayout{
+		PartitionTable: keziov1alpha3.PartitionTableGPT,
 		SfdiskJSON:     `{"partitiontable":{}}`,
-		Slots: []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleESP, ContentRef: &keziov1alpha2.NameRef{Name: fixtureContentName(hash)}},
-			{Number: 2, Role: keziov1alpha2.PartitionRoleData, FSType: "ext4"},
-			{Number: 3, Role: keziov1alpha2.PartitionRoleSwap, UUID: "swap-uuid"},
+		Slots: []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleESP, ContentRef: &keziov1alpha3.NameRef{Name: fixtureContentName(hash)}},
+			{Number: 2, Role: keziov1alpha3.PartitionRoleData, FSType: "ext4"},
+			{Number: 3, Role: keziov1alpha3.PartitionRoleSwap, UUID: "swap-uuid"},
 		},
 	}
 	image := fx.mustCreateImage(ns, layout)
@@ -1124,11 +1124,11 @@ func testSlotClassification(t *testing.T, fx *fixtures) {
 	fx.mustCreatePostHook(ns, posthookdefaults.DefaultFinalizeHookName, posthookdefaults.Spec())
 
 	b := &Builder{Client: fx.client, ManagerNamespace: ns}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: image.Name}, SubnetRef: subnetRef},
+		Spec:       keziov1alpha3.MachineSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}, SubnetRef: subnetRef},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	plan, _, err := b.Build(context.Background(), machine, run)
 	if err != nil {
@@ -1159,21 +1159,21 @@ func testPartitionContentNotReady(t *testing.T, fx *fixtures) {
 	hash := fixtureInfoHash("not-ready")
 	fx.mustCreatePartitionContentPending(ns, hash)
 
-	layout := keziov1alpha2.ImageDiskLayout{
-		PartitionTable: keziov1alpha2.PartitionTableGPT,
+	layout := keziov1alpha3.ImageDiskLayout{
+		PartitionTable: keziov1alpha3.PartitionTableGPT,
 		SfdiskJSON:     `{"partitiontable":{}}`,
-		Slots: []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: fixtureContentName(hash)}},
+		Slots: []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: fixtureContentName(hash)}},
 		},
 	}
 	image := fx.mustCreateImage(ns, layout)
 
 	b := &Builder{Client: fx.client}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: image.Name}},
+		Spec:       keziov1alpha3.MachineSpec{ImageRef: &keziov1alpha3.NameRef{Name: image.Name}},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	_, _, err := b.Build(context.Background(), machine, run)
 	var notReady *NotReadyError
@@ -1185,23 +1185,23 @@ func testPartitionContentNotReady(t *testing.T, fx *fixtures) {
 func testUnresolvedPlaceholder(t *testing.T, fx *fixtures) {
 	ns := fx.mustCreateNamespace()
 	fx.mustCreateMachineHardware(ns, oneDisk("/dev/vda"))
-	fx.mustCreatePostHook(ns, "hook", keziov1alpha2.PostHookSpec{
-		Steps: []keziov1alpha2.PostHookStep{{
-			OSFamily: keziov1alpha2.OSFamilyLinux,
-			Script:   &keziov1alpha2.PostHookScriptSource{Script: "echo {{ .neverDeclared }}"},
+	fx.mustCreatePostHook(ns, "hook", keziov1alpha3.PostHookSpec{
+		Steps: []keziov1alpha3.PostHookStep{{
+			OSFamily: keziov1alpha3.OSFamilyLinux,
+			Script:   &keziov1alpha3.PostHookScriptSource{Script: "echo {{ .neverDeclared }}"},
 		}},
 	})
 	image := fx.mustCreateImage(ns, blankDataLayout())
 
 	b := &Builder{Client: fx.client}
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: ns},
-		Spec: keziov1alpha2.MachineSpec{
-			ImageRef:     &keziov1alpha2.NameRef{Name: image.Name},
-			PostHookRefs: []keziov1alpha2.NameRef{{Name: "hook"}},
+		Spec: keziov1alpha3.MachineSpec{
+			ImageRef:     &keziov1alpha3.NameRef{Name: image.Name},
+			PostHookRefs: []keziov1alpha3.NameRef{{Name: "hook"}},
 		},
 	}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", UID: types.UID("uid1")}}
 
 	_, _, err := b.Build(context.Background(), machine, run)
 	var valErr *ValidationError
@@ -1227,15 +1227,15 @@ func (fx *fixtures) mustCreateNamespace() string {
 // looked up name-aligned with its Machine.
 const testMachineName = "m1"
 
-func (fx *fixtures) mustCreateMachineHardware(ns string, disks []keziov1alpha2.MachineHardwareDisk) {
+func (fx *fixtures) mustCreateMachineHardware(ns string, disks []keziov1alpha3.MachineHardwareDisk) {
 	fx.mustCreateMachineHardwareNamed(ns, testMachineName, disks)
 }
 
-func (fx *fixtures) mustCreateMachineHardwareNamed(ns, name string, disks []keziov1alpha2.MachineHardwareDisk) {
+func (fx *fixtures) mustCreateMachineHardwareNamed(ns, name string, disks []keziov1alpha3.MachineHardwareDisk) {
 	fx.t.Helper()
-	hw := &keziov1alpha2.MachineHardware{
+	hw := &keziov1alpha3.MachineHardware{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec:       keziov1alpha2.MachineHardwareSpec{Disks: disks},
+		Spec:       keziov1alpha3.MachineHardwareSpec{Disks: disks},
 	}
 	if err := fx.client.Create(context.Background(), hw); err != nil {
 		fx.t.Fatalf("create machinehardware %s/%s: %v", ns, name, err)
@@ -1245,35 +1245,35 @@ func (fx *fixtures) mustCreateMachineHardwareNamed(ns, name string, disks []kezi
 // testImageName is the Image name every subtest's fixtures use.
 const testImageName = "img1"
 
-func (fx *fixtures) mustCreateImage(ns string, layout keziov1alpha2.ImageDiskLayout) *keziov1alpha2.Image {
+func (fx *fixtures) mustCreateImage(ns string, layout keziov1alpha3.ImageDiskLayout) *keziov1alpha3.Image {
 	return fx.mustCreateImageWithParams(ns, layout, nil)
 }
 
-func (fx *fixtures) mustCreateImageWithParams(ns string, layout keziov1alpha2.ImageDiskLayout, params *apiextensionsv1.JSON) *keziov1alpha2.Image {
+func (fx *fixtures) mustCreateImageWithParams(ns string, layout keziov1alpha3.ImageDiskLayout, params *apiextensionsv1.JSON) *keziov1alpha3.Image {
 	fx.t.Helper()
 	return fx.mustCreateImageFull(ns, testImageName, layout, params, nil)
 }
 
-func (fx *fixtures) mustCreateImageWithHooks(ns string, layout keziov1alpha2.ImageDiskLayout, hookRefs []keziov1alpha2.NameRef) *keziov1alpha2.Image {
+func (fx *fixtures) mustCreateImageWithHooks(ns string, layout keziov1alpha3.ImageDiskLayout, hookRefs []keziov1alpha3.NameRef) *keziov1alpha3.Image {
 	fx.t.Helper()
 	return fx.mustCreateImageFull(ns, testImageName, layout, nil, hookRefs)
 }
 
-func (fx *fixtures) mustCreateImageWithHooksNamed(ns, name string, layout keziov1alpha2.ImageDiskLayout, hookRefs []keziov1alpha2.NameRef) *keziov1alpha2.Image {
+func (fx *fixtures) mustCreateImageWithHooksNamed(ns, name string, layout keziov1alpha3.ImageDiskLayout, hookRefs []keziov1alpha3.NameRef) *keziov1alpha3.Image {
 	fx.t.Helper()
 	return fx.mustCreateImageFull(ns, name, layout, nil, hookRefs)
 }
 
-func (fx *fixtures) mustCreateImageFull(ns, name string, layout keziov1alpha2.ImageDiskLayout, params *apiextensionsv1.JSON, hookRefs []keziov1alpha2.NameRef) *keziov1alpha2.Image {
+func (fx *fixtures) mustCreateImageFull(ns, name string, layout keziov1alpha3.ImageDiskLayout, params *apiextensionsv1.JSON, hookRefs []keziov1alpha3.NameRef) *keziov1alpha3.Image {
 	fx.t.Helper()
-	img := &keziov1alpha2.Image{
+	img := &keziov1alpha3.Image{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec:       keziov1alpha2.ImageSpec{Layout: layout, Params: params, PostHookRefs: hookRefs},
+		Spec:       keziov1alpha3.ImageSpec{Layout: layout, Params: params, PostHookRefs: hookRefs},
 	}
 	if err := fx.client.Create(context.Background(), img); err != nil {
 		fx.t.Fatalf("create image %s/%s: %v", ns, name, err)
 	}
-	img.Status.State = keziov1alpha2.ImageStateReady
+	img.Status.State = keziov1alpha3.ImageStateReady
 	if err := fx.client.Status().Update(context.Background(), img); err != nil {
 		fx.t.Fatalf("update image %s/%s status: %v", ns, name, err)
 	}
@@ -1283,11 +1283,11 @@ func (fx *fixtures) mustCreateImageFull(ns, name string, layout keziov1alpha2.Im
 // mustCreateImagePending creates an Image whose Status.State is left at
 // its zero value (never set to ImageStateReady), standing in for an image
 // resolveImage's reconciler has not finished processing yet.
-func (fx *fixtures) mustCreateImagePending(ns string, layout keziov1alpha2.ImageDiskLayout) *keziov1alpha2.Image {
+func (fx *fixtures) mustCreateImagePending(ns string, layout keziov1alpha3.ImageDiskLayout) *keziov1alpha3.Image {
 	fx.t.Helper()
-	img := &keziov1alpha2.Image{
+	img := &keziov1alpha3.Image{
 		ObjectMeta: metav1.ObjectMeta{Name: testImageName, Namespace: ns},
-		Spec:       keziov1alpha2.ImageSpec{Layout: layout},
+		Spec:       keziov1alpha3.ImageSpec{Layout: layout},
 	}
 	if err := fx.client.Create(context.Background(), img); err != nil {
 		fx.t.Fatalf("create image %s/%s: %v", ns, img.Name, err)
@@ -1317,7 +1317,7 @@ func (fx *fixtures) mustCreateSecret(ns, name string, data map[string][]byte) {
 	}
 }
 
-func (fx *fixtures) mustCreatePostHook(ns, name string, spec keziov1alpha2.PostHookSpec) {
+func (fx *fixtures) mustCreatePostHook(ns, name string, spec keziov1alpha3.PostHookSpec) {
 	fx.t.Helper()
 	fx.mustCreatePostHookWithValidity(ns, name, spec, true)
 }
@@ -1325,14 +1325,14 @@ func (fx *fixtures) mustCreatePostHook(ns, name string, spec keziov1alpha2.PostH
 // mustCreatePostHookPending creates a PostHook without setting its Valid
 // condition, standing in for one the PostHookReconciler has not finished
 // validating yet.
-func (fx *fixtures) mustCreatePostHookPending(ns, name string, spec keziov1alpha2.PostHookSpec) {
+func (fx *fixtures) mustCreatePostHookPending(ns, name string, spec keziov1alpha3.PostHookSpec) {
 	fx.t.Helper()
 	fx.mustCreatePostHookWithValidity(ns, name, spec, false)
 }
 
-func (fx *fixtures) mustCreatePostHookWithValidity(ns, name string, spec keziov1alpha2.PostHookSpec, valid bool) {
+func (fx *fixtures) mustCreatePostHookWithValidity(ns, name string, spec keziov1alpha3.PostHookSpec, valid bool) {
 	fx.t.Helper()
-	ph := &keziov1alpha2.PostHook{
+	ph := &keziov1alpha3.PostHook{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec:       spec,
 	}
@@ -1343,7 +1343,7 @@ func (fx *fixtures) mustCreatePostHookWithValidity(ns, name string, spec keziov1
 		return
 	}
 	meta.SetStatusCondition(&ph.Status.Conditions, metav1.Condition{
-		Type: keziov1alpha2.PostHookConditionValid, Status: metav1.ConditionTrue, Reason: "TestFixture", Message: "fixture",
+		Type: keziov1alpha3.PostHookConditionValid, Status: metav1.ConditionTrue, Reason: "TestFixture", Message: "fixture",
 	})
 	if err := fx.client.Status().Update(context.Background(), ph); err != nil {
 		fx.t.Fatalf("update posthook %s/%s status: %v", ns, name, err)
@@ -1369,21 +1369,21 @@ func (fx *fixtures) mustCreatePartitionContentPending(ns string, hash store.Info
 
 func (fx *fixtures) mustCreatePartitionContent(ns string, hash store.InfoHash, ready bool) {
 	fx.t.Helper()
-	pc := &keziov1alpha2.PartitionContent{
+	pc := &keziov1alpha3.PartitionContent{
 		ObjectMeta: metav1.ObjectMeta{Name: fixtureContentName(hash), Namespace: ns},
-		Spec: keziov1alpha2.PartitionContentSpec{
+		Spec: keziov1alpha3.PartitionContentSpec{
 			FSType: "ext4", UsedBytes: 1, SizeBytes: 1, LastExtentEnd: 1, PieceLength: store.PieceSize,
-			Source: keziov1alpha2.PartitionContentSource{ImportName: "src", PartitionNumber: 1},
+			Source: keziov1alpha3.PartitionContentSource{ImportName: "src", PartitionNumber: 1},
 		},
 	}
 	if err := fx.client.Create(context.Background(), pc); err != nil {
 		fx.t.Fatalf("create partitioncontent %s/%s: %v", ns, pc.Name, err)
 	}
 	if ready {
-		pc.Status.State = keziov1alpha2.PartitionContentStateReady
+		pc.Status.State = keziov1alpha3.PartitionContentStateReady
 		pc.Status.InfoHash = hash.String()
 		meta.SetStatusCondition(&pc.Status.Conditions, metav1.Condition{
-			Type: keziov1alpha2.PartitionContentConditionReady, Status: metav1.ConditionTrue, Reason: "TestFixture", Message: "fixture",
+			Type: keziov1alpha3.PartitionContentConditionReady, Status: metav1.ConditionTrue, Reason: "TestFixture", Message: "fixture",
 		})
 		if err := fx.client.Status().Update(context.Background(), pc); err != nil {
 			fx.t.Fatalf("update partitioncontent %s/%s status: %v", ns, pc.Name, err)
@@ -1397,29 +1397,29 @@ func (fx *fixtures) mustCreatePartitionContent(ns string, hash store.InfoHash, r
 // returns the NameRef a Machine's spec.subnetRef needs to resolve through
 // this chain (sitederive.Resolve), plus the resulting Site identity
 // string (sitederive.SiteIdentity's format) seederdeploy.Name needs.
-func (fx *fixtures) mustCreateSite(ns string) (keziov1alpha2.NameRef, string) {
+func (fx *fixtures) mustCreateSite(ns string) (keziov1alpha3.NameRef, string) {
 	fx.t.Helper()
-	subnet := &keziov1alpha2.Subnet{
+	subnet := &keziov1alpha3.Subnet{
 		ObjectMeta: metav1.ObjectMeta{Name: "seeding-subnet", Namespace: ns},
-		Spec: keziov1alpha2.SubnetSpec{
-			SiteRef:          keziov1alpha2.NameRef{Name: "site1"},
+		Spec: keziov1alpha3.SubnetSpec{
+			SiteRef:          keziov1alpha3.NameRef{Name: "site1"},
 			CIDR:             "198.51.100.0/24",
-			SeederNetworkRef: &keziov1alpha2.NameRef{Name: "seeder-nad"},
+			SeederNetworkRef: &keziov1alpha3.NameRef{Name: "seeder-nad"},
 		},
 	}
 	if err := fx.client.Create(context.Background(), subnet); err != nil {
 		fx.t.Fatalf("create subnet %s/%s: %v", ns, subnet.Name, err)
 	}
-	site := &keziov1alpha2.Site{
+	site := &keziov1alpha3.Site{
 		ObjectMeta: metav1.ObjectMeta{Name: "site1", Namespace: ns},
-		Spec: keziov1alpha2.SiteSpec{
-			SeederSubnetRef: &keziov1alpha2.NameRef{Name: subnet.Name},
+		Spec: keziov1alpha3.SiteSpec{
+			SeederSubnetRef: &keziov1alpha3.NameRef{Name: subnet.Name},
 		},
 	}
 	if err := fx.client.Create(context.Background(), site); err != nil {
 		fx.t.Fatalf("create site %s/%s: %v", ns, site.Name, err)
 	}
-	return keziov1alpha2.NameRef{Name: subnet.Name}, ns + "/" + site.Name
+	return keziov1alpha3.NameRef{Name: subnet.Name}, ns + "/" + site.Name
 }
 
 // mustCreateSeederPod creates the per-(Image, Site) seeder Deployment
@@ -1483,30 +1483,30 @@ func (fx *fixtures) mustCreateSeederDeploymentAndPod(ns, imageName, siteIdentity
 	return pod
 }
 
-func oneDisk(deviceName string) []keziov1alpha2.MachineHardwareDisk {
-	return []keziov1alpha2.MachineHardwareDisk{{DeviceName: deviceName, SizeBytes: 32 << 30}}
+func oneDisk(deviceName string) []keziov1alpha3.MachineHardwareDisk {
+	return []keziov1alpha3.MachineHardwareDisk{{DeviceName: deviceName, SizeBytes: 32 << 30}}
 }
 
 // blankDataLayout carries an ESP slot (number 1) ahead of its blank data
 // slot (number 2) so a subtest attaching the shipped default PostHook
 // (mkswap, efibootmgr) has an ESP for efibootmgr's derived "part" default
 // to resolve against.
-func blankDataLayout() keziov1alpha2.ImageDiskLayout {
-	return keziov1alpha2.ImageDiskLayout{
-		PartitionTable: keziov1alpha2.PartitionTableGPT,
+func blankDataLayout() keziov1alpha3.ImageDiskLayout {
+	return keziov1alpha3.ImageDiskLayout{
+		PartitionTable: keziov1alpha3.PartitionTableGPT,
 		SfdiskJSON:     `{"partitiontable":{}}`,
-		Slots: []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleESP, FSType: "vfat"},
-			{Number: 2, Role: keziov1alpha2.PartitionRoleData, FSType: "ext4"},
+		Slots: []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleESP, FSType: "vfat"},
+			{Number: 2, Role: keziov1alpha3.PartitionRoleData, FSType: "ext4"},
 		},
 	}
 }
 
-func scriptHookSpec(tag string) keziov1alpha2.PostHookSpec {
-	return keziov1alpha2.PostHookSpec{
-		Steps: []keziov1alpha2.PostHookStep{{
-			OSFamily: keziov1alpha2.OSFamilyLinux,
-			Script:   &keziov1alpha2.PostHookScriptSource{Script: "echo " + tag},
+func scriptHookSpec(tag string) keziov1alpha3.PostHookSpec {
+	return keziov1alpha3.PostHookSpec{
+		Steps: []keziov1alpha3.PostHookStep{{
+			OSFamily: keziov1alpha3.OSFamilyLinux,
+			Script:   &keziov1alpha3.PostHookScriptSource{Script: "echo " + tag},
 		}},
 	}
 }

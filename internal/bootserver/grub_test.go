@@ -22,7 +22,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // TestGrubNetPath pins the one syntax GRUB's network stack resolves:
@@ -145,10 +145,10 @@ func TestBootLocalConfig_EveryOutcomeNamesItself(t *testing.T) {
 // case that must fall back instead (no boot half, nil Subnet).
 func TestSubnetBootBaseURL(t *testing.T) {
 	t.Run("boot plane present", func(t *testing.T) {
-		subnet := &keziov1alpha2.Subnet{
+		subnet := &keziov1alpha3.Subnet{
 			ObjectMeta: metav1.ObjectMeta{Name: "s"},
-			Spec: keziov1alpha2.SubnetSpec{
-				DHCP:          &keziov1alpha2.SubnetDHCP{Mode: keziov1alpha2.SubnetDHCPModeProxy},
+			Spec: keziov1alpha3.SubnetSpec{
+				DHCP:          &keziov1alpha3.SubnetDHCP{Mode: keziov1alpha3.SubnetDHCPModeProxy},
 				BootdServerIP: "192.0.2.2",
 			},
 		}
@@ -162,9 +162,9 @@ func TestSubnetBootBaseURL(t *testing.T) {
 	})
 
 	t.Run("no boot half", func(t *testing.T) {
-		subnet := &keziov1alpha2.Subnet{
+		subnet := &keziov1alpha3.Subnet{
 			ObjectMeta: metav1.ObjectMeta{Name: "s"},
-			Spec:       keziov1alpha2.SubnetSpec{},
+			Spec:       keziov1alpha3.SubnetSpec{},
 		}
 		if _, ok := subnetBootBaseURL(subnet); ok {
 			t.Fatalf("subnetBootBaseURL() ok = true for a Subnet with no boot half, want false")

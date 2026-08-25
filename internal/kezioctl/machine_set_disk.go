@@ -23,7 +23,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // MachineSetDiskOptions configures MachineSetDisk.
@@ -33,7 +33,7 @@ type MachineSetDiskOptions struct {
 	// TargetDisk replaces the Machine's spec.targetDisk wholesale - this
 	// command sets the hint set, it does not merge into whatever was
 	// there before.
-	TargetDisk keziov1alpha2.TargetDiskHints
+	TargetDisk keziov1alpha3.TargetDiskHints
 }
 
 // MachineSetDisk implements `kezioctl machine set-disk`: it replaces the
@@ -42,7 +42,7 @@ type MachineSetDiskOptions struct {
 // time and requires exactly one match before any write; this command does
 // not resolve or validate hints against real hardware itself.
 func MachineSetDisk(ctx context.Context, c client.Client, opts MachineSetDiskOptions) error {
-	machine := &keziov1alpha2.Machine{}
+	machine := &keziov1alpha3.Machine{}
 	key := client.ObjectKey{Namespace: opts.Namespace, Name: opts.Name}
 	if err := c.Get(ctx, key, machine); err != nil {
 		if apierrors.IsNotFound(err) {

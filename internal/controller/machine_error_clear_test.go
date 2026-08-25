@@ -34,7 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/deployer"
 )
 
@@ -120,25 +120,25 @@ var _ = Describe("Machine error detail clearing", func() {
 
 	// newErrorClearMachine creates a Machine whose name and MAC are unique
 	// to suffix, and registers its cleanup.
-	newErrorClearMachine := func(suffix string, mac byte, imageRef *keziov1alpha2.NameRef) types.NamespacedName {
+	newErrorClearMachine := func(suffix string, mac byte, imageRef *keziov1alpha3.NameRef) types.NamespacedName {
 		GinkgoHelper()
 		machineName := fmt.Sprintf("errclear-%s-%d", suffix, GinkgoRandomSeed())
-		resource := &keziov1alpha2.Machine{
+		resource := &keziov1alpha3.Machine{
 			ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
-			Spec: keziov1alpha2.MachineSpec{
-				BMC: keziov1alpha2.MachineBMC{
+			Spec: keziov1alpha3.MachineSpec{
+				BMC: keziov1alpha3.MachineBMC{
 					Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-					CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "bmc-creds"},
 				},
 				BootMACAddress: fmt.Sprintf("aa:bb:cc:e1:%02x:%02x", mac, GinkgoRandomSeed()%256),
-				SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 				ImageRef:       imageRef,
 			},
 		}
 		Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 		name := types.NamespacedName{Name: machineName, Namespace: "default"}
 		DeferCleanup(func() {
-			var machine keziov1alpha2.Machine
+			var machine keziov1alpha3.Machine
 			if err := k8sClient.Get(ctx, name, &machine); err == nil {
 				Expect(k8sClient.Delete(ctx, &machine)).To(Succeed())
 			}
@@ -148,9 +148,9 @@ var _ = Describe("Machine error detail clearing", func() {
 
 	// reconcileUntil drives Reconcile until cond holds, returning the
 	// Machine as it stood when it did.
-	reconcileUntil := func(r *MachineReconciler, name types.NamespacedName, description string, cond func(*keziov1alpha2.Machine) bool) *keziov1alpha2.Machine {
+	reconcileUntil := func(r *MachineReconciler, name types.NamespacedName, description string, cond func(*keziov1alpha3.Machine) bool) *keziov1alpha3.Machine {
 		GinkgoHelper()
-		machine := &keziov1alpha2.Machine{}
+		machine := &keziov1alpha3.Machine{}
 		for range 60 {
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 			Expect(err).NotTo(HaveOccurred())
@@ -163,15 +163,15 @@ var _ = Describe("Machine error detail clearing", func() {
 		return nil
 	}
 
-	expectNoErrorDetail := func(machine *keziov1alpha2.Machine) {
+	expectNoErrorDetail := func(machine *keziov1alpha3.Machine) {
 		GinkgoHelper()
-		Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+		Expect(machine.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusOK))
 		Expect(machine.Status.ErrorType).To(BeEmpty(), "a machine that is no longer in error must not keep the errorType of the failure it left")
 		Expect(machine.Status.ErrorMessage).To(BeEmpty(), "a machine that is no longer in error must not keep the errorMessage of the failure it left")
 	}
 
-	inError := func(m *keziov1alpha2.Machine) bool {
-		return m.Status.OperationalStatus == keziov1alpha2.MachineOperationalStatusError
+	inError := func(m *keziov1alpha3.Machine) bool {
+		return m.Status.OperationalStatus == keziov1alpha3.MachineOperationalStatusError
 	}
 
 	It("clears the error detail when a state transition resets the error", func() {
@@ -181,10 +181,10 @@ var _ = Describe("Machine error detail clearing", func() {
 		var inspectCalls int
 		fakeDeployer := &deployer.FakeDeployer{
 			Client: k8sClient,
-			InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+			InspectFunc: func(context.Context, *keziov1alpha3.Machine, bool) (deployer.Result, error) {
 				inspectCalls++
 				if inspectCalls == 1 {
-					return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeTransient, ErrorMessage: "boom"}, nil
+					return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha3.MachineErrorTypeTransient, ErrorMessage: "boom"}, nil
 				}
 				return deployer.Result{Outcome: deployer.Complete}, nil
 			},
@@ -196,8 +196,8 @@ var _ = Describe("Machine error detail clearing", func() {
 		Expect(machine.Status.ErrorMessage).To(Equal("boom"))
 
 		By("letting the retry succeed into Available")
-		machine = reconcileUntil(reconciler, name, "Available", func(m *keziov1alpha2.Machine) bool {
-			return m.Status.State == keziov1alpha2.MachineStateAvailable
+		machine = reconcileUntil(reconciler, name, "Available", func(m *keziov1alpha3.Machine) bool {
+			return m.Status.State == keziov1alpha3.MachineStateAvailable
 		})
 		expectNoErrorDetail(machine)
 		Expect(machine.Status.ErrorCount).To(Equal(int32(0)))
@@ -207,33 +207,33 @@ var _ = Describe("Machine error detail clearing", func() {
 		// startProvisioningRun, reached through recordCurrentRunDeleted -
 		// the exact shape that made a healthy machine report a deleted
 		// run as its current error.
-		imageRef := keziov1alpha2.NameRef{Name: "test-image"}
+		imageRef := keziov1alpha3.NameRef{Name: "test-image"}
 		name := newErrorClearMachine("runvanished", 0x02, &imageRef)
 
 		fakeDeployer := &deployer.FakeDeployer{
 			Client: k8sClient,
-			ProvisionFunc: func(context.Context, *keziov1alpha2.Machine, *keziov1alpha2.DeployRun, bool) (deployer.Result, error) {
+			ProvisionFunc: func(context.Context, *keziov1alpha3.Machine, *keziov1alpha3.DeployRun, bool) (deployer.Result, error) {
 				return deployer.Result{Outcome: deployer.Continuing}, nil
 			},
 		}
 		reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: fakeDeployer}
 
 		By("holding a first provisioning run in flight")
-		machine := reconcileUntil(reconciler, name, "a run in flight", func(m *keziov1alpha2.Machine) bool {
+		machine := reconcileUntil(reconciler, name, "a run in flight", func(m *keziov1alpha3.Machine) bool {
 			return m.Status.CurrentRunRef != nil
 		})
 		firstRun := machine.Status.CurrentRunRef.Name
 
 		By("deleting that run out from under the machine")
-		run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: firstRun, Namespace: "default"}}
+		run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: firstRun, Namespace: "default"}}
 		Expect(k8sClient.Delete(ctx, run)).To(Succeed())
 
 		machine = reconcileUntil(reconciler, name, "the vanished run recorded as a failure", inError)
-		Expect(machine.Status.ErrorType).To(Equal(keziov1alpha2.MachineErrorTypeRestart))
+		Expect(machine.Status.ErrorType).To(Equal(keziov1alpha3.MachineErrorTypeRestart))
 		Expect(machine.Status.ErrorMessage).To(ContainSubstring(firstRun))
 
 		By("starting the replacement run")
-		machine = reconcileUntil(reconciler, name, "a replacement run", func(m *keziov1alpha2.Machine) bool {
+		machine = reconcileUntil(reconciler, name, "a replacement run", func(m *keziov1alpha3.Machine) bool {
 			return m.Status.CurrentRunRef != nil && m.Status.CurrentRunRef.Name != firstRun
 		})
 		expectNoErrorDetail(machine)
@@ -241,16 +241,16 @@ var _ = Describe("Machine error detail clearing", func() {
 	})
 
 	It("clears the error detail once the provisioning run completes", func() {
-		imageRef := keziov1alpha2.NameRef{Name: "test-image"}
+		imageRef := keziov1alpha3.NameRef{Name: "test-image"}
 		name := newErrorClearMachine("provisioned", 0x03, &imageRef)
 
 		failNextProvision := true
 		passthrough := &deployer.FakeDeployer{Client: k8sClient}
 		fakeDeployer := &deployer.FakeDeployer{Client: k8sClient}
-		fakeDeployer.ProvisionFunc = func(c context.Context, m *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun, restarting bool) (deployer.Result, error) {
+		fakeDeployer.ProvisionFunc = func(c context.Context, m *keziov1alpha3.Machine, run *keziov1alpha3.DeployRun, restarting bool) (deployer.Result, error) {
 			if failNextProvision {
 				failNextProvision = false
-				return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeTransient, ErrorMessage: "boom"}, nil
+				return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha3.MachineErrorTypeTransient, ErrorMessage: "boom"}, nil
 			}
 			return passthrough.Provision(c, m, run, restarting)
 		}
@@ -261,8 +261,8 @@ var _ = Describe("Machine error detail clearing", func() {
 		Expect(machine.Status.ErrorMessage).To(Equal("boom"))
 
 		By("retrying the same run to success")
-		machine = reconcileUntil(reconciler, name, "Provisioned", func(m *keziov1alpha2.Machine) bool {
-			return m.Status.State == keziov1alpha2.MachineStateProvisioned
+		machine = reconcileUntil(reconciler, name, "Provisioned", func(m *keziov1alpha3.Machine) bool {
+			return m.Status.State == keziov1alpha3.MachineStateProvisioned
 		})
 		expectNoErrorDetail(machine)
 		Expect(machine.Status.ErrorCount).To(Equal(int32(0)))
@@ -276,26 +276,26 @@ var _ = Describe("Machine error detail clearing", func() {
 		var deprovisionCalls int
 		fakeDeployer := &deployer.FakeDeployer{
 			Client: k8sClient,
-			DeprovisionFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+			DeprovisionFunc: func(context.Context, *keziov1alpha3.Machine, bool) (deployer.Result, error) {
 				deprovisionCalls++
 				if deprovisionCalls == 1 {
-					return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeTransient, ErrorMessage: "boom"}, nil
+					return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha3.MachineErrorTypeTransient, ErrorMessage: "boom"}, nil
 				}
 				return deployer.Result{Outcome: deployer.Complete}, nil
 			},
 			// Park the walk at PoweringOff so the status written by the
 			// stage advance is still readable.
-			PowerOffFunc: func(context.Context, *keziov1alpha2.Machine) (deployer.Result, error) {
+			PowerOffFunc: func(context.Context, *keziov1alpha3.Machine) (deployer.Result, error) {
 				return deployer.Result{Outcome: deployer.Continuing}, nil
 			},
 		}
 		reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: fakeDeployer}
 
 		By("reconciling until the finalizer is in place, then deleting")
-		reconcileUntil(reconciler, name, "the finalizer", func(m *keziov1alpha2.Machine) bool {
+		reconcileUntil(reconciler, name, "the finalizer", func(m *keziov1alpha3.Machine) bool {
 			return len(m.Finalizers) > 0
 		})
-		var machine keziov1alpha2.Machine
+		var machine keziov1alpha3.Machine
 		Expect(k8sClient.Get(ctx, name, &machine)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, &machine)).To(Succeed())
 
@@ -304,14 +304,14 @@ var _ = Describe("Machine error detail clearing", func() {
 		Expect(recorded.Status.ErrorMessage).To(Equal("boom"))
 
 		By("letting the retry advance the walk to PoweringOff")
-		advanced := reconcileUntil(reconciler, name, "PoweringOff", func(m *keziov1alpha2.Machine) bool {
-			return m.Status.State == keziov1alpha2.MachineStatePoweringOff
+		advanced := reconcileUntil(reconciler, name, "PoweringOff", func(m *keziov1alpha3.Machine) bool {
+			return m.Status.State == keziov1alpha3.MachineStatePoweringOff
 		})
 		expectNoErrorDetail(advanced)
 		Expect(advanced.Status.ErrorCount).To(Equal(int32(0)))
 
 		By("letting the walk finish so the Machine is released")
-		fakeDeployer.PowerOffFunc = func(context.Context, *keziov1alpha2.Machine) (deployer.Result, error) {
+		fakeDeployer.PowerOffFunc = func(context.Context, *keziov1alpha3.Machine) (deployer.Result, error) {
 			return deployer.Result{Outcome: deployer.Complete}, nil
 		}
 		var gone bool
@@ -332,10 +332,10 @@ var _ = Describe("Machine error detail clearing", func() {
 		var inspectCalls int
 		fakeDeployer := &deployer.FakeDeployer{
 			Client: k8sClient,
-			InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+			InspectFunc: func(context.Context, *keziov1alpha3.Machine, bool) (deployer.Result, error) {
 				inspectCalls++
 				if inspectCalls == 1 {
-					return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeTransient, ErrorMessage: "boom"}, nil
+					return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha3.MachineErrorTypeTransient, ErrorMessage: "boom"}, nil
 				}
 				return deployer.Result{Outcome: deployer.Continuing}, nil
 			},
@@ -347,10 +347,10 @@ var _ = Describe("Machine error detail clearing", func() {
 		Expect(machine.Status.ErrorMessage).To(Equal("boom"))
 
 		By("detaching the machine, which freezes the recorded error")
-		machine.Annotations = map[string]string{keziov1alpha2.MachineAnnotationDetached: ""}
+		machine.Annotations = map[string]string{keziov1alpha3.MachineAnnotationDetached: ""}
 		Expect(k8sClient.Update(ctx, machine)).To(Succeed())
-		machine = reconcileUntil(reconciler, name, "detached", func(m *keziov1alpha2.Machine) bool {
-			return m.Status.OperationalStatus == keziov1alpha2.MachineOperationalStatusDetached
+		machine = reconcileUntil(reconciler, name, "detached", func(m *keziov1alpha3.Machine) bool {
+			return m.Status.OperationalStatus == keziov1alpha3.MachineOperationalStatusDetached
 		})
 
 		By("re-attaching it")
@@ -369,10 +369,10 @@ var _ = Describe("Machine error detail clearing", func() {
 		var inspectCalls int
 		fakeDeployer := &deployer.FakeDeployer{
 			Client: k8sClient,
-			InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+			InspectFunc: func(context.Context, *keziov1alpha3.Machine, bool) (deployer.Result, error) {
 				inspectCalls++
 				if inspectCalls == 1 {
-					return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeRestart, ErrorMessage: "boom"}, nil
+					return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha3.MachineErrorTypeRestart, ErrorMessage: "boom"}, nil
 				}
 				return deployer.Result{Outcome: deployer.Continuing}, nil
 			},
@@ -381,11 +381,11 @@ var _ = Describe("Machine error detail clearing", func() {
 
 		By("failing the first Inspect with a Restart-classified error")
 		machine := reconcileUntil(reconciler, name, "a recorded Restart failure", inError)
-		Expect(machine.Status.ErrorType).To(Equal(keziov1alpha2.MachineErrorTypeRestart))
+		Expect(machine.Status.ErrorType).To(Equal(keziov1alpha3.MachineErrorTypeRestart))
 
 		By("letting the restart retry report progress")
-		machine = reconcileUntil(reconciler, name, "the cleared error status", func(m *keziov1alpha2.Machine) bool {
-			return m.Status.OperationalStatus == keziov1alpha2.MachineOperationalStatusOK
+		machine = reconcileUntil(reconciler, name, "the cleared error status", func(m *keziov1alpha3.Machine) bool {
+			return m.Status.OperationalStatus == keziov1alpha3.MachineOperationalStatusOK
 		})
 		expectNoErrorDetail(machine)
 		Expect(machine.Status.ErrorCount).To(Equal(int32(1)),
@@ -401,11 +401,11 @@ var _ = Describe("Machine error detail clearing", func() {
 		var inspectCalls int
 		fakeDeployer := &deployer.FakeDeployer{
 			Client: k8sClient,
-			InspectFunc: func(context.Context, *keziov1alpha2.Machine, bool) (deployer.Result, error) {
+			InspectFunc: func(context.Context, *keziov1alpha3.Machine, bool) (deployer.Result, error) {
 				inspectCalls++
 				switch inspectCalls {
 				case 1:
-					return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeTransient, ErrorMessage: "boom"}, nil
+					return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha3.MachineErrorTypeTransient, ErrorMessage: "boom"}, nil
 				case 2:
 					return deployer.Result{Outcome: deployer.Delayed}, nil
 				default:
@@ -417,13 +417,13 @@ var _ = Describe("Machine error detail clearing", func() {
 
 		By("failing the first Inspect, then delaying the retry")
 		reconcileUntil(reconciler, name, "a recorded Inspect failure", inError)
-		reconcileUntil(reconciler, name, "delayed", func(m *keziov1alpha2.Machine) bool {
-			return m.Status.OperationalStatus == keziov1alpha2.MachineOperationalStatusDelayed
+		reconcileUntil(reconciler, name, "delayed", func(m *keziov1alpha3.Machine) bool {
+			return m.Status.OperationalStatus == keziov1alpha3.MachineOperationalStatusDelayed
 		})
 
 		By("letting the next call report progress")
-		machine := reconcileUntil(reconciler, name, "the cleared delayed status", func(m *keziov1alpha2.Machine) bool {
-			return m.Status.OperationalStatus == keziov1alpha2.MachineOperationalStatusOK
+		machine := reconcileUntil(reconciler, name, "the cleared delayed status", func(m *keziov1alpha3.Machine) bool {
+			return m.Status.OperationalStatus == keziov1alpha3.MachineOperationalStatusOK
 		})
 		expectNoErrorDetail(machine)
 	})

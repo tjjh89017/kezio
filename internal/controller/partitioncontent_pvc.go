@@ -27,7 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/store"
 )
 
@@ -71,7 +71,7 @@ func partitionContentPVCSize(sizeBytes int64) resource.Quantity {
 // spec.sizeBytes never changes (PartitionContentSpec is immutable) and a
 // PVC's request size and access modes are themselves immutable once
 // bound.
-func (r *PartitionContentReconciler) ensureContentPVC(ctx context.Context, pc *keziov1alpha2.PartitionContent) (*corev1.PersistentVolumeClaim, error) {
+func (r *PartitionContentReconciler) ensureContentPVC(ctx context.Context, pc *keziov1alpha3.PartitionContent) (*corev1.PersistentVolumeClaim, error) {
 	name := store.PVCName(pc.Name)
 	key := client.ObjectKey{Namespace: pc.Namespace, Name: name}
 
@@ -96,7 +96,7 @@ func (r *PartitionContentReconciler) ensureContentPVC(ctx context.Context, pc *k
 
 // buildContentPVC constructs the (not yet created) PVC holding pc's
 // content bytes.
-func (r *PartitionContentReconciler) buildContentPVC(pc *keziov1alpha2.PartitionContent, name string) *corev1.PersistentVolumeClaim {
+func (r *PartitionContentReconciler) buildContentPVC(pc *keziov1alpha3.PartitionContent, name string) *corev1.PersistentVolumeClaim {
 	size := partitionContentPVCSize(pc.Spec.SizeBytes)
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{

@@ -21,7 +21,7 @@ import (
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 )
 
@@ -118,10 +118,10 @@ func TestRenderTemplate_ResolvesDeclaredKey(t *testing.T) {
 }
 
 func TestResolveNamespace(t *testing.T) {
-	if got := resolveNamespace(keziov1alpha2.NameRef{Name: "n"}, "default"); got != "default" {
+	if got := resolveNamespace(keziov1alpha3.NameRef{Name: "n"}, "default"); got != "default" {
 		t.Errorf("resolveNamespace with empty ref namespace = %q, want default", got)
 	}
-	if got := resolveNamespace(keziov1alpha2.NameRef{Namespace: "other", Name: "n"}, "default"); got != "other" {
+	if got := resolveNamespace(keziov1alpha3.NameRef{Namespace: "other", Name: "n"}, "default"); got != "other" {
 		t.Errorf("resolveNamespace with set ref namespace = %q, want other", got)
 	}
 }

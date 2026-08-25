@@ -25,7 +25,7 @@ import (
 	"fmt"
 	"strings"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // giB is one gigabyte in bytes, used to compare MinSizeGigabytes and
@@ -59,7 +59,7 @@ var ErrAmbiguous = errors.New("multiple disks match the hints")
 // (a targetDisk hint is required to disambiguate). Otherwise exactly one
 // disk must satisfy the hints; zero matches is ErrNoMatch, 2+ is
 // ErrAmbiguous.
-func Match(disks []keziov1alpha2.MachineHardwareDisk, hints *keziov1alpha2.TargetDiskHints) (*keziov1alpha2.MachineHardwareDisk, error) {
+func Match(disks []keziov1alpha3.MachineHardwareDisk, hints *keziov1alpha3.TargetDiskHints) (*keziov1alpha3.MachineHardwareDisk, error) {
 	if !hasAnyHint(hints) {
 		switch len(disks) {
 		case 0:
@@ -73,7 +73,7 @@ func Match(disks []keziov1alpha2.MachineHardwareDisk, hints *keziov1alpha2.Targe
 		}
 	}
 
-	var matches []keziov1alpha2.MachineHardwareDisk
+	var matches []keziov1alpha3.MachineHardwareDisk
 	for _, d := range disks {
 		if hintsMatch(d, hints) {
 			matches = append(matches, d)
@@ -92,7 +92,7 @@ func Match(disks []keziov1alpha2.MachineHardwareDisk, hints *keziov1alpha2.Targe
 }
 
 // hasAnyHint reports whether at least one field of hints is set.
-func hasAnyHint(h *keziov1alpha2.TargetDiskHints) bool {
+func hasAnyHint(h *keziov1alpha3.TargetDiskHints) bool {
 	if h == nil {
 		return false
 	}
@@ -110,7 +110,7 @@ func hasAnyHint(h *keziov1alpha2.TargetDiskHints) bool {
 }
 
 // hintsMatch reports whether d satisfies every set field of h.
-func hintsMatch(d keziov1alpha2.MachineHardwareDisk, h *keziov1alpha2.TargetDiskHints) bool {
+func hintsMatch(d keziov1alpha3.MachineHardwareDisk, h *keziov1alpha3.TargetDiskHints) bool {
 	if h.DeviceName != "" && d.DeviceName != h.DeviceName {
 		return false
 	}
@@ -149,7 +149,7 @@ func hintsMatch(d keziov1alpha2.MachineHardwareDisk, h *keziov1alpha2.TargetDisk
 
 // describeDisks renders a bounded, human-readable list of disk device
 // names for an ambiguous-match error message.
-func describeDisks(disks []keziov1alpha2.MachineHardwareDisk) string {
+func describeDisks(disks []keziov1alpha3.MachineHardwareDisk) string {
 	names := make([]string, 0, len(disks))
 	for i, d := range disks {
 		if i >= maxListedDisks {
@@ -169,7 +169,7 @@ func describeDisks(disks []keziov1alpha2.MachineHardwareDisk) string {
 // conflict messages: for example "OS image" or "dataImages[0]".
 type Selection struct {
 	Label string
-	Disk  *keziov1alpha2.MachineHardwareDisk
+	Disk  *keziov1alpha3.MachineHardwareDisk
 }
 
 // CheckDistinct reports ErrAmbiguous when two or more selections resolved
@@ -196,7 +196,7 @@ func CheckDistinct(selections []Selection) error {
 
 // diskIdentity returns the stable key CheckDistinct groups selections by:
 // the disk's serial number when reported, otherwise its device name.
-func diskIdentity(d keziov1alpha2.MachineHardwareDisk) string {
+func diskIdentity(d keziov1alpha3.MachineHardwareDisk) string {
 	if d.SerialNumber != "" {
 		return d.SerialNumber
 	}
@@ -204,7 +204,7 @@ func diskIdentity(d keziov1alpha2.MachineHardwareDisk) string {
 }
 
 // describeIdentity renders a disk for a conflict error message.
-func describeIdentity(d keziov1alpha2.MachineHardwareDisk) string {
+func describeIdentity(d keziov1alpha3.MachineHardwareDisk) string {
 	if d.SerialNumber != "" {
 		return fmt.Sprintf("%s (serial %s)", d.DeviceName, d.SerialNumber)
 	}

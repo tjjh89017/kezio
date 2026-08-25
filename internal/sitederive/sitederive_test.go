@@ -27,22 +27,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 func newTestClient(t *testing.T, objs ...client.Object) client.Client {
 	t.Helper()
 	scheme := apimachineryruntime.NewScheme()
-	if err := keziov1alpha2.AddToScheme(scheme); err != nil {
+	if err := keziov1alpha3.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
 	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 }
 
-func newMachine(namespace string, subnetRef keziov1alpha2.NameRef) *keziov1alpha2.Machine {
-	return &keziov1alpha2.Machine{
+func newMachine(namespace string, subnetRef keziov1alpha3.NameRef) *keziov1alpha3.Machine {
+	return &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: namespace},
-		Spec: keziov1alpha2.MachineSpec{
+		Spec: keziov1alpha3.MachineSpec{
 			BootMACAddress: "aa:bb:cc:dd:ee:01",
 			SubnetRef:      subnetRef,
 		},
@@ -51,17 +51,17 @@ func newMachine(namespace string, subnetRef keziov1alpha2.NameRef) *keziov1alpha
 
 // newSubnet always names the Subnet "sub1" and points spec.siteRef at "hq";
 // namespace and seederNetworkRef are the fields callers vary.
-func newSubnet(namespace string, seederNetworkRef *keziov1alpha2.NameRef) *keziov1alpha2.Subnet {
-	return &keziov1alpha2.Subnet{
+func newSubnet(namespace string, seederNetworkRef *keziov1alpha3.NameRef) *keziov1alpha3.Subnet {
+	return &keziov1alpha3.Subnet{
 		ObjectMeta: metav1.ObjectMeta{Name: "sub1", Namespace: namespace},
-		Spec: keziov1alpha2.SubnetSpec{
-			SiteRef:          keziov1alpha2.NameRef{Name: "hq"},
+		Spec: keziov1alpha3.SubnetSpec{
+			SiteRef:          keziov1alpha3.NameRef{Name: "hq"},
 			CIDR:             "192.0.2.0/24",
 			BootdServerIP:    "192.0.2.2",
-			BootdNetworkRef:  &keziov1alpha2.NameRef{Name: "bootd-nad"},
+			BootdNetworkRef:  &keziov1alpha3.NameRef{Name: "bootd-nad"},
 			SeederNetworkRef: seederNetworkRef,
 			NodeSelector:     map[string]string{"kubernetes.io/hostname": "node-1"},
-			DHCP:             &keziov1alpha2.SubnetDHCP{Mode: keziov1alpha2.SubnetDHCPModeProxy},
+			DHCP:             &keziov1alpha3.SubnetDHCP{Mode: keziov1alpha3.SubnetDHCPModeProxy},
 		},
 	}
 }
@@ -69,21 +69,21 @@ func newSubnet(namespace string, seederNetworkRef *keziov1alpha2.NameRef) *kezio
 // newSite always names the Site "hq" - the name every newSubnet's
 // spec.siteRef names - with namespace and seederSubnetRef the fields
 // callers vary.
-func newSite(namespace string, seederSubnetRef *keziov1alpha2.NameRef) *keziov1alpha2.Site {
-	return &keziov1alpha2.Site{
+func newSite(namespace string, seederSubnetRef *keziov1alpha3.NameRef) *keziov1alpha3.Site {
+	return &keziov1alpha3.Site{
 		ObjectMeta: metav1.ObjectMeta{Name: "hq", Namespace: namespace},
-		Spec: keziov1alpha2.SiteSpec{
+		Spec: keziov1alpha3.SiteSpec{
 			SeederSubnetRef: seederSubnetRef,
 		},
 	}
 }
 
 func TestResolveHappyPath(t *testing.T) {
-	subnetRef := keziov1alpha2.NameRef{Name: "sub1"}
-	seederRef := &keziov1alpha2.NameRef{Name: "seeder-nad"}
+	subnetRef := keziov1alpha3.NameRef{Name: "sub1"}
+	seederRef := &keziov1alpha3.NameRef{Name: "seeder-nad"}
 	machine := newMachine("ns1", subnetRef)
 	subnet := newSubnet("ns1", seederRef)
-	site := newSite("ns1", &keziov1alpha2.NameRef{Name: "sub1"})
+	site := newSite("ns1", &keziov1alpha3.NameRef{Name: "sub1"})
 
 	c := newTestClient(t, machine, subnet, site)
 
@@ -115,30 +115,30 @@ func TestResolveHappyPath(t *testing.T) {
 // designates a different Subnet to host the seeder. Resolve must return
 // the Site's seeding Subnet's facts, not the machine's own Subnet's.
 func TestResolveFollowsSiteToADifferentSeedingSubnet(t *testing.T) {
-	machineSubnetRef := keziov1alpha2.NameRef{Name: "machine-subnet"}
+	machineSubnetRef := keziov1alpha3.NameRef{Name: "machine-subnet"}
 	machine := newMachine("ns1", machineSubnetRef)
 
-	machineSubnet := &keziov1alpha2.Subnet{
+	machineSubnet := &keziov1alpha3.Subnet{
 		ObjectMeta: metav1.ObjectMeta{Name: "machine-subnet", Namespace: "ns1"},
-		Spec: keziov1alpha2.SubnetSpec{
-			SiteRef:         keziov1alpha2.NameRef{Name: "hq"},
+		Spec: keziov1alpha3.SubnetSpec{
+			SiteRef:         keziov1alpha3.NameRef{Name: "hq"},
 			CIDR:            "192.0.2.0/24",
 			BootdServerIP:   "192.0.2.2",
-			BootdNetworkRef: &keziov1alpha2.NameRef{Name: "bootd-nad"},
-			DHCP:            &keziov1alpha2.SubnetDHCP{Mode: keziov1alpha2.SubnetDHCPModeProxy},
+			BootdNetworkRef: &keziov1alpha3.NameRef{Name: "bootd-nad"},
+			DHCP:            &keziov1alpha3.SubnetDHCP{Mode: keziov1alpha3.SubnetDHCPModeProxy},
 		},
 	}
-	seederRef := &keziov1alpha2.NameRef{Name: "seeder-nad"}
-	seedingSubnet := &keziov1alpha2.Subnet{
+	seederRef := &keziov1alpha3.NameRef{Name: "seeder-nad"}
+	seedingSubnet := &keziov1alpha3.Subnet{
 		ObjectMeta: metav1.ObjectMeta{Name: "seeding-subnet", Namespace: "ns1"},
-		Spec: keziov1alpha2.SubnetSpec{
-			SiteRef:          keziov1alpha2.NameRef{Name: "hq"},
+		Spec: keziov1alpha3.SubnetSpec{
+			SiteRef:          keziov1alpha3.NameRef{Name: "hq"},
 			CIDR:             "198.51.100.0/24",
 			SeederNetworkRef: seederRef,
 			NodeSelector:     map[string]string{"kubernetes.io/hostname": "node-2"},
 		},
 	}
-	site := newSite("ns1", &keziov1alpha2.NameRef{Name: "seeding-subnet"})
+	site := newSite("ns1", &keziov1alpha3.NameRef{Name: "seeding-subnet"})
 
 	c := newTestClient(t, machine, machineSubnet, seedingSubnet, site)
 
@@ -163,7 +163,7 @@ func TestResolveFollowsSiteToADifferentSeedingSubnet(t *testing.T) {
 // A dangling Subnet.spec.siteRef is a user-facing misconfiguration,
 // classified so a caller can surface it rather than retry forever.
 func TestResolveDanglingSiteRefIsClassified(t *testing.T) {
-	subnetRef := keziov1alpha2.NameRef{Name: "sub1"}
+	subnetRef := keziov1alpha3.NameRef{Name: "sub1"}
 	machine := newMachine("ns1", subnetRef)
 	subnet := newSubnet("ns1", nil)
 	c := newTestClient(t, machine, subnet)
@@ -180,10 +180,10 @@ func TestResolveDanglingSiteRefIsClassified(t *testing.T) {
 // A Site whose seederSubnetRef names a Subnet that does not exist is a
 // user-facing misconfiguration, classified rather than retried.
 func TestResolveDanglingSeederSubnetRefIsClassified(t *testing.T) {
-	subnetRef := keziov1alpha2.NameRef{Name: "sub1"}
+	subnetRef := keziov1alpha3.NameRef{Name: "sub1"}
 	machine := newMachine("ns1", subnetRef)
 	subnet := newSubnet("ns1", nil)
-	site := newSite("ns1", &keziov1alpha2.NameRef{Name: "ghost-subnet"})
+	site := newSite("ns1", &keziov1alpha3.NameRef{Name: "ghost-subnet"})
 	c := newTestClient(t, machine, subnet, site)
 
 	got, err := Resolve(context.Background(), c, machine)
@@ -200,7 +200,7 @@ func TestResolveDanglingSeederSubnetRefIsClassified(t *testing.T) {
 // (HasSeeder false) rather than looking like an ordinary successful
 // resolution.
 func TestResolveSiteWithNoSeederSubnetRefHasNoSeeder(t *testing.T) {
-	subnetRef := keziov1alpha2.NameRef{Name: "sub1"}
+	subnetRef := keziov1alpha3.NameRef{Name: "sub1"}
 	machine := newMachine("ns1", subnetRef)
 	subnet := newSubnet("ns1", nil)
 	site := newSite("ns1", nil)
@@ -224,15 +224,15 @@ func TestResolveSiteWithNoSeederSubnetRefHasNoSeeder(t *testing.T) {
 // Subnet names aren't cluster-unique; a bare Subnet.Name would collapse two
 // unrelated segments' seeder demand into one Deployment.
 func TestResolveNamespaceQualifiesIdentity(t *testing.T) {
-	subnetRefA := keziov1alpha2.NameRef{Name: "sub1"}
+	subnetRefA := keziov1alpha3.NameRef{Name: "sub1"}
 	machineA := newMachine("region-a", subnetRefA)
 	subnetA := newSubnet("region-a", nil)
-	siteA := newSite("region-a", &keziov1alpha2.NameRef{Name: "sub1"})
+	siteA := newSite("region-a", &keziov1alpha3.NameRef{Name: "sub1"})
 
-	subnetRefB := keziov1alpha2.NameRef{Name: "sub1"}
+	subnetRefB := keziov1alpha3.NameRef{Name: "sub1"}
 	machineB := newMachine("region-b", subnetRefB)
 	subnetB := newSubnet("region-b", nil)
-	siteB := newSite("region-b", &keziov1alpha2.NameRef{Name: "sub1"})
+	siteB := newSite("region-b", &keziov1alpha3.NameRef{Name: "sub1"})
 
 	c := newTestClient(t, machineA, subnetA, siteA, machineB, subnetB, siteB)
 
@@ -257,7 +257,7 @@ func TestResolveNamespaceQualifiesIdentity(t *testing.T) {
 }
 
 func TestResolveMissingSubnet(t *testing.T) {
-	machine := newMachine("ns1", keziov1alpha2.NameRef{Name: "ghost"})
+	machine := newMachine("ns1", keziov1alpha3.NameRef{Name: "ghost"})
 	c := newTestClient(t, machine)
 
 	got, err := Resolve(context.Background(), c, machine)
@@ -271,10 +271,10 @@ func TestResolveMissingSubnet(t *testing.T) {
 
 // A bare subnetRef defaults against the Machine holding it.
 func TestResolveCrossNamespace(t *testing.T) {
-	subnetRef := keziov1alpha2.NameRef{Namespace: "y", Name: "sub1"}
+	subnetRef := keziov1alpha3.NameRef{Namespace: "y", Name: "sub1"}
 	machine := newMachine("x", subnetRef)
 	subnet := newSubnet("y", nil)
-	site := newSite("y", &keziov1alpha2.NameRef{Name: "sub1"})
+	site := newSite("y", &keziov1alpha3.NameRef{Name: "sub1"})
 
 	c := newTestClient(t, machine, subnet, site)
 
@@ -292,10 +292,10 @@ func TestResolveCrossNamespace(t *testing.T) {
 
 // A Subnet with no SeederNetworkRef is a supported topology, not an error.
 func TestResolveSubnetWithNoSeederNetworkRef(t *testing.T) {
-	subnetRef := keziov1alpha2.NameRef{Name: "sub1"}
+	subnetRef := keziov1alpha3.NameRef{Name: "sub1"}
 	machine := newMachine("ns1", subnetRef)
 	subnet := newSubnet("ns1", nil)
-	site := newSite("ns1", &keziov1alpha2.NameRef{Name: "sub1"})
+	site := newSite("ns1", &keziov1alpha3.NameRef{Name: "sub1"})
 
 	c := newTestClient(t, machine, subnet, site)
 
@@ -314,13 +314,13 @@ func TestResolveSubnetWithNoSeederNetworkRef(t *testing.T) {
 // A non-NotFound Get failure must propagate as-is, not get misclassified
 // as ErrSubnetNotFound.
 func TestResolveSubnetGetTransientErrorPropagates(t *testing.T) {
-	subnetRef := keziov1alpha2.NameRef{Name: "sub1"}
+	subnetRef := keziov1alpha3.NameRef{Name: "sub1"}
 	machine := newMachine("ns1", subnetRef)
 	subnet := newSubnet("ns1", nil)
 
 	wantErr := errors.New("injected transient failure")
 	scheme := apimachineryruntime.NewScheme()
-	if err := keziov1alpha2.AddToScheme(scheme); err != nil {
+	if err := keziov1alpha3.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
 	c := fake.NewClientBuilder().
@@ -328,7 +328,7 @@ func TestResolveSubnetGetTransientErrorPropagates(t *testing.T) {
 		WithObjects(machine, subnet).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(ctx context.Context, cli client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-				if _, ok := obj.(*keziov1alpha2.Subnet); ok {
+				if _, ok := obj.(*keziov1alpha3.Subnet); ok {
 					return wantErr
 				}
 				return cli.Get(ctx, key, obj, opts...)

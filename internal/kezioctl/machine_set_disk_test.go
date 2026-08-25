@@ -25,18 +25,18 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 func TestMachineSetDisk_SetsTargetDisk(t *testing.T) {
-	machine := &keziov1alpha2.Machine{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Namespace: "default"}}
+	machine := &keziov1alpha3.Machine{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Namespace: "default"}}
 	c := fake.NewClientBuilder().WithScheme(Scheme).WithObjects(machine).Build()
 
 	minSize := int64(100)
 	err := MachineSetDisk(context.Background(), c, MachineSetDiskOptions{
 		Name:      "node-1",
 		Namespace: "default",
-		TargetDisk: keziov1alpha2.TargetDiskHints{
+		TargetDisk: keziov1alpha3.TargetDiskHints{
 			SerialNumber:     "SN123",
 			MinSizeGigabytes: &minSize,
 		},
@@ -45,7 +45,7 @@ func TestMachineSetDisk_SetsTargetDisk(t *testing.T) {
 		t.Fatalf("MachineSetDisk() error = %v", err)
 	}
 
-	stored := &keziov1alpha2.Machine{}
+	stored := &keziov1alpha3.Machine{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "node-1"}, stored); err != nil {
 		t.Fatalf("get Machine: %v", err)
 	}
@@ -61,10 +61,10 @@ func TestMachineSetDisk_SetsTargetDisk(t *testing.T) {
 }
 
 func TestMachineSetDisk_ReplacesExistingHints(t *testing.T) {
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "node-1", Namespace: "default"},
-		Spec: keziov1alpha2.MachineSpec{
-			TargetDisk: &keziov1alpha2.TargetDiskHints{SerialNumber: "OLD"},
+		Spec: keziov1alpha3.MachineSpec{
+			TargetDisk: &keziov1alpha3.TargetDiskHints{SerialNumber: "OLD"},
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(Scheme).WithObjects(machine).Build()
@@ -72,13 +72,13 @@ func TestMachineSetDisk_ReplacesExistingHints(t *testing.T) {
 	err := MachineSetDisk(context.Background(), c, MachineSetDiskOptions{
 		Name:       "node-1",
 		Namespace:  "default",
-		TargetDisk: keziov1alpha2.TargetDiskHints{WWN: "NEW-WWN"},
+		TargetDisk: keziov1alpha3.TargetDiskHints{WWN: "NEW-WWN"},
 	})
 	if err != nil {
 		t.Fatalf("MachineSetDisk() error = %v", err)
 	}
 
-	stored := &keziov1alpha2.Machine{}
+	stored := &keziov1alpha3.Machine{}
 	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "node-1"}, stored); err != nil {
 		t.Fatalf("get Machine: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestMachineSetDisk_MachineNotFound(t *testing.T) {
 	err := MachineSetDisk(context.Background(), c, MachineSetDiskOptions{
 		Name:       "missing",
 		Namespace:  "default",
-		TargetDisk: keziov1alpha2.TargetDiskHints{WWN: "x"},
+		TargetDisk: keziov1alpha3.TargetDiskHints{WWN: "x"},
 	})
 	if err == nil {
 		t.Fatal("expected an error for a missing Machine")

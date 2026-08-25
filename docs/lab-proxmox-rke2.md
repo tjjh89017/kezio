@@ -843,7 +843,7 @@ the Site again with the reference complete.
 
 ```sh
 cat <<'EOF' | kubectl apply -f -
-apiVersion: kezio.kojuro.date/v1alpha2
+apiVersion: kezio.kojuro.date/v1alpha3
 kind: Site
 metadata:
   name: lab
@@ -856,7 +856,7 @@ EOF
 
 ```sh
 cat <<'EOF' | kubectl apply -f -
-apiVersion: kezio.kojuro.date/v1alpha2
+apiVersion: kezio.kojuro.date/v1alpha3
 kind: Subnet
 metadata:
   name: lab-prov
@@ -883,7 +883,7 @@ tracker address:
 
 ```sh
 cat <<'EOF' | kubectl apply -f -
-apiVersion: kezio.kojuro.date/v1alpha2
+apiVersion: kezio.kojuro.date/v1alpha3
 kind: Site
 metadata:
   name: lab
@@ -1110,7 +1110,7 @@ Then create the Machine:
 
 ```sh
 cat <<'EOF' | kubectl apply -f -
-apiVersion: kezio.kojuro.date/v1alpha2
+apiVersion: kezio.kojuro.date/v1alpha3
 kind: Machine
 metadata:
   name: lab-target-1

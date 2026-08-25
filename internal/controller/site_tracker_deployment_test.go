@@ -22,15 +22,15 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // trackerTestSeedingSubnet returns a seeding Subnet carrying a
 // SeederNetworkRef, so buildTrackerDeployment produces the pinned-address
 // annotation rather than withholding it.
-func trackerTestSeedingSubnet(namespace string) *keziov1alpha2.Subnet {
-	return testSubnet(namespace, func(s *keziov1alpha2.Subnet) {
-		s.Spec.SeederNetworkRef = &keziov1alpha2.NameRef{Name: "seeder-nad"}
+func trackerTestSeedingSubnet(namespace string) *keziov1alpha3.Subnet {
+	return testSubnet(namespace, func(s *keziov1alpha3.Subnet) {
+		s.Spec.SeederNetworkRef = &keziov1alpha3.NameRef{Name: "seeder-nad"}
 	})
 }
 
@@ -39,9 +39,9 @@ func trackerTestSeedingSubnet(namespace string) *keziov1alpha2.Subnet {
 // outgoing one is deleted, and both would request the same pinned
 // address, which the ipam plugin can only hand to one pod at a time.
 func TestBuildTrackerDeploymentStrategyIsRecreate(t *testing.T) {
-	site := &keziov1alpha2.Site{
+	site := &keziov1alpha3.Site{
 		ObjectMeta: metav1.ObjectMeta{Name: "hq", Namespace: "site-hq"},
-		Spec:       keziov1alpha2.SiteSpec{Tracker: keziov1alpha2.SiteTracker{IP: "192.0.2.60"}},
+		Spec:       keziov1alpha3.SiteSpec{Tracker: keziov1alpha3.SiteTracker{IP: "192.0.2.60"}},
 	}
 	subnet := trackerTestSeedingSubnet("site-hq")
 

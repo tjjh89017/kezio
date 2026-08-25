@@ -19,7 +19,7 @@ package planbuild
 import (
 	"testing"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 func TestDeriveBuiltinDefaults(t *testing.T) {
@@ -33,11 +33,11 @@ func TestDeriveBuiltinDefaults(t *testing.T) {
 	t.Run("derives disk, esp partition, and last partition", func(t *testing.T) {
 		osImage := &resolvedImage{
 			targetDisk: "/dev/sda",
-			image: &keziov1alpha2.Image{Spec: keziov1alpha2.ImageSpec{Layout: keziov1alpha2.ImageDiskLayout{
-				Slots: []keziov1alpha2.ImageSlot{
-					{Number: 1, Role: keziov1alpha2.PartitionRoleESP},
-					{Number: 2, Role: keziov1alpha2.PartitionRoleData},
-					{Number: 3, Role: keziov1alpha2.PartitionRoleSwap},
+			image: &keziov1alpha3.Image{Spec: keziov1alpha3.ImageSpec{Layout: keziov1alpha3.ImageDiskLayout{
+				Slots: []keziov1alpha3.ImageSlot{
+					{Number: 1, Role: keziov1alpha3.PartitionRoleESP},
+					{Number: 2, Role: keziov1alpha3.PartitionRoleData},
+					{Number: 3, Role: keziov1alpha3.PartitionRoleSwap},
 				},
 			}}},
 		}
@@ -51,8 +51,8 @@ func TestDeriveBuiltinDefaults(t *testing.T) {
 	t.Run("no ESP slot leaves espPartition zero", func(t *testing.T) {
 		osImage := &resolvedImage{
 			targetDisk: "/dev/sda",
-			image: &keziov1alpha2.Image{Spec: keziov1alpha2.ImageSpec{Layout: keziov1alpha2.ImageDiskLayout{
-				Slots: []keziov1alpha2.ImageSlot{{Number: 1, Role: keziov1alpha2.PartitionRoleData}},
+			image: &keziov1alpha3.Image{Spec: keziov1alpha3.ImageSpec{Layout: keziov1alpha3.ImageDiskLayout{
+				Slots: []keziov1alpha3.ImageSlot{{Number: 1, Role: keziov1alpha3.PartitionRoleData}},
 			}}},
 		}
 		got := deriveBuiltinDefaults(osImage)
@@ -67,7 +67,7 @@ func TestResolveBuiltinParams(t *testing.T) {
 	data := map[string]any{"machineName": "m1"}
 
 	t.Run("efibootmgr derives disk and part from ESP", func(t *testing.T) {
-		got, err := resolveBuiltinParams(keziov1alpha2.BuiltinStepEfibootmgr, nil, defaultsWithESP, data)
+		got, err := resolveBuiltinParams(keziov1alpha3.BuiltinStepEfibootmgr, nil, defaultsWithESP, data)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -78,7 +78,7 @@ func TestResolveBuiltinParams(t *testing.T) {
 	})
 
 	t.Run("explicit user param overrides derived default", func(t *testing.T) {
-		got, err := resolveBuiltinParams(keziov1alpha2.BuiltinStepEfibootmgr, map[string]string{"part": "2"}, defaultsWithESP, data)
+		got, err := resolveBuiltinParams(keziov1alpha3.BuiltinStepEfibootmgr, map[string]string{"part": "2"}, defaultsWithESP, data)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -91,7 +91,7 @@ func TestResolveBuiltinParams(t *testing.T) {
 	})
 
 	t.Run("user param value is templated against data", func(t *testing.T) {
-		got, err := resolveBuiltinParams(keziov1alpha2.BuiltinStepEfibootmgr, map[string]string{"disk": "/dev/{{ .machineName }}"}, defaultsWithESP, data)
+		got, err := resolveBuiltinParams(keziov1alpha3.BuiltinStepEfibootmgr, map[string]string{"disk": "/dev/{{ .machineName }}"}, defaultsWithESP, data)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -101,7 +101,7 @@ func TestResolveBuiltinParams(t *testing.T) {
 	})
 
 	t.Run("missing ESP with no override is a ValidationError", func(t *testing.T) {
-		_, err := resolveBuiltinParams(keziov1alpha2.BuiltinStepEfibootmgr, nil, builtinDefaults{disk: "/dev/sda"}, data)
+		_, err := resolveBuiltinParams(keziov1alpha3.BuiltinStepEfibootmgr, nil, builtinDefaults{disk: "/dev/sda"}, data)
 		var valErr *ValidationError
 		if err == nil {
 			t.Fatal("expected an error, got nil")
@@ -112,7 +112,7 @@ func TestResolveBuiltinParams(t *testing.T) {
 	})
 
 	t.Run("missing ESP but explicit part override succeeds", func(t *testing.T) {
-		got, err := resolveBuiltinParams(keziov1alpha2.BuiltinStepInstallRemovableFallback, map[string]string{"part": "5"}, builtinDefaults{disk: "/dev/sda"}, data)
+		got, err := resolveBuiltinParams(keziov1alpha3.BuiltinStepInstallRemovableFallback, map[string]string{"part": "5"}, builtinDefaults{disk: "/dev/sda"}, data)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -122,7 +122,7 @@ func TestResolveBuiltinParams(t *testing.T) {
 	})
 
 	t.Run("growLastPartition derives disk and last partition number", func(t *testing.T) {
-		got, err := resolveBuiltinParams(keziov1alpha2.BuiltinStepGrowLastPartition, nil, defaultsWithESP, data)
+		got, err := resolveBuiltinParams(keziov1alpha3.BuiltinStepGrowLastPartition, nil, defaultsWithESP, data)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -132,7 +132,7 @@ func TestResolveBuiltinParams(t *testing.T) {
 	})
 
 	t.Run("mkswap has no params", func(t *testing.T) {
-		got, err := resolveBuiltinParams(keziov1alpha2.BuiltinStepMkswap, nil, defaultsWithESP, data)
+		got, err := resolveBuiltinParams(keziov1alpha3.BuiltinStepMkswap, nil, defaultsWithESP, data)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -142,11 +142,11 @@ func TestResolveBuiltinParams(t *testing.T) {
 	})
 
 	t.Run("bad template in user param is a ValidationError", func(t *testing.T) {
-		_, err := resolveBuiltinParams(keziov1alpha2.BuiltinStepMkswap, nil, defaultsWithESP, data)
+		_, err := resolveBuiltinParams(keziov1alpha3.BuiltinStepMkswap, nil, defaultsWithESP, data)
 		if err != nil {
 			t.Fatalf("unexpected error for mkswap with no params: %v", err)
 		}
-		_, err = resolveBuiltinParams(keziov1alpha2.BuiltinStepGrowLastPartition, map[string]string{"disk": "{{ .undeclared }}"}, defaultsWithESP, data)
+		_, err = resolveBuiltinParams(keziov1alpha3.BuiltinStepGrowLastPartition, map[string]string{"disk": "{{ .undeclared }}"}, defaultsWithESP, data)
 		var valErr *ValidationError
 		if !isValidationError(err, &valErr) {
 			t.Fatalf("err = %v (%T), want *ValidationError", err, err)

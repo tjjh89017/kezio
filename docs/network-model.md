@@ -1,8 +1,8 @@
 # The Site/Subnet network model
 
 kezio models an operator's network as two objects: `Site`
-(`api/v1alpha2/site_types.go`) and `Subnet`
-(`api/v1alpha2/subnet_types.go`). Read this document before
+(`api/v1alpha3/site_types.go`) and `Subnet`
+(`api/v1alpha3/subnet_types.go`). Read this document before
 `docs/physical-lab-deployment.md`: every prerequisite in that guide is a
 consequence of the model here.
 
@@ -12,7 +12,7 @@ Every `Subnet` inside one `Site` is mutually routable. Anything a VRF,
 firewall, or other barrier separates is, by definition, a different
 `Site`. The user declares this by setting `Subnet.spec.siteRef`; kezio
 never probes it (`SiteSpec`'s own doc comment,
-`api/v1alpha2/site_types.go`).
+`api/v1alpha3/site_types.go`).
 
 **What a Site guarantees:**
 
@@ -55,7 +55,7 @@ A `Subnet` denotes one broadcast domain. Its **boot half**
 (`bootdServerIP`, `bootdNetworkRef`, `dhcp`) is optional as a group: set
 all three together and the Subnet gets a bootd Deployment, or leave all
 three unset and the Subnet carries no machines
-(`SubnetSpec`'s doc comment, `api/v1alpha2/subnet_types.go`). Separately,
+(`SubnetSpec`'s doc comment, `api/v1alpha3/subnet_types.go`). Separately,
 `seederNetworkRef` names the network attachment seeder and tracker pods
 use when this Subnet is a Site's designated seeding Subnet.
 
@@ -209,7 +209,7 @@ seeding `Subnet`, backing a Site-owned tracker Deployment
 `SiteReconciler` creates and keeps current) or `externalURL` (a tracker
 the operator already runs; kezio creates nothing and checks nothing
 about it) - the two are mutually exclusive
-(`SiteTracker`'s `XValidation` rule, `api/v1alpha2/site_types.go`). The
+(`SiteTracker`'s `XValidation` rule, `api/v1alpha3/site_types.go`). The
 `ip` choice constrains the seeding attachment's IPAM: see "A
 Site-managed tracker needs a pool on the seeding attachment" above.
 

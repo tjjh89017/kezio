@@ -33,41 +33,41 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 func newFakeClient(t *testing.T) client.Client {
 	t.Helper()
 	scheme := apimachineryruntime.NewScheme()
-	if err := keziov1alpha2.AddToScheme(scheme); err != nil {
+	if err := keziov1alpha3.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&keziov1alpha2.DeployRun{}).
+		WithStatusSubresource(&keziov1alpha3.DeployRun{}).
 		Build()
 }
 
-func newTestMachine() *keziov1alpha2.Machine {
-	return &keziov1alpha2.Machine{
+func newTestMachine() *keziov1alpha3.Machine {
+	return &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: "default", UID: types.UID("uid-m1")},
-		Spec: keziov1alpha2.MachineSpec{
-			BMC: keziov1alpha2.MachineBMC{
+		Spec: keziov1alpha3.MachineSpec{
+			BMC: keziov1alpha3.MachineBMC{
 				Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
-				CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "m1-bmc"},
+				CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "m1-bmc"},
 			},
 			BootMACAddress: "aa:bb:cc:dd:ee:ff",
-			SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+			SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 		},
 	}
 }
 
-func newTestDeployRun(t *testing.T, c client.Client, machine *keziov1alpha2.Machine) *keziov1alpha2.DeployRun {
+func newTestDeployRun(t *testing.T, c client.Client, machine *keziov1alpha3.Machine) *keziov1alpha3.DeployRun {
 	t.Helper()
-	run := &keziov1alpha2.DeployRun{
+	run := &keziov1alpha3.DeployRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"},
-		Spec: keziov1alpha2.DeployRunSpec{
-			MachineRef: keziov1alpha2.NameRef{Name: machine.Name},
+		Spec: keziov1alpha3.DeployRunSpec{
+			MachineRef: keziov1alpha3.NameRef{Name: machine.Name},
 		},
 	}
 	if err := c.Create(context.Background(), run); err != nil {
@@ -89,7 +89,7 @@ func TestFakeDeployerInspectWritesSyntheticMachineHardware(t *testing.T) {
 		t.Fatalf("Inspect() outcome = %v, want Complete", result.Outcome)
 	}
 
-	var hw keziov1alpha2.MachineHardware
+	var hw keziov1alpha3.MachineHardware
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "m1"}, &hw); err != nil {
 		t.Fatalf("Get(MachineHardware) error = %v", err)
 	}
@@ -116,7 +116,7 @@ func TestFakeDeployerInspectDefaultsToOneDisk(t *testing.T) {
 		t.Fatalf("Inspect() error = %v", err)
 	}
 
-	var hw keziov1alpha2.MachineHardware
+	var hw keziov1alpha3.MachineHardware
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "m1"}, &hw); err != nil {
 		t.Fatalf("Get(MachineHardware) error = %v", err)
 	}
@@ -141,7 +141,7 @@ func TestFakeDeployerInspectFakeDisksAnnotationFabricatesTwoDistinctDisks(t *tes
 		t.Fatalf("Inspect() error = %v", err)
 	}
 
-	var hw keziov1alpha2.MachineHardware
+	var hw keziov1alpha3.MachineHardware
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "m1"}, &hw); err != nil {
 		t.Fatalf("Get(MachineHardware) error = %v", err)
 	}
@@ -180,7 +180,7 @@ func TestFakeDeployerInspectFakeDisksAnnotationIgnoresUnrecognizedValue(t *testi
 		t.Fatalf("Inspect() error = %v", err)
 	}
 
-	var hw keziov1alpha2.MachineHardware
+	var hw keziov1alpha3.MachineHardware
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "m1"}, &hw); err != nil {
 		t.Fatalf("Get(MachineHardware) error = %v", err)
 	}
@@ -213,12 +213,12 @@ func TestFakeDeployerProvisionWalksPhasesToSucceeded(t *testing.T) {
 	f := &FakeDeployer{Client: c}
 
 	wantPhases := []string{
-		keziov1alpha2.DeployRunPhasePending,
-		keziov1alpha2.DeployRunPhasePartitioning,
-		keziov1alpha2.DeployRunPhaseWritingContent,
-		keziov1alpha2.DeployRunPhaseRunningPostHook,
-		keziov1alpha2.DeployRunPhaseFinalizing,
-		keziov1alpha2.DeployRunPhaseSucceeded,
+		keziov1alpha3.DeployRunPhasePending,
+		keziov1alpha3.DeployRunPhasePartitioning,
+		keziov1alpha3.DeployRunPhaseWritingContent,
+		keziov1alpha3.DeployRunPhaseRunningPostHook,
+		keziov1alpha3.DeployRunPhaseFinalizing,
+		keziov1alpha3.DeployRunPhaseSucceeded,
 	}
 
 	for i, wantPhase := range wantPhases {
@@ -257,7 +257,7 @@ func TestFakeDeployerProvisionWalksPhasesToSucceeded(t *testing.T) {
 
 	found := false
 	for _, cond := range run.Status.Conditions {
-		if cond.Type == keziov1alpha2.DeployRunConditionSucceeded {
+		if cond.Type == keziov1alpha3.DeployRunConditionSucceeded {
 			found = true
 			if cond.Status != metav1.ConditionTrue {
 				t.Errorf("Succeeded condition status = %q, want %q", cond.Status, metav1.ConditionTrue)
@@ -290,7 +290,7 @@ func TestFakeDeployerInspectFuncOverride(t *testing.T) {
 	machine := newTestMachine()
 	wantErr := errors.New("simulated transient failure")
 	f := &FakeDeployer{
-		InspectFunc: func(_ context.Context, m *keziov1alpha2.Machine, restartOnFailure bool) (Result, error) {
+		InspectFunc: func(_ context.Context, m *keziov1alpha3.Machine, restartOnFailure bool) (Result, error) {
 			if m.Name != machine.Name {
 				t.Errorf("InspectFunc received machine %q, want %q", m.Name, machine.Name)
 			}
@@ -309,7 +309,7 @@ func TestFakeDeployerInspectFuncOverride(t *testing.T) {
 
 func TestFakeDeployerProvisionFuncOverrideCanScriptEveryOutcome(t *testing.T) {
 	machine := newTestMachine()
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
 
 	cases := []struct {
 		name   string
@@ -319,13 +319,13 @@ func TestFakeDeployerProvisionFuncOverrideCanScriptEveryOutcome(t *testing.T) {
 		{"complete", Result{Outcome: Complete}, nil},
 		{"continuing", Result{Outcome: Continuing}, nil},
 		{"busy", Result{Outcome: Busy, RequeueAfter: 5 * time.Second}, nil},
-		{"failed", Result{Outcome: Failed, ErrorType: keziov1alpha2.MachineErrorTypeRestart, ErrorMessage: "boom"}, nil},
+		{"failed", Result{Outcome: Failed, ErrorType: keziov1alpha3.MachineErrorTypeRestart, ErrorMessage: "boom"}, nil},
 		{"transient", Result{}, errors.New("simulated transient failure")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &FakeDeployer{
-				ProvisionFunc: func(_ context.Context, _ *keziov1alpha2.Machine, _ *keziov1alpha2.DeployRun, restartOnFailure bool) (Result, error) {
+				ProvisionFunc: func(_ context.Context, _ *keziov1alpha3.Machine, _ *keziov1alpha3.DeployRun, restartOnFailure bool) (Result, error) {
 					if !restartOnFailure {
 						t.Error("ProvisionFunc received restartOnFailure = false, want true")
 					}
@@ -373,7 +373,7 @@ func TestFakeDeployerDeprovisionFuncOverride(t *testing.T) {
 	machine := newTestMachine()
 	wantErr := errors.New("simulated transient failure")
 	f := &FakeDeployer{
-		DeprovisionFunc: func(_ context.Context, m *keziov1alpha2.Machine, restartOnFailure bool) (Result, error) {
+		DeprovisionFunc: func(_ context.Context, m *keziov1alpha3.Machine, restartOnFailure bool) (Result, error) {
 			if m.Name != machine.Name {
 				t.Errorf("DeprovisionFunc received machine %q, want %q", m.Name, machine.Name)
 			}
@@ -394,7 +394,7 @@ func TestFakeDeployerPowerOffFuncOverride(t *testing.T) {
 	machine := newTestMachine()
 	wantErr := errors.New("simulated transient failure")
 	f := &FakeDeployer{
-		PowerOffFunc: func(_ context.Context, m *keziov1alpha2.Machine) (Result, error) {
+		PowerOffFunc: func(_ context.Context, m *keziov1alpha3.Machine) (Result, error) {
 			if m.Name != machine.Name {
 				t.Errorf("PowerOffFunc received machine %q, want %q", m.Name, machine.Name)
 			}
@@ -426,7 +426,7 @@ func TestFakeDeployerRebootFuncOverride(t *testing.T) {
 	wantErr := errors.New("simulated transient failure")
 	var gotHard bool
 	f := &FakeDeployer{
-		RebootFunc: func(_ context.Context, m *keziov1alpha2.Machine, hard bool) (Result, error) {
+		RebootFunc: func(_ context.Context, m *keziov1alpha3.Machine, hard bool) (Result, error) {
 			if m.Name != machine.Name {
 				t.Errorf("RebootFunc received machine %q, want %q", m.Name, machine.Name)
 			}
@@ -501,8 +501,8 @@ func TestFakeDeployerProvisionHonorsFakeFailAnnotation(t *testing.T) {
 	if result.Outcome != Continuing {
 		t.Fatalf("Provision() at errorCount=2 outcome = %v, want Continuing (default walk resumed)", result.Outcome)
 	}
-	if run.Status.Phase != keziov1alpha2.DeployRunPhasePending {
-		t.Errorf("Provision() at errorCount=2 run.Status.Phase = %q, want %q", run.Status.Phase, keziov1alpha2.DeployRunPhasePending)
+	if run.Status.Phase != keziov1alpha3.DeployRunPhasePending {
+		t.Errorf("Provision() at errorCount=2 run.Status.Phase = %q, want %q", run.Status.Phase, keziov1alpha3.DeployRunPhasePending)
 	}
 }
 
@@ -511,7 +511,7 @@ func TestFakeDeployerProvisionHonorsFakeFailAnnotation(t *testing.T) {
 func TestFakeDeployerProvisionFakeFailAnnotationForever(t *testing.T) {
 	machine := newTestMachine()
 	machine.Annotations = map[string]string{FakeFailAnnotation: "provision:forever"}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
 	f := &FakeDeployer{}
 
 	machine.Status.ErrorCount = 100
@@ -594,9 +594,9 @@ func TestFakeDeployerFakeFailAnnotationScopedToItsOwnStep(t *testing.T) {
 func TestFakeDeployerFuncOverrideTakesPriorityOverFakeFailAnnotation(t *testing.T) {
 	machine := newTestMachine()
 	machine.Annotations = map[string]string{FakeFailAnnotation: "provision:forever"}
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
 	f := &FakeDeployer{
-		ProvisionFunc: func(_ context.Context, _ *keziov1alpha2.Machine, _ *keziov1alpha2.DeployRun, _ bool) (Result, error) {
+		ProvisionFunc: func(_ context.Context, _ *keziov1alpha3.Machine, _ *keziov1alpha3.DeployRun, _ bool) (Result, error) {
 			return Result{Outcome: Complete}, nil
 		},
 	}
@@ -617,9 +617,9 @@ func TestFakeDeployerFuncOverrideTakesPriorityOverFakeFailAnnotation(t *testing.
 func TestFakeDeployerInspectIgnoresUnresolvedReferences(t *testing.T) {
 	c := newFakeClient(t)
 	machine := newTestMachine()
-	machine.Spec.SubnetRef = keziov1alpha2.NameRef{Name: "no-such-subnet"}
-	machine.Spec.PostHookRefs = []keziov1alpha2.NameRef{{Name: "no-such-hook"}}
-	imageRef := keziov1alpha2.NameRef{Name: "no-such-image"}
+	machine.Spec.SubnetRef = keziov1alpha3.NameRef{Name: "no-such-subnet"}
+	machine.Spec.PostHookRefs = []keziov1alpha3.NameRef{{Name: "no-such-hook"}}
+	imageRef := keziov1alpha3.NameRef{Name: "no-such-image"}
 	machine.Spec.ImageRef = &imageRef
 	f := &FakeDeployer{Client: c}
 

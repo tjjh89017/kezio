@@ -19,12 +19,12 @@ package posthookdefaults
 import (
 	"testing"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/posthookvalidate"
 )
 
 func TestSpecPassesValidation(t *testing.T) {
-	ph := &keziov1alpha2.PostHook{Spec: Spec()}
+	ph := &keziov1alpha3.PostHook{Spec: Spec()}
 	if err := posthookvalidate.Validate(ph); err != nil {
 		t.Fatalf("Spec() failed posthookvalidate.Validate: %v", err)
 	}
@@ -42,20 +42,20 @@ func TestSpecCompletesTheFallbackPathItPointsNVRAMAt(t *testing.T) {
 	}
 
 	wantNames := []string{
-		keziov1alpha2.BuiltinStepMkswap,
-		keziov1alpha2.BuiltinStepInstallRemovableFallback,
-		keziov1alpha2.BuiltinStepEfibootmgr,
+		keziov1alpha3.BuiltinStepMkswap,
+		keziov1alpha3.BuiltinStepInstallRemovableFallback,
+		keziov1alpha3.BuiltinStepEfibootmgr,
 	}
 	for i, want := range wantNames {
 		step := spec.Steps[i]
-		if step.Type() != keziov1alpha2.PostHookStepTypeBuiltin {
+		if step.Type() != keziov1alpha3.PostHookStepTypeBuiltin {
 			t.Fatalf("step[%d]: type = %q, want builtin", i, step.Type())
 		}
 		if step.Builtin.Name != want {
 			t.Errorf("step[%d].builtin.name = %q, want %q", i, step.Builtin.Name, want)
 		}
-		if step.OSFamily != keziov1alpha2.OSFamilyLinux {
-			t.Errorf("step[%d].osFamily = %q, want %q", i, step.OSFamily, keziov1alpha2.OSFamilyLinux)
+		if step.OSFamily != keziov1alpha3.OSFamilyLinux {
+			t.Errorf("step[%d].osFamily = %q, want %q", i, step.OSFamily, keziov1alpha3.OSFamilyLinux)
 		}
 	}
 }

@@ -28,12 +28,12 @@ import (
 	"fmt"
 	"regexp"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // Validate runs every spec-only PostHook check: unique param names, then
 // each step's shape and content in order.
-func Validate(ph *keziov1alpha2.PostHook) error {
+func Validate(ph *keziov1alpha3.PostHook) error {
 	if err := ValidateParams(ph.Spec.Params); err != nil {
 		return err
 	}
@@ -51,7 +51,7 @@ func Validate(ph *keziov1alpha2.PostHook) error {
 // name), so this is defense in depth for a caller that builds a PostHook
 // programmatically past that layer (for example a dry-run or a future
 // in-process caller).
-func ValidateParams(params []keziov1alpha2.PostHookParam) error {
+func ValidateParams(params []keziov1alpha3.PostHookParam) error {
 	seen := make(map[string]bool, len(params))
 	for i, p := range params {
 		if seen[p.Name] {
@@ -65,11 +65,11 @@ func ValidateParams(params []keziov1alpha2.PostHookParam) error {
 // DeclaredPlaceholderNames returns the set of template placeholder names a
 // PostHook's steps may reference: every declared param, plus the reserved
 // names the deploy plan builder injects on its own.
-func DeclaredPlaceholderNames(params []keziov1alpha2.PostHookParam) map[string]bool {
+func DeclaredPlaceholderNames(params []keziov1alpha3.PostHookParam) map[string]bool {
 	names := map[string]bool{
-		keziov1alpha2.PostHookReservedParamMachineName: true,
-		keziov1alpha2.PostHookReservedParamImageName:   true,
-		keziov1alpha2.PostHookReservedParamTargetDisk:  true,
+		keziov1alpha3.PostHookReservedParamMachineName: true,
+		keziov1alpha3.PostHookReservedParamImageName:   true,
+		keziov1alpha3.PostHookReservedParamTargetDisk:  true,
 	}
 	for _, p := range params {
 		names[p.Name] = true
@@ -82,9 +82,9 @@ func DeclaredPlaceholderNames(params []keziov1alpha2.PostHookParam) map[string]b
 // assume Linux disk/boot tooling. install-removable-fallback is not
 // restricted; it only copies a bootloader file onto the ESP.
 var osFamilyRestrictedBuiltins = map[string]bool{
-	keziov1alpha2.BuiltinStepMkswap:            true,
-	keziov1alpha2.BuiltinStepEfibootmgr:        true,
-	keziov1alpha2.BuiltinStepGrowLastPartition: true,
+	keziov1alpha3.BuiltinStepMkswap:            true,
+	keziov1alpha3.BuiltinStepEfibootmgr:        true,
+	keziov1alpha3.BuiltinStepGrowLastPartition: true,
 }
 
 // ValidateStep validates one step at spec.steps[i]: exactly one kind is
@@ -96,18 +96,18 @@ var osFamilyRestrictedBuiltins = map[string]bool{
 // the CRD schema's CEL rules; re-checking them here keeps this function
 // usable and testable independent of a running apiserver, and gives a
 // field-path-qualified error message for the common case.
-func ValidateStep(i int, step keziov1alpha2.PostHookStep, declared map[string]bool) error {
+func ValidateStep(i int, step keziov1alpha3.PostHookStep, declared map[string]bool) error {
 	path := fmt.Sprintf("spec.steps[%d]", i)
 
 	switch step.Type() {
-	case keziov1alpha2.PostHookStepTypeUnknown:
+	case keziov1alpha3.PostHookStepTypeUnknown:
 		return fmt.Errorf("%s: exactly one of builtin or script must be set", path)
-	case keziov1alpha2.PostHookStepTypeBuiltin:
+	case keziov1alpha3.PostHookStepTypeBuiltin:
 		if err := validateOSFamilyGating(path, step); err != nil {
 			return err
 		}
 		return validateBuiltinParams(path, *step.Builtin, declared)
-	case keziov1alpha2.PostHookStepTypeScript:
+	case keziov1alpha3.PostHookStepTypeScript:
 		return validateScriptSource(path+".script", *step.Script, declared)
 	}
 	return nil
@@ -115,14 +115,14 @@ func ValidateStep(i int, step keziov1alpha2.PostHookStep, declared map[string]bo
 
 // validateOSFamilyGating rejects a builtin step whose Name is in
 // osFamilyRestrictedBuiltins unless the step's osFamily is Linux.
-func validateOSFamilyGating(path string, step keziov1alpha2.PostHookStep) error {
+func validateOSFamilyGating(path string, step keziov1alpha3.PostHookStep) error {
 	if !osFamilyRestrictedBuiltins[step.Builtin.Name] {
 		return nil
 	}
-	if step.OSFamily != keziov1alpha2.OSFamilyLinux {
+	if step.OSFamily != keziov1alpha3.OSFamilyLinux {
 		return fmt.Errorf(
 			"%s.builtin: %q requires osFamily to be set to %q, got %q",
-			path, step.Builtin.Name, keziov1alpha2.OSFamilyLinux, step.OSFamily,
+			path, step.Builtin.Name, keziov1alpha3.OSFamilyLinux, step.OSFamily,
 		)
 	}
 	return nil
@@ -136,10 +136,10 @@ func validateOSFamilyGating(path string, step keziov1alpha2.PostHookStep) error 
 // "partition", "fsType"); mkswap takes none, since it always acts on
 // every swap slot across the whole plan.
 var builtinAllowedParams = map[string]map[string]bool{
-	keziov1alpha2.BuiltinStepEfibootmgr:               {"disk": true, "part": true},
-	keziov1alpha2.BuiltinStepInstallRemovableFallback: {"disk": true, "part": true},
-	keziov1alpha2.BuiltinStepGrowLastPartition:        {"disk": true, "partition": true, "fsType": true},
-	keziov1alpha2.BuiltinStepMkswap:                   {},
+	keziov1alpha3.BuiltinStepEfibootmgr:               {"disk": true, "part": true},
+	keziov1alpha3.BuiltinStepInstallRemovableFallback: {"disk": true, "part": true},
+	keziov1alpha3.BuiltinStepGrowLastPartition:        {"disk": true, "partition": true, "fsType": true},
+	keziov1alpha3.BuiltinStepMkswap:                   {},
 }
 
 // validateBuiltinParams rejects a builtin step's params key not in
@@ -148,7 +148,7 @@ var builtinAllowedParams = map[string]map[string]bool{
 // (validatePlaceholders). step.Name not appearing in builtinAllowedParams
 // at all is not reported here - the CRD schema's own Enum on
 // PostHookBuiltinStep.Name already rejects any other value.
-func validateBuiltinParams(path string, step keziov1alpha2.PostHookBuiltinStep, declared map[string]bool) error {
+func validateBuiltinParams(path string, step keziov1alpha3.PostHookBuiltinStep, declared map[string]bool) error {
 	allowed := builtinAllowedParams[step.Name]
 	for key, value := range step.Params {
 		if !allowed[key] {
@@ -163,11 +163,11 @@ func validateBuiltinParams(path string, step keziov1alpha2.PostHookBuiltinStep, 
 
 // validateScriptSource checks a script step's content source and, for an
 // inline script, its template placeholders.
-func validateScriptSource(path string, src keziov1alpha2.PostHookScriptSource, declared map[string]bool) error {
-	if src.SourceKind() == keziov1alpha2.PostHookScriptSourceUnknown {
+func validateScriptSource(path string, src keziov1alpha3.PostHookScriptSource, declared map[string]bool) error {
+	if src.SourceKind() == keziov1alpha3.PostHookScriptSourceUnknown {
 		return fmt.Errorf("%s: exactly one of script, configMapRef, or secretRef must be set", path)
 	}
-	if src.SourceKind() != keziov1alpha2.PostHookScriptSourceInline {
+	if src.SourceKind() != keziov1alpha3.PostHookScriptSourceInline {
 		// configMapRef/secretRef content lives outside this object and can
 		// change independently of it, so its placeholders cannot be checked
 		// here; PostHookReconciler checks that the reference itself
@@ -185,7 +185,7 @@ func validateScriptSource(path string, src keziov1alpha2.PostHookScriptSource, d
 // against would simply never run once resolved, which is virtually always
 // a configuration mistake worth catching at admission/resolve time rather
 // than a hook intentionally covering several OS families in one object.
-func CheckOSFamilyCompatible(hook *keziov1alpha2.PostHook, imageOSFamily string) error {
+func CheckOSFamilyCompatible(hook *keziov1alpha3.PostHook, imageOSFamily string) error {
 	for i, step := range hook.Spec.Steps {
 		if step.OSFamily == "" || step.OSFamily == imageOSFamily {
 			continue

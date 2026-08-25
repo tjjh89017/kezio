@@ -30,7 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // Labels every tracker Deployment and its pods carry.
@@ -119,7 +119,7 @@ func trackerIPWithPrefix(subnetCIDR, ip string) (string, error) {
 // for the same no-NAT reason seederPodAnnotations is: a peer connects to
 // the address the tracker's announce response advertises, which must be
 // the address the tracker pod actually listens on.
-func trackerPodAnnotations(seedingSubnet *keziov1alpha2.Subnet, ip string) (map[string]string, error) {
+func trackerPodAnnotations(seedingSubnet *keziov1alpha3.Subnet, ip string) (map[string]string, error) {
 	if seedingSubnet.Spec.SeederNetworkRef == nil {
 		return nil, nil
 	}
@@ -147,7 +147,7 @@ func trackerPodAnnotations(seedingSubnet *keziov1alpha2.Subnet, ip string) (map[
 // An error means seedingSubnet.Spec.CIDR does not parse (see
 // trackerPodAnnotations); the caller surfaces that as a Site
 // misconfiguration instead of creating a Deployment.
-func buildTrackerDeployment(site *keziov1alpha2.Site, seedingSubnet *keziov1alpha2.Subnet, cfg TrackerDeploymentConfig) (*appsv1.Deployment, error) {
+func buildTrackerDeployment(site *keziov1alpha3.Site, seedingSubnet *keziov1alpha3.Subnet, cfg TrackerDeploymentConfig) (*appsv1.Deployment, error) {
 	annotations, err := trackerPodAnnotations(seedingSubnet, site.Spec.Tracker.IP)
 	if err != nil {
 		return nil, err

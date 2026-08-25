@@ -28,13 +28,13 @@ import (
 	toolscache "k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/cache/informertest"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
-func machine(name, mac string) *keziov1alpha2.Machine {
-	return &keziov1alpha2.Machine{
+func machine(name, mac string) *keziov1alpha3.Machine {
+	return &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec:       keziov1alpha2.MachineSpec{BootMACAddress: mac},
+		Spec:       keziov1alpha3.MachineSpec{BootMACAddress: mac},
 	}
 }
 
@@ -173,7 +173,7 @@ func TestMACCache_MalformedMACIgnored(t *testing.T) {
 // Machine added through the informer before Start observed sync.
 func TestMACCache_StartGatesOnSync(t *testing.T) {
 	scheme := runtime.NewScheme()
-	if err := keziov1alpha2.AddToScheme(scheme); err != nil {
+	if err := keziov1alpha3.AddToScheme(scheme); err != nil {
 		t.Fatalf("building scheme: %v", err)
 	}
 	fakeInformers := &informertest.FakeInformers{Scheme: scheme}
@@ -187,7 +187,7 @@ func TestMACCache_StartGatesOnSync(t *testing.T) {
 		t.Fatalf("NewMACCache: %v", err)
 	}
 
-	fakeInformer, err := fakeInformers.FakeInformerFor(ctx, &keziov1alpha2.Machine{})
+	fakeInformer, err := fakeInformers.FakeInformerFor(ctx, &keziov1alpha3.Machine{})
 	if err != nil {
 		t.Fatalf("FakeInformerFor: %v", err)
 	}

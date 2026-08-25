@@ -1,9 +1,0 @@
-apiVersion: kezio.kojuro.date/v1alpha2
-kind: PartitionContent
-metadata:
-  labels:
-    app.kubernetes.io/name: kezio
-    app.kubernetes.io/managed-by: kustomize
-  name: partitioncontent-sample
-spec:
-  # TODO(user): Add fields here

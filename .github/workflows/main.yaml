@@ -1053,7 +1053,7 @@ jobs:
           image-name: ${{ steps.build-data-image.outputs.image-name }}
           target-disk-serial: "${{ env.TARGET_DISK_SERIAL }}"
 
-      - name: Dump all kezio v1alpha2 resources
+      - name: Dump all kezio v1alpha3 resources
         if: always()
         uses: ./.github/actions/dump-kezio-resources
 

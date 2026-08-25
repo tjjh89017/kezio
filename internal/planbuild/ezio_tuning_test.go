@@ -19,14 +19,14 @@ package planbuild
 import (
 	"testing"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/seeder"
 )
 
 func int32ptr(v int32) *int32 { return &v }
 
 func TestMachineEzioOverrides_NilWhenEzioUnset(t *testing.T) {
-	m := &keziov1alpha2.Machine{}
+	m := &keziov1alpha3.Machine{}
 	if got := machineEzioMaxUploads(m); got != nil {
 		t.Errorf("machineEzioMaxUploads = %v, want nil", got)
 	}
@@ -39,9 +39,9 @@ func TestMachineEzioOverrides_PartialOverrideLeavesOtherFieldNil(t *testing.T) {
 	// Only maxUploads is set on the Machine: maxConnections must still
 	// report nil so ResolveMaxConnections falls back to the layer above,
 	// rather than the merge accidentally forcing an override.
-	m := &keziov1alpha2.Machine{
-		Spec: keziov1alpha2.MachineSpec{
-			Ezio: &keziov1alpha2.MachineEzioTuning{MaxUploads: int32ptr(42)},
+	m := &keziov1alpha3.Machine{
+		Spec: keziov1alpha3.MachineSpec{
+			Ezio: &keziov1alpha3.MachineEzioTuning{MaxUploads: int32ptr(42)},
 		},
 	}
 	if got := machineEzioMaxUploads(m); got == nil || *got != 42 {
@@ -57,10 +57,10 @@ func TestMachineEzioOverrides_PartialOverrideLeavesOtherFieldNil(t *testing.T) {
 // Builder.Build wires it, without needing a full envtest Machine/DeployRun
 // round trip.
 func TestLeecherTuningChain_ThreeLayers(t *testing.T) {
-	plain := &keziov1alpha2.Machine{}
-	overridden := &keziov1alpha2.Machine{
-		Spec: keziov1alpha2.MachineSpec{
-			Ezio: &keziov1alpha2.MachineEzioTuning{
+	plain := &keziov1alpha3.Machine{}
+	overridden := &keziov1alpha3.Machine{
+		Spec: keziov1alpha3.MachineSpec{
+			Ezio: &keziov1alpha3.MachineEzioTuning{
 				MaxUploads:     int32ptr(5),
 				MaxConnections: int32ptr(50),
 			},
@@ -70,7 +70,7 @@ func TestLeecherTuningChain_ThreeLayers(t *testing.T) {
 	cases := []struct {
 		name               string
 		leecherCfg         LeecherEzioConfig
-		machine            *keziov1alpha2.Machine
+		machine            *keziov1alpha3.Machine
 		wantMaxUploads     int32
 		wantMaxConnections int32
 	}{

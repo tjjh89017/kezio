@@ -28,7 +28,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines,verbs=get;list;watch
@@ -76,7 +76,7 @@ func NewMACCache(ctx context.Context, informers ctrlcache.Informers, sink MACSin
 		sink:      sink,
 	}
 
-	informer, err := informers.GetInformer(ctx, &keziov1alpha2.Machine{})
+	informer, err := informers.GetInformer(ctx, &keziov1alpha3.Machine{})
 	if err != nil {
 		return nil, fmt.Errorf("getting Machine informer: %w", err)
 	}
@@ -147,7 +147,7 @@ func (c *MACCache) pushLocked() {
 }
 
 func (c *MACCache) onAdd(obj any) {
-	machine, ok := obj.(*keziov1alpha2.Machine)
+	machine, ok := obj.(*keziov1alpha3.Machine)
 	if !ok {
 		return
 	}
@@ -155,11 +155,11 @@ func (c *MACCache) onAdd(obj any) {
 }
 
 func (c *MACCache) onUpdate(oldObj, newObj any) {
-	oldMachine, ok := oldObj.(*keziov1alpha2.Machine)
+	oldMachine, ok := oldObj.(*keziov1alpha3.Machine)
 	if !ok {
 		return
 	}
-	newMachine, ok := newObj.(*keziov1alpha2.Machine)
+	newMachine, ok := newObj.(*keziov1alpha3.Machine)
 	if !ok {
 		return
 	}
@@ -174,7 +174,7 @@ func (c *MACCache) onUpdate(oldObj, newObj any) {
 }
 
 func (c *MACCache) onDelete(obj any) {
-	machine, ok := obj.(*keziov1alpha2.Machine)
+	machine, ok := obj.(*keziov1alpha3.Machine)
 	if !ok {
 		// A watch that misses a delete event can hand back a
 		// DeletedFinalStateUnknown wrapping the last known object
@@ -184,7 +184,7 @@ func (c *MACCache) onDelete(obj any) {
 		if !ok {
 			return
 		}
-		machine, ok = tombstone.Obj.(*keziov1alpha2.Machine)
+		machine, ok = tombstone.Obj.(*keziov1alpha3.Machine)
 		if !ok {
 			return
 		}

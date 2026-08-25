@@ -27,7 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // seederDeploymentFor builds the seeder Deployment shape
@@ -85,20 +85,20 @@ var _ = Describe("Site Controller seeder watch", func() {
 		ns := createSubnetTestNamespace(ctx)
 		site := testSite(ctx, ns, "site-seeder-ready")
 
-		subnet := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
-			s.Spec.SiteRef = keziov1alpha2.NameRef{Name: "site-seeder-ready"}
-			s.Spec.SeederNetworkRef = &keziov1alpha2.NameRef{Name: "seeder-nad"}
+		subnet := testSubnet(ns, func(s *keziov1alpha3.Subnet) {
+			s.Spec.SiteRef = keziov1alpha3.NameRef{Name: "site-seeder-ready"}
+			s.Spec.SeederNetworkRef = &keziov1alpha3.NameRef{Name: "seeder-nad"}
 		})
 		Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
 		createTestNAD(ctx, ns, "seeder-nad", `{"ipam":{}}`)
-		setSeederSubnetRef(ctx, site, subnet.Name, keziov1alpha2.SiteTracker{IP: "192.0.2.60"})
+		setSeederSubnetRef(ctx, site, subnet.Name, keziov1alpha3.SiteTracker{IP: "192.0.2.60"})
 
 		r := newSiteTestReconciler()
 		key := types.NamespacedName{Name: site.Name, Namespace: ns}
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 		Expect(err).NotTo(HaveOccurred())
 
-		var beforeSeeder keziov1alpha2.Site
+		var beforeSeeder keziov1alpha3.Site
 		Expect(k8sClient.Get(ctx, key, &beforeSeeder)).To(Succeed())
 		Expect(beforeSeeder.Status.SeederReady).To(BeFalse(), "no seeder Deployment exists yet")
 
@@ -117,7 +117,7 @@ var _ = Describe("Site Controller seeder watch", func() {
 		_, err = r.Reconcile(ctx, requests[0])
 		Expect(err).NotTo(HaveOccurred())
 
-		var updated keziov1alpha2.Site
+		var updated keziov1alpha3.Site
 		Expect(k8sClient.Get(ctx, key, &updated)).To(Succeed())
 		Expect(updated.Status.SeederReady).To(BeTrue())
 	})

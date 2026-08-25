@@ -22,7 +22,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // MachineBootMACIndexField is the field index name Server looks Machines
@@ -39,7 +39,7 @@ const MachineBootMACIndexField = ".spec.bootMACAddress"
 // already guarantee it does, but the indexer must not panic on a stored
 // object that predates that validation).
 func IndexMachineBootMAC(obj client.Object) []string {
-	machine, ok := obj.(*keziov1alpha2.Machine)
+	machine, ok := obj.(*keziov1alpha3.Machine)
 	if !ok {
 		return nil
 	}
@@ -54,5 +54,5 @@ func IndexMachineBootMAC(obj client.Object) []string {
 // Call it once before the manager starts, alongside every controller's
 // own SetupWithManager, and before adding a Server that depends on it.
 func SetupFieldIndexer(ctx context.Context, mgr ctrl.Manager) error {
-	return mgr.GetFieldIndexer().IndexField(ctx, &keziov1alpha2.Machine{}, MachineBootMACIndexField, IndexMachineBootMAC)
+	return mgr.GetFieldIndexer().IndexField(ctx, &keziov1alpha3.Machine{}, MachineBootMACIndexField, IndexMachineBootMAC)
 }

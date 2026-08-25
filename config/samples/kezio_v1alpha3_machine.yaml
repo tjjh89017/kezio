@@ -1,0 +1,9 @@
+apiVersion: kezio.kojuro.date/v1alpha3
+kind: Machine
+metadata:
+  labels:
+    app.kubernetes.io/name: kezio
+    app.kubernetes.io/managed-by: kustomize
+  name: machine-sample
+spec:
+  # TODO(user): Add fields here

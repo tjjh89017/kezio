@@ -31,7 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // TestSetupFieldIndexer_EnvtestLookup exercises SetupFieldIndexer against
@@ -44,7 +44,7 @@ func TestSetupFieldIndexer_EnvtestLookup(t *testing.T) {
 	}
 
 	testScheme := scheme.Scheme
-	if err := keziov1alpha2.AddToScheme(testScheme); err != nil {
+	if err := keziov1alpha3.AddToScheme(testScheme); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
 	}
 
@@ -95,7 +95,7 @@ func TestSetupFieldIndexer_EnvtestLookup(t *testing.T) {
 		t.Fatalf("client.New: %v", err)
 	}
 
-	machine := newTestMachine(keziov1alpha2.MachineStateInspecting)
+	machine := newTestMachine(keziov1alpha3.MachineStateInspecting)
 	machine.Namespace = "default"
 	wantState := machine.Status.State
 	if err := rawClient.Create(ctx, machine); err != nil {

@@ -30,7 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/bmc"
 	"github.com/tjjh89017/kezio/internal/deployer"
 )
@@ -82,15 +82,15 @@ var _ = Describe("Machine reconciliation with AgentDeployer", func() {
 			Expect(k8sClient.Delete(ctx, secret)).To(Succeed())
 		})
 
-		machine := &keziov1alpha2.Machine{
+		machine := &keziov1alpha3.Machine{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-			Spec: keziov1alpha2.MachineSpec{
-				BMC: keziov1alpha2.MachineBMC{
+			Spec: keziov1alpha3.MachineSpec{
+				BMC: keziov1alpha3.MachineBMC{
 					Address:              machineBMCTestDriverScheme + "://" + name,
-					CredentialsSecretRef: keziov1alpha2.SecretReference{Name: secretName},
+					CredentialsSecretRef: keziov1alpha3.SecretReference{Name: secretName},
 				},
 				BootMACAddress: "aa:bb:cc:dd:ee:03",
-				SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 			},
 		}
 		Expect(k8sClient.Create(ctx, machine)).To(Succeed())
@@ -115,37 +115,37 @@ var _ = Describe("Machine reconciliation with AgentDeployer", func() {
 		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 		Expect(err).NotTo(HaveOccurred())
 
-		var afterInspectStart keziov1alpha2.Machine
+		var afterInspectStart keziov1alpha3.Machine
 		Expect(k8sClient.Get(ctx, key, &afterInspectStart)).To(Succeed())
-		Expect(afterInspectStart.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
+		Expect(afterInspectStart.Status.State).To(Equal(keziov1alpha3.MachineStateInspecting))
 
 		By("Inspect arming PXE and powering on: the machine stays Inspecting/OK, not Failed")
 		result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.RequeueAfter).To(BeNumerically(">", 0))
 
-		var afterArm keziov1alpha2.Machine
+		var afterArm keziov1alpha3.Machine
 		Expect(k8sClient.Get(ctx, key, &afterArm)).To(Succeed())
-		Expect(afterArm.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
-		Expect(afterArm.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+		Expect(afterArm.Status.State).To(Equal(keziov1alpha3.MachineStateInspecting))
+		Expect(afterArm.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusOK))
 
 		By("polling again without a registered agent: still Continuing, not Failed")
 		result, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.RequeueAfter).To(BeNumerically(">", 0))
-		var stillInspecting keziov1alpha2.Machine
+		var stillInspecting keziov1alpha3.Machine
 		Expect(k8sClient.Get(ctx, key, &stillInspecting)).To(Succeed())
-		Expect(stillInspecting.Status.State).To(Equal(keziov1alpha2.MachineStateInspecting))
-		Expect(stillInspecting.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+		Expect(stillInspecting.Status.State).To(Equal(keziov1alpha3.MachineStateInspecting))
+		Expect(stillInspecting.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusOK))
 
 		By("simulating the live agent's registration: MachineHardware plus AgentRegistered=True")
-		hw := &keziov1alpha2.MachineHardware{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"}}
+		hw := &keziov1alpha3.MachineHardware{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"}}
 		Expect(k8sClient.Create(ctx, hw)).To(Succeed())
 
-		var registering keziov1alpha2.Machine
+		var registering keziov1alpha3.Machine
 		Expect(k8sClient.Get(ctx, key, &registering)).To(Succeed())
 		apimeta.SetStatusCondition(&registering.Status.Conditions, metav1.Condition{
-			Type:               keziov1alpha2.MachineConditionAgentRegistered,
+			Type:               keziov1alpha3.MachineConditionAgentRegistered,
 			Status:             metav1.ConditionTrue,
 			Reason:             "AgentRegistered",
 			Message:            "kezio-agent registered",
@@ -157,10 +157,10 @@ var _ = Describe("Machine reconciliation with AgentDeployer", func() {
 		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 		Expect(err).NotTo(HaveOccurred())
 
-		var final keziov1alpha2.Machine
+		var final keziov1alpha3.Machine
 		Expect(k8sClient.Get(ctx, key, &final)).To(Succeed())
-		Expect(final.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable))
-		Expect(final.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+		Expect(final.Status.State).To(Equal(keziov1alpha3.MachineStateAvailable))
+		Expect(final.Status.OperationalStatus).To(Equal(keziov1alpha3.MachineOperationalStatusOK))
 	})
 
 	It("deletes a Machine through the real Deprovision step instead of stalling in Deprovisioning forever", func() {
@@ -179,15 +179,15 @@ var _ = Describe("Machine reconciliation with AgentDeployer", func() {
 			Expect(k8sClient.Delete(ctx, secret)).To(Succeed())
 		})
 
-		machine := &keziov1alpha2.Machine{
+		machine := &keziov1alpha3.Machine{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-			Spec: keziov1alpha2.MachineSpec{
-				BMC: keziov1alpha2.MachineBMC{
+			Spec: keziov1alpha3.MachineSpec{
+				BMC: keziov1alpha3.MachineBMC{
 					Address:              machineBMCTestDriverScheme + "://" + name,
-					CredentialsSecretRef: keziov1alpha2.SecretReference{Name: secretName},
+					CredentialsSecretRef: keziov1alpha3.SecretReference{Name: secretName},
 				},
 				BootMACAddress: "aa:bb:cc:dd:ee:04",
-				SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+				SubnetRef:      keziov1alpha3.NameRef{Name: "default"},
 			},
 		}
 		Expect(k8sClient.Create(ctx, machine)).To(Succeed())
@@ -204,13 +204,13 @@ var _ = Describe("Machine reconciliation with AgentDeployer", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		By("deleting the Machine")
-		var toDelete keziov1alpha2.Machine
+		var toDelete keziov1alpha3.Machine
 		Expect(k8sClient.Get(ctx, key, &toDelete)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, &toDelete)).To(Succeed())
 
 		By("reconciling the delete walk to completion: a stubbed Deprovision would stall here forever")
 		var gone bool
-		var machine2 keziov1alpha2.Machine
+		var machine2 keziov1alpha3.Machine
 		for i := 0; i < 10; i++ {
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 			Expect(err).NotTo(HaveOccurred())

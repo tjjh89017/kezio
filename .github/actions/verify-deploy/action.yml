@@ -12,7 +12,7 @@ description: >-
   in order gives a single, unambiguous cause instead of two reports of
   the same problem.
 
-  Layer 1 (Machine status) reads api/v1alpha2/machine_types.go's
+  Layer 1 (Machine status) reads api/v1alpha3/machine_types.go's
   MachineStatus directly: status.state == "Provisioned",
   status.operationalStatus == "OK", and
   status.lastSuccessfulRunRef.name == deploy-run-name - the last check

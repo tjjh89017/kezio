@@ -1,0 +1,17 @@
+apiVersion: kezio.kojuro.date/v1alpha3
+kind: Subnet
+metadata:
+  labels:
+    app.kubernetes.io/name: kezio
+    app.kubernetes.io/managed-by: kustomize
+  name: subnet-dataplane-sample
+spec:
+  # No boot half (bootdServerIP/bootdNetworkRef/dhcp): this Subnet hosts
+  # no machines at all, only a Site's seeder and tracker. The boot half
+  # is optional as a group, but a Subnet must declare at least one
+  # plane - seederNetworkRef is what this one declares instead.
+  siteRef:
+    name: site-sample
+  cidr: 192.0.2.128/25
+  seederNetworkRef:
+    name: seeder-net-sample

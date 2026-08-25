@@ -29,7 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 	"github.com/tjjh89017/kezio/internal/posthookvalidate"
 )
@@ -47,7 +47,7 @@ import (
 // imageOSFamily is the resolved OS image's effective OSFamily, empty for a
 // dataImages-only run (no OS image to check compatibility against) -
 // resolveHook skips the compatibility check in that case.
-func (b *Builder) resolveHooks(ctx context.Context, defaultNS string, refs []keziov1alpha2.NameRef, shared map[string]any, defaults builtinDefaults, imageOSFamily string) ([]agentapi.ResolvedHook, error) {
+func (b *Builder) resolveHooks(ctx context.Context, defaultNS string, refs []keziov1alpha3.NameRef, shared map[string]any, defaults builtinDefaults, imageOSFamily string) ([]agentapi.ResolvedHook, error) {
 	hooks := make([]agentapi.ResolvedHook, 0, len(refs))
 	for _, ref := range refs {
 		hook, err := b.resolveHook(ctx, defaultNS, ref, shared, defaults, imageOSFamily)
@@ -67,17 +67,17 @@ func (b *Builder) resolveHooks(ctx context.Context, defaultNS string, refs []kez
 // compatibility here - the single place both an Image's own postHookRefs
 // and a Machine's postHookRefs resolve through - is what makes the rule
 // hold regardless of which side referenced the hook.
-func (b *Builder) resolveHook(ctx context.Context, defaultNS string, ref keziov1alpha2.NameRef, shared map[string]any, defaults builtinDefaults, imageOSFamily string) (agentapi.ResolvedHook, error) {
+func (b *Builder) resolveHook(ctx context.Context, defaultNS string, ref keziov1alpha3.NameRef, shared map[string]any, defaults builtinDefaults, imageOSFamily string) (agentapi.ResolvedHook, error) {
 	ns := resolveNamespace(ref, defaultNS)
 
-	hook := &keziov1alpha2.PostHook{}
+	hook := &keziov1alpha3.PostHook{}
 	if err := b.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: ref.Name}, hook); err != nil {
 		if apierrors.IsNotFound(err) {
 			return agentapi.ResolvedHook{}, &NotReadyError{Reason: fmt.Sprintf("posthook %s/%s not found", ns, ref.Name)}
 		}
 		return agentapi.ResolvedHook{}, fmt.Errorf("get posthook %s/%s: %w", ns, ref.Name, err)
 	}
-	if !meta.IsStatusConditionTrue(hook.Status.Conditions, keziov1alpha2.PostHookConditionValid) {
+	if !meta.IsStatusConditionTrue(hook.Status.Conditions, keziov1alpha3.PostHookConditionValid) {
 		return agentapi.ResolvedHook{}, &NotReadyError{Reason: fmt.Sprintf("posthook %s/%s is not Valid yet", ns, ref.Name)}
 	}
 	if imageOSFamily != "" {
@@ -104,7 +104,7 @@ func (b *Builder) resolveHook(ctx context.Context, defaultNS string, ref keziov1
 // plus hook's own declared params' defaults for any name shared does not
 // already set - so one PostHook's own defaults never leak into another
 // hook resolved from the same shared map.
-func hookTemplateData(shared map[string]any, hook *keziov1alpha2.PostHook) map[string]any {
+func hookTemplateData(shared map[string]any, hook *keziov1alpha3.PostHook) map[string]any {
 	data := make(map[string]any, len(shared)+len(hook.Spec.Params))
 	maps.Copy(data, shared)
 	for _, p := range hook.Spec.Params {
@@ -122,9 +122,9 @@ func hookTemplateData(shared map[string]any, hook *keziov1alpha2.PostHook) map[s
 // builtin step carries its name through verbatim; a script step has its
 // content fetched (fetchScriptSource) and templated (renderTemplate)
 // against data.
-func (b *Builder) resolveStep(ctx context.Context, ns string, step keziov1alpha2.PostHookStep, data map[string]any, defaults builtinDefaults) (agentapi.ResolvedHookStep, error) {
+func (b *Builder) resolveStep(ctx context.Context, ns string, step keziov1alpha3.PostHookStep, data map[string]any, defaults builtinDefaults) (agentapi.ResolvedHookStep, error) {
 	switch step.Type() {
-	case keziov1alpha2.PostHookStepTypeBuiltin:
+	case keziov1alpha3.PostHookStepTypeBuiltin:
 		params, err := resolveBuiltinParams(step.Builtin.Name, step.Builtin.Params, defaults, data)
 		if err != nil {
 			return agentapi.ResolvedHookStep{}, err
@@ -137,7 +137,7 @@ func (b *Builder) resolveStep(ctx context.Context, ns string, step keziov1alpha2
 			TimeoutSeconds: step.Builtin.EffectiveTimeoutSeconds(),
 		}, nil
 
-	case keziov1alpha2.PostHookStepTypeScript:
+	case keziov1alpha3.PostHookStepTypeScript:
 		return b.resolveScriptStep(ctx, ns, step.OSFamily, *step.Script, data)
 
 	default:
@@ -147,7 +147,7 @@ func (b *Builder) resolveStep(ctx context.Context, ns string, step keziov1alpha2
 
 // resolveScriptStep fetches source's content, templates it against data,
 // and wraps the result as a script ResolvedHookStep.
-func (b *Builder) resolveScriptStep(ctx context.Context, ns, osFamily string, source keziov1alpha2.PostHookScriptSource, data map[string]any) (agentapi.ResolvedHookStep, error) {
+func (b *Builder) resolveScriptStep(ctx context.Context, ns, osFamily string, source keziov1alpha3.PostHookScriptSource, data map[string]any) (agentapi.ResolvedHookStep, error) {
 	raw, err := b.fetchScriptSource(ctx, ns, source)
 	if err != nil {
 		return agentapi.ResolvedHookStep{}, err
@@ -171,12 +171,12 @@ func (b *Builder) resolveScriptStep(ctx context.Context, ns, osFamily string, so
 // resolves (see posthookvalidate's doc comment), so a fetch failure here
 // should be transient - the PostHookReconciler will flip Valid=False on
 // its own next pass.
-func (b *Builder) fetchScriptSource(ctx context.Context, ns string, source keziov1alpha2.PostHookScriptSource) (string, error) {
+func (b *Builder) fetchScriptSource(ctx context.Context, ns string, source keziov1alpha3.PostHookScriptSource) (string, error) {
 	switch source.SourceKind() {
-	case keziov1alpha2.PostHookScriptSourceInline:
+	case keziov1alpha3.PostHookScriptSourceInline:
 		return source.Script, nil
 
-	case keziov1alpha2.PostHookScriptSourceConfigMapRef:
+	case keziov1alpha3.PostHookScriptSourceConfigMapRef:
 		cm := &corev1.ConfigMap{}
 		if err := b.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: source.ConfigMapRef.Name}, cm); err != nil {
 			if apierrors.IsNotFound(err) {
@@ -190,7 +190,7 @@ func (b *Builder) fetchScriptSource(ctx context.Context, ns string, source kezio
 		}
 		return v, nil
 
-	case keziov1alpha2.PostHookScriptSourceSecretRef:
+	case keziov1alpha3.PostHookScriptSourceSecretRef:
 		secret := &corev1.Secret{}
 		if err := b.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: source.SecretRef.Name}, secret); err != nil {
 			if apierrors.IsNotFound(err) {
@@ -232,8 +232,8 @@ func renderTemplate(raw string, data map[string]any) (string, error) {
 // "which partition is the ESP" without either an esp-role slot on the OS
 // image or an explicit user override.
 var espDependentBuiltins = map[string]bool{
-	keziov1alpha2.BuiltinStepEfibootmgr:               true,
-	keziov1alpha2.BuiltinStepInstallRemovableFallback: true,
+	keziov1alpha3.BuiltinStepEfibootmgr:               true,
+	keziov1alpha3.BuiltinStepInstallRemovableFallback: true,
 }
 
 // resolveBuiltinParams computes one builtin step's ResolvedHookStep.Params:
@@ -244,14 +244,14 @@ var espDependentBuiltins = map[string]bool{
 func resolveBuiltinParams(name string, userParams map[string]string, defaults builtinDefaults, data map[string]any) (map[string]string, error) {
 	merged := map[string]string{}
 	switch name {
-	case keziov1alpha2.BuiltinStepEfibootmgr, keziov1alpha2.BuiltinStepInstallRemovableFallback:
+	case keziov1alpha3.BuiltinStepEfibootmgr, keziov1alpha3.BuiltinStepInstallRemovableFallback:
 		if defaults.disk != "" {
 			merged["disk"] = defaults.disk
 		}
 		if defaults.espPartition > 0 {
 			merged["part"] = strconv.Itoa(int(defaults.espPartition))
 		}
-	case keziov1alpha2.BuiltinStepGrowLastPartition:
+	case keziov1alpha3.BuiltinStepGrowLastPartition:
 		if defaults.disk != "" {
 			merged["disk"] = defaults.disk
 		}
@@ -269,7 +269,7 @@ func resolveBuiltinParams(name string, userParams map[string]string, defaults bu
 	}
 
 	if espDependentBuiltins[name] && merged["part"] == "" {
-		return nil, &ValidationError{Reason: fmt.Sprintf("builtin %q needs the OS image's ESP partition number but none could be identified: no slot has role %q, and params.part was not set explicitly", name, keziov1alpha2.PartitionRoleESP)}
+		return nil, &ValidationError{Reason: fmt.Sprintf("builtin %q needs the OS image's ESP partition number but none could be identified: no slot has role %q, and params.part was not set explicitly", name, keziov1alpha3.PartitionRoleESP)}
 	}
 
 	if len(merged) == 0 {
@@ -280,7 +280,7 @@ func resolveBuiltinParams(name string, userParams map[string]string, defaults bu
 
 // resolveNamespace returns ref's namespace when set, defaultNS otherwise -
 // the resolution rule NameRef's doc comment fixes.
-func resolveNamespace(ref keziov1alpha2.NameRef, defaultNS string) string {
+func resolveNamespace(ref keziov1alpha3.NameRef, defaultNS string) string {
 	if ref.Namespace != "" {
 		return ref.Namespace
 	}

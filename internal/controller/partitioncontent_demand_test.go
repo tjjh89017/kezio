@@ -22,45 +22,45 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 func TestMachineImageRefs(t *testing.T) {
 	cases := []struct {
 		name    string
-		machine *keziov1alpha2.Machine
+		machine *keziov1alpha3.Machine
 		want    []client.ObjectKey
 	}{
 		{
 			name:    "no imageRef and no dataImages returns nothing",
-			machine: &keziov1alpha2.Machine{ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "ns"}},
+			machine: &keziov1alpha3.Machine{ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "ns"}},
 			want:    nil,
 		},
 		{
 			name: "imageRef with no namespace defaults to the machine's own",
-			machine: &keziov1alpha2.Machine{
+			machine: &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "ns"},
-				Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Name: "os-image"}},
+				Spec:       keziov1alpha3.MachineSpec{ImageRef: &keziov1alpha3.NameRef{Name: "os-image"}},
 			},
 			want: []client.ObjectKey{{Namespace: "ns", Name: "os-image"}},
 		},
 		{
 			name: "imageRef with an explicit namespace is respected",
-			machine: &keziov1alpha2.Machine{
+			machine: &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "ns"},
-				Spec:       keziov1alpha2.MachineSpec{ImageRef: &keziov1alpha2.NameRef{Namespace: "other", Name: "os-image"}},
+				Spec:       keziov1alpha3.MachineSpec{ImageRef: &keziov1alpha3.NameRef{Namespace: "other", Name: "os-image"}},
 			},
 			want: []client.ObjectKey{{Namespace: "other", Name: "os-image"}},
 		},
 		{
 			name: "imageRef plus dataImages, deduplicated",
-			machine: &keziov1alpha2.Machine{
+			machine: &keziov1alpha3.Machine{
 				ObjectMeta: metav1.ObjectMeta{Name: "m", Namespace: "ns"},
-				Spec: keziov1alpha2.MachineSpec{
-					ImageRef: &keziov1alpha2.NameRef{Name: "os-image"},
-					DataImages: []keziov1alpha2.MachineDataImage{
-						{ImageRef: keziov1alpha2.NameRef{Name: "data-image"}},
-						{ImageRef: keziov1alpha2.NameRef{Name: "os-image"}}, // duplicate of ImageRef
+				Spec: keziov1alpha3.MachineSpec{
+					ImageRef: &keziov1alpha3.NameRef{Name: "os-image"},
+					DataImages: []keziov1alpha3.MachineDataImage{
+						{ImageRef: keziov1alpha3.NameRef{Name: "data-image"}},
+						{ImageRef: keziov1alpha3.NameRef{Name: "os-image"}}, // duplicate of ImageRef
 					},
 				},
 			},
@@ -87,24 +87,24 @@ func TestMachineImageRefs(t *testing.T) {
 }
 
 func TestAnyLiveMachine(t *testing.T) {
-	live := func(name string) keziov1alpha2.Machine {
-		return keziov1alpha2.Machine{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	live := func(name string) keziov1alpha3.Machine {
+		return keziov1alpha3.Machine{ObjectMeta: metav1.ObjectMeta{Name: name}}
 	}
-	deleting := func(name string) keziov1alpha2.Machine {
+	deleting := func(name string) keziov1alpha3.Machine {
 		now := metav1.Now()
-		return keziov1alpha2.Machine{ObjectMeta: metav1.ObjectMeta{Name: name, DeletionTimestamp: &now}}
+		return keziov1alpha3.Machine{ObjectMeta: metav1.ObjectMeta{Name: name, DeletionTimestamp: &now}}
 	}
 
 	cases := []struct {
 		name     string
-		machines []keziov1alpha2.Machine
+		machines []keziov1alpha3.Machine
 		want     bool
 	}{
 		{name: "no machines", machines: nil, want: false},
-		{name: "one live machine", machines: []keziov1alpha2.Machine{live("a")}, want: true},
-		{name: "one deleting machine", machines: []keziov1alpha2.Machine{deleting("a")}, want: false},
-		{name: "a deleting machine alongside a live one", machines: []keziov1alpha2.Machine{deleting("a"), live("b")}, want: true},
-		{name: "every machine deleting", machines: []keziov1alpha2.Machine{deleting("a"), deleting("b")}, want: false},
+		{name: "one live machine", machines: []keziov1alpha3.Machine{live("a")}, want: true},
+		{name: "one deleting machine", machines: []keziov1alpha3.Machine{deleting("a")}, want: false},
+		{name: "a deleting machine alongside a live one", machines: []keziov1alpha3.Machine{deleting("a"), live("b")}, want: true},
+		{name: "every machine deleting", machines: []keziov1alpha3.Machine{deleting("a"), deleting("b")}, want: false},
 	}
 
 	for _, tc := range cases {

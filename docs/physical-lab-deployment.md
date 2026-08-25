@@ -41,7 +41,7 @@ bootd's proxyDHCP answers PXE requests only. It never touches lease
 traffic. The segment's own DHCP server keeps sole ownership of leases,
 and both services run on the segment at the same time with no conflict.
 Setup: set `Subnet.spec.dhcp.mode` to `proxy`
-(`SubnetDHCPModeProxy`, `api/v1alpha2/subnet_types.go`). This is the
+(`SubnetDHCPModeProxy`, `api/v1alpha3/subnet_types.go`). This is the
 shape kezio's own `e2e-routed-site` and `e2e-two-site-concurrent`
 GitHub Actions lanes exercise end to end (see section 8).
 
@@ -54,7 +54,7 @@ Set `Subnet.spec.dhcp.mode` to `lease`
 (`SubnetDHCPModeLease`). bootd's dnsmasq then renders a lease-serving
 `dhcp-range` (start/end host addresses, no `proxy` flag) instead of the
 proxyDHCP range, and becomes the segment's own DHCP authority
-(`api/v1alpha2/subnet_types.go`'s `SubnetDHCP`). The lease range
+(`api/v1alpha3/subnet_types.go`'s `SubnetDHCP`). The lease range
 defaults to the `Subnet`'s CIDR-derived first and last host addresses;
 set `spec.dhcp.leaseRangeStart` and `spec.dhcp.leaseRangeEnd` together to
 override it (the CRD schema rejects setting only one).
@@ -226,7 +226,7 @@ instead. bootd's proxy is the default path, not the only one.
 
 ### 2.5 BMC network reachability
 
-`spec.bmc` is required on every `Machine` (`api/v1alpha2/machine_types.go`'s
+`spec.bmc` is required on every `Machine` (`api/v1alpha3/machine_types.go`'s
 `MachineBMC` field; the validating webhook rejects a `Machine` with an
 empty `spec.bmc.address`). The controller-manager needs to reach that
 BMC endpoint over the cluster's own network path - `internal/bmc` picks
@@ -263,7 +263,7 @@ data-plane-only `Subnet` for the Site's seeder and tracker, all naming
 the same `Site`:
 
 ```yaml
-apiVersion: kezio.kojuro.date/v1alpha2
+apiVersion: kezio.kojuro.date/v1alpha3
 kind: Site
 metadata:
   name: lab-site
@@ -274,7 +274,7 @@ spec:
   tracker:
     ip: 198.51.102.3
 ---
-apiVersion: kezio.kojuro.date/v1alpha2
+apiVersion: kezio.kojuro.date/v1alpha3
 kind: Subnet
 metadata:
   name: lab-subnet-a
@@ -286,7 +286,7 @@ spec:
   bootdNetworkRef: { name: kezio-boot-network-a }
   dhcp: { mode: proxy }
 ---
-apiVersion: kezio.kojuro.date/v1alpha2
+apiVersion: kezio.kojuro.date/v1alpha3
 kind: Subnet
 metadata:
   name: lab-subnet-b
@@ -298,7 +298,7 @@ spec:
   bootdNetworkRef: { name: kezio-boot-network-b }
   dhcp: { mode: proxy }
 ---
-apiVersion: kezio.kojuro.date/v1alpha2
+apiVersion: kezio.kojuro.date/v1alpha3
 kind: Subnet
 metadata:
   name: lab-subnet-data
@@ -648,7 +648,7 @@ open work.
 | Claim | File verified against |
 |---|---|
 | bootd never assigns IP leases in proxy mode; every `dhcp-range` carries `proxy` | `internal/bootd/render.go` |
-| `dhcp.mode: lease` renders a lease-serving `dhcp-range` and `dhcp-boot`/`dhcp-match` instead of `pxe-service`; the MAC gate is unchanged | `api/v1alpha2/subnet_types.go` (`SubnetDHCP`), `internal/bootd/render.go` |
+| `dhcp.mode: lease` renders a lease-serving `dhcp-range` and `dhcp-boot`/`dhcp-match` instead of `pxe-service`; the MAC gate is unchanged | `api/v1alpha3/subnet_types.go` (`SubnetDHCP`), `internal/bootd/render.go` |
 | One bootd replica per boot-half Subnet | `internal/controller/subnet_controller.go` |
 | bootd needs a Multus attachment, not `hostNetwork` | `config/bootd/networkattachmentdefinition.example.yaml` |
 | Namespace needs `pod-security.kubernetes.io/enforce=privileged` | `config/bootd/kustomization.yaml`, `config/netboot-e2e/namespace-privileged-patch.yaml` |
@@ -660,7 +660,7 @@ open work.
 | e2e lanes use Multus same-bridge attachment for tracker/seeder | `.github/actions/create-provisioning-nads`, `.github/workflows/main.yaml` (`e2e-routed-site`, `e2e-two-site-concurrent`) |
 | Fixed BT port 16881; torrent HTTP port 8080; gRPC port 50051 | `internal/seederdeploy/identity.go` |
 | Tracker port 6969 | `internal/controller/site_tracker_deployment.go` (`trackerAnnouncePort`) |
-| A Site runs at most one tracker of its own, only when it has a seederSubnetRef | `api/v1alpha2/site_types.go`, `internal/controller/site_controller.go` |
+| A Site runs at most one tracker of its own, only when it has a seederSubnetRef | `api/v1alpha3/site_types.go`, `internal/controller/site_controller.go` |
 | A Machine's Site is derived (`spec.subnetRef` -> `Subnet.spec.siteRef` -> `Site`), never set directly | `internal/sitederive` |
 | BMC driver selection by URL scheme; IPMI default port 623 | `docs/bmc.md`, `internal/bmc/ipmi/ipmi.go` |
 | Secure Boot chain and CI gap | `docs/secure-boot.md` |

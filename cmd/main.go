@@ -44,14 +44,14 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/agentserver"
 	"github.com/tjjh89017/kezio/internal/bootserver"
 	"github.com/tjjh89017/kezio/internal/controller"
 	"github.com/tjjh89017/kezio/internal/deployer"
 	"github.com/tjjh89017/kezio/internal/planbuild"
 	"github.com/tjjh89017/kezio/internal/posthookdefaults"
-	webhookv1alpha2 "github.com/tjjh89017/kezio/internal/webhook/v1alpha2"
+	webhookv1alpha3 "github.com/tjjh89017/kezio/internal/webhook/v1alpha3"
 
 	// Blank-imported so their init() registers "redfish"/"ipmi" (and
 	// related schemes) with internal/bmc's registry: the Machine webhook
@@ -70,7 +70,7 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
-	utilruntime.Must(keziov1alpha2.AddToScheme(scheme))
+	utilruntime.Must(keziov1alpha3.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -246,7 +246,7 @@ func main() {
 	}
 	// nolint:goconst
 	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
-		if err := webhookv1alpha2.SetupMachineWebhookWithManager(mgr); err != nil {
+		if err := webhookv1alpha3.SetupMachineWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "Machine")
 			os.Exit(1)
 		}
@@ -284,28 +284,28 @@ func main() {
 	}
 	// nolint:goconst
 	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
-		if err := webhookv1alpha2.SetupImageWebhookWithManager(mgr); err != nil {
+		if err := webhookv1alpha3.SetupImageWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "Image")
 			os.Exit(1)
 		}
 	}
 	// nolint:goconst
 	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
-		if err := webhookv1alpha2.SetupPartitionContentWebhookWithManager(mgr); err != nil {
+		if err := webhookv1alpha3.SetupPartitionContentWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "PartitionContent")
 			os.Exit(1)
 		}
 	}
 	// nolint:goconst
 	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
-		if err := webhookv1alpha2.SetupDeployRunWebhookWithManager(mgr); err != nil {
+		if err := webhookv1alpha3.SetupDeployRunWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "DeployRun")
 			os.Exit(1)
 		}
 	}
 	// nolint:goconst
 	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
-		if err := webhookv1alpha2.SetupMachineHardwareWebhookWithManager(mgr); err != nil {
+		if err := webhookv1alpha3.SetupMachineHardwareWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "MachineHardware")
 			os.Exit(1)
 		}
@@ -320,7 +320,7 @@ func main() {
 	}
 	// nolint:goconst
 	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
-		if err := webhookv1alpha2.SetupSubnetWebhookWithManager(mgr); err != nil {
+		if err := webhookv1alpha3.SetupSubnetWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "Subnet")
 			os.Exit(1)
 		}
@@ -367,7 +367,7 @@ func main() {
 	}
 	// nolint:goconst
 	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
-		if err := webhookv1alpha2.SetupPostHookWebhookWithManager(mgr); err != nil {
+		if err := webhookv1alpha3.SetupPostHookWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "PostHook")
 			os.Exit(1)
 		}
@@ -382,7 +382,7 @@ func main() {
 	}
 	// nolint:goconst
 	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
-		if err := webhookv1alpha2.SetupSiteWebhookWithManager(mgr); err != nil {
+		if err := webhookv1alpha3.SetupSiteWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "Site")
 			os.Exit(1)
 		}

@@ -24,7 +24,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/bootserver"
 )
 
@@ -56,8 +56,8 @@ func mintSessionToken() (token, hash string, err error) {
 // for a freshly minted session: hash and expiry only, per
 // MachineAgentSessionStatus's doc comment - the plaintext token is never
 // stored.
-func newAgentSessionStatus(hash string, now time.Time, ttl time.Duration) *keziov1alpha2.MachineAgentSessionStatus {
-	return &keziov1alpha2.MachineAgentSessionStatus{
+func newAgentSessionStatus(hash string, now time.Time, ttl time.Duration) *keziov1alpha3.MachineAgentSessionStatus {
+	return &keziov1alpha3.MachineAgentSessionStatus{
 		TokenHash: hash,
 		ExpiresAt: metav1.NewTime(now.Add(ttl)),
 	}

@@ -27,7 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // statusPollInterval is how often `kezioctl status --watch` re-checks the
@@ -51,8 +51,8 @@ type StatusOptions struct {
 
 // terminalDeployRunPhases are DeployRunStatus.Phase values Watch stops on.
 var terminalDeployRunPhases = map[string]bool{
-	keziov1alpha2.DeployRunPhaseSucceeded: true,
-	keziov1alpha2.DeployRunPhaseFailed:    true,
+	keziov1alpha3.DeployRunPhaseSucceeded: true,
+	keziov1alpha3.DeployRunPhaseFailed:    true,
 }
 
 // Status implements `kezioctl status`: it reports the named Machine's
@@ -123,8 +123,8 @@ func Status(ctx context.Context, c client.Client, opts StatusOptions) error {
 // statusLine fetches the Machine and (if it has one) its current or last
 // DeployRun, and renders one report line. run is nil when the Machine has
 // never had a deploy requested.
-func statusLine(ctx context.Context, c client.Client, opts StatusOptions) (string, *keziov1alpha2.DeployRun, error) {
-	machine := &keziov1alpha2.Machine{}
+func statusLine(ctx context.Context, c client.Client, opts StatusOptions) (string, *keziov1alpha3.DeployRun, error) {
+	machine := &keziov1alpha3.Machine{}
 	key := client.ObjectKey{Namespace: opts.Namespace, Name: opts.MachineName}
 	if err := c.Get(ctx, key, machine); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -152,7 +152,7 @@ func statusLine(ctx context.Context, c client.Client, opts StatusOptions) (strin
 	if runNamespace == "" {
 		runNamespace = machine.Namespace
 	}
-	run := &keziov1alpha2.DeployRun{}
+	run := &keziov1alpha3.DeployRun{}
 	runKey := client.ObjectKey{Namespace: runNamespace, Name: runRef.Name}
 	if err := c.Get(ctx, runKey, run); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -162,7 +162,7 @@ func statusLine(ctx context.Context, c client.Client, opts StatusOptions) (strin
 		return "", nil, fmt.Errorf("get DeployRun %s/%s: %w", runNamespace, runRef.Name, err)
 	}
 
-	succeeded := meta.FindStatusCondition(run.Status.Conditions, keziov1alpha2.DeployRunConditionSucceeded)
+	succeeded := meta.FindStatusCondition(run.Status.Conditions, keziov1alpha3.DeployRunConditionSucceeded)
 	succeededStr := "unknown"
 	if succeeded != nil {
 		succeededStr = string(succeeded.Status)

@@ -31,7 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/ingest"
 	"github.com/tjjh89017/kezio/internal/store"
 )
@@ -82,7 +82,7 @@ type ImageImportReconciler struct {
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *ImageImportReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var imp keziov1alpha2.ImageImport
+	var imp keziov1alpha3.ImageImport
 	if err := r.Get(ctx, req.NamespacedName, &imp); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -92,9 +92,9 @@ func (r *ImageImportReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 // onChange drives one step of the import walk: Pending -> Ingesting ->
 // Ready|Failed. A finished import never re-enters it - the Image and the
 // content it created are immutable, so there is nothing left to converge.
-func (r *ImageImportReconciler) onChange(ctx context.Context, imp *keziov1alpha2.ImageImport) (ctrl.Result, error) {
+func (r *ImageImportReconciler) onChange(ctx context.Context, imp *keziov1alpha3.ImageImport) (ctrl.Result, error) {
 	switch imp.Status.State {
-	case keziov1alpha2.ImageImportStateReady, keziov1alpha2.ImageImportStateFailed:
+	case keziov1alpha3.ImageImportStateReady, keziov1alpha3.ImageImportStateFailed:
 		return ctrl.Result{}, nil
 	}
 
@@ -117,7 +117,7 @@ func (r *ImageImportReconciler) onChange(ctx context.Context, imp *keziov1alpha2
 // and ensureImportedImage), because both kinds promise immutability and
 // writing over a name would break that promise for whoever already
 // references it.
-func (r *ImageImportReconciler) completeIngest(ctx context.Context, imp *keziov1alpha2.ImageImport, job *batchv1.Job) (ctrl.Result, error) {
+func (r *ImageImportReconciler) completeIngest(ctx context.Context, imp *keziov1alpha3.ImageImport, job *batchv1.Job) (ctrl.Result, error) {
 	result, err := readJobResult(ctx, r.Client, imp.Namespace, job)
 	if err != nil {
 		return r.recordImportFailed(ctx, imp, fmt.Sprintf("reading ingest result: %s", err))
@@ -134,9 +134,9 @@ func (r *ImageImportReconciler) completeIngest(ctx context.Context, imp *keziov1
 		return r.recordImportFailed(ctx, imp, err.Error())
 	}
 
-	contentRefs := make([]keziov1alpha2.NameRef, 0, len(result.Disk.Partitions))
+	contentRefs := make([]keziov1alpha3.NameRef, 0, len(result.Disk.Partitions))
 	for _, part := range result.Disk.Partitions {
-		if part.Role == keziov1alpha2.PartitionRoleSwap {
+		if part.Role == keziov1alpha3.PartitionRoleSwap {
 			continue
 		}
 		name := store.ContentName(imp.Spec.ContentPrefix, part.Number)
@@ -147,7 +147,7 @@ func (r *ImageImportReconciler) completeIngest(ctx context.Context, imp *keziov1
 			}
 			return ctrl.Result{}, err
 		}
-		contentRefs = append(contentRefs, keziov1alpha2.NameRef{Name: name})
+		contentRefs = append(contentRefs, keziov1alpha3.NameRef{Name: name})
 	}
 
 	if err := r.ensureImportedImage(ctx, imp, layout); err != nil {
@@ -180,8 +180,8 @@ func (e *importNameConflictError) Error() string {
 // part, unless this same import already created it (a reconcile that
 // resumed after creating part of the set). An existing object from any
 // other origin is a conflict.
-func (r *ImageImportReconciler) ensureImportedContent(ctx context.Context, imp *keziov1alpha2.ImageImport, name string, part ingest.ResultPartition) error {
-	existing := &keziov1alpha2.PartitionContent{}
+func (r *ImageImportReconciler) ensureImportedContent(ctx context.Context, imp *keziov1alpha3.ImageImport, name string, part ingest.ResultPartition) error {
+	existing := &keziov1alpha3.PartitionContent{}
 	key := client.ObjectKey{Namespace: imp.Namespace, Name: name}
 	err := r.Get(ctx, key, existing)
 	switch {
@@ -194,15 +194,15 @@ func (r *ImageImportReconciler) ensureImportedContent(ctx context.Context, imp *
 		return fmt.Errorf("imageimport %q: getting PartitionContent %q: %w", imp.Name, name, err)
 	}
 
-	pc := &keziov1alpha2.PartitionContent{
+	pc := &keziov1alpha3.PartitionContent{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: imp.Namespace},
-		Spec: keziov1alpha2.PartitionContentSpec{
+		Spec: keziov1alpha3.PartitionContentSpec{
 			FSType:        part.FSType,
 			UsedBytes:     part.UsedBytes,
 			SizeBytes:     part.SizeBytes,
 			LastExtentEnd: part.LastExtentEnd,
 			PieceLength:   part.PieceLength,
-			Source: keziov1alpha2.PartitionContentSource{
+			Source: keziov1alpha3.PartitionContentSource{
 				ImportName:      imp.Name,
 				PartitionNumber: part.Number,
 			},
@@ -217,9 +217,9 @@ func (r *ImageImportReconciler) ensureImportedContent(ctx context.Context, imp *
 // ensureImportedImage creates the Image named imp.Spec.ImageName with
 // layout, unless this same import already created it (see
 // imageImportAnnotation).
-func (r *ImageImportReconciler) ensureImportedImage(ctx context.Context, imp *keziov1alpha2.ImageImport, layout keziov1alpha2.ImageDiskLayout) error {
+func (r *ImageImportReconciler) ensureImportedImage(ctx context.Context, imp *keziov1alpha3.ImageImport, layout keziov1alpha3.ImageDiskLayout) error {
 	name := imp.Spec.ImageName
-	existing := &keziov1alpha2.Image{}
+	existing := &keziov1alpha3.Image{}
 	key := client.ObjectKey{Namespace: imp.Namespace, Name: name}
 	err := r.Get(ctx, key, existing)
 	switch {
@@ -232,13 +232,13 @@ func (r *ImageImportReconciler) ensureImportedImage(ctx context.Context, imp *ke
 		return fmt.Errorf("imageimport %q: getting Image %q: %w", imp.Name, name, err)
 	}
 
-	image := &keziov1alpha2.Image{
+	image := &keziov1alpha3.Image{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
 			Namespace:   imp.Namespace,
 			Annotations: map[string]string{imageImportAnnotation: imp.Name},
 		},
-		Spec: keziov1alpha2.ImageSpec{
+		Spec: keziov1alpha3.ImageSpec{
 			OSFamily:     imp.Spec.OSFamily,
 			Bootable:     imp.Spec.Bootable,
 			Layout:       layout,
@@ -264,7 +264,7 @@ var imageImportUpdatePredicate = predicate.Or(
 // SetupWithManager sets up the controller with the Manager.
 func (r *ImageImportReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&keziov1alpha2.ImageImport{}, builder.WithPredicates(imageImportUpdatePredicate)).
+		For(&keziov1alpha3.ImageImport{}, builder.WithPredicates(imageImportUpdatePredicate)).
 		Owns(&batchv1.Job{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Named("imageimport").

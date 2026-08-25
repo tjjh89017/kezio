@@ -23,7 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 func TestPartitionContentPVCSize(t *testing.T) {
@@ -60,9 +60,9 @@ func TestPartitionContentPVCSize(t *testing.T) {
 }
 
 func TestBuildContentPVC(t *testing.T) {
-	pc := &keziov1alpha2.PartitionContent{
+	pc := &keziov1alpha3.PartitionContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "pc-test", Namespace: "default"},
-		Spec:       keziov1alpha2.PartitionContentSpec{SizeBytes: 1024},
+		Spec:       keziov1alpha3.PartitionContentSpec{SizeBytes: 1024},
 	}
 
 	cases := []struct {

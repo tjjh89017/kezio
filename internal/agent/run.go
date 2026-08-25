@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"time"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 )
 
@@ -110,7 +110,7 @@ func Run(ctx context.Context, cfg Config) error {
 // cancelled. See DefaultRegisterRetryInterval's doc comment for why
 // retrying indefinitely is the right behavior here, rather than giving up
 // after a fixed number of attempts.
-func registerWithRetry(ctx context.Context, client *Client, cfg Config, hardware keziov1alpha2.MachineHardwareSpec) (RegisterResult, error) {
+func registerWithRetry(ctx context.Context, client *Client, cfg Config, hardware keziov1alpha3.MachineHardwareSpec) (RegisterResult, error) {
 	retryInterval := cfg.RegisterRetryInterval
 	if retryInterval <= 0 {
 		retryInterval = DefaultRegisterRetryInterval

@@ -27,7 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/duration"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // ImageListOptions configures ImageList.
@@ -41,8 +41,8 @@ type ImageListOptions struct {
 }
 
 // ImageList fetches the Images `kezioctl image list` reports on.
-func ImageList(ctx context.Context, c client.Client, opts ImageListOptions) ([]keziov1alpha2.Image, error) {
-	list := &keziov1alpha2.ImageList{}
+func ImageList(ctx context.Context, c client.Client, opts ImageListOptions) ([]keziov1alpha3.Image, error) {
+	list := &keziov1alpha3.ImageList{}
 	var listOpts []client.ListOption
 	if !opts.AllNamespaces {
 		listOpts = append(listOpts, client.InNamespace(opts.Namespace))
@@ -56,7 +56,7 @@ func ImageList(ctx context.Context, c client.Client, opts ImageListOptions) ([]k
 // WriteImageList renders images as a tabwriter table to w, matching
 // kubectl's general list shape. The NAMESPACE column only appears when
 // allNamespaces is true, the same rule kubectl's -A applies.
-func WriteImageList(w io.Writer, images []keziov1alpha2.Image, allNamespaces bool) error {
+func WriteImageList(w io.Writer, images []keziov1alpha3.Image, allNamespaces bool) error {
 	tw := tabwriter.NewWriter(w, 0, 8, 2, ' ', 0)
 
 	if allNamespaces {
@@ -69,9 +69,9 @@ func WriteImageList(w io.Writer, images []keziov1alpha2.Image, allNamespaces boo
 	for _, img := range images {
 		state := img.Status.State
 		if state == "" {
-			state = keziov1alpha2.ImageStatePending
+			state = keziov1alpha3.ImageStatePending
 		}
-		ready := meta.IsStatusConditionTrue(img.Status.Conditions, keziov1alpha2.ImageConditionReady)
+		ready := meta.IsStatusConditionTrue(img.Status.Conditions, keziov1alpha3.ImageConditionReady)
 		age := duration.ShortHumanDuration(now.Sub(img.CreationTimestamp.Time))
 
 		if allNamespaces {

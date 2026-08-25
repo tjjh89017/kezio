@@ -24,7 +24,7 @@ import (
 	"strings"
 	"time"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 	"github.com/tjjh89017/kezio/internal/seeder"
 )
@@ -169,7 +169,7 @@ func (e *Executor) Execute(ctx context.Context, plan *agentapi.DeployPlan) (err 
 		return fmt.Errorf("invalid plan: %w", verr)
 	}
 
-	step := keziov1alpha2.DeployRunPhasePartitioning
+	step := keziov1alpha3.DeployRunPhasePartitioning
 	defer func() {
 		if err != nil {
 			e.reportFailed(ctx, plan, step, err.Error())
@@ -189,7 +189,7 @@ func (e *Executor) Execute(ctx context.Context, plan *agentapi.DeployPlan) (err 
 	}
 	e.reportSucceeded(ctx, plan, step, "")
 
-	step = keziov1alpha2.DeployRunPhaseWritingContent
+	step = keziov1alpha3.DeployRunPhaseWritingContent
 	e.reportRunning(ctx, plan, step)
 
 	hasTorrent := hasTorrentSlot(plans)
@@ -230,7 +230,7 @@ func (e *Executor) Execute(ctx context.Context, plan *agentapi.DeployPlan) (err 
 	// and before the machine reboots, so a chrootScript step sees a
 	// complete, mountable root file system and a script step (or a
 	// builtin like "efibootmgr"/"growLastPartition") can still run.
-	step = keziov1alpha2.DeployRunPhaseRunningPostHook
+	step = keziov1alpha3.DeployRunPhaseRunningPostHook
 	e.reportRunning(ctx, plan, step)
 	if err := e.runHooks(ctx, plan); err != nil {
 		return fmt.Errorf("running post hooks: %w", err)
@@ -241,14 +241,14 @@ func (e *Executor) Execute(ctx context.Context, plan *agentapi.DeployPlan) (err 
 	// action (efibootmgr, growLastPartition, ...) already ran as a hook
 	// step above, on the plan's own explicit request. This phase report
 	// exists only to keep the DeployRun's phase sequence complete.
-	step = keziov1alpha2.DeployRunPhaseFinalizing
+	step = keziov1alpha3.DeployRunPhaseFinalizing
 	e.reportRunning(ctx, plan, step)
 	e.reportSucceeded(ctx, plan, step, "")
 
 	// The terminal report: everything above completed, so this is the
 	// deploy's success signal. It is sent before invoking systemctl
 	// below, since nothing sent after that call is guaranteed to land.
-	step = keziov1alpha2.DeployRunPhaseSucceeded
+	step = keziov1alpha3.DeployRunPhaseSucceeded
 	e.reportSucceeded(ctx, plan, step, "")
 	e.writeConsole("deploy finalized")
 
@@ -372,7 +372,7 @@ func (e *Executor) writeSlots(ctx context.Context, dp diskPlan, handle EzioHandl
 			// A mkfs or swap slot is fully written the moment its command
 			// returns; a torrent slot has only been handed to ezio here, so
 			// seedUntilStopped reports that one's progress instead.
-			e.reportPartitionComplete(ctx, plan, keziov1alpha2.DeployRunPhaseWritingContent, s.Number)
+			e.reportPartitionComplete(ctx, plan, keziov1alpha3.DeployRunPhaseWritingContent, s.Number)
 		}
 	}
 	return nil
@@ -521,7 +521,7 @@ func (e *Executor) seedUntilStopped(ctx context.Context, plan *agentapi.DeployPl
 					}
 				}
 			}
-			e.reportProgress(ctx, plan, keziov1alpha2.DeployRunPhaseWritingContent, aggregatePercent(total, totalDone), totalDone, partitions)
+			e.reportProgress(ctx, plan, keziov1alpha3.DeployRunPhaseWritingContent, aggregatePercent(total, totalDone), totalDone, partitions)
 			if allStopped(statuses) {
 				return nil
 			}
@@ -596,11 +596,11 @@ func (e *Executor) writeConsole(msg string) {
 
 // rebootOrPowerOff hands the machine off to the deployed OS once every
 // hook has run and the terminal progress report is sent: systemctl
-// reboot for keziov1alpha2.AfterDeployReboot (the default, including an
+// reboot for keziov1alpha3.AfterDeployReboot (the default, including an
 // empty AfterDeploy), systemctl poweroff for AfterDeployPowerOff.
 func (e *Executor) rebootOrPowerOff(ctx context.Context, afterDeploy string) error {
 	action := "reboot"
-	if afterDeploy == keziov1alpha2.AfterDeployPowerOff {
+	if afterDeploy == keziov1alpha3.AfterDeployPowerOff {
 		action = "poweroff"
 	}
 

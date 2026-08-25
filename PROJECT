@@ -18,8 +18,8 @@ resources:
   domain: kojuro.date
   group: kezio
   kind: Machine
-  path: github.com/tjjh89017/kezio/api/v1alpha2
-  version: v1alpha2
+  path: github.com/tjjh89017/kezio/api/v1alpha3
+  version: v1alpha3
   webhooks:
     validation: true
     webhookVersion: v1
@@ -30,8 +30,8 @@ resources:
   domain: kojuro.date
   group: kezio
   kind: DeployRun
-  path: github.com/tjjh89017/kezio/api/v1alpha2
-  version: v1alpha2
+  path: github.com/tjjh89017/kezio/api/v1alpha3
+  version: v1alpha3
   webhooks:
     validation: true
     webhookVersion: v1
@@ -41,8 +41,8 @@ resources:
   domain: kojuro.date
   group: kezio
   kind: MachineHardware
-  path: github.com/tjjh89017/kezio/api/v1alpha2
-  version: v1alpha2
+  path: github.com/tjjh89017/kezio/api/v1alpha3
+  version: v1alpha3
   webhooks:
     validation: true
     webhookVersion: v1
@@ -53,8 +53,8 @@ resources:
   domain: kojuro.date
   group: kezio
   kind: Image
-  path: github.com/tjjh89017/kezio/api/v1alpha2
-  version: v1alpha2
+  path: github.com/tjjh89017/kezio/api/v1alpha3
+  version: v1alpha3
   webhooks:
     validation: true
     webhookVersion: v1
@@ -65,8 +65,8 @@ resources:
   domain: kojuro.date
   group: kezio
   kind: ImageImport
-  path: github.com/tjjh89017/kezio/api/v1alpha2
-  version: v1alpha2
+  path: github.com/tjjh89017/kezio/api/v1alpha3
+  version: v1alpha3
 - api:
     crdVersion: v1
     namespaced: true
@@ -74,8 +74,8 @@ resources:
   domain: kojuro.date
   group: kezio
   kind: PartitionContent
-  path: github.com/tjjh89017/kezio/api/v1alpha2
-  version: v1alpha2
+  path: github.com/tjjh89017/kezio/api/v1alpha3
+  version: v1alpha3
   webhooks:
     validation: true
     webhookVersion: v1
@@ -86,8 +86,8 @@ resources:
   domain: kojuro.date
   group: kezio
   kind: Subnet
-  path: github.com/tjjh89017/kezio/api/v1alpha2
-  version: v1alpha2
+  path: github.com/tjjh89017/kezio/api/v1alpha3
+  version: v1alpha3
   webhooks:
     validation: true
     webhookVersion: v1
@@ -98,8 +98,8 @@ resources:
   domain: kojuro.date
   group: kezio
   kind: PostHook
-  path: github.com/tjjh89017/kezio/api/v1alpha2
-  version: v1alpha2
+  path: github.com/tjjh89017/kezio/api/v1alpha3
+  version: v1alpha3
   webhooks:
     validation: true
     webhookVersion: v1
@@ -110,8 +110,8 @@ resources:
   domain: kojuro.date
   group: kezio
   kind: Site
-  path: github.com/tjjh89017/kezio/api/v1alpha2
-  version: v1alpha2
+  path: github.com/tjjh89017/kezio/api/v1alpha3
+  version: v1alpha3
   webhooks:
     validation: true
     webhookVersion: v1

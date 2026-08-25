@@ -28,11 +28,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // concurrentSeederDeploymentsTestClient builds a fake client seeded with
-// deployments, its scheme carrying both apps/v1 and kezio.kojuro.date/v1alpha2
+// deployments, its scheme carrying both apps/v1 and kezio.kojuro.date/v1alpha3
 // - concurrentSeederDeployments never reads a kezio type directly, but
 // SubnetReconciler's own embedded client.Client expects the full scheme.
 func concurrentSeederDeploymentsTestClient(t *testing.T, deployments ...client.Object) client.Client {
@@ -41,7 +41,7 @@ func concurrentSeederDeploymentsTestClient(t *testing.T, deployments ...client.O
 	if err := appsv1.AddToScheme(scheme); err != nil {
 		t.Fatalf("appsv1.AddToScheme() error = %v", err)
 	}
-	if err := keziov1alpha2.AddToScheme(scheme); err != nil {
+	if err := keziov1alpha3.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
 	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(deployments...).WithStatusSubresource(&appsv1.Deployment{}).Build()
@@ -80,7 +80,7 @@ func availableSeederDeployment(namespace, name, subnetLabel string) *appsv1.Depl
 // label at all, and one in a different namespace with the same label
 // value.
 func TestConcurrentSeederDeploymentsScopesToSubnetNetwork(t *testing.T) {
-	subnet := &keziov1alpha2.Subnet{ObjectMeta: metav1.ObjectMeta{Name: "rack-1", Namespace: "ns1"}}
+	subnet := &keziov1alpha3.Subnet{ObjectMeta: metav1.ObjectMeta{Name: "rack-1", Namespace: "ns1"}}
 
 	onSubnet := availableSeederDeployment("ns1", "seeder-a", "rack-1")
 	otherSubnet := availableSeederDeployment("ns1", "seeder-b", "rack-2")

@@ -30,7 +30,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines,verbs=get;list;watch
@@ -282,8 +282,8 @@ func (s *Server) handleGrubConfig(w http.ResponseWriter, r *http.Request, rawMAC
 // error: bootMACAddress uniqueness is only a convention (not enforced by
 // a webhook), and picking either match for a live-environment boot and a
 // token would be a guess this package is not willing to make.
-func (s *Server) lookupMachine(ctx context.Context, mac string) (*keziov1alpha2.Machine, error) {
-	var list keziov1alpha2.MachineList
+func (s *Server) lookupMachine(ctx context.Context, mac string) (*keziov1alpha3.Machine, error) {
+	var list keziov1alpha3.MachineList
 	if err := s.Client.List(ctx, &list, client.MatchingFields{MachineBootMACIndexField: mac}); err != nil {
 		return nil, fmt.Errorf("listing machines by boot MAC: %w", err)
 	}
@@ -300,12 +300,12 @@ func (s *Server) lookupMachine(ctx context.Context, mac string) (*keziov1alpha2.
 // resolveSubnet resolves machine's SubnetRef to the Subnet object,
 // defaulting to machine's own namespace the same way every other NameRef
 // in this API resolves an empty Namespace.
-func (s *Server) resolveSubnet(ctx context.Context, machine *keziov1alpha2.Machine) (*keziov1alpha2.Subnet, error) {
+func (s *Server) resolveSubnet(ctx context.Context, machine *keziov1alpha3.Machine) (*keziov1alpha3.Subnet, error) {
 	ns := machine.Spec.SubnetRef.Namespace
 	if ns == "" {
 		ns = machine.Namespace
 	}
-	var subnet keziov1alpha2.Subnet
+	var subnet keziov1alpha3.Subnet
 	if err := s.Client.Get(ctx, client.ObjectKey{Name: machine.Spec.SubnetRef.Name, Namespace: ns}, &subnet); err != nil {
 		return nil, fmt.Errorf("getting Subnet %s/%s: %w", ns, machine.Spec.SubnetRef.Name, err)
 	}
@@ -320,15 +320,15 @@ func (s *Server) resolveSubnet(ctx context.Context, machine *keziov1alpha2.Machi
 //   - Every other state (Enrolling, Available, Provisioned,
 //     Deprovisioning, PoweringOff): no net boot needed.
 //
-// v1alpha2 has no Error top-level state - a phase failure is reported on
+// v1alpha3 has no Error top-level state - a phase failure is reported on
 // the orthogonal OperationalStatus axis while State stays at whatever
 // phase failed (see MachineStatus's doc comment), so a machine retrying
 // a failed inspection or provisioning is still State Inspecting/
 // Provisioning and this check needs no separate error-state branch to
 // cover the retry.
-func needsNetBoot(machine *keziov1alpha2.Machine) bool {
+func needsNetBoot(machine *keziov1alpha3.Machine) bool {
 	switch machine.Status.State {
-	case keziov1alpha2.MachineStateInspecting, keziov1alpha2.MachineStateProvisioning:
+	case keziov1alpha3.MachineStateInspecting, keziov1alpha3.MachineStateProvisioning:
 		return true
 	default:
 		return false
@@ -340,13 +340,13 @@ func needsNetBoot(machine *keziov1alpha2.Machine) bool {
 // MachineNetBootStatus's doc comment for why that is the intended
 // behavior, not a race to avoid), and returns the token itself for
 // embedding in the GRUB config's cmdline.
-func (s *Server) rotateToken(ctx context.Context, machine *keziov1alpha2.Machine) (string, error) {
+func (s *Server) rotateToken(ctx context.Context, machine *keziov1alpha3.Machine) (string, error) {
 	token, hash, err := mintToken()
 	if err != nil {
 		return "", err
 	}
 
-	machine.Status.NetBoot = &keziov1alpha2.MachineNetBootStatus{
+	machine.Status.NetBoot = &keziov1alpha3.MachineNetBootStatus{
 		TokenHash: hash,
 		ExpiresAt: metav1.NewTime(s.now().Add(s.Config.TokenTTL)),
 	}

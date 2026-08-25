@@ -30,7 +30,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/agent"
 	"github.com/tjjh89017/kezio/internal/agent/deploy"
 	"github.com/tjjh89017/kezio/internal/agentapi"
@@ -170,16 +170,16 @@ func (p *progressRecorder) reports() []agentapi.ProgressRequest {
 // that same cancellation.
 func TestAbortEndToEnd_DeletingRunMidWriteStopsAgentAndReportsFailed(t *testing.T) {
 	now := time.Now()
-	machine := &keziov1alpha2.Machine{
+	machine := &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: testMachineName},
-		Status: keziov1alpha2.MachineStatus{
-			CurrentRunRef: &keziov1alpha2.NameRef{Name: abortE2ERunName},
+		Status: keziov1alpha3.MachineStatus{
+			CurrentRunRef: &keziov1alpha3.NameRef{Name: abortE2ERunName},
 		},
 	}
 	s, c := newTestServer(t, now, machine)
 	s.Abort = NewAbortDecider(c)
 
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: abortE2ERunName}}
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: abortE2ERunName}}
 	if err := c.Create(context.Background(), run); err != nil {
 		t.Fatalf("create DeployRun: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestAbortEndToEnd_DeletingRunMidWriteStopsAgentAndReportsFailed(t *testing.
 	if err != nil {
 		t.Fatalf("mintSessionToken: %v", err)
 	}
-	machine.Status.AgentSession = &keziov1alpha2.MachineAgentSessionStatus{
+	machine.Status.AgentSession = &keziov1alpha3.MachineAgentSessionStatus{
 		TokenHash: sessionHash,
 		ExpiresAt: metav1.NewTime(now.Add(time.Hour)),
 	}
@@ -227,7 +227,7 @@ func TestAbortEndToEnd_DeletingRunMidWriteStopsAgentAndReportsFailed(t *testing.
 		Slots: []agentapi.DeploySlot{
 			{Number: 1, Device: "/dev/sda1", Torrent: &agentapi.DeployTorrent{URL: "http://seeder/root.torrent", InfoHash: "deadbeef"}},
 		},
-		AfterDeploy: keziov1alpha2.AfterDeployReboot,
+		AfterDeploy: keziov1alpha3.AfterDeployReboot,
 	}
 
 	execErr := make(chan error, 1)

@@ -23,7 +23,7 @@ import (
 	"context"
 	"time"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // Outcome is the result of one Deployer step call that returned without a
@@ -86,7 +86,7 @@ type Result struct {
 	RequeueAfter time.Duration
 	// ErrorType and ErrorMessage are set only when Outcome is Failed, and
 	// map directly onto Machine.status.errorType/errorMessage.
-	ErrorType    keziov1alpha2.MachineErrorType
+	ErrorType    keziov1alpha3.MachineErrorType
 	ErrorMessage string
 }
 
@@ -114,7 +114,7 @@ type Deployer interface {
 	// Machine.status.errorType == MachineErrorTypeRestart: the
 	// implementation must discard any in-progress inspection state and
 	// start over rather than resume it.
-	Inspect(ctx context.Context, machine *keziov1alpha2.Machine, restartOnFailure bool) (Result, error)
+	Inspect(ctx context.Context, machine *keziov1alpha3.Machine, restartOnFailure bool) (Result, error)
 
 	// Provision drives one step of deploying run to machine. On Complete,
 	// run finished successfully and kezio-agent has already committed to
@@ -131,23 +131,23 @@ type Deployer interface {
 	// this Provision step: the implementation discards this attempt's
 	// in-progress state - including any progress already recorded on run
 	// itself - and starts the step over.
-	Provision(ctx context.Context, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun, restartOnFailure bool) (Result, error)
+	Provision(ctx context.Context, machine *keziov1alpha3.Machine, run *keziov1alpha3.DeployRun, restartOnFailure bool) (Result, error)
 
 	// Deprovision drives one step of tearing down machine's deployed
 	// state as the first step of the delete walk. On Complete, machine
 	// carries no deployer-managed state that must survive the Machine
 	// object's removal. restartOnFailure carries the same meaning as in
 	// Inspect, scoped to this Deprovision step.
-	Deprovision(ctx context.Context, machine *keziov1alpha2.Machine, restartOnFailure bool) (Result, error)
+	Deprovision(ctx context.Context, machine *keziov1alpha3.Machine, restartOnFailure bool) (Result, error)
 
 	// PowerOff drives one step of powering machine off, the delete walk's
 	// last live action before the Machine object is released. On
 	// Complete, the machine is (or is believed to be) powered off.
-	PowerOff(ctx context.Context, machine *keziov1alpha2.Machine) (Result, error)
+	PowerOff(ctx context.Context, machine *keziov1alpha3.Machine) (Result, error)
 
 	// Reboot drives one step of rebooting machine in response to a reboot
 	// annotation. hard selects a hard (forced) reboot over a soft
 	// (graceful) one. On Complete, the machine has been commanded to
 	// reboot; this does not wait for the machine to finish booting.
-	Reboot(ctx context.Context, machine *keziov1alpha2.Machine, hard bool) (Result, error)
+	Reboot(ctx context.Context, machine *keziov1alpha3.Machine, hard bool) (Result, error)
 }

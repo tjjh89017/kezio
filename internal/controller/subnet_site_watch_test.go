@@ -27,7 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 var _ = Describe("Subnet Controller dangling siteRef", func() {
@@ -37,16 +37,16 @@ var _ = Describe("Subnet Controller dangling siteRef", func() {
 		ns := createSubnetTestNamespace(ctx)
 		site := testSite(ctx, ns, "site-watch")
 
-		referencing := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
+		referencing := testSubnet(ns, func(s *keziov1alpha3.Subnet) {
 			s.Name = "rack-referencing"
-			s.Spec.SiteRef = keziov1alpha2.NameRef{Name: "site-watch"}
+			s.Spec.SiteRef = keziov1alpha3.NameRef{Name: "site-watch"}
 		})
 		Expect(k8sClient.Create(ctx, referencing)).To(Succeed())
-		other := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
+		other := testSubnet(ns, func(s *keziov1alpha3.Subnet) {
 			s.Name = "rack-other"
 			s.Spec.CIDR = "192.0.3.0/24"
 			s.Spec.BootdServerIP = "192.0.3.2"
-			s.Spec.SiteRef = keziov1alpha2.NameRef{Name: "hq"}
+			s.Spec.SiteRef = keziov1alpha3.NameRef{Name: "hq"}
 		})
 		Expect(k8sClient.Create(ctx, other)).To(Succeed())
 
@@ -68,17 +68,17 @@ var _ = Describe("Subnet Controller dangling siteRef", func() {
 		createTestNAD(ctx, ns, "boot-nad", bootdStaticNADConfig("192.0.2.2"))
 		createTestNAD(ctx, ns, "boot-nad-2", bootdStaticNADConfig("192.0.3.2"))
 
-		affected := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
+		affected := testSubnet(ns, func(s *keziov1alpha3.Subnet) {
 			s.Name = "rack-affected"
-			s.Spec.SiteRef = keziov1alpha2.NameRef{Name: "site-vanish"}
+			s.Spec.SiteRef = keziov1alpha3.NameRef{Name: "site-vanish"}
 		})
 		Expect(k8sClient.Create(ctx, affected)).To(Succeed())
-		unrelated := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
+		unrelated := testSubnet(ns, func(s *keziov1alpha3.Subnet) {
 			s.Name = "rack-unrelated"
 			s.Spec.CIDR = "192.0.3.0/24"
 			s.Spec.BootdServerIP = "192.0.3.2"
-			s.Spec.BootdNetworkRef = &keziov1alpha2.NameRef{Name: "boot-nad-2"}
-			s.Spec.SiteRef = keziov1alpha2.NameRef{Name: "hq"}
+			s.Spec.BootdNetworkRef = &keziov1alpha3.NameRef{Name: "boot-nad-2"}
+			s.Spec.SiteRef = keziov1alpha3.NameRef{Name: "hq"}
 		})
 		Expect(k8sClient.Create(ctx, unrelated)).To(Succeed())
 
@@ -91,9 +91,9 @@ var _ = Describe("Subnet Controller dangling siteRef", func() {
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: unrelatedKey})
 		Expect(err).NotTo(HaveOccurred())
 
-		var beforeDelete, unrelatedBefore keziov1alpha2.Subnet
+		var beforeDelete, unrelatedBefore keziov1alpha3.Subnet
 		Expect(k8sClient.Get(ctx, affectedKey, &beforeDelete)).To(Succeed())
-		Expect(findCondition(beforeDelete.Status.Conditions, keziov1alpha2.SubnetConditionValid).Status).To(Equal(metav1.ConditionTrue))
+		Expect(findCondition(beforeDelete.Status.Conditions, keziov1alpha3.SubnetConditionValid).Status).To(Equal(metav1.ConditionTrue))
 		Expect(k8sClient.Get(ctx, unrelatedKey, &unrelatedBefore)).To(Succeed())
 
 		Expect(k8sClient.Delete(ctx, site)).To(Succeed())
@@ -105,35 +105,35 @@ var _ = Describe("Subnet Controller dangling siteRef", func() {
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: affectedKey})
 		Expect(err).NotTo(HaveOccurred())
 
-		var afterDelete keziov1alpha2.Subnet
+		var afterDelete keziov1alpha3.Subnet
 		Expect(k8sClient.Get(ctx, affectedKey, &afterDelete)).To(Succeed())
-		validCond := findCondition(afterDelete.Status.Conditions, keziov1alpha2.SubnetConditionValid)
+		validCond := findCondition(afterDelete.Status.Conditions, keziov1alpha3.SubnetConditionValid)
 		Expect(validCond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(validCond.Reason).To(Equal("SiteNotFound"))
 		Expect(validCond.Message).To(ContainSubstring("site-vanish"))
 
-		readyCond := findCondition(afterDelete.Status.Conditions, keziov1alpha2.SubnetConditionReady)
+		readyCond := findCondition(afterDelete.Status.Conditions, keziov1alpha3.SubnetConditionReady)
 		Expect(readyCond.Status).To(Equal(metav1.ConditionFalse), "Ready follows Valid down: bootd still PXEs machines on this segment, but the Subnet is misconfigured and must say so, the same way a non-blocking CheckBootdAddress mismatch already fails Ready without withholding the Deployment")
 		Expect(readyCond.Reason).To(Equal("SiteNotFound"))
 
 		// The unrelated Subnet, naming a different (still-existing) Site,
 		// must not have been touched by reconciling the affected one.
-		var unrelatedAfter keziov1alpha2.Subnet
+		var unrelatedAfter keziov1alpha3.Subnet
 		Expect(k8sClient.Get(ctx, unrelatedKey, &unrelatedAfter)).To(Succeed())
 		Expect(unrelatedAfter.ResourceVersion).To(Equal(unrelatedBefore.ResourceVersion), "reconciling one Subnet must never write another")
-		unrelatedValid := findCondition(unrelatedAfter.Status.Conditions, keziov1alpha2.SubnetConditionValid)
+		unrelatedValid := findCondition(unrelatedAfter.Status.Conditions, keziov1alpha3.SubnetConditionValid)
 		Expect(unrelatedValid.Status).To(Equal(metav1.ConditionTrue))
 
 		By("recreating the Site")
-		recreated := &keziov1alpha2.Site{ObjectMeta: metav1.ObjectMeta{Name: "site-vanish", Namespace: ns}}
+		recreated := &keziov1alpha3.Site{ObjectMeta: metav1.ObjectMeta{Name: "site-vanish", Namespace: ns}}
 		Expect(k8sClient.Create(ctx, recreated)).To(Succeed())
 
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: affectedKey})
 		Expect(err).NotTo(HaveOccurred())
 
-		var afterRecreate keziov1alpha2.Subnet
+		var afterRecreate keziov1alpha3.Subnet
 		Expect(k8sClient.Get(ctx, affectedKey, &afterRecreate)).To(Succeed())
-		Expect(findCondition(afterRecreate.Status.Conditions, keziov1alpha2.SubnetConditionValid).Status).To(Equal(metav1.ConditionTrue))
+		Expect(findCondition(afterRecreate.Status.Conditions, keziov1alpha3.SubnetConditionValid).Status).To(Equal(metav1.ConditionTrue))
 		// Ready also needs the bootd Deployment Available, which envtest
 		// never sets on its own (no real Deployment controller runs here) -
 		// stamp it, mirroring subnet_bootd_envtest_test.go's own pattern,
@@ -146,6 +146,6 @@ var _ = Describe("Subnet Controller dangling siteRef", func() {
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: affectedKey})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(k8sClient.Get(ctx, affectedKey, &afterRecreate)).To(Succeed())
-		Expect(findCondition(afterRecreate.Status.Conditions, keziov1alpha2.SubnetConditionReady).Status).To(Equal(metav1.ConditionTrue))
+		Expect(findCondition(afterRecreate.Status.Conditions, keziov1alpha3.SubnetConditionReady).Status).To(Equal(metav1.ConditionTrue))
 	})
 })

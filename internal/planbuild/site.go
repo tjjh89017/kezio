@@ -22,7 +22,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/sitederive"
 )
 
@@ -34,7 +34,7 @@ import (
 // subnetRef/siteRef it never uses.
 type lazySiteResolution struct {
 	client  client.Reader
-	machine *keziov1alpha2.Machine
+	machine *keziov1alpha3.Machine
 
 	once sync.Once
 	res  sitederive.Resolution

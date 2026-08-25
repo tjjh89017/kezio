@@ -19,7 +19,7 @@ package ingest
 import (
 	"testing"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 func TestClassifyRole(t *testing.T) {
@@ -29,13 +29,13 @@ func TestClassifyRole(t *testing.T) {
 		fsType   string
 		want     string
 	}{
-		{"gpt esp", espTypeGUIDGPT, "vfat", keziov1alpha2.PartitionRoleESP},
-		{"gpt esp uppercase input", "C12A7328-F81F-11D2-BA4B-00A0C93EC93B", "vfat", keziov1alpha2.PartitionRoleESP},
-		{"mbr esp", espTypeMBR, "vfat", keziov1alpha2.PartitionRoleESP},
-		{"gpt msr", msrTypeGUIDGPT, "", keziov1alpha2.PartitionRoleMSR},
-		{"linux swap by fstype", "0657fd6d-a4ab-43c4-84e5-0933c84b4f4f", "swap", keziov1alpha2.PartitionRoleSwap},
-		{"linux data", "0fc63daf-8483-4772-8e79-3d69d8477de4", "ext4", keziov1alpha2.PartitionRoleData},
-		{"unknown fs falls back to data", "0fc63daf-8483-4772-8e79-3d69d8477de4", "", keziov1alpha2.PartitionRoleData},
+		{"gpt esp", espTypeGUIDGPT, "vfat", keziov1alpha3.PartitionRoleESP},
+		{"gpt esp uppercase input", "C12A7328-F81F-11D2-BA4B-00A0C93EC93B", "vfat", keziov1alpha3.PartitionRoleESP},
+		{"mbr esp", espTypeMBR, "vfat", keziov1alpha3.PartitionRoleESP},
+		{"gpt msr", msrTypeGUIDGPT, "", keziov1alpha3.PartitionRoleMSR},
+		{"linux swap by fstype", "0657fd6d-a4ab-43c4-84e5-0933c84b4f4f", "swap", keziov1alpha3.PartitionRoleSwap},
+		{"linux data", "0fc63daf-8483-4772-8e79-3d69d8477de4", "ext4", keziov1alpha3.PartitionRoleData},
+		{"unknown fs falls back to data", "0fc63daf-8483-4772-8e79-3d69d8477de4", "", keziov1alpha3.PartitionRoleData},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

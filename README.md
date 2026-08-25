@@ -27,7 +27,7 @@ mode that deploys a machine without one.
 
 ## Custom resources
 
-kezio defines these CRDs under the `kezio.kojuro.date/v1alpha2` group:
+kezio defines these CRDs under the `kezio.kojuro.date/v1alpha3` group:
 
 | Kind | Purpose |
 |---|---|

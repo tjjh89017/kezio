@@ -63,7 +63,7 @@ type ResultDisk struct {
 	// SizeBytes is the total size of the source disk image (the raw
 	// conversion's file size).
 	SizeBytes int64 `json:"sizeBytes"`
-	// PartitionTable is "gpt" or "mbr" (api/v1alpha2's
+	// PartitionTable is "gpt" or "mbr" (api/v1alpha3's
 	// PartitionTableGPT / PartitionTableMBR).
 	PartitionTable string `json:"partitionTable"`
 	// SfdiskJSON is the verbatim `sfdisk --dump --json` output for the
@@ -76,7 +76,7 @@ type ResultDisk struct {
 }
 
 // ResultPartition is one partition's summary in a successful ingest
-// Result. The fields shared with api/v1alpha2.PartitionContentSpec
+// Result. The fields shared with api/v1alpha3.PartitionContentSpec
 // (FSType, UsedBytes, SizeBytes, LastExtentEnd, PieceLength) let the
 // ImageImport controller copy them across with no translation; Role,
 // TypeGUID, PartUUID, UUID and SizeBytes fill in the Image slot that

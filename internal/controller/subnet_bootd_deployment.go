@@ -29,7 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/bootd"
 )
 
@@ -84,7 +84,7 @@ const multusNetworksAnnotation = "k8s.v1.cni.cncf.io/networks"
 // resolveNamespace returns ref.Namespace when set, otherwise
 // defaultNamespace - the namespace default every NameRef in this package
 // shares.
-func resolveNamespace(ref keziov1alpha2.NameRef, defaultNamespace string) string {
+func resolveNamespace(ref keziov1alpha3.NameRef, defaultNamespace string) string {
 	if ref.Namespace != "" {
 		return ref.Namespace
 	}
@@ -110,7 +110,7 @@ func bootdDeploymentName(subnetName string) string {
 // subnet's BootdNetworkRef as a secondary Multus network. A bare NAD
 // name is qualified with subnet's own namespace rather than relying on a
 // resolution default.
-func bootdPodAnnotations(subnet *keziov1alpha2.Subnet) map[string]string {
+func bootdPodAnnotations(subnet *keziov1alpha3.Subnet) map[string]string {
 	ref := *subnet.Spec.BootdNetworkRef
 	ns := resolveNamespace(ref, subnet.Namespace)
 	return map[string]string{multusNetworksAnnotation: ns + "/" + ref.Name}
@@ -124,8 +124,8 @@ func bootdPodAnnotations(subnet *keziov1alpha2.Subnet) map[string]string {
 // /boot/... to it, so the value is always this Subnet's own
 // bootdServerIP on bootd.DefaultProxyPort. Left unset when
 // cfg.BootUpstreamURL is empty, since nothing serves /boot/... then.
-func bootdEnv(subnet *keziov1alpha2.Subnet, cfg BootdDeploymentConfig) []corev1.EnvVar {
-	leaseMode := subnet.Spec.DHCP.Mode == keziov1alpha2.SubnetDHCPModeLease
+func bootdEnv(subnet *keziov1alpha3.Subnet, cfg BootdDeploymentConfig) []corev1.EnvVar {
+	leaseMode := subnet.Spec.DHCP.Mode == keziov1alpha3.SubnetDHCPModeLease
 	env := []corev1.EnvVar{
 		{Name: "BOOTD_SERVER_IP", Value: subnet.Spec.BootdServerIP},
 		{Name: "BOOTD_PROVISIONING_CIDR", Value: subnet.Spec.CIDR},
@@ -173,7 +173,7 @@ func bootdEnv(subnet *keziov1alpha2.Subnet, cfg BootdDeploymentConfig) []corev1.
 // subnet.Spec.NodeSelector becomes the pod template's NodeSelector:
 // nothing in the cluster can otherwise tell which node is on this
 // broadcast domain.
-func buildBootdDeployment(subnet *keziov1alpha2.Subnet, cfg BootdDeploymentConfig) *appsv1.Deployment {
+func buildBootdDeployment(subnet *keziov1alpha3.Subnet, cfg BootdDeploymentConfig) *appsv1.Deployment {
 	replicas := int32(1)
 	labels := map[string]string{
 		bootdAppNameLabel:          bootdAppNameValue,

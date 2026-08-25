@@ -12,7 +12,7 @@ description: >-
   that action's own doc comment for the insertion point it reserves.
 
   Sets the suffixless reboot annotation
-  (api/v1alpha2/machine_types.go's MachineAnnotationRebootPrefix) with
+  (api/v1alpha3/machine_types.go's MachineAnnotationRebootPrefix) with
   mode "hard": internal/deployer/agent.go's AgentDeployer.Reboot maps
   hard to a single bmc.BMC.PowerCycle call, which the redfish driver
   sends as one ComputerSystem.Reset(ForceRestart). KubeVirtBMC's Redfish

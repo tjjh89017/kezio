@@ -25,7 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // posthookConfigMapRefIndex and posthookSecretRefIndex are the field index
@@ -51,11 +51,11 @@ var (
 // posthookSecretRefIndex on the manager's field indexer exactly once.
 func ensurePostHookSourceIndexes(mgr ctrl.Manager) error {
 	posthookSourceIndexesOnce.Do(func() {
-		if err := mgr.GetFieldIndexer().IndexField(context.Background(), &keziov1alpha2.PostHook{}, posthookConfigMapRefIndex, indexPostHookConfigMapRefs); err != nil {
+		if err := mgr.GetFieldIndexer().IndexField(context.Background(), &keziov1alpha3.PostHook{}, posthookConfigMapRefIndex, indexPostHookConfigMapRefs); err != nil {
 			posthookSourceIndexesErr = err
 			return
 		}
-		posthookSourceIndexesErr = mgr.GetFieldIndexer().IndexField(context.Background(), &keziov1alpha2.PostHook{}, posthookSecretRefIndex, indexPostHookSecretRefs)
+		posthookSourceIndexesErr = mgr.GetFieldIndexer().IndexField(context.Background(), &keziov1alpha3.PostHook{}, posthookSecretRefIndex, indexPostHookSecretRefs)
 	})
 	return posthookSourceIndexesErr
 }
@@ -63,7 +63,7 @@ func ensurePostHookSourceIndexes(mgr ctrl.Manager) error {
 // indexPostHookConfigMapRefs extracts every ConfigMap name obj's script
 // steps reference, for posthookConfigMapRefIndex.
 func indexPostHookConfigMapRefs(obj client.Object) []string {
-	ph, ok := obj.(*keziov1alpha2.PostHook)
+	ph, ok := obj.(*keziov1alpha3.PostHook)
 	if !ok {
 		return nil
 	}
@@ -83,7 +83,7 @@ func indexPostHookConfigMapRefs(obj client.Object) []string {
 // indexPostHookSecretRefs extracts every Secret name obj's script steps
 // reference, for posthookSecretRefIndex.
 func indexPostHookSecretRefs(obj client.Object) []string {
-	ph, ok := obj.(*keziov1alpha2.PostHook)
+	ph, ok := obj.(*keziov1alpha3.PostHook)
 	if !ok {
 		return nil
 	}
@@ -110,7 +110,7 @@ func (r *PostHookReconciler) mapConfigMapToPostHooks(ctx context.Context, obj cl
 	if !ok {
 		return nil
 	}
-	var posthooks keziov1alpha2.PostHookList
+	var posthooks keziov1alpha3.PostHookList
 	if err := r.List(ctx, &posthooks, client.InNamespace(cm.Namespace), client.MatchingFields{posthookConfigMapRefIndex: cm.Name}); err != nil {
 		return nil
 	}
@@ -123,7 +123,7 @@ func (r *PostHookReconciler) mapSecretToPostHooks(ctx context.Context, obj clien
 	if !ok {
 		return nil
 	}
-	var posthooks keziov1alpha2.PostHookList
+	var posthooks keziov1alpha3.PostHookList
 	if err := r.List(ctx, &posthooks, client.InNamespace(secret.Namespace), client.MatchingFields{posthookSecretRefIndex: secret.Name}); err != nil {
 		return nil
 	}
@@ -131,7 +131,7 @@ func (r *PostHookReconciler) mapSecretToPostHooks(ctx context.Context, obj clien
 }
 
 // postHookRequests builds one reconcile.Request per PostHook in items.
-func postHookRequests(items []keziov1alpha2.PostHook) []reconcile.Request {
+func postHookRequests(items []keziov1alpha3.PostHook) []reconcile.Request {
 	requests := make([]reconcile.Request, 0, len(items))
 	for _, ph := range items {
 		requests = append(requests, reconcile.Request{

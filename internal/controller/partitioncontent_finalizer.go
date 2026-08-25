@@ -29,7 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // deletionBlockRequeueInterval is the fallback poll interval while a
@@ -54,8 +54,8 @@ const maxBlockingRefsNamed = 5
 // is untouched by a deletion timestamp: a seeder still demanded keeps
 // running through the grace period exactly as it would without a pending
 // delete, since onDelete returns before ever calling onChange/reconcileSeeder.
-func (r *PartitionContentReconciler) onDelete(ctx context.Context, pc *keziov1alpha2.PartitionContent) (ctrl.Result, error) {
-	if !controllerutil.ContainsFinalizer(pc, keziov1alpha2.PartitionContentFinalizer) {
+func (r *PartitionContentReconciler) onDelete(ctx context.Context, pc *keziov1alpha3.PartitionContent) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(pc, keziov1alpha3.PartitionContentFinalizer) {
 		return ctrl.Result{}, nil
 	}
 
@@ -67,7 +67,7 @@ func (r *PartitionContentReconciler) onDelete(ctx context.Context, pc *keziov1al
 		return r.recordDeletionBlocked(ctx, pc, blockers)
 	}
 
-	controllerutil.RemoveFinalizer(pc, keziov1alpha2.PartitionContentFinalizer)
+	controllerutil.RemoveFinalizer(pc, keziov1alpha3.PartitionContentFinalizer)
 	if err := r.Update(ctx, pc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("partitioncontent %q: removing finalizer: %w", pc.Name, err)
 	}
@@ -76,7 +76,7 @@ func (r *PartitionContentReconciler) onDelete(ctx context.Context, pc *keziov1al
 
 // blockingReferences returns "kind/name" for every Image and active
 // DeployRun still referencing pc, sorted for a stable message.
-func (r *PartitionContentReconciler) blockingReferences(ctx context.Context, pc *keziov1alpha2.PartitionContent) ([]string, error) {
+func (r *PartitionContentReconciler) blockingReferences(ctx context.Context, pc *keziov1alpha3.PartitionContent) ([]string, error) {
 	images, err := r.imagesReferencing(ctx, pc)
 	if err != nil {
 		return nil, fmt.Errorf("partitioncontent %q: listing referencing images: %w", pc.Name, err)
@@ -103,8 +103,8 @@ func (r *PartitionContentReconciler) blockingReferences(ctx context.Context, pc 
 // namespace is correct, not merely convenient: the Image webhook denies any
 // slot contentRef naming a namespace other than the Image's own, so no
 // Image outside pc's namespace can ever reference it.
-func (r *PartitionContentReconciler) imagesReferencing(ctx context.Context, pc *keziov1alpha2.PartitionContent) ([]keziov1alpha2.Image, error) {
-	var list keziov1alpha2.ImageList
+func (r *PartitionContentReconciler) imagesReferencing(ctx context.Context, pc *keziov1alpha3.PartitionContent) ([]keziov1alpha3.Image, error) {
+	var list keziov1alpha3.ImageList
 	if err := r.List(ctx, &list, client.InNamespace(pc.Namespace), client.MatchingFields{imageContentRefIndex: pc.Name}); err != nil {
 		return nil, err
 	}
@@ -117,9 +117,9 @@ func (r *PartitionContentReconciler) imagesReferencing(ctx context.Context, pc *
 // phase a freshly created run starts in, counts as active - a run only
 // stops being able to matter to a content it deploys once it is
 // definitively done, one way or the other.
-func isDeployRunActive(run *keziov1alpha2.DeployRun) bool {
+func isDeployRunActive(run *keziov1alpha3.DeployRun) bool {
 	switch run.Status.Phase {
-	case keziov1alpha2.DeployRunPhaseSucceeded, keziov1alpha2.DeployRunPhaseFailed:
+	case keziov1alpha3.DeployRunPhaseSucceeded, keziov1alpha3.DeployRunPhaseFailed:
 		return false
 	default:
 		return true
@@ -132,9 +132,9 @@ func isDeployRunActive(run *keziov1alpha2.DeployRun) bool {
 // PartitionContent directly - only the Image it resolved into - so this
 // is the set activeDeployRunsReferencing resolves transitively against
 // each Image's own slots.
-func deployRunImageNames(run *keziov1alpha2.DeployRun) []client.ObjectKey {
+func deployRunImageNames(run *keziov1alpha3.DeployRun) []client.ObjectKey {
 	keys := make([]client.ObjectKey, 0, 1+len(run.Spec.DataImages))
-	addRef := func(ref keziov1alpha2.NameRef) {
+	addRef := func(ref keziov1alpha3.NameRef) {
 		ns := ref.Namespace
 		if ns == "" {
 			ns = run.Namespace
@@ -169,14 +169,14 @@ func deployRunImageNames(run *keziov1alpha2.DeployRun) []client.ObjectKey {
 // List is still scoped to DeployRuns in pc's own namespace, an independent
 // assumption about where a run deploying pc's content lives that this
 // contentRef invariant does not establish or depend on.
-func (r *PartitionContentReconciler) activeDeployRunsReferencing(ctx context.Context, pc *keziov1alpha2.PartitionContent) ([]keziov1alpha2.DeployRun, error) {
-	var list keziov1alpha2.DeployRunList
+func (r *PartitionContentReconciler) activeDeployRunsReferencing(ctx context.Context, pc *keziov1alpha3.PartitionContent) ([]keziov1alpha3.DeployRun, error) {
+	var list keziov1alpha3.DeployRunList
 	if err := r.List(ctx, &list, client.InNamespace(pc.Namespace)); err != nil {
 		return nil, err
 	}
 
 	imageReferencesPC := make(map[client.ObjectKey]bool)
-	var matches []keziov1alpha2.DeployRun
+	var matches []keziov1alpha3.DeployRun
 	for i := range list.Items {
 		run := &list.Items[i]
 		if !isDeployRunActive(run) {
@@ -186,7 +186,7 @@ func (r *PartitionContentReconciler) activeDeployRunsReferencing(ctx context.Con
 		for _, key := range deployRunImageNames(run) {
 			refs, cached := imageReferencesPC[key]
 			if !cached {
-				var img keziov1alpha2.Image
+				var img keziov1alpha3.Image
 				err := r.Get(ctx, key, &img)
 				switch {
 				case apierrors.IsNotFound(err):
@@ -212,7 +212,7 @@ func (r *PartitionContentReconciler) activeDeployRunsReferencing(ctx context.Con
 // block is re-checked - the fallback for a blocking active DeployRun,
 // which nothing here watches directly (see deletionBlockRequeueInterval).
 // A blocking Image is re-checked sooner via mapImageToPartitionContents.
-func (r *PartitionContentReconciler) recordDeletionBlocked(ctx context.Context, pc *keziov1alpha2.PartitionContent, blockers []string) (ctrl.Result, error) {
+func (r *PartitionContentReconciler) recordDeletionBlocked(ctx context.Context, pc *keziov1alpha3.PartitionContent, blockers []string) (ctrl.Result, error) {
 	message := fmt.Sprintf("deletion blocked: still referenced by %s", formatBlockers(blockers))
 	setPartitionContentDeletionBlockedCondition(pc, "ReferencesRemain", message)
 	onSuccess := func() {

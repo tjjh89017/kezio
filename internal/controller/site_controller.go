@@ -35,7 +35,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/nadvalidate"
 )
 
@@ -81,7 +81,7 @@ type siteValidationFailure struct {
 // garbage collection removes it once the Site is gone - the same
 // reasoning SubnetReconciler's own doc comment gives for bootd.
 func (r *SiteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	site := &keziov1alpha2.Site{}
+	site := &keziov1alpha3.Site{}
 	if err := r.Get(ctx, req.NamespacedName, site); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -95,7 +95,7 @@ func (r *SiteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 // onDelete is a no-op: garbage collection removes the tracker Deployment
 // via its owner reference once the API server accepts the delete.
-func (r *SiteReconciler) onDelete(ctx context.Context, _ *keziov1alpha2.Site) (ctrl.Result, error) {
+func (r *SiteReconciler) onDelete(ctx context.Context, _ *keziov1alpha3.Site) (ctrl.Result, error) {
 	_ = logf.FromContext(ctx)
 	return ctrl.Result{}, nil
 }
@@ -104,7 +104,7 @@ func (r *SiteReconciler) onDelete(ctx context.Context, _ *keziov1alpha2.Site) (c
 // its tracker Deployment exists and matches its current spec when
 // eligible, and folds all of it into site's status and Valid/Ready
 // conditions.
-func (r *SiteReconciler) onChange(ctx context.Context, site *keziov1alpha2.Site) (ctrl.Result, error) {
+func (r *SiteReconciler) onChange(ctx context.Context, site *keziov1alpha3.Site) (ctrl.Result, error) {
 	subnetRefs, err := r.listSubnetRefs(ctx, site)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -205,7 +205,7 @@ func (r *SiteReconciler) onChange(ctx context.Context, site *keziov1alpha2.Site)
 // A NAD that cannot be fetched or parsed produces an Indeterminate result
 // rather than aborting the reconcile, mirroring runNADChecks; only a
 // non-NotFound API error is returned as an error.
-func (r *SiteReconciler) runTrackerAddressCheck(ctx context.Context, site *keziov1alpha2.Site, seedingSubnet *keziov1alpha2.Subnet) ([]nadvalidate.CheckResult, error) {
+func (r *SiteReconciler) runTrackerAddressCheck(ctx context.Context, site *keziov1alpha3.Site, seedingSubnet *keziov1alpha3.Subnet) ([]nadvalidate.CheckResult, error) {
 	seederConfig, err := fetchNADConfig(ctx, r.Client, *seedingSubnet.Spec.SeederNetworkRef, seedingSubnet.Namespace)
 	if err != nil {
 		if !isIndeterminateNADErr(err) {
@@ -222,8 +222,8 @@ func (r *SiteReconciler) runTrackerAddressCheck(ctx context.Context, site *kezio
 // listSubnetRefs returns the sorted names of the Subnets in site's own
 // namespace whose spec.siteRef names site - SiteStatus.SubnetRefs' exact
 // contract.
-func (r *SiteReconciler) listSubnetRefs(ctx context.Context, site *keziov1alpha2.Site) ([]string, error) {
-	var subnets keziov1alpha2.SubnetList
+func (r *SiteReconciler) listSubnetRefs(ctx context.Context, site *keziov1alpha3.Site) ([]string, error) {
+	var subnets keziov1alpha3.SubnetList
 	if err := r.List(ctx, &subnets, client.InNamespace(site.Namespace)); err != nil {
 		return nil, fmt.Errorf("list subnets: %w", err)
 	}
@@ -243,11 +243,11 @@ func (r *SiteReconciler) listSubnetRefs(ctx context.Context, site *keziov1alpha2
 // webhook (SiteCustomValidator.validateSeederSubnetRef) enforces both at
 // admission, so a failure here means the referenced Subnet drifted after
 // site was admitted.
-func (r *SiteReconciler) resolveSeedingSubnet(ctx context.Context, site *keziov1alpha2.Site) (*keziov1alpha2.Subnet, *siteValidationFailure, error) {
+func (r *SiteReconciler) resolveSeedingSubnet(ctx context.Context, site *keziov1alpha3.Site) (*keziov1alpha3.Subnet, *siteValidationFailure, error) {
 	ref := *site.Spec.SeederSubnetRef
 	ns := resolveNamespace(ref, site.Namespace)
 
-	subnet := &keziov1alpha2.Subnet{}
+	subnet := &keziov1alpha3.Subnet{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: ref.Name}, subnet); err != nil {
 		if kerrors.IsNotFound(err) {
 			return nil, &siteValidationFailure{
@@ -277,7 +277,7 @@ func (r *SiteReconciler) resolveSeedingSubnet(ctx context.Context, site *keziov1
 // Available replica. This is SiteStatus.SeederReady's data source: it
 // reads the per-(Image, Site) seeder Deployment ImageReconciler already
 // builds, rather than building one of its own.
-func (r *SiteReconciler) seederPlacementReady(ctx context.Context, subnet *keziov1alpha2.Subnet) (bool, error) {
+func (r *SiteReconciler) seederPlacementReady(ctx context.Context, subnet *keziov1alpha3.Subnet) (bool, error) {
 	var deployments appsv1.DeploymentList
 	if err := r.List(ctx, &deployments, client.InNamespace(subnet.Namespace), client.MatchingLabels{
 		partitionContentAppComponentLabel: partitionContentSeederComponentValue,
@@ -306,7 +306,7 @@ func (r *SiteReconciler) seederPlacementReady(ctx context.Context, subnet *kezio
 // a Site misconfiguration by way of its seeding Subnet, surfaced the same
 // way resolveSeedingSubnet's own failures are, not a create/update error
 // worth retrying as one.
-func (r *SiteReconciler) reconcileTrackerDeployment(ctx context.Context, site *keziov1alpha2.Site, seedingSubnet *keziov1alpha2.Subnet) (dep *appsv1.Deployment, unowned bool, invalid *siteValidationFailure, err error) {
+func (r *SiteReconciler) reconcileTrackerDeployment(ctx context.Context, site *keziov1alpha3.Site, seedingSubnet *keziov1alpha3.Subnet) (dep *appsv1.Deployment, unowned bool, invalid *siteValidationFailure, err error) {
 	desired, err := buildTrackerDeployment(site, seedingSubnet, r.TrackerDeployment)
 	if err != nil {
 		return nil, false, &siteValidationFailure{
@@ -360,7 +360,7 @@ func (r *SiteReconciler) reconcileTrackerDeployment(ctx context.Context, site *k
 // (trackerWanted false: no seederSubnetRef, or Tracker.ExternalURL) is
 // Ready once Valid, exactly as SiteConditionReady's own doc comment
 // states.
-func (r *SiteReconciler) updateSiteConditions(ctx context.Context, site *keziov1alpha2.Site, invalid *siteValidationFailure, checks []nadvalidate.CheckResult, trackerWanted, depConfigured, depAvailable bool, depReason, depMessage string) error {
+func (r *SiteReconciler) updateSiteConditions(ctx context.Context, site *keziov1alpha3.Site, invalid *siteValidationFailure, checks []nadvalidate.CheckResult, trackerWanted, depConfigured, depAvailable bool, depReason, depMessage string) error {
 	var violation, indeterminate *nadvalidate.CheckResult
 	for i := range checks {
 		c := &checks[i]
@@ -386,7 +386,7 @@ func (r *SiteReconciler) updateSiteConditions(ctx context.Context, site *keziov1
 		validStatus, validReason, validMessage = metav1.ConditionUnknown, indeterminate.Reason, indeterminate.Message
 	}
 	apimeta.SetStatusCondition(&site.Status.Conditions, metav1.Condition{
-		Type:               keziov1alpha2.SiteConditionValid,
+		Type:               keziov1alpha3.SiteConditionValid,
 		Status:             validStatus,
 		Reason:             validReason,
 		Message:            validMessage,
@@ -407,7 +407,7 @@ func (r *SiteReconciler) updateSiteConditions(ctx context.Context, site *keziov1
 		readyReason, readyMessage = "SiteTrackerReady", "tracker Deployment is available and validation found no issues"
 	}
 	apimeta.SetStatusCondition(&site.Status.Conditions, metav1.Condition{
-		Type:               keziov1alpha2.SiteConditionReady,
+		Type:               keziov1alpha3.SiteConditionReady,
 		Status:             readyStatus,
 		Reason:             readyReason,
 		Message:            readyMessage,
@@ -428,7 +428,7 @@ func (r *SiteReconciler) updateSiteConditions(ctx context.Context, site *keziov1
 // it eventually, the same trade-off SubnetReconciler accepts for NAD
 // watches.
 func (r *SiteReconciler) mapSubnetToSite(_ context.Context, obj client.Object) []reconcile.Request {
-	subnet, ok := obj.(*keziov1alpha2.Subnet)
+	subnet, ok := obj.(*keziov1alpha3.Subnet)
 	if !ok || subnet.Spec.SiteRef.Name == "" {
 		return nil
 	}
@@ -462,9 +462,9 @@ func (r *SiteReconciler) mapSeederDeploymentToSite(_ context.Context, obj client
 // mapSeederDeploymentToSite).
 func (r *SiteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&keziov1alpha2.Site{}).
+		For(&keziov1alpha3.Site{}).
 		Owns(&appsv1.Deployment{}).
-		Watches(&keziov1alpha2.Subnet{}, handler.EnqueueRequestsFromMapFunc(r.mapSubnetToSite)).
+		Watches(&keziov1alpha3.Subnet{}, handler.EnqueueRequestsFromMapFunc(r.mapSubnetToSite)).
 		Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(r.mapSeederDeploymentToSite)).
 		Named("site").
 		Complete(r)

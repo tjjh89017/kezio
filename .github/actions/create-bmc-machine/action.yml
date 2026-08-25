@@ -6,7 +6,7 @@ description: >-
   keys - internal/bmc/credentials.go's SecretKeyUsername/SecretKeyPassword)
   and the Machine CR pointing spec.bmc at a Redfish endpoint through it.
   No spec.imageRef: this action only enrolls the machine, it does not
-  request a deployment. Asserts the Machine is admitted (the v1alpha2
+  request a deployment. Asserts the Machine is admitted (the v1alpha3
   Machine validating webhook accepts spec.bmc/spec.subnetRef) and its
   status.state leaves "" within a short timeout - proof the controller
   observed it and entered the Enrolling walk. Does not wait for
@@ -98,7 +98,7 @@ runs:
       run: |
         set -euo pipefail
         machine_yaml="$(cat <<EOF
-        apiVersion: kezio.kojuro.date/v1alpha2
+        apiVersion: kezio.kojuro.date/v1alpha3
         kind: Machine
         metadata:
           name: ${MACHINE_NAME}

@@ -22,7 +22,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // newDeployCmd builds the top-level `kezioctl deploy` command.
@@ -55,9 +55,9 @@ repeated; it replaces spec.params wholesale as a flat string map.`,
 			if err != nil {
 				return err
 			}
-			postHookRefs := make([]keziov1alpha2.NameRef, 0, len(postHooks))
+			postHookRefs := make([]keziov1alpha3.NameRef, 0, len(postHooks))
 			for _, name := range postHooks {
-				postHookRefs = append(postHookRefs, keziov1alpha2.NameRef{Name: name})
+				postHookRefs = append(postHookRefs, keziov1alpha3.NameRef{Name: name})
 			}
 			paramMap, err := parseParamFlags(params)
 			if err != nil {
@@ -107,13 +107,13 @@ repeated; it replaces spec.params wholesale as a flat string map.`,
 // hint would need its own flag family, which this command does not offer -
 // use "machine set-disk" against a data image's own resolved disk after
 // inspection if that is ever needed.
-func parseDataImageFlags(names []string) ([]keziov1alpha2.MachineDataImage, error) {
-	images := make([]keziov1alpha2.MachineDataImage, 0, len(names))
+func parseDataImageFlags(names []string) ([]keziov1alpha3.MachineDataImage, error) {
+	images := make([]keziov1alpha3.MachineDataImage, 0, len(names))
 	for _, name := range names {
 		if name == "" {
 			return nil, fmt.Errorf("--data-image must not be empty")
 		}
-		images = append(images, keziov1alpha2.MachineDataImage{ImageRef: keziov1alpha2.NameRef{Name: name}})
+		images = append(images, keziov1alpha3.MachineDataImage{ImageRef: keziov1alpha3.NameRef{Name: name}})
 	}
 	return images, nil
 }

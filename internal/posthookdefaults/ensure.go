@@ -27,7 +27,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // FieldManager is the Server-Side Apply field manager identity Ensurer
@@ -42,7 +42,7 @@ const FieldManager = "kezio-manager"
 type applyBody struct {
 	metav1.TypeMeta `json:",inline"`
 	Metadata        applyBodyMetadata          `json:"metadata,omitempty"`
-	Spec            keziov1alpha2.PostHookSpec `json:"spec"`
+	Spec            keziov1alpha3.PostHookSpec `json:"spec"`
 }
 
 // applyBodyMetadata mirrors the JSON shape of the metav1.ObjectMeta fields
@@ -87,7 +87,7 @@ func (e *Ensurer) Start(ctx context.Context) error {
 // DefaultFinalizeHookName in namespace, creating it if absent.
 func (e *Ensurer) ensure(ctx context.Context, namespace string) error {
 	body := applyBody{
-		TypeMeta: metav1.TypeMeta{APIVersion: keziov1alpha2.GroupVersion.String(), Kind: "PostHook"},
+		TypeMeta: metav1.TypeMeta{APIVersion: keziov1alpha3.GroupVersion.String(), Kind: "PostHook"},
 		Metadata: applyBodyMetadata{Name: DefaultFinalizeHookName, Namespace: namespace},
 		Spec:     Spec(),
 	}
@@ -96,7 +96,7 @@ func (e *Ensurer) ensure(ctx context.Context, namespace string) error {
 		return fmt.Errorf("encoding apply body: %w", err)
 	}
 
-	ph := &keziov1alpha2.PostHook{
+	ph := &keziov1alpha3.PostHook{
 		ObjectMeta: metav1.ObjectMeta{Name: DefaultFinalizeHookName, Namespace: namespace},
 	}
 	patch := client.RawPatch(types.ApplyPatchType, data)

@@ -26,7 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 	"github.com/tjjh89017/kezio/internal/planbuild"
 	"github.com/tjjh89017/kezio/internal/posthookdefaults"
@@ -38,27 +38,27 @@ const nextPlanTestManagerNamespace = "kezio-system"
 // slot, cheap to resolve: no PartitionContent or seeder Deployment/Pod
 // lookup. The ESP slot is required for mustCreateDefaultPostHook's
 // default hook (efibootmgr) to resolve its derived "part" parameter.
-func blankDataImage(name, ns string) *keziov1alpha2.Image {
-	img := &keziov1alpha2.Image{
+func blankDataImage(name, ns string) *keziov1alpha3.Image {
+	img := &keziov1alpha3.Image{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: keziov1alpha2.ImageSpec{
-			Layout: keziov1alpha2.ImageDiskLayout{
-				PartitionTable: keziov1alpha2.PartitionTableGPT,
+		Spec: keziov1alpha3.ImageSpec{
+			Layout: keziov1alpha3.ImageDiskLayout{
+				PartitionTable: keziov1alpha3.PartitionTableGPT,
 				SfdiskJSON:     `{"partitiontable":{}}`,
-				Slots: []keziov1alpha2.ImageSlot{
-					{Number: 1, Role: keziov1alpha2.PartitionRoleESP, FSType: "vfat"},
-					{Number: 2, Role: keziov1alpha2.PartitionRoleData, FSType: "ext4"},
+				Slots: []keziov1alpha3.ImageSlot{
+					{Number: 1, Role: keziov1alpha3.PartitionRoleESP, FSType: "vfat"},
+					{Number: 2, Role: keziov1alpha3.PartitionRoleData, FSType: "ext4"},
 				},
 			},
 		},
 	}
-	img.Status.State = keziov1alpha2.ImageStateReady
+	img.Status.State = keziov1alpha3.ImageStateReady
 	return img
 }
 
 func mustCreateDefaultPostHook(t *testing.T, c client.Client) {
 	t.Helper()
-	ph := &keziov1alpha2.PostHook{
+	ph := &keziov1alpha3.PostHook{
 		ObjectMeta: metav1.ObjectMeta{Name: posthookdefaults.DefaultFinalizeHookName, Namespace: nextPlanTestManagerNamespace},
 		Spec:       posthookdefaults.Spec(),
 	}
@@ -66,7 +66,7 @@ func mustCreateDefaultPostHook(t *testing.T, c client.Client) {
 		t.Fatalf("create default posthook: %v", err)
 	}
 	apimeta.SetStatusCondition(&ph.Status.Conditions, metav1.Condition{
-		Type: keziov1alpha2.PostHookConditionValid, Status: metav1.ConditionTrue, Reason: "TestFixture", Message: "fixture",
+		Type: keziov1alpha3.PostHookConditionValid, Status: metav1.ConditionTrue, Reason: "TestFixture", Message: "fixture",
 	})
 	if err := c.Status().Update(t.Context(), ph); err != nil {
 		t.Fatalf("update default posthook status: %v", err)
@@ -76,23 +76,23 @@ func mustCreateDefaultPostHook(t *testing.T, c client.Client) {
 // newNextPlanTestMachine builds a Machine wired the same way
 // newTestMachineWithSession does (a live session, so /agent/next
 // authenticates), plus a resolvable deploy intent and a currentRunRef.
-func newNextPlanTestMachine(now time.Time) *keziov1alpha2.Machine {
+func newNextPlanTestMachine(now time.Time) *keziov1alpha3.Machine {
 	m := newTestMachineWithSession(now)
-	m.Spec.ImageRef = &keziov1alpha2.NameRef{Name: "img1"}
-	m.Status.CurrentRunRef = &keziov1alpha2.NameRef{Name: "run1"}
+	m.Spec.ImageRef = &keziov1alpha3.NameRef{Name: "img1"}
+	m.Status.CurrentRunRef = &keziov1alpha3.NameRef{Name: "run1"}
 	return m
 }
 
 func TestHandleNext_PendingRunAnswersDeployWithPlan(t *testing.T) {
 	now := time.Now()
 	machine := newNextPlanTestMachine(now)
-	hw := &keziov1alpha2.MachineHardware{
+	hw := &keziov1alpha3.MachineHardware{
 		ObjectMeta: metav1.ObjectMeta{Name: machine.Name, Namespace: machine.Namespace},
-		Spec:       keziov1alpha2.MachineHardwareSpec{Disks: []keziov1alpha2.MachineHardwareDisk{{DeviceName: "/dev/vda", SizeBytes: 32 << 30}}},
+		Spec:       keziov1alpha3.MachineHardwareSpec{Disks: []keziov1alpha3.MachineHardwareDisk{{DeviceName: "/dev/vda", SizeBytes: 32 << 30}}},
 	}
 	img := blankDataImage("img1", machine.Namespace)
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", Namespace: machine.Namespace}}
-	run.Status.Phase = keziov1alpha2.DeployRunPhasePending
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", Namespace: machine.Namespace}}
+	run.Status.Phase = keziov1alpha3.DeployRunPhasePending
 
 	s, c := newTestServer(t, now, machine, hw, img, run)
 	mustCreateDefaultPostHook(t, c)
@@ -136,8 +136,8 @@ func TestHandleNext_NoCurrentRunAnswersWait(t *testing.T) {
 func TestHandleNext_TerminalPhaseAnswersWait(t *testing.T) {
 	now := time.Now()
 	machine := newNextPlanTestMachine(now)
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", Namespace: machine.Namespace}}
-	run.Status.Phase = keziov1alpha2.DeployRunPhaseSucceeded
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", Namespace: machine.Namespace}}
+	run.Status.Phase = keziov1alpha3.DeployRunPhaseSucceeded
 
 	s, c := newTestServer(t, now, machine, run)
 	s.PlanBuilder = &planbuild.Builder{Client: c, ManagerNamespace: nextPlanTestManagerNamespace}
@@ -156,8 +156,8 @@ func TestHandleNext_BuildErrorAnswersWait(t *testing.T) {
 	now := time.Now()
 	machine := newNextPlanTestMachine(now)
 	// No MachineHardware, no Image: Build fails with a NotReadyError.
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", Namespace: machine.Namespace}}
-	run.Status.Phase = keziov1alpha2.DeployRunPhasePending
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", Namespace: machine.Namespace}}
+	run.Status.Phase = keziov1alpha3.DeployRunPhasePending
 
 	s, c := newTestServer(t, now, machine, run)
 	s.PlanBuilder = &planbuild.Builder{Client: c, ManagerNamespace: nextPlanTestManagerNamespace}
@@ -178,8 +178,8 @@ func TestHandleNext_BuildErrorAnswersWait(t *testing.T) {
 func TestHandleNext_NilPlanBuilderAnswersWait(t *testing.T) {
 	now := time.Now()
 	machine := newNextPlanTestMachine(now)
-	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", Namespace: machine.Namespace}}
-	run.Status.Phase = keziov1alpha2.DeployRunPhasePending
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run1", Namespace: machine.Namespace}}
+	run.Status.Phase = keziov1alpha3.DeployRunPhasePending
 	s, _ := newTestServer(t, now, machine, run) // s.PlanBuilder left nil
 
 	rec := doNext(s.Handler(), testSessionToken)

@@ -166,7 +166,7 @@ runs:
 
         trap 'dump_image_diagnostics "${NAMESPACE}" "${COMPOSED_IMAGE_NAME}"' ERR
         jq -n --arg name "${COMPOSED_IMAGE_NAME}" --arg ns "${NAMESPACE}" --argjson layout "${layout}" '{
-          apiVersion: "kezio.kojuro.date/v1alpha2",
+          apiVersion: "kezio.kojuro.date/v1alpha3",
           kind: "Image",
           metadata: {name: $name, namespace: $ns},
           spec: {layout: $layout}
@@ -229,7 +229,7 @@ runs:
           --from-literal=password=fake \
           --dry-run=client -o yaml | kubectl apply -f -
         cat <<EOF | kubectl apply -f -
-        apiVersion: kezio.kojuro.date/v1alpha2
+        apiVersion: kezio.kojuro.date/v1alpha3
         kind: Machine
         metadata:
           name: ${demand_machine}

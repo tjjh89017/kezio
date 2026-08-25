@@ -10,7 +10,7 @@ description: >-
   DeployRun once, after deploy-machine already waited for it to go
   terminal, so this makes no poll of its own.
 
-  Checks, against api/v1alpha2/deployrun_types.go's DeployRunStatus:
+  Checks, against api/v1alpha3/deployrun_types.go's DeployRunStatus:
   status.phase is "Succeeded"; status.conditions has a "Succeeded" entry
   with status "True"; status.partitions is non-empty and every entry's
   percent reached 100 (the type's own documented ceiling, so this is the

@@ -25,7 +25,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // imageDeletePollInterval is how often ImageDelete re-checks whether a
@@ -60,7 +60,7 @@ type ImageDeleteOptions struct {
 // this command does nothing beyond the delete call itself and, if asked,
 // waiting for the Image object to actually disappear.
 func ImageDelete(ctx context.Context, c client.Client, opts ImageDeleteOptions) error {
-	image := &keziov1alpha2.Image{}
+	image := &keziov1alpha3.Image{}
 	key := client.ObjectKey{Namespace: opts.Namespace, Name: opts.Name}
 	if err := c.Get(ctx, key, image); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -95,7 +95,7 @@ func waitForImageGone(ctx context.Context, c client.Client, opts ImageDeleteOpti
 	}
 
 	key := client.ObjectKey{Namespace: opts.Namespace, Name: opts.Name}
-	image := &keziov1alpha2.Image{}
+	image := &keziov1alpha3.Image{}
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 

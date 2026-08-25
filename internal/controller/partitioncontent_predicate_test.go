@@ -22,53 +22,53 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 func TestPartitionContentUpdatePredicateUpdate(t *testing.T) {
-	base := func() *keziov1alpha2.PartitionContent {
-		return &keziov1alpha2.PartitionContent{
+	base := func() *keziov1alpha3.PartitionContent {
+		return &keziov1alpha3.PartitionContent{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:            "pc-test",
 				Generation:      1,
 				Annotations:     map[string]string{"a": "1"},
 				ResourceVersion: "1",
 			},
-			Status: keziov1alpha2.PartitionContentStatus{State: keziov1alpha2.PartitionContentStatePending},
+			Status: keziov1alpha3.PartitionContentStatus{State: keziov1alpha3.PartitionContentStatePending},
 		}
 	}
 
 	cases := []struct {
 		name  string
-		newer func(*keziov1alpha2.PartitionContent)
+		newer func(*keziov1alpha3.PartitionContent)
 		want  bool
 	}{
 		{
 			name: "status-only self-write does not trigger",
-			newer: func(pc *keziov1alpha2.PartitionContent) {
-				pc.Status.State = keziov1alpha2.PartitionContentStatePublishing
+			newer: func(pc *keziov1alpha3.PartitionContent) {
+				pc.Status.State = keziov1alpha3.PartitionContentStatePublishing
 				pc.ResourceVersion = "2"
 			},
 			want: false,
 		},
 		{
 			name:  "generation bump triggers",
-			newer: func(pc *keziov1alpha2.PartitionContent) { pc.Generation = 2 },
+			newer: func(pc *keziov1alpha3.PartitionContent) { pc.Generation = 2 },
 			want:  true,
 		},
 		{
 			name:  "annotation change triggers",
-			newer: func(pc *keziov1alpha2.PartitionContent) { pc.Annotations["a"] = "2" },
+			newer: func(pc *keziov1alpha3.PartitionContent) { pc.Annotations["a"] = "2" },
 			want:  true,
 		},
 		{
 			name:  "finalizers change triggers",
-			newer: func(pc *keziov1alpha2.PartitionContent) { pc.Finalizers = append(pc.Finalizers, "extra/finalizer") },
+			newer: func(pc *keziov1alpha3.PartitionContent) { pc.Finalizers = append(pc.Finalizers, "extra/finalizer") },
 			want:  true,
 		},
 		{
 			name:  "no change at all does not trigger",
-			newer: func(*keziov1alpha2.PartitionContent) {},
+			newer: func(*keziov1alpha3.PartitionContent) {},
 			want:  false,
 		},
 	}
@@ -88,7 +88,7 @@ func TestPartitionContentUpdatePredicateUpdate(t *testing.T) {
 }
 
 func TestPartitionContentUpdatePredicateLeavesOtherEventsUnfiltered(t *testing.T) {
-	pc := &keziov1alpha2.PartitionContent{ObjectMeta: metav1.ObjectMeta{Name: "pc-test"}}
+	pc := &keziov1alpha3.PartitionContent{ObjectMeta: metav1.ObjectMeta{Name: "pc-test"}}
 
 	if !partitionContentUpdatePredicate.Create(event.CreateEvent{Object: pc}) {
 		t.Error("Create event must not be filtered")

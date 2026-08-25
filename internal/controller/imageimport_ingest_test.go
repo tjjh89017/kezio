@@ -30,7 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/ingest"
 	"github.com/tjjh89017/kezio/internal/store"
 )
@@ -44,11 +44,11 @@ func importTestChecksum(seq int) string {
 // newTestImageImport builds an (uncreated) ImageImport whose created Image
 // and content names are both derived from name, the way `kezioctl image
 // upload` defaults them.
-func newTestImageImport(name, sourceURL string, seq int) *keziov1alpha2.ImageImport {
-	return &keziov1alpha2.ImageImport{
+func newTestImageImport(name, sourceURL string, seq int) *keziov1alpha3.ImageImport {
+	return &keziov1alpha3.ImageImport{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-		Spec: keziov1alpha2.ImageImportSpec{
-			Source:        keziov1alpha2.ImportSource{URL: sourceURL, Checksum: importTestChecksum(seq)},
+		Spec: keziov1alpha3.ImageImportSpec{
+			Source:        keziov1alpha3.ImportSource{URL: sourceURL, Checksum: importTestChecksum(seq)},
 			ImageName:     name + "-image",
 			ContentPrefix: name,
 		},
@@ -62,12 +62,12 @@ func diskResult() ingest.Result {
 		Success: true,
 		Disk: &ingest.ResultDisk{
 			SizeBytes:      1 << 30,
-			PartitionTable: keziov1alpha2.PartitionTableGPT,
+			PartitionTable: keziov1alpha3.PartitionTableGPT,
 			SfdiskJSON:     `{"partitiontable":{"label":"gpt"}}`,
 			Partitions: []ingest.ResultPartition{
-				{Number: 1, Role: keziov1alpha2.PartitionRoleESP, FSType: "vfat", UsedBytes: 1024, SizeBytes: 4096, LastExtentEnd: 2048, PieceLength: 16384, TypeGUID: "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"},
-				{Number: 2, Role: keziov1alpha2.PartitionRoleData, FSType: "ext4", UsedBytes: 2048, SizeBytes: 8192, LastExtentEnd: 4096, PieceLength: 16384},
-				{Number: 3, Role: keziov1alpha2.PartitionRoleSwap, UUID: "11111111-1111-1111-1111-111111111111"},
+				{Number: 1, Role: keziov1alpha3.PartitionRoleESP, FSType: "vfat", UsedBytes: 1024, SizeBytes: 4096, LastExtentEnd: 2048, PieceLength: 16384, TypeGUID: "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"},
+				{Number: 2, Role: keziov1alpha3.PartitionRoleData, FSType: "ext4", UsedBytes: 2048, SizeBytes: 8192, LastExtentEnd: 4096, PieceLength: 16384},
+				{Number: 3, Role: keziov1alpha3.PartitionRoleSwap, UUID: "11111111-1111-1111-1111-111111111111"},
 			},
 		},
 	}
@@ -77,7 +77,7 @@ func diskResult() ingest.Result {
 // as its termination message - envtest runs no real Job controller or
 // kubelet, so this stands in for what a real ingest Job pod would report
 // (see readJobResult).
-func fakeIngestJobSucceeded(ctx context.Context, imp *keziov1alpha2.ImageImport, result ingest.Result) {
+func fakeIngestJobSucceeded(ctx context.Context, imp *keziov1alpha3.ImageImport, result ingest.Result) {
 	data, err := ingest.MarshalResult(result)
 	Expect(err).NotTo(HaveOccurred())
 	fakeIngestJobSucceededWithMessage(ctx, imp, string(data))
@@ -88,7 +88,7 @@ func fakeIngestJobSucceeded(ctx context.Context, imp *keziov1alpha2.ImageImport,
 // message - used to exercise readJobResult's error path for a malformed
 // or non-JSON message, which no real ingest binary would write but a
 // corrupted transport could.
-func fakeIngestJobSucceededWithMessage(ctx context.Context, imp *keziov1alpha2.ImageImport, message string) {
+func fakeIngestJobSucceededWithMessage(ctx context.Context, imp *keziov1alpha3.ImageImport, message string) {
 	var job batchv1.Job
 	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ingestJobName(imp), Namespace: imp.Namespace}, &job)).To(Succeed())
 	job.Status.Succeeded = 1
@@ -118,7 +118,7 @@ func fakeIngestJobSucceededWithMessage(ctx context.Context, imp *keziov1alpha2.I
 // fakeIngestJobSucceededNoPod fakes imp's ingest Job as succeeded with no
 // pod at all - readJobResult must still fail cleanly rather than leave the
 // import stuck.
-func fakeIngestJobSucceededNoPod(ctx context.Context, imp *keziov1alpha2.ImageImport) {
+func fakeIngestJobSucceededNoPod(ctx context.Context, imp *keziov1alpha3.ImageImport) {
 	var job batchv1.Job
 	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ingestJobName(imp), Namespace: imp.Namespace}, &job)).To(Succeed())
 	job.Status.Succeeded = 1
@@ -127,7 +127,7 @@ func fakeIngestJobSucceededNoPod(ctx context.Context, imp *keziov1alpha2.ImageIm
 
 // fakeIngestJobFailed fakes imp's ingest Job as terminally failed, the way
 // a real Job controller would report it.
-func fakeIngestJobFailed(ctx context.Context, imp *keziov1alpha2.ImageImport) {
+func fakeIngestJobFailed(ctx context.Context, imp *keziov1alpha3.ImageImport) {
 	var job batchv1.Job
 	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ingestJobName(imp), Namespace: imp.Namespace}, &job)).To(Succeed())
 	job.Status.Failed = 1
@@ -149,7 +149,7 @@ var _ = Describe("ImageImport Controller", func() {
 
 	// createImport creates imp, registers its cleanup, and returns the key
 	// every reconcile in these specs runs against.
-	createImport := func(imp *keziov1alpha2.ImageImport) types.NamespacedName {
+	createImport := func(imp *keziov1alpha3.ImageImport) types.NamespacedName {
 		Expect(k8sClient.Create(ctx, imp)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, imp) })
 		return types.NamespacedName{Name: imp.Name, Namespace: imp.Namespace}
@@ -163,10 +163,10 @@ var _ = Describe("ImageImport Controller", func() {
 		_, err := unconfigured.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		var got keziov1alpha2.ImageImport
+		var got keziov1alpha3.ImageImport
 		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
-		Expect(got.Status.State).To(Equal(keziov1alpha2.ImageImportStatePending))
-		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.ImageImportConditionReady)
+		Expect(got.Status.State).To(Equal(keziov1alpha3.ImageImportStatePending))
+		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha3.ImageImportConditionReady)
 		Expect(readyCond).NotTo(BeNil())
 		Expect(readyCond.Reason).To(Equal("IngestUnconfigured"))
 	})
@@ -230,10 +230,10 @@ var _ = Describe("ImageImport Controller", func() {
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		var got keziov1alpha2.ImageImport
+		var got keziov1alpha3.ImageImport
 		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
-		Expect(got.Status.State).To(Equal(keziov1alpha2.ImageImportStatePending))
-		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.ImageImportConditionReady)
+		Expect(got.Status.State).To(Equal(keziov1alpha3.ImageImportStatePending))
+		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha3.ImageImportConditionReady)
 		Expect(readyCond).NotTo(BeNil())
 		Expect(readyCond.Reason).To(Equal("StagingUnconfigured"))
 
@@ -252,7 +252,7 @@ var _ = Describe("ImageImport Controller", func() {
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		var pc1, pc2 keziov1alpha2.PartitionContent
+		var pc1, pc2 keziov1alpha3.PartitionContent
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: store.ContentName(imp.Spec.ContentPrefix, 1), Namespace: "default"}, &pc1)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, &pc1) })
 		Expect(pc1.Spec.FSType).To(Equal("vfat"))
@@ -264,26 +264,26 @@ var _ = Describe("ImageImport Controller", func() {
 		Expect(pc2.Spec.FSType).To(Equal("ext4"))
 
 		// The swap partition carries no content.
-		var swapPC keziov1alpha2.PartitionContent
+		var swapPC keziov1alpha3.PartitionContent
 		err = k8sClient.Get(ctx, types.NamespacedName{Name: store.ContentName(imp.Spec.ContentPrefix, 3), Namespace: "default"}, &swapPC)
 		Expect(apierrors.IsNotFound(err)).To(BeTrue())
 
-		var img keziov1alpha2.Image
+		var img keziov1alpha3.Image
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: imp.Spec.ImageName, Namespace: "default"}, &img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, &img) })
-		Expect(img.Spec.Layout.PartitionTable).To(Equal(keziov1alpha2.PartitionTableGPT))
+		Expect(img.Spec.Layout.PartitionTable).To(Equal(keziov1alpha3.PartitionTableGPT))
 		Expect(img.Spec.Layout.SfdiskJSON).To(Equal(`{"partitiontable":{"label":"gpt"}}`))
 		Expect(img.Spec.Layout.Slots).To(HaveLen(3))
-		Expect(img.Spec.Layout.Slots[0].Role).To(Equal(keziov1alpha2.PartitionRoleESP))
+		Expect(img.Spec.Layout.Slots[0].Role).To(Equal(keziov1alpha3.PartitionRoleESP))
 		Expect(img.Spec.Layout.Slots[0].ContentRef.Name).To(Equal(pc1.Name))
 		Expect(img.Spec.Layout.Slots[0].TypeGUID).To(Equal("c12a7328-f81f-11d2-ba4b-00a0c93ec93b"))
-		Expect(img.Spec.Layout.Slots[2].Role).To(Equal(keziov1alpha2.PartitionRoleSwap))
+		Expect(img.Spec.Layout.Slots[2].Role).To(Equal(keziov1alpha3.PartitionRoleSwap))
 		Expect(img.Spec.Layout.Slots[2].ContentRef).To(BeNil())
 		Expect(img.Spec.Layout.Slots[2].UUID).To(Equal("11111111-1111-1111-1111-111111111111"))
 
-		var got keziov1alpha2.ImageImport
+		var got keziov1alpha3.ImageImport
 		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
-		Expect(got.Status.State).To(Equal(keziov1alpha2.ImageImportStateReady))
+		Expect(got.Status.State).To(Equal(keziov1alpha3.ImageImportStateReady))
 		Expect(got.Status.ImageRef.Name).To(Equal(imp.Spec.ImageName))
 		Expect(got.Status.ContentRefs).To(HaveLen(2))
 	})
@@ -304,19 +304,19 @@ var _ = Describe("ImageImport Controller", func() {
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		var got keziov1alpha2.ImageImport
+		var got keziov1alpha3.ImageImport
 		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
-		Expect(got.Status.State).To(Equal(keziov1alpha2.ImageImportStateFailed))
-		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.ImageImportConditionReady)
+		Expect(got.Status.State).To(Equal(keziov1alpha3.ImageImportStateFailed))
+		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha3.ImageImportConditionReady)
 		Expect(readyCond).NotTo(BeNil())
 		Expect(readyCond.Message).To(ContainSubstring(squatter.Name))
 		Expect(readyCond.Message).To(ContainSubstring("immutable"))
 
-		var after keziov1alpha2.PartitionContent
+		var after keziov1alpha3.PartitionContent
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: squatter.Name, Namespace: "default"}, &after)).To(Succeed())
 		Expect(after.ResourceVersion).To(Equal(resourceVersionBefore), "the existing content must not be modified")
 
-		var img keziov1alpha2.Image
+		var img keziov1alpha3.Image
 		err = k8sClient.Get(ctx, types.NamespacedName{Name: imp.Spec.ImageName, Namespace: "default"}, &img)
 		Expect(apierrors.IsNotFound(err)).To(BeTrue())
 	})
@@ -325,8 +325,8 @@ var _ = Describe("ImageImport Controller", func() {
 		imp := newTestImageImport("import-image-taken", "https://example.test/disk.img", 7)
 		nn := createImport(imp)
 
-		squatter := newTestImageWithSlots(imp.Spec.ImageName, []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, FSType: "ext4"},
+		squatter := newTestImageWithSlots(imp.Spec.ImageName, []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, FSType: "ext4"},
 		})
 		Expect(k8sClient.Create(ctx, squatter)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, squatter) })
@@ -337,18 +337,18 @@ var _ = Describe("ImageImport Controller", func() {
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		var got keziov1alpha2.ImageImport
+		var got keziov1alpha3.ImageImport
 		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
-		Expect(got.Status.State).To(Equal(keziov1alpha2.ImageImportStateFailed))
-		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.ImageImportConditionReady)
+		Expect(got.Status.State).To(Equal(keziov1alpha3.ImageImportStateFailed))
+		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha3.ImageImportConditionReady)
 		Expect(readyCond).NotTo(BeNil())
 		Expect(readyCond.Message).To(ContainSubstring(imp.Spec.ImageName))
 
-		var after keziov1alpha2.Image
+		var after keziov1alpha3.Image
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: imp.Spec.ImageName, Namespace: "default"}, &after)).To(Succeed())
 		Expect(after.Spec.Layout.Slots).To(HaveLen(1), "the existing Image must be left untouched")
 		for i := int32(1); i <= 2; i++ {
-			var pc keziov1alpha2.PartitionContent
+			var pc keziov1alpha3.PartitionContent
 			if err := k8sClient.Get(ctx, types.NamespacedName{Name: store.ContentName(imp.Spec.ContentPrefix, i), Namespace: "default"}, &pc); err == nil {
 				DeferCleanup(func() { _ = k8sClient.Delete(ctx, &pc) })
 			}
@@ -365,10 +365,10 @@ var _ = Describe("ImageImport Controller", func() {
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		var got keziov1alpha2.ImageImport
+		var got keziov1alpha3.ImageImport
 		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
-		Expect(got.Status.State).To(Equal(keziov1alpha2.ImageImportStateFailed))
-		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.ImageImportConditionReady)
+		Expect(got.Status.State).To(Equal(keziov1alpha3.ImageImportStateFailed))
+		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha3.ImageImportConditionReady)
 		Expect(readyCond).NotTo(BeNil())
 		Expect(readyCond.Reason).To(Equal("ImportFailed"))
 	})
@@ -383,10 +383,10 @@ var _ = Describe("ImageImport Controller", func() {
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		var got keziov1alpha2.ImageImport
+		var got keziov1alpha3.ImageImport
 		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
-		Expect(got.Status.State).To(Equal(keziov1alpha2.ImageImportStateFailed))
-		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.ImageImportConditionReady)
+		Expect(got.Status.State).To(Equal(keziov1alpha3.ImageImportStateFailed))
+		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha3.ImageImportConditionReady)
 		Expect(readyCond.Message).To(ContainSubstring("ingest job reported failure: boom"))
 	})
 
@@ -400,10 +400,10 @@ var _ = Describe("ImageImport Controller", func() {
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		var got keziov1alpha2.ImageImport
+		var got keziov1alpha3.ImageImport
 		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
-		Expect(got.Status.State).To(Equal(keziov1alpha2.ImageImportStateFailed))
-		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.ImageImportConditionReady)
+		Expect(got.Status.State).To(Equal(keziov1alpha3.ImageImportStateFailed))
+		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha3.ImageImportConditionReady)
 		Expect(readyCond.Message).To(ContainSubstring("reading ingest result"))
 	})
 
@@ -417,10 +417,10 @@ var _ = Describe("ImageImport Controller", func() {
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		var got keziov1alpha2.ImageImport
+		var got keziov1alpha3.ImageImport
 		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
-		Expect(got.Status.State).To(Equal(keziov1alpha2.ImageImportStateFailed))
-		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.ImageImportConditionReady)
+		Expect(got.Status.State).To(Equal(keziov1alpha3.ImageImportStateFailed))
+		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha3.ImageImportConditionReady)
 		Expect(readyCond.Message).To(ContainSubstring("reading ingest result"))
 	})
 
@@ -437,10 +437,10 @@ var _ = Describe("ImageImport Controller", func() {
 		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 		Expect(err).NotTo(HaveOccurred())
 
-		var got keziov1alpha2.ImageImport
+		var got keziov1alpha3.ImageImport
 		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
-		Expect(got.Status.State).To(Equal(keziov1alpha2.ImageImportStateFailed))
-		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha2.ImageImportConditionReady)
+		Expect(got.Status.State).To(Equal(keziov1alpha3.ImageImportStateFailed))
+		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha3.ImageImportConditionReady)
 		Expect(readyCond.Message).To(ContainSubstring("partition table dump"))
 	})
 })

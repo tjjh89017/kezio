@@ -26,7 +26,7 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // TestEnsurer_EnvtestLifecycle exercises Ensurer.Start against a real API
@@ -39,7 +39,7 @@ func TestEnsurer_EnvtestLifecycle(t *testing.T) {
 	}
 
 	testScheme := scheme.Scheme
-	if err := keziov1alpha2.AddToScheme(testScheme); err != nil {
+	if err := keziov1alpha3.AddToScheme(testScheme); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
 	}
 
@@ -74,7 +74,7 @@ func TestEnsurer_EnvtestLifecycle(t *testing.T) {
 		t.Fatalf("ensure() first run: %v", err)
 	}
 
-	var got keziov1alpha2.PostHook
+	var got keziov1alpha3.PostHook
 	key := ctrlclient.ObjectKey{Name: DefaultFinalizeHookName, Namespace: namespace}
 	if err := rawClient.Get(ctx, key, &got); err != nil {
 		t.Fatalf("Get after first ensure(): %v", err)
@@ -90,8 +90,8 @@ func TestEnsurer_EnvtestLifecycle(t *testing.T) {
 	assertShippedSteps(t, got.Spec)
 
 	// A user edits the spec directly.
-	got.Spec.Steps = []keziov1alpha2.PostHookStep{
-		{OSFamily: keziov1alpha2.OSFamilyLinux, Builtin: &keziov1alpha2.PostHookBuiltinStep{Name: keziov1alpha2.BuiltinStepGrowLastPartition}},
+	got.Spec.Steps = []keziov1alpha3.PostHookStep{
+		{OSFamily: keziov1alpha3.OSFamilyLinux, Builtin: &keziov1alpha3.PostHookBuiltinStep{Name: keziov1alpha3.BuiltinStepGrowLastPartition}},
 	}
 	if err := rawClient.Update(ctx, &got); err != nil {
 		t.Fatalf("user Update: %v", err)
@@ -106,7 +106,7 @@ func TestEnsurer_EnvtestLifecycle(t *testing.T) {
 	assertShippedSteps(t, got.Spec)
 }
 
-func assertShippedSteps(t *testing.T, got keziov1alpha2.PostHookSpec) {
+func assertShippedSteps(t *testing.T, got keziov1alpha3.PostHookSpec) {
 	t.Helper()
 	want := Spec()
 	if len(got.Steps) != len(want.Steps) {

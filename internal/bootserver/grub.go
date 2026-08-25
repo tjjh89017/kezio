@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"strings"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/bootd"
 )
 
@@ -122,7 +122,7 @@ func GrubNetPath(serverURL, filePath string) (string, error) {
 // address instead of one manager-wide default. ok is false when subnet is
 // nil or declares no boot half (SubnetSpec.HasBootPlane), the caller's
 // signal to keep the manager-wide Config.ServerURL/AgentServerURL.
-func subnetBootBaseURL(subnet *keziov1alpha2.Subnet) (baseURL string, ok bool) {
+func subnetBootBaseURL(subnet *keziov1alpha3.Subnet) (baseURL string, ok bool) {
 	if subnet == nil || !subnet.Spec.HasBootPlane() {
 		return "", false
 	}

@@ -31,7 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/ingest"
 	"github.com/tjjh89017/kezio/internal/planbuild"
 	"github.com/tjjh89017/kezio/internal/seederdeploy"
@@ -50,19 +50,19 @@ func imageSeederTestHash(seq int) string {
 // both in "default". Returns the Site's identity string
 // (sitederive.SiteIdentity's format).
 func mustCreateSeedingSite(ctx context.Context, subnetName, siteName string) string {
-	subnet := &keziov1alpha2.Subnet{
+	subnet := &keziov1alpha3.Subnet{
 		ObjectMeta: metav1.ObjectMeta{Name: subnetName, Namespace: "default"},
-		Spec: keziov1alpha2.SubnetSpec{
-			SiteRef:          keziov1alpha2.NameRef{Name: siteName},
+		Spec: keziov1alpha3.SubnetSpec{
+			SiteRef:          keziov1alpha3.NameRef{Name: siteName},
 			CIDR:             "198.51.100.0/24",
-			SeederNetworkRef: &keziov1alpha2.NameRef{Name: subnetName + "-nad"},
+			SeederNetworkRef: &keziov1alpha3.NameRef{Name: subnetName + "-nad"},
 		},
 	}
 	Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
 
-	site := &keziov1alpha2.Site{
+	site := &keziov1alpha3.Site{
 		ObjectMeta: metav1.ObjectMeta{Name: siteName, Namespace: "default"},
-		Spec:       keziov1alpha2.SiteSpec{SeederSubnetRef: &keziov1alpha2.NameRef{Name: subnetName}},
+		Spec:       keziov1alpha3.SiteSpec{SeederSubnetRef: &keziov1alpha3.NameRef{Name: subnetName}},
 	}
 	Expect(k8sClient.Create(ctx, site)).To(Succeed())
 
@@ -74,7 +74,7 @@ func mustCreateSeedingSite(ctx context.Context, subnetName, siteName string) str
 // it, the same way mustCreatePodForDeployment stands in for a scheduled
 // pod.
 func mustSetSiteTrackerURL(ctx context.Context, siteName, trackerURL string) {
-	var site keziov1alpha2.Site
+	var site keziov1alpha3.Site
 	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: siteName, Namespace: "default"}, &site)).To(Succeed())
 	site.Status.TrackerURL = trackerURL
 	Expect(k8sClient.Status().Update(ctx, &site)).To(Succeed())
@@ -83,14 +83,14 @@ func mustSetSiteTrackerURL(ctx context.Context, siteName, trackerURL string) {
 // mustCreateMachineSubnet creates a boot-plane Subnet a Machine can name
 // in spec.subnetRef, belonging to siteName.
 func mustCreateMachineSubnet(ctx context.Context, subnetName, siteName string) {
-	subnet := &keziov1alpha2.Subnet{
+	subnet := &keziov1alpha3.Subnet{
 		ObjectMeta: metav1.ObjectMeta{Name: subnetName, Namespace: "default"},
-		Spec: keziov1alpha2.SubnetSpec{
-			SiteRef:         keziov1alpha2.NameRef{Name: siteName},
+		Spec: keziov1alpha3.SubnetSpec{
+			SiteRef:         keziov1alpha3.NameRef{Name: siteName},
 			CIDR:            "192.0.2.0/24",
 			BootdServerIP:   "192.0.2.2",
-			BootdNetworkRef: &keziov1alpha2.NameRef{Name: subnetName + "-bootd-nad"},
-			DHCP:            &keziov1alpha2.SubnetDHCP{Mode: keziov1alpha2.SubnetDHCPModeProxy},
+			BootdNetworkRef: &keziov1alpha3.NameRef{Name: subnetName + "-bootd-nad"},
+			DHCP:            &keziov1alpha3.SubnetDHCP{Mode: keziov1alpha3.SubnetDHCPModeProxy},
 		},
 	}
 	Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
@@ -100,16 +100,16 @@ func mustCreateMachineSubnet(ctx context.Context, subnetName, siteName string) {
 // and subnetName - the minimal shape sitederive.Resolve needs, mirroring
 // newTestMachine but with a caller-chosen subnetRef instead of a
 // never-resolved placeholder.
-func newTestMachineOnSubnet(name, imageName, subnetName string) *keziov1alpha2.Machine {
-	return &keziov1alpha2.Machine{
+func newTestMachineOnSubnet(name, imageName, subnetName string) *keziov1alpha3.Machine {
+	return &keziov1alpha3.Machine{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-		Spec: keziov1alpha2.MachineSpec{
-			BMC: keziov1alpha2.MachineBMC{
+		Spec: keziov1alpha3.MachineSpec{
+			BMC: keziov1alpha3.MachineBMC{
 				Address:              "redfish://198.51.100.10/redfish/v1/Systems/1",
-				CredentialsSecretRef: keziov1alpha2.SecretReference{Name: name + "-bmc-creds"},
+				CredentialsSecretRef: keziov1alpha3.SecretReference{Name: name + "-bmc-creds"},
 			},
-			ImageRef:  &keziov1alpha2.NameRef{Name: imageName},
-			SubnetRef: keziov1alpha2.NameRef{Name: subnetName},
+			ImageRef:  &keziov1alpha3.NameRef{Name: imageName},
+			SubnetRef: keziov1alpha3.NameRef{Name: subnetName},
 		},
 	}
 }
@@ -133,8 +133,8 @@ var _ = Describe("Image Controller seeder placement", func() {
 		contentName := "pc-" + imageSeederTestHash(701)
 		createReadyContent(ctx, contentName)
 
-		img := newTestImageWithSlots("image-701", []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		img := newTestImageWithSlots("image-701", []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentName}},
 		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
@@ -190,8 +190,8 @@ var _ = Describe("Image Controller seeder placement", func() {
 		contentName := "pc-" + imageSeederTestHash(702)
 		createReadyContent(ctx, contentName)
 
-		img := newTestImageWithSlots("image-702", []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		img := newTestImageWithSlots("image-702", []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentName}},
 		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
@@ -234,13 +234,13 @@ var _ = Describe("Image Controller seeder placement", func() {
 		createReadyContent(ctx, contentNameA)
 		createReadyContent(ctx, contentNameB)
 
-		imgA := newTestImageWithSlots("image-703a", []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentNameA}},
+		imgA := newTestImageWithSlots("image-703a", []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentNameA}},
 		})
 		Expect(k8sClient.Create(ctx, imgA)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, imgA) })
-		imgB := newTestImageWithSlots("image-703b", []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentNameB}},
+		imgB := newTestImageWithSlots("image-703b", []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentNameB}},
 		})
 		Expect(k8sClient.Create(ctx, imgB)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, imgB) })
@@ -292,15 +292,15 @@ var _ = Describe("Image Controller seeder placement", func() {
 		// pairs with both Deployments and both pods present at once, and
 		// pin that each resolves to its own pod's address, never the
 		// other's.
-		mhA := &keziov1alpha2.MachineHardware{
+		mhA := &keziov1alpha3.MachineHardware{
 			ObjectMeta: metav1.ObjectMeta{Name: "seeder-lookup-703a", Namespace: "default"},
-			Spec:       keziov1alpha2.MachineHardwareSpec{Disks: []keziov1alpha2.MachineHardwareDisk{{DeviceName: "/dev/vda", SizeBytes: 32 << 30}}},
+			Spec:       keziov1alpha3.MachineHardwareSpec{Disks: []keziov1alpha3.MachineHardwareDisk{{DeviceName: "/dev/vda", SizeBytes: 32 << 30}}},
 		}
 		Expect(k8sClient.Create(ctx, mhA)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, mhA) })
-		mhB := &keziov1alpha2.MachineHardware{
+		mhB := &keziov1alpha3.MachineHardware{
 			ObjectMeta: metav1.ObjectMeta{Name: "seeder-lookup-703b", Namespace: "default"},
-			Spec:       keziov1alpha2.MachineHardwareSpec{Disks: []keziov1alpha2.MachineHardwareDisk{{DeviceName: "/dev/vda", SizeBytes: 32 << 30}}},
+			Spec:       keziov1alpha3.MachineHardwareSpec{Disks: []keziov1alpha3.MachineHardwareDisk{{DeviceName: "/dev/vda", SizeBytes: 32 << 30}}},
 		}
 		Expect(k8sClient.Create(ctx, mhB)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, mhB) })
@@ -311,14 +311,14 @@ var _ = Describe("Image Controller seeder placement", func() {
 		// PostHook fixture.
 		builder := &planbuild.Builder{Client: k8sClient}
 
-		machineForA := &keziov1alpha2.Machine{
+		machineForA := &keziov1alpha3.Machine{
 			ObjectMeta: metav1.ObjectMeta{Name: mhA.Name, Namespace: "default"},
-			Spec: keziov1alpha2.MachineSpec{
-				DataImages: []keziov1alpha2.MachineDataImage{{ImageRef: keziov1alpha2.NameRef{Name: imgA.Name}}},
-				SubnetRef:  keziov1alpha2.NameRef{Name: "machine-subnet-703"},
+			Spec: keziov1alpha3.MachineSpec{
+				DataImages: []keziov1alpha3.MachineDataImage{{ImageRef: keziov1alpha3.NameRef{Name: imgA.Name}}},
+				SubnetRef:  keziov1alpha3.NameRef{Name: "machine-subnet-703"},
 			},
 		}
-		runA := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run-703a", UID: types.UID("run-703a")}}
+		runA := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run-703a", UID: types.UID("run-703a")}}
 		planA, _, err := builder.Build(ctx, machineForA, runA)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(planA.DataImages).To(HaveLen(1))
@@ -328,14 +328,14 @@ var _ = Describe("Image Controller seeder placement", func() {
 		Expect(torrentA.URL).To(ContainSubstring(podA.Status.PodIP), "must resolve to dep A's own pod")
 		Expect(torrentA.URL).NotTo(ContainSubstring(podB.Status.PodIP), "must never resolve to dep B's pod")
 
-		machineForB := &keziov1alpha2.Machine{
+		machineForB := &keziov1alpha3.Machine{
 			ObjectMeta: metav1.ObjectMeta{Name: mhB.Name, Namespace: "default"},
-			Spec: keziov1alpha2.MachineSpec{
-				DataImages: []keziov1alpha2.MachineDataImage{{ImageRef: keziov1alpha2.NameRef{Name: imgB.Name}}},
-				SubnetRef:  keziov1alpha2.NameRef{Name: "machine-subnet-703"},
+			Spec: keziov1alpha3.MachineSpec{
+				DataImages: []keziov1alpha3.MachineDataImage{{ImageRef: keziov1alpha3.NameRef{Name: imgB.Name}}},
+				SubnetRef:  keziov1alpha3.NameRef{Name: "machine-subnet-703"},
 			},
 		}
-		runB := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run-703b", UID: types.UID("run-703b")}}
+		runB := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run-703b", UID: types.UID("run-703b")}}
 		planB, _, err := builder.Build(ctx, machineForB, runB)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(planB.DataImages).To(HaveLen(1))
@@ -354,8 +354,8 @@ var _ = Describe("Image Controller seeder placement", func() {
 		contentName := "pc-" + imageSeederTestHash(708)
 		createReadyContent(ctx, contentName)
 
-		img := newTestImageWithSlots("image-708", []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		img := newTestImageWithSlots("image-708", []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentName}},
 		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
@@ -398,8 +398,8 @@ var _ = Describe("Image Controller seeder placement", func() {
 		contentName := "pc-" + imageSeederTestHash(709)
 		createReadyContent(ctx, contentName)
 
-		img := newTestImageWithSlots("image-709", []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		img := newTestImageWithSlots("image-709", []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentName}},
 		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
@@ -489,8 +489,8 @@ var _ = Describe("PartitionContent status seeder reflection", func() {
 		contentName := "pc-" + imageSeederTestHash(707)
 		pc := createReadyContent(ctx, contentName)
 
-		img := newTestImageWithSlots("image-707", []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		img := newTestImageWithSlots("image-707", []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentName}},
 		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
@@ -518,9 +518,9 @@ var _ = Describe("PartitionContent status seeder reflection", func() {
 		_, err = pr.Reconcile(ctx, reconcile.Request{NamespacedName: pcNN})
 		Expect(err).NotTo(HaveOccurred())
 
-		var got keziov1alpha2.PartitionContent
+		var got keziov1alpha3.PartitionContent
 		Expect(k8sClient.Get(ctx, pcNN, &got)).To(Succeed())
-		Expect(got.Status.Seeders).To(ConsistOf(keziov1alpha2.PartitionContentSeederSite{Site: siteIdentity, MachineCount: 1}))
+		Expect(got.Status.Seeders).To(ConsistOf(keziov1alpha3.PartitionContentSeederSite{Site: siteIdentity, MachineCount: 1}))
 		for _, s := range got.Status.Seeders {
 			Expect(s.Site).NotTo(Equal("default"), "must never report the retired placeholder site string")
 		}
@@ -541,8 +541,8 @@ var _ = Describe("Image Controller seeder demand grouping", func() {
 		contentName := "pc-" + imageSeederTestHash(705)
 		createReadyContent(ctx, contentName)
 
-		img := newTestImageWithSlots("image-705", []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		img := newTestImageWithSlots("image-705", []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentName}},
 		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
@@ -597,8 +597,8 @@ var _ = Describe("Image Controller seeder demand grouping", func() {
 		contentName := "pc-" + imageSeederTestHash(706)
 		createReadyContent(ctx, contentName)
 
-		img := newTestImageWithSlots("image-706", []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		img := newTestImageWithSlots("image-706", []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentName}},
 		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
@@ -635,8 +635,8 @@ var _ = Describe("Image Controller seeder degradation reporting", func() {
 		return &ImageReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Seeder: seeder}
 	}
 
-	mustGetImage := func(name string) *keziov1alpha2.Image {
-		var img keziov1alpha2.Image
+	mustGetImage := func(name string) *keziov1alpha3.Image {
+		var img keziov1alpha3.Image
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &img)).To(Succeed())
 		return &img
 	}
@@ -648,8 +648,8 @@ var _ = Describe("Image Controller seeder degradation reporting", func() {
 		contentName := "pc-" + imageSeederTestHash(710)
 		createReadyContent(ctx, contentName)
 
-		img := newTestImageWithSlots("image-710", []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		img := newTestImageWithSlots("image-710", []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentName}},
 		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
@@ -677,7 +677,7 @@ var _ = Describe("Image Controller seeder degradation reporting", func() {
 		Expect(dep.Annotations).To(HaveKey(imageSeederUnreadySinceAnnotation))
 
 		img = mustGetImage(img.Name)
-		cond := meta.FindStatusCondition(img.Status.Conditions, keziov1alpha2.ImageConditionSeederDegraded)
+		cond := meta.FindStatusCondition(img.Status.Conditions, keziov1alpha3.ImageConditionSeederDegraded)
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
 		Expect(cond.Reason).To(Equal("SeederPodUnready"))
@@ -698,7 +698,7 @@ var _ = Describe("Image Controller seeder degradation reporting", func() {
 		Expect(dep.Annotations).NotTo(HaveKey(imageSeederUnreadySinceAnnotation))
 
 		img = mustGetImage(img.Name)
-		Expect(meta.FindStatusCondition(img.Status.Conditions, keziov1alpha2.ImageConditionSeederDegraded)).To(BeNil())
+		Expect(meta.FindStatusCondition(img.Status.Conditions, keziov1alpha3.ImageConditionSeederDegraded)).To(BeNil())
 	})
 
 	It("leaves a foreign Deployment under the expected name untouched and reports it, never adopting it", func() {
@@ -708,8 +708,8 @@ var _ = Describe("Image Controller seeder degradation reporting", func() {
 		contentName := "pc-" + imageSeederTestHash(711)
 		createReadyContent(ctx, contentName)
 
-		img := newTestImageWithSlots("image-711", []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		img := newTestImageWithSlots("image-711", []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentName}},
 		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
@@ -750,7 +750,7 @@ var _ = Describe("Image Controller seeder degradation reporting", func() {
 		Expect(got.Spec.Template.Spec.Containers[0].Name).To(Equal("not-a-seeder"))
 
 		gotImg := mustGetImage(img.Name)
-		cond := meta.FindStatusCondition(gotImg.Status.Conditions, keziov1alpha2.ImageConditionSeederDegraded)
+		cond := meta.FindStatusCondition(gotImg.Status.Conditions, keziov1alpha3.ImageConditionSeederDegraded)
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
 		Expect(cond.Reason).To(Equal("SeederDeploymentForeignOwner"))
@@ -760,24 +760,24 @@ var _ = Describe("Image Controller seeder degradation reporting", func() {
 	It("still creates a seeder Deployment, with no Multus annotation, for a Site whose seeding Subnet has no seederNetworkRef, and does not report it as degraded", func() {
 		siteName := "site-712"
 		subnetName := "seed-subnet-712"
-		subnet := &keziov1alpha2.Subnet{
+		subnet := &keziov1alpha3.Subnet{
 			ObjectMeta: metav1.ObjectMeta{Name: subnetName, Namespace: "default"},
-			Spec: keziov1alpha2.SubnetSpec{
-				SiteRef: keziov1alpha2.NameRef{Name: siteName},
+			Spec: keziov1alpha3.SubnetSpec{
+				SiteRef: keziov1alpha3.NameRef{Name: siteName},
 				CIDR:    "198.51.100.0/24",
 				// A Subnet must declare at least one plane; this one keeps
 				// its boot half (shared with the machines it seeds) but
 				// deliberately carries no SeederNetworkRef, so the seeder
 				// still runs, just on the ordinary cluster network.
 				BootdServerIP:   "198.51.100.2",
-				BootdNetworkRef: &keziov1alpha2.NameRef{Name: subnetName + "-bootd-nad"},
-				DHCP:            &keziov1alpha2.SubnetDHCP{Mode: keziov1alpha2.SubnetDHCPModeProxy},
+				BootdNetworkRef: &keziov1alpha3.NameRef{Name: subnetName + "-bootd-nad"},
+				DHCP:            &keziov1alpha3.SubnetDHCP{Mode: keziov1alpha3.SubnetDHCPModeProxy},
 			},
 		}
 		Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
-		site := &keziov1alpha2.Site{
+		site := &keziov1alpha3.Site{
 			ObjectMeta: metav1.ObjectMeta{Name: siteName, Namespace: "default"},
-			Spec:       keziov1alpha2.SiteSpec{SeederSubnetRef: &keziov1alpha2.NameRef{Name: subnetName}},
+			Spec:       keziov1alpha3.SiteSpec{SeederSubnetRef: &keziov1alpha3.NameRef{Name: subnetName}},
 		}
 		Expect(k8sClient.Create(ctx, site)).To(Succeed())
 		siteIdentity := "default/" + siteName
@@ -786,8 +786,8 @@ var _ = Describe("Image Controller seeder degradation reporting", func() {
 		contentName := "pc-" + imageSeederTestHash(712)
 		createReadyContent(ctx, contentName)
 
-		img := newTestImageWithSlots("image-712", []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		img := newTestImageWithSlots("image-712", []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentName}},
 		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
@@ -806,13 +806,13 @@ var _ = Describe("Image Controller seeder degradation reporting", func() {
 		Expect(dep.Spec.Template.Annotations).NotTo(HaveKey(multusDefaultNetworkAnnotation))
 
 		gotImg := mustGetImage(img.Name)
-		Expect(meta.FindStatusCondition(gotImg.Status.Conditions, keziov1alpha2.ImageConditionSeederDegraded)).To(BeNil(),
+		Expect(meta.FindStatusCondition(gotImg.Status.Conditions, keziov1alpha3.ImageConditionSeederDegraded)).To(BeNil(),
 			"a seeding Subnet with no seederNetworkRef is a supported topology, not a degraded one")
 	})
 
 	It("creates no seeder Deployment for a Site with no seederSubnetRef at all, and names the unset reference on the Image", func() {
 		siteName := "site-713"
-		site := &keziov1alpha2.Site{
+		site := &keziov1alpha3.Site{
 			ObjectMeta: metav1.ObjectMeta{Name: siteName, Namespace: "default"},
 			// No SeederSubnetRef: this Site runs no seeder at all.
 		}
@@ -823,8 +823,8 @@ var _ = Describe("Image Controller seeder degradation reporting", func() {
 		contentName := "pc-" + imageSeederTestHash(713)
 		createReadyContent(ctx, contentName)
 
-		img := newTestImageWithSlots("image-713", []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		img := newTestImageWithSlots("image-713", []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentName}},
 		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
@@ -846,7 +846,7 @@ var _ = Describe("Image Controller seeder degradation reporting", func() {
 		}
 
 		gotImg := mustGetImage(img.Name)
-		cond := meta.FindStatusCondition(gotImg.Status.Conditions, keziov1alpha2.ImageConditionSeederDegraded)
+		cond := meta.FindStatusCondition(gotImg.Status.Conditions, keziov1alpha3.ImageConditionSeederDegraded)
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Status).To(Equal(metav1.ConditionTrue))
 		Expect(cond.Reason).To(Equal("SeederSubnetRefUnset"))
@@ -863,18 +863,18 @@ var _ = Describe("Image Controller seeder degradation reporting", func() {
 
 		siteName := "site-714"
 		subnetName := "seed-subnet-714"
-		subnet := &keziov1alpha2.Subnet{
+		subnet := &keziov1alpha3.Subnet{
 			ObjectMeta: metav1.ObjectMeta{Name: subnetName, Namespace: subnetNamespace},
-			Spec: keziov1alpha2.SubnetSpec{
-				SiteRef:          keziov1alpha2.NameRef{Name: siteName, Namespace: imageNamespace},
+			Spec: keziov1alpha3.SubnetSpec{
+				SiteRef:          keziov1alpha3.NameRef{Name: siteName, Namespace: imageNamespace},
 				CIDR:             "198.51.100.0/24",
-				SeederNetworkRef: &keziov1alpha2.NameRef{Name: subnetName + "-nad"},
+				SeederNetworkRef: &keziov1alpha3.NameRef{Name: subnetName + "-nad"},
 			},
 		}
 		Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
-		site := &keziov1alpha2.Site{
+		site := &keziov1alpha3.Site{
 			ObjectMeta: metav1.ObjectMeta{Name: siteName, Namespace: imageNamespace},
-			Spec:       keziov1alpha2.SiteSpec{SeederSubnetRef: &keziov1alpha2.NameRef{Name: subnetName, Namespace: subnetNamespace}},
+			Spec:       keziov1alpha3.SiteSpec{SeederSubnetRef: &keziov1alpha3.NameRef{Name: subnetName, Namespace: subnetNamespace}},
 		}
 		Expect(k8sClient.Create(ctx, site)).To(Succeed())
 		siteIdentity := imageNamespace + "/" + siteName
@@ -883,8 +883,8 @@ var _ = Describe("Image Controller seeder degradation reporting", func() {
 		contentName := "pc-" + imageSeederTestHash(714)
 		createReadyContent(ctx, contentName)
 
-		img := newTestImageWithSlots("image-714", []keziov1alpha2.ImageSlot{
-			{Number: 1, Role: keziov1alpha2.PartitionRoleData, ContentRef: &keziov1alpha2.NameRef{Name: contentName}},
+		img := newTestImageWithSlots("image-714", []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentName}},
 		})
 		Expect(k8sClient.Create(ctx, img)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })

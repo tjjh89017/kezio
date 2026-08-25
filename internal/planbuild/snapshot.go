@@ -22,7 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 )
 
@@ -35,7 +35,7 @@ import (
 type Snapshot struct {
 	// ResolvedDisks records which disk each image (the OS image, then
 	// each dataImages entry, in order) resolved to.
-	ResolvedDisks []keziov1alpha2.DeployRunResolvedDisk
+	ResolvedDisks []keziov1alpha3.DeployRunResolvedDisk
 	// HooksHash is a content hash of every resolved PostHook step, so the
 	// provisioning trigger can detect a hook change without storing the
 	// resolved hook content itself.
@@ -45,7 +45,7 @@ type Snapshot struct {
 // ApplySnapshot writes snap into run.Spec. Call it only before run is
 // created - DeployRunSpec's own XValidation rule rejects any change to
 // an already-stored value.
-func ApplySnapshot(run *keziov1alpha2.DeployRun, snap Snapshot) {
+func ApplySnapshot(run *keziov1alpha3.DeployRun, snap Snapshot) {
 	run.Spec.ResolvedDisks = snap.ResolvedDisks
 	run.Spec.HooksHash = snap.HooksHash
 }

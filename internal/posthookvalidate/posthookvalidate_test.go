@@ -19,19 +19,19 @@ package posthookvalidate
 import (
 	"testing"
 
-	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
-func validBuiltinStep() keziov1alpha2.PostHookStep {
-	return keziov1alpha2.PostHookStep{
-		Builtin: &keziov1alpha2.PostHookBuiltinStep{Name: keziov1alpha2.BuiltinStepInstallRemovableFallback},
+func validBuiltinStep() keziov1alpha3.PostHookStep {
+	return keziov1alpha3.PostHookStep{
+		Builtin: &keziov1alpha3.PostHookBuiltinStep{Name: keziov1alpha3.BuiltinStepInstallRemovableFallback},
 	}
 }
 
 func TestValidateParams(t *testing.T) {
 	tests := []struct {
 		name    string
-		params  []keziov1alpha2.PostHookParam
+		params  []keziov1alpha3.PostHookParam
 		wantErr string
 	}{
 		{
@@ -40,13 +40,13 @@ func TestValidateParams(t *testing.T) {
 		},
 		{
 			name: "unique names",
-			params: []keziov1alpha2.PostHookParam{
+			params: []keziov1alpha3.PostHookParam{
 				{Name: "a"}, {Name: "b"},
 			},
 		},
 		{
 			name: "duplicate name",
-			params: []keziov1alpha2.PostHookParam{
+			params: []keziov1alpha3.PostHookParam{
 				{Name: "a"}, {Name: "a"},
 			},
 			wantErr: `spec.params[1]: duplicate param name "a"`,
@@ -78,12 +78,12 @@ func TestValidateStep(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		step    keziov1alpha2.PostHookStep
+		step    keziov1alpha3.PostHookStep
 		wantErr string
 	}{
 		{
 			name:    "no kind set",
-			step:    keziov1alpha2.PostHookStep{},
+			step:    keziov1alpha3.PostHookStep{},
 			wantErr: "spec.steps[0]: exactly one of builtin or script must be set",
 		},
 		{
@@ -92,59 +92,59 @@ func TestValidateStep(t *testing.T) {
 		},
 		{
 			name: "restricted builtin without osFamily",
-			step: keziov1alpha2.PostHookStep{
-				Builtin: &keziov1alpha2.PostHookBuiltinStep{Name: keziov1alpha2.BuiltinStepMkswap},
+			step: keziov1alpha3.PostHookStep{
+				Builtin: &keziov1alpha3.PostHookBuiltinStep{Name: keziov1alpha3.BuiltinStepMkswap},
 			},
 			wantErr: `spec.steps[0].builtin: "mkswap" requires osFamily to be set to "Linux", got ""`,
 		},
 		{
 			name: "restricted builtin with wrong osFamily",
-			step: keziov1alpha2.PostHookStep{
-				OSFamily: keziov1alpha2.OSFamilyWindows,
-				Builtin:  &keziov1alpha2.PostHookBuiltinStep{Name: keziov1alpha2.BuiltinStepEfibootmgr},
+			step: keziov1alpha3.PostHookStep{
+				OSFamily: keziov1alpha3.OSFamilyWindows,
+				Builtin:  &keziov1alpha3.PostHookBuiltinStep{Name: keziov1alpha3.BuiltinStepEfibootmgr},
 			},
 			wantErr: `spec.steps[0].builtin: "efibootmgr" requires osFamily to be set to "Linux", got "Windows"`,
 		},
 		{
 			name: "restricted builtin with osFamily linux",
-			step: keziov1alpha2.PostHookStep{
-				OSFamily: keziov1alpha2.OSFamilyLinux,
-				Builtin:  &keziov1alpha2.PostHookBuiltinStep{Name: keziov1alpha2.BuiltinStepGrowLastPartition},
+			step: keziov1alpha3.PostHookStep{
+				OSFamily: keziov1alpha3.OSFamilyLinux,
+				Builtin:  &keziov1alpha3.PostHookBuiltinStep{Name: keziov1alpha3.BuiltinStepGrowLastPartition},
 			},
 		},
 		{
 			name: "script with declared placeholder",
-			step: keziov1alpha2.PostHookStep{
-				Script: &keziov1alpha2.PostHookScriptSource{Script: "echo {{ .foo }}"},
+			step: keziov1alpha3.PostHookStep{
+				Script: &keziov1alpha3.PostHookScriptSource{Script: "echo {{ .foo }}"},
 			},
 		},
 		{
 			name: "script with reserved placeholder",
-			step: keziov1alpha2.PostHookStep{
-				Script: &keziov1alpha2.PostHookScriptSource{Script: "echo {{ .machineName }}"},
+			step: keziov1alpha3.PostHookStep{
+				Script: &keziov1alpha3.PostHookScriptSource{Script: "echo {{ .machineName }}"},
 			},
 		},
 		{
 			name: "script with undeclared placeholder",
-			step: keziov1alpha2.PostHookStep{
-				Script: &keziov1alpha2.PostHookScriptSource{Script: "echo {{ .bogus }}"},
+			step: keziov1alpha3.PostHookStep{
+				Script: &keziov1alpha3.PostHookScriptSource{Script: "echo {{ .bogus }}"},
 			},
 			wantErr: `spec.steps[0].script.script: placeholder "bogus" does not reference a declared param or a reserved name (machineName, imageName, targetDisk)`,
 		},
 		{
 			name: "builtin with allowed param",
-			step: keziov1alpha2.PostHookStep{
-				Builtin: &keziov1alpha2.PostHookBuiltinStep{
-					Name:   keziov1alpha2.BuiltinStepInstallRemovableFallback,
+			step: keziov1alpha3.PostHookStep{
+				Builtin: &keziov1alpha3.PostHookBuiltinStep{
+					Name:   keziov1alpha3.BuiltinStepInstallRemovableFallback,
 					Params: map[string]string{"disk": "/dev/sda", "part": "1"},
 				},
 			},
 		},
 		{
 			name: "builtin with unknown param key",
-			step: keziov1alpha2.PostHookStep{
-				Builtin: &keziov1alpha2.PostHookBuiltinStep{
-					Name:   keziov1alpha2.BuiltinStepInstallRemovableFallback,
+			step: keziov1alpha3.PostHookStep{
+				Builtin: &keziov1alpha3.PostHookBuiltinStep{
+					Name:   keziov1alpha3.BuiltinStepInstallRemovableFallback,
 					Params: map[string]string{"bogus": "x"},
 				},
 			},
@@ -152,10 +152,10 @@ func TestValidateStep(t *testing.T) {
 		},
 		{
 			name: "mkswap rejects any param",
-			step: keziov1alpha2.PostHookStep{
-				OSFamily: keziov1alpha2.OSFamilyLinux,
-				Builtin: &keziov1alpha2.PostHookBuiltinStep{
-					Name:   keziov1alpha2.BuiltinStepMkswap,
+			step: keziov1alpha3.PostHookStep{
+				OSFamily: keziov1alpha3.OSFamilyLinux,
+				Builtin: &keziov1alpha3.PostHookBuiltinStep{
+					Name:   keziov1alpha3.BuiltinStepMkswap,
 					Params: map[string]string{"disk": "/dev/sda"},
 				},
 			},
@@ -163,18 +163,18 @@ func TestValidateStep(t *testing.T) {
 		},
 		{
 			name: "builtin param with declared placeholder",
-			step: keziov1alpha2.PostHookStep{
-				Builtin: &keziov1alpha2.PostHookBuiltinStep{
-					Name:   keziov1alpha2.BuiltinStepInstallRemovableFallback,
+			step: keziov1alpha3.PostHookStep{
+				Builtin: &keziov1alpha3.PostHookBuiltinStep{
+					Name:   keziov1alpha3.BuiltinStepInstallRemovableFallback,
 					Params: map[string]string{"disk": "{{ .foo }}"},
 				},
 			},
 		},
 		{
 			name: "builtin param with undeclared placeholder",
-			step: keziov1alpha2.PostHookStep{
-				Builtin: &keziov1alpha2.PostHookBuiltinStep{
-					Name:   keziov1alpha2.BuiltinStepInstallRemovableFallback,
+			step: keziov1alpha3.PostHookStep{
+				Builtin: &keziov1alpha3.PostHookBuiltinStep{
+					Name:   keziov1alpha3.BuiltinStepInstallRemovableFallback,
 					Params: map[string]string{"disk": "{{ .bogus }}"},
 				},
 			},
@@ -182,24 +182,24 @@ func TestValidateStep(t *testing.T) {
 		},
 		{
 			name: "growLastPartition allows disk, partition, fsType",
-			step: keziov1alpha2.PostHookStep{
-				OSFamily: keziov1alpha2.OSFamilyLinux,
-				Builtin: &keziov1alpha2.PostHookBuiltinStep{
-					Name:   keziov1alpha2.BuiltinStepGrowLastPartition,
+			step: keziov1alpha3.PostHookStep{
+				OSFamily: keziov1alpha3.OSFamilyLinux,
+				Builtin: &keziov1alpha3.PostHookBuiltinStep{
+					Name:   keziov1alpha3.BuiltinStepGrowLastPartition,
 					Params: map[string]string{"disk": "/dev/sda", "partition": "3", "fsType": "ext4"},
 				},
 			},
 		},
 		{
 			name: "script sourced from configMapRef skips placeholder checks",
-			step: keziov1alpha2.PostHookStep{
-				Script: &keziov1alpha2.PostHookScriptSource{ConfigMapRef: &keziov1alpha2.ConfigMapKeyRef{Name: "cm", Key: "run.sh"}},
+			step: keziov1alpha3.PostHookStep{
+				Script: &keziov1alpha3.PostHookScriptSource{ConfigMapRef: &keziov1alpha3.ConfigMapKeyRef{Name: "cm", Key: "run.sh"}},
 			},
 		},
 		{
 			name: "script with no source set",
-			step: keziov1alpha2.PostHookStep{
-				Script: &keziov1alpha2.PostHookScriptSource{},
+			step: keziov1alpha3.PostHookStep{
+				Script: &keziov1alpha3.PostHookScriptSource{},
 			},
 			wantErr: "spec.steps[0].script: exactly one of script, configMapRef, or secretRef must be set",
 		},
@@ -221,7 +221,7 @@ func TestValidateStep(t *testing.T) {
 }
 
 func TestDeclaredPlaceholderNames(t *testing.T) {
-	names := DeclaredPlaceholderNames([]keziov1alpha2.PostHookParam{{Name: "foo"}})
+	names := DeclaredPlaceholderNames([]keziov1alpha3.PostHookParam{{Name: "foo"}})
 	for _, want := range []string{"foo", "machineName", "imageName", "targetDisk"} {
 		if !names[want] {
 			t.Errorf("expected %q to be a declared placeholder name", want)
@@ -235,57 +235,57 @@ func TestDeclaredPlaceholderNames(t *testing.T) {
 func TestCheckOSFamilyCompatible(t *testing.T) {
 	tests := []struct {
 		name    string
-		steps   []keziov1alpha2.PostHookStep
+		steps   []keziov1alpha3.PostHookStep
 		image   string
 		wantErr string
 	}{
 		{
 			name:  "no steps",
 			steps: nil,
-			image: keziov1alpha2.OSFamilyLinux,
+			image: keziov1alpha3.OSFamilyLinux,
 		},
 		{
 			name: "step with no osFamily applies regardless",
-			steps: []keziov1alpha2.PostHookStep{
-				{Script: &keziov1alpha2.PostHookScriptSource{Script: "echo hi"}},
+			steps: []keziov1alpha3.PostHookStep{
+				{Script: &keziov1alpha3.PostHookScriptSource{Script: "echo hi"}},
 			},
-			image: keziov1alpha2.OSFamilyWindows,
+			image: keziov1alpha3.OSFamilyWindows,
 		},
 		{
 			name: "matching explicit osFamily",
-			steps: []keziov1alpha2.PostHookStep{
-				{OSFamily: keziov1alpha2.OSFamilyLinux, Script: &keziov1alpha2.PostHookScriptSource{Script: "echo hi"}},
+			steps: []keziov1alpha3.PostHookStep{
+				{OSFamily: keziov1alpha3.OSFamilyLinux, Script: &keziov1alpha3.PostHookScriptSource{Script: "echo hi"}},
 			},
-			image: keziov1alpha2.OSFamilyLinux,
+			image: keziov1alpha3.OSFamilyLinux,
 		},
 		{
 			name: "mismatched explicit osFamily on a script step",
-			steps: []keziov1alpha2.PostHookStep{
-				{OSFamily: keziov1alpha2.OSFamilyWindows, Script: &keziov1alpha2.PostHookScriptSource{Script: "echo hi"}},
+			steps: []keziov1alpha3.PostHookStep{
+				{OSFamily: keziov1alpha3.OSFamilyWindows, Script: &keziov1alpha3.PostHookScriptSource{Script: "echo hi"}},
 			},
-			image:   keziov1alpha2.OSFamilyLinux,
+			image:   keziov1alpha3.OSFamilyLinux,
 			wantErr: `spec.steps[0]: osFamily "Windows" is incompatible with the image's osFamily "Linux"`,
 		},
 		{
 			name: "script step with no osFamily applies regardless, no error",
-			steps: []keziov1alpha2.PostHookStep{
-				{Script: &keziov1alpha2.PostHookScriptSource{Script: "echo hi"}},
+			steps: []keziov1alpha3.PostHookStep{
+				{Script: &keziov1alpha3.PostHookScriptSource{Script: "echo hi"}},
 			},
-			image: keziov1alpha2.OSFamilyWindows,
+			image: keziov1alpha3.OSFamilyWindows,
 		},
 		{
 			name: "the offending step is named when it is not the first one",
-			steps: []keziov1alpha2.PostHookStep{
-				{OSFamily: keziov1alpha2.OSFamilyLinux, Script: &keziov1alpha2.PostHookScriptSource{Script: "echo hi"}},
-				{OSFamily: keziov1alpha2.OSFamilyWindows, Script: &keziov1alpha2.PostHookScriptSource{Script: "echo bye"}},
+			steps: []keziov1alpha3.PostHookStep{
+				{OSFamily: keziov1alpha3.OSFamilyLinux, Script: &keziov1alpha3.PostHookScriptSource{Script: "echo hi"}},
+				{OSFamily: keziov1alpha3.OSFamilyWindows, Script: &keziov1alpha3.PostHookScriptSource{Script: "echo bye"}},
 			},
-			image:   keziov1alpha2.OSFamilyLinux,
+			image:   keziov1alpha3.OSFamilyLinux,
 			wantErr: `spec.steps[1]: osFamily "Windows" is incompatible with the image's osFamily "Linux"`,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			hook := &keziov1alpha2.PostHook{Spec: keziov1alpha2.PostHookSpec{Steps: tt.steps}}
+			hook := &keziov1alpha3.PostHook{Spec: keziov1alpha3.PostHookSpec{Steps: tt.steps}}
 			err := CheckOSFamilyCompatible(hook, tt.image)
 			if tt.wantErr == "" {
 				if err != nil {
@@ -301,18 +301,18 @@ func TestCheckOSFamilyCompatible(t *testing.T) {
 }
 
 func TestValidate(t *testing.T) {
-	valid := &keziov1alpha2.PostHook{
-		Spec: keziov1alpha2.PostHookSpec{
-			Steps: []keziov1alpha2.PostHookStep{validBuiltinStep()},
+	valid := &keziov1alpha3.PostHook{
+		Spec: keziov1alpha3.PostHookSpec{
+			Steps: []keziov1alpha3.PostHookStep{validBuiltinStep()},
 		},
 	}
 	if err := Validate(valid); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	invalid := &keziov1alpha2.PostHook{
-		Spec: keziov1alpha2.PostHookSpec{
-			Steps: []keziov1alpha2.PostHookStep{{}},
+	invalid := &keziov1alpha3.PostHook{
+		Spec: keziov1alpha3.PostHookSpec{
+			Steps: []keziov1alpha3.PostHookStep{{}},
 		},
 	}
 	if err := Validate(invalid); err == nil {
@@ -326,10 +326,10 @@ func TestValidate(t *testing.T) {
 // Params value, or simply document an input a future step or attaching
 // resource can rely on.
 func TestValidateAcceptsUnreferencedParam(t *testing.T) {
-	ph := &keziov1alpha2.PostHook{
-		Spec: keziov1alpha2.PostHookSpec{
-			Params: []keziov1alpha2.PostHookParam{{Name: "unused"}},
-			Steps:  []keziov1alpha2.PostHookStep{validBuiltinStep()},
+	ph := &keziov1alpha3.PostHook{
+		Spec: keziov1alpha3.PostHookSpec{
+			Params: []keziov1alpha3.PostHookParam{{Name: "unused"}},
+			Steps:  []keziov1alpha3.PostHookStep{validBuiltinStep()},
 		},
 	}
 	if err := Validate(ph); err != nil {
