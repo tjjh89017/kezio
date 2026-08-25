@@ -55,6 +55,13 @@ type Server struct {
 	// (through the manager's cache; the two token-hash lookups need
 	// SetupFieldIndexer run at manager start).
 	Client client.Client
+	// APIReader reads straight from the API server, bypassing the cache
+	// Client reads through. Used only where a cached read that lags
+	// behind a write this same server just made would be wrong rather
+	// than merely stale - see persistProgress. Optional: nil falls back
+	// to Client, which stays correct but converges only as fast as the
+	// cache does. Production wiring passes mgr.GetAPIReader().
+	APIReader client.Reader
 	// Config holds the server's listen address, session TTL, and poll
 	// interval.
 	Config Config

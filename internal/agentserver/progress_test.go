@@ -267,6 +267,144 @@ func TestPersistProgress_MissingRunIsNoop(t *testing.T) {
 	}
 }
 
+// laggingReadClient serves DeployRun reads from a frozen snapshot,
+// standing in for the manager's informer cache lagging behind a write
+// that already landed in the API server. Writes go through to the real
+// store, so an Update built on the snapshot conflicts exactly as it does
+// in production. staleReads bounds how many reads are served stale;
+// -1 means every read, forever.
+type laggingReadClient struct {
+	client.Client
+	stale      *keziov1alpha2.DeployRun
+	staleReads int
+}
+
+func (c *laggingReadClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	run, ok := obj.(*keziov1alpha2.DeployRun)
+	if !ok || c.staleReads == 0 || key.Name != c.stale.Name {
+		return c.Client.Get(ctx, key, obj, opts...)
+	}
+	if c.staleReads > 0 {
+		c.staleReads--
+	}
+	c.stale.DeepCopyInto(run)
+	return nil
+}
+
+// driveToFinalizing replays the report sequence deploy.Executor.Execute
+// sends before its terminal one, leaving run at the Finalizing phase.
+func driveToFinalizing(t *testing.T, s *Server, machine *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun) {
+	t.Helper()
+	steps := []struct{ step, state string }{
+		{keziov1alpha2.DeployRunPhaseRunningPostHook, agentapi.ProgressStateRunning},
+		{keziov1alpha2.DeployRunPhaseRunningPostHook, agentapi.ProgressStateSucceeded},
+		{keziov1alpha2.DeployRunPhaseFinalizing, agentapi.ProgressStateRunning},
+		{keziov1alpha2.DeployRunPhaseFinalizing, agentapi.ProgressStateSucceeded},
+	}
+	for _, st := range steps {
+		req := agentapi.ProgressRequest{
+			RunName: run.Name, RunUID: string(run.UID),
+			Step: st.step, State: st.state, Timestamp: time.Now(),
+		}
+		if err := s.persistProgress(context.Background(), machine, req); err != nil {
+			t.Fatalf("persistProgress(%s/%s): %v", st.step, st.state, err)
+		}
+	}
+}
+
+func terminalSucceededRequest(run *keziov1alpha2.DeployRun) agentapi.ProgressRequest {
+	return agentapi.ProgressRequest{
+		RunName: run.Name, RunUID: string(run.UID),
+		Step: keziov1alpha2.DeployRunPhaseSucceeded, State: agentapi.ProgressStateSucceeded,
+		Timestamp: time.Now(),
+	}
+}
+
+func assertRunSucceeded(t *testing.T, c client.Client, run *keziov1alpha2.DeployRun) {
+	t.Helper()
+	var stored keziov1alpha2.DeployRun
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(run), &stored); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if stored.Status.Phase != keziov1alpha2.DeployRunPhaseSucceeded {
+		t.Fatalf("Phase = %q, want %q: the terminal report was dropped, so the Machine polls this run forever",
+			stored.Status.Phase, keziov1alpha2.DeployRunPhaseSucceeded)
+	}
+	cond := apimeta.FindStatusCondition(stored.Status.Conditions, keziov1alpha2.DeployRunConditionSucceeded)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Fatalf("Succeeded condition = %+v, want True", cond)
+	}
+}
+
+func TestPersistProgress_TerminalSucceededSurvivesAStaleRead(t *testing.T) {
+	machine := newProgressTestMachine()
+	c := newProgressTestClient(t, machine)
+	run := newProgressTestRun(t, c)
+	ctx := context.Background()
+
+	// Snapshot the run one report before the last one Execute sends
+	// ahead of its terminal report: this is what a cache that has not
+	// yet observed the Finalizing-succeeded write still hands back.
+	s := &Server{Client: c}
+	driveToFinalizing(t, s, machine, run)
+	var stale keziov1alpha2.DeployRun
+	if err := c.Get(ctx, client.ObjectKeyFromObject(run), &stale); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	req := agentapi.ProgressRequest{
+		RunName: run.Name, RunUID: string(run.UID),
+		Step: keziov1alpha2.DeployRunPhaseFinalizing, State: agentapi.ProgressStateRunning,
+		Partitions: []agentapi.ProgressPartition{{Number: 1, Percent: 100}},
+		Timestamp:  time.Now(),
+	}
+	if err := s.persistProgress(ctx, machine, req); err != nil {
+		t.Fatalf("persistProgress: %v", err)
+	}
+
+	lagging := &Server{Client: &laggingReadClient{Client: c, stale: &stale, staleReads: 1}}
+	if err := lagging.persistProgress(ctx, machine, terminalSucceededRequest(run)); err != nil {
+		t.Fatalf("persistProgress(terminal): %v", err)
+	}
+	assertRunSucceeded(t, c, run)
+}
+
+// TestPersistProgress_TerminalSucceededSurvivesAnArbitrarilyLaggingCache
+// is the stale-read case taken to its limit: the cache never catches up,
+// so retrying against it alone would conflict forever. Only re-reading
+// through APIReader lets the terminal report land - the property that
+// has to hold on a cluster whose cache lags for reasons CI never shows.
+func TestPersistProgress_TerminalSucceededSurvivesAnArbitrarilyLaggingCache(t *testing.T) {
+	machine := newProgressTestMachine()
+	c := newProgressTestClient(t, machine)
+	run := newProgressTestRun(t, c)
+	ctx := context.Background()
+
+	s := &Server{Client: c}
+	driveToFinalizing(t, s, machine, run)
+	var stale keziov1alpha2.DeployRun
+	if err := c.Get(ctx, client.ObjectKeyFromObject(run), &stale); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	req := agentapi.ProgressRequest{
+		RunName: run.Name, RunUID: string(run.UID),
+		Step: keziov1alpha2.DeployRunPhaseFinalizing, State: agentapi.ProgressStateRunning,
+		Partitions: []agentapi.ProgressPartition{{Number: 1, Percent: 100}},
+		Timestamp:  time.Now(),
+	}
+	if err := s.persistProgress(ctx, machine, req); err != nil {
+		t.Fatalf("persistProgress: %v", err)
+	}
+
+	lagging := &Server{
+		Client:    &laggingReadClient{Client: c, stale: &stale, staleReads: -1},
+		APIReader: c,
+	}
+	if err := lagging.persistProgress(ctx, machine, terminalSucceededRequest(run)); err != nil {
+		t.Fatalf("persistProgress(terminal): %v", err)
+	}
+	assertRunSucceeded(t, c, run)
+}
+
 func TestPersistProgress_StaleRunUIDIsNoop(t *testing.T) {
 	machine := newProgressTestMachine()
 	c := newProgressTestClient(t, machine)

@@ -351,6 +351,7 @@ func main() {
 			os.Exit(1)
 		}
 		agentSrv := agentserver.New(mgr.GetClient(), *agentConfig)
+		agentSrv.APIReader = mgr.GetAPIReader()
 		agentSrv.PlanBuilder = planBuilder(mgr.GetClient())
 		agentSrv.Abort = agentserver.NewAbortDecider(mgr.GetClient())
 		if err := mgr.Add(agentSrv); err != nil {
