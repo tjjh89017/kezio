@@ -34,6 +34,10 @@ go.work
 # powerloop working files
 /.powerloop/
 
+# assistant working files, including the worktrees a background agent
+# checks out under .claude/worktrees
+/.claude/
+
 # local planning documents
 /.plan/
 
