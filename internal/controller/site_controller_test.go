@@ -507,4 +507,33 @@ var _ = Describe("Site Controller", func() {
 		Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(readyCond.Reason).To(Equal("TrackerOverlapWhereabouts"))
 	})
+
+	It("fails Valid when the seeder NAD uses static ipam while this Site pins a tracker address on it", func() {
+		ns := createSubnetTestNamespace(ctx)
+		site := testSite(ctx, ns, "site-j")
+
+		subnet := testSubnet(ns, func(s *keziov1alpha2.Subnet) {
+			s.Spec.SiteRef = keziov1alpha2.NameRef{Name: "site-j"}
+			s.Spec.SeederNetworkRef = &keziov1alpha2.NameRef{Name: "seeder-nad"}
+		})
+		Expect(k8sClient.Create(ctx, subnet)).To(Succeed())
+		// tracker.ip is not this static address, so CheckTrackerAddress
+		// alone passes. The static plugin still gives the tracker pod this
+		// address beside its pinned one, and every seeder pod on the same
+		// NAD holds it too.
+		createTestNAD(ctx, ns, "seeder-nad", `{"ipam":{"type":"static","addresses":[{"address":"192.0.2.5/24"}]}}`)
+		setSeederSubnetRef(ctx, site, subnet.Name, keziov1alpha2.SiteTracker{IP: "192.0.2.60"})
+
+		r := newSiteTestReconciler()
+		key := types.NamespacedName{Name: site.Name, Namespace: ns}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		var updated keziov1alpha2.Site
+		Expect(k8sClient.Get(ctx, key, &updated)).To(Succeed())
+		validCond := findCondition(updated.Status.Conditions, keziov1alpha2.SiteConditionValid)
+		Expect(validCond).NotTo(BeNil())
+		Expect(validCond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(validCond.Reason).To(Equal("SeederStaticIPAMWithTracker"))
+	})
 })

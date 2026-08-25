@@ -297,6 +297,55 @@ func CheckTrackerAddress(subnetCIDR, seederConfig, trackerIP string) CheckResult
 	}
 }
 
+// CheckSeederStaticWithTracker checks that seederConfig - the seeding
+// Subnet's seeder NAD spec.config - does not use static ipam while
+// trackerIP names a Site-managed tracker (Site.spec.tracker.ip). The
+// tracker pod single-homes on that same NAD and pins trackerIP through
+// a per-pod "ips" override; Multus hands that override to the ipam
+// plugin as the CNI_ARGS "IP" entry, and the static plugin ADDS such an
+// entry to the address list its own config declares. The tracker
+// therefore comes up with the NAD's configured address as well as its
+// pinned one, and that configured address is the address every seeder
+// pod on the same NAD also holds.
+//
+// An empty trackerIP means the Site points at a tracker of its own
+// (Site.spec.tracker.externalURL) or has no tracker at all: nothing
+// pins a second address on this NAD, so static ipam stays correct.
+// CheckSeederStaticMultiImage covers the remaining static-ipam risk
+// there, which is seeder concurrency, not the tracker.
+func CheckSeederStaticWithTracker(seederConfig, trackerIP string) CheckResult {
+	if trackerIP == "" {
+		return CheckResult{
+			Verdict: OK,
+			Reason:  "NoManagedTracker",
+			Message: "this Site has no tracker of kezio's own on the seeder NAD, so nothing pins a second address on it",
+		}
+	}
+
+	ipam, err := ParseIPAM(seederConfig)
+	if err != nil {
+		return CheckResult{
+			Verdict: Indeterminate,
+			Reason:  "SeederNADConfigUnparseable",
+			Message: fmt.Sprintf("seeder NAD config: %v", err),
+		}
+	}
+
+	if ipam.Kind != KindStatic {
+		return CheckResult{
+			Verdict: OK,
+			Reason:  "SeederIPAMNotStatic",
+			Message: fmt.Sprintf("seeder NAD ipam type is %q, not static, so it can give the tracker and each seeder pod its own address", ipam.Kind),
+		}
+	}
+
+	return CheckResult{
+		Verdict: Violation,
+		Reason:  "SeederStaticIPAMWithTracker",
+		Message: fmt.Sprintf("seeder NAD uses static ipam while this Site pins tracker.ip %s on the same NAD: the static plugin adds its own configured address to the pinned one, so the tracker pod also holds the address every seeder pod holds; use a pool-type ipam (host-local or whereabouts) on this NAD", trackerIP),
+	}
+}
+
 // CheckSeederStaticMultiImage flags - but does not reject - a seeder
 // NAD using static ipam while its Site runs more than one Image
 // concurrently (concurrentImages). Static ipam hands every attaching

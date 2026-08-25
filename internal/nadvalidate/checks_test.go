@@ -357,6 +357,64 @@ func TestCheckTrackerAddress(t *testing.T) {
 	}
 }
 
+func TestCheckSeederStaticWithTracker(t *testing.T) {
+	tests := []struct {
+		name         string
+		seederConfig string
+		trackerIP    string
+		want         Verdict
+		wantReason   string
+	}{
+		{
+			name:         "static ipam under a Site-managed tracker is a violation: the tracker keeps the NAD's own address beside its pinned one",
+			seederConfig: `{"ipam":{"type":"static","addresses":[{"address":"192.0.2.5/24"}]}}`,
+			trackerIP:    "192.0.2.60",
+			want:         Violation,
+			wantReason:   "SeederStaticIPAMWithTracker",
+		},
+		{
+			name:         "static ipam with no Site-managed tracker is correct: nothing pins a second address on this NAD",
+			seederConfig: `{"ipam":{"type":"static","addresses":[{"address":"192.0.2.5/24"}]}}`,
+			trackerIP:    "",
+			want:         OK,
+			wantReason:   "NoManagedTracker",
+		},
+		{
+			name:         "a host-local pool gives the tracker and every seeder its own address",
+			seederConfig: `{"ipam":{"type":"host-local","subnet":"192.0.2.0/24","rangeStart":"192.0.2.101","rangeEnd":"192.0.2.116"}}`,
+			trackerIP:    "192.0.2.116",
+			want:         OK,
+			wantReason:   "SeederIPAMNotStatic",
+		},
+		{
+			name:         "a whereabouts pool gives the tracker and every seeder its own address",
+			seederConfig: seederWhereaboutsConfig,
+			trackerIP:    "192.0.2.60",
+			want:         OK,
+			wantReason:   "SeederIPAMNotStatic",
+		},
+		{
+			name:         "unparseable config is cannot-determine",
+			seederConfig: `{not json`,
+			trackerIP:    "192.0.2.60",
+			want:         Indeterminate,
+			wantReason:   "SeederNADConfigUnparseable",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CheckSeederStaticWithTracker(tt.seederConfig, tt.trackerIP)
+			if got.Verdict != tt.want {
+				t.Fatalf("Verdict = %v, want %v (message: %s)", got.Verdict, tt.want, got.Message)
+			}
+			if got.Reason != tt.wantReason {
+				t.Fatalf("Reason = %v, want %v", got.Reason, tt.wantReason)
+			}
+		})
+	}
+}
+
 func TestCheckSeederStaticMultiImage(t *testing.T) {
 	tests := []struct {
 		name             string

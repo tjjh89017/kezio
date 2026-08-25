@@ -110,7 +110,11 @@ address. `internal/nadvalidate.CheckSeederStaticMultiImage` raises an
 Advisory once a Site's concurrent Image count exceeds what static IPAM
 (one fixed address) can serve - not a hard Violation, since static IPAM
 is exactly correct while a Site never runs more than one Image at a
-time.
+time. That Advisory is not visible on the Subnet today:
+`SubnetReconciler.updateSubnetConditions` reads only the Violation and
+Indeterminate verdicts, so an Advisory changes no condition. Its input
+is also a runtime count (the seeder Deployments that have an available
+replica right now), not a declared one.
 
 **Sizing rule:** pool size >= (max concurrently deploying Images at the
 Site) x replicas (always 1 today: every seeder and tracker Deployment is
@@ -133,11 +137,62 @@ reads: range size >= (max concurrently deploying Images at the Site) +
 a range-bounded `host-local` pool, so `CheckTrackerAddress` reports
 Indeterminate for this shape instead of a verdict.
 
-## whereabouts and its ip-reconciler are required, not optional
+## A Site-managed tracker needs a pool on the seeding attachment
+
+The tracker pod attaches to the seeding `Subnet`'s own
+`seederNetworkRef` attachment, and pins `Site.spec.tracker.ip` with a
+per-pod `ips` override on the default-network annotation
+(`trackerPodAnnotations`,
+`internal/controller/site_tracker_deployment.go`). Every seeder pod of
+that Site attaches to the same attachment.
+
+Multus gives that pinned address to the IPAM plugin as the CNI_ARGS
+`IP` entry (`DelegateAdd`). It cannot give it as a runtime
+configuration here: the default-network delegate is the master plugin,
+and Multus writes a runtime configuration only for a delegate that is
+not the master plugin (`mergeCNIRuntimeConfig`). The CNI_ARGS path is
+therefore the only path this address takes.
+
+The CNI `static` plugin **adds** a CNI_ARGS address to the address list
+of its own configuration. It does not replace that list (`static`'s own
+`LoadIPAMConfig`; its `runtimeConfig` and `args` paths do replace the
+list, but Multus uses neither of them here). On a `static` seeding
+attachment, the tracker pod therefore holds two addresses: its pinned
+one, and the attachment's own configured one. Every seeder pod holds
+that same configured address. Two pods then hold one address on one
+segment - observed in CI as two pods that both held `192.0.2.5`.
+
+A pool plugin does not do this. `host-local` gives one address for each
+range, and uses the requested address for that range when the address
+is inside the range. `whereabouts` behaves the same way.
+
+**Rule:** a Site that declares `tracker.ip` must use a pool IPAM -
+`host-local` or `whereabouts` - on its seeding attachment. A `static`
+attachment with one address is correct only where the Site runs no
+tracker of kezio's own: the `tracker.externalURL` case, which declares
+no `tracker.ip`.
+
+`internal/nadvalidate.CheckSeederStaticWithTracker` raises a Violation
+for this shape, and `SiteReconciler` writes it to the Site's
+`Valid`/`Ready` conditions. A Violation, not an Advisory, because no
+`static` shape serves both roles at once: an address list that holds
+`tracker.ip` collides with the tracker directly (`CheckTrackerAddress`,
+reason `TrackerOverlapStatic`), and any other address list gives the
+tracker an address that every seeder pod also holds. The Violation
+withholds nothing - the tracker Deployment is still created, and still
+binds its pinned address - so it only tells the operator what is wrong.
+`CheckSeederStaticMultiImage` answers a different question: how many
+seeders one static address can serve. It says nothing about the
+tracker, and reports OK for a Site that runs one Image.
+
+## whereabouts needs its ip-reconciler, if you choose whereabouts
 
 A seeder network attachment sized for more than one concurrent Image
-needs a range-based IPAM plugin, not static addressing. `whereabouts` is
-the plugin kezio's own e2e lanes and lab guide use for this. Deploying
+needs a range-based IPAM plugin, not static addressing. kezio's own e2e
+lanes and lab guide make that choice with `host-local` and a narrowed
+range (`.github/actions/create-provisioning-nads`,
+`docs/lab-proxmox-rke2.md`). `whereabouts` is the other supported
+choice, and it carries one condition. Deploying
 `whereabouts` without also deploying its `ip-reconciler` CronJob is not a
 supported configuration: `ip-reconciler` reclaims addresses whose pod
 was deleted without whereabouts observing the deletion event (a node
@@ -145,8 +200,7 @@ crash, a hard kubelet restart) - without it, a pool can silently leak
 down to zero free addresses over the life of a cluster, and a Site whose
 seeder count fluctuates as Images come and go is exactly the workload
 that leaks addresses this way. Treat `ip-reconciler` as part of
-deploying `whereabouts` at all, never as an optional extra
-(`docs/lab-proxmox-rke2.md`, section 6.1).
+deploying `whereabouts` at all, never as an optional extra.
 
 ## The tracker is per Site, pinned or external
 
@@ -155,7 +209,9 @@ seeding `Subnet`, backing a Site-owned tracker Deployment
 `SiteReconciler` creates and keeps current) or `externalURL` (a tracker
 the operator already runs; kezio creates nothing and checks nothing
 about it) - the two are mutually exclusive
-(`SiteTracker`'s `XValidation` rule, `api/v1alpha2/site_types.go`).
+(`SiteTracker`'s `XValidation` rule, `api/v1alpha2/site_types.go`). The
+`ip` choice constrains the seeding attachment's IPAM: see "A
+Site-managed tracker needs a pool on the seeding attachment" above.
 
 **A single global tracker cannot exist across Sites that do not route to
 each other.** A tracker's announce responses must be reachable by every

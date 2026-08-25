@@ -195,10 +195,12 @@ func (r *SiteReconciler) onChange(ctx context.Context, site *keziov1alpha2.Site)
 }
 
 // runTrackerAddressCheck fetches seedingSubnet's SeederNetworkRef config
-// and runs nadvalidate.CheckTrackerAddress against site's Tracker.IP, the
+// and runs nadvalidate.CheckTrackerAddress and
+// nadvalidate.CheckSeederStaticWithTracker against site's Tracker.IP, the
 // same shape SubnetReconciler.runNADChecks uses for CheckBootdAddress/
 // CheckSeederOverlap. Called only once seedingSubnet.Spec.SeederNetworkRef
-// is known non-nil.
+// is known non-nil, and only for a Site whose tracker kezio manages
+// itself (onChange returns earlier for Tracker.ExternalURL).
 //
 // A NAD that cannot be fetched or parsed produces an Indeterminate result
 // rather than aborting the reconcile, mirroring runNADChecks; only a
@@ -211,7 +213,10 @@ func (r *SiteReconciler) runTrackerAddressCheck(ctx context.Context, site *kezio
 		}
 		return []nadvalidate.CheckResult{indeterminateFromFetchErr("Seeder", "seeder NAD", err)}, nil
 	}
-	return []nadvalidate.CheckResult{nadvalidate.CheckTrackerAddress(seedingSubnet.Spec.CIDR, seederConfig, site.Spec.Tracker.IP)}, nil
+	return []nadvalidate.CheckResult{
+		nadvalidate.CheckTrackerAddress(seedingSubnet.Spec.CIDR, seederConfig, site.Spec.Tracker.IP),
+		nadvalidate.CheckSeederStaticWithTracker(seederConfig, site.Spec.Tracker.IP),
+	}, nil
 }
 
 // listSubnetRefs returns the sorted names of the Subnets in site's own
