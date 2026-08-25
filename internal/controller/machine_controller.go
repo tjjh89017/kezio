@@ -289,7 +289,7 @@ func (r *MachineReconciler) advanceDeleteStage(ctx context.Context, machine *kez
 	}
 
 	machine.Status.State = nextState
-	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusOK
+	markOperational(machine)
 	machine.Status.ErrorCount = 0
 	stampLastUpdated(machine)
 	if err := r.applyMachineStatus(ctx, machine); err != nil {
@@ -435,7 +435,7 @@ func (r *MachineReconciler) applyMachineStatus(ctx context.Context, machine *kez
 // after the write succeeds - see applyMachineStatus.
 func (r *MachineReconciler) setState(ctx context.Context, machine *keziov1alpha2.Machine, state string, onSuccess ...func()) (ctrl.Result, error) {
 	machine.Status.State = state
-	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusOK
+	markOperational(machine)
 	machine.Status.ErrorCount = 0
 	meta.RemoveStatusCondition(&machine.Status.Conditions, keziov1alpha2.MachineConditionStatusLossHold)
 	stampLastUpdated(machine)
@@ -840,7 +840,7 @@ func (r *MachineReconciler) startProvisioningRun(ctx context.Context, machine *k
 
 	machine.Status.State = keziov1alpha2.MachineStateProvisioning
 	machine.Status.CurrentRunRef = &keziov1alpha2.NameRef{Name: run.Name}
-	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusOK
+	markOperational(machine)
 	machine.Status.ErrorCount = 0
 	stampLastUpdated(machine)
 	if err := r.applyMachineStatus(ctx, machine); err != nil {
@@ -896,7 +896,7 @@ func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *
 	machine.Status.State = keziov1alpha2.MachineStateProvisioned
 	machine.Status.LastSuccessfulRunRef = &keziov1alpha2.NameRef{Name: run.Name}
 	machine.Status.LastAttemptedRunRef = &keziov1alpha2.NameRef{Name: run.Name}
-	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusOK
+	markOperational(machine)
 	machine.Status.ErrorCount = 0
 	stampLastUpdated(machine)
 	if err := r.applyMachineStatus(ctx, machine); err != nil {
@@ -952,13 +952,13 @@ func (r *MachineReconciler) reconcileDetached(ctx context.Context, machine *kezi
 }
 
 // clearDetached resumes normal operation once the detached annotation is
-// removed: it restores operationalStatus to OK in its own patch, so the
+// removed: it marks the Machine operational in its own patch, so the
 // next reconcile's state walk starts from a clean status - the same
 // one-step-per-reconcile discipline as clearRetryStatus. The annotation removal
 // that reached this reconcile already happened; nothing further will
 // re-trigger the watch, so this requeues explicitly to resume the walk.
 func (r *MachineReconciler) clearDetached(ctx context.Context, machine *keziov1alpha2.Machine) (ctrl.Result, error) {
-	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusOK
+	markOperational(machine)
 	stampLastUpdated(machine)
 	if err := r.applyMachineStatus(ctx, machine); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: clearing detached status: %w", machine.Name, err)
@@ -1062,9 +1062,9 @@ func (r *MachineReconciler) markDelayed(ctx context.Context, machine *keziov1alp
 func (r *MachineReconciler) clearRetryStatus(ctx context.Context, machine *keziov1alpha2.Machine, restarting bool, result ctrl.Result) (ctrl.Result, error) {
 	switch {
 	case machine.Status.OperationalStatus == keziov1alpha2.MachineOperationalStatusDelayed:
-		machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusOK
+		markOperational(machine)
 	case restarting && machine.Status.OperationalStatus == keziov1alpha2.MachineOperationalStatusError:
-		machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusOK
+		markOperational(machine)
 	default:
 		return result, nil
 	}
@@ -1092,6 +1092,24 @@ func applyFailure(machine *keziov1alpha2.Machine, errorType keziov1alpha2.Machin
 	machine.Status.ErrorType = errorType
 	machine.Status.ErrorMessage = errorMessage
 	machine.Status.ErrorCount++
+}
+
+// markOperational is applyFailure's inverse and the single place
+// operationalStatus goes back to OK: errorType/errorMessage describe the
+// error status they were written with, so they must never outlive it - a
+// healthy machine still displaying the last failure it ever had reads as
+// current state, and has already sent one investigation chasing a failure
+// that was not happening. Every reset path calls this rather than spelling
+// the reset out again; those fields drifted out of step precisely because
+// the reset was written separately in each place.
+//
+// errorCount is deliberately not reset here: its reset points are not the
+// same set (clearRetryStatus clears the error status but keeps the count -
+// see its own doc comment), so callers that do reset it say so themselves.
+func markOperational(machine *keziov1alpha2.Machine) {
+	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusOK
+	machine.Status.ErrorType = ""
+	machine.Status.ErrorMessage = ""
 }
 
 // recordCurrentRunDeleted handles the current DeployRun having disappeared
