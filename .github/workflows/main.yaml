@@ -45,12 +45,12 @@ jobs:
       - run: make test
 
   # Image <-> Dockerfile mapping grows one row per component as later
-  # stages add it. Seeder is amd64-only: ezio's C++ build (cmake/boost/
-  # libtorrent) is too slow under QEMU emulation. Ingest ships only apt
-  # packages (partclone/qemu-utils/util-linux/fdisk) plus a CGO_ENABLED=0
-  # Go binary, so it builds natively for both platforms. image-service is a
-  # plain CGO_ENABLED=0 Go binary with no external tools at all (no apt
-  # packages), so it also builds natively for both platforms.
+  # stages add it.
+  #
+  # This job builds amd64 and hands off tarballs; it never pushes. The
+  # multi-arch push lives in the publish job, behind the e2e gate: every
+  # lane waits on this job, so a push here makes every lane pay for the
+  # arm64 rebuild before it can start.
   images:
     name: ${{ matrix.name }}
     needs: [lint, test]
@@ -58,41 +58,30 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-      packages: write
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: manager
-            image: kezio
             dockerfile: Dockerfile
-            platforms: linux/amd64,linux/arm64
             local-tag: example.com/kezio:e2e
           - name: ingest
-            image: kezio-ingest
             dockerfile: docker/ingest/Dockerfile
-            platforms: linux/amd64,linux/arm64
             local-tag: example.com/kezio-ingest:e2e
           - name: seeder
-            image: kezio-seeder
             dockerfile: docker/seeder/Dockerfile
-            platforms: linux/amd64
             local-tag: example.com/kezio-seeder:e2e
           - name: image-service
-            image: kezio-image-service
             dockerfile: docker/image-service/Dockerfile
-            platforms: linux/amd64,linux/arm64
             local-tag: example.com/kezio-image-service:e2e
           - name: bootd
-            image: kezio-bootd
             dockerfile: docker/bootd/Dockerfile
-            platforms: linux/amd64,linux/arm64
             local-tag: example.com/kezio-bootd:e2e
     steps:
       - uses: actions/checkout@v7
 
-      - uses: docker/setup-qemu-action@v4
-
+      # No setup-qemu-action: this job builds amd64 on an amd64 runner.
+      # Emulation is the publish job's concern.
       - uses: docker/setup-buildx-action@v4
 
       # load:true cannot hold a multi-platform manifest - amd64 only, for
@@ -118,20 +107,6 @@ jobs:
           path: /tmp/${{ matrix.name }}.tar
           retention-days: 1
           if-no-files-found: error
-
-      # Multi-arch push, main only - PRs never authenticate or push.
-      - name: Push to ghcr.io
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: ./.github/actions/push-image-to-ghcr
-        with:
-          registry: ${{ env.REGISTRY }}
-          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}
-          tags-spec: |
-            type=ref,event=branch
-          dockerfile: ${{ matrix.dockerfile }}
-          platforms: ${{ matrix.platforms }}
-          cache-scope: ${{ matrix.name }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
 
   boot-artifacts:
     name: Boot artifacts
@@ -3904,3 +3879,98 @@ jobs:
             [ "${{ needs.e2e-routed-site.result }}" = "success" ] && \
             [ "${{ needs.e2e-two-site-concurrent.result }}" = "success" ] && \
             [ "${{ needs.e2e-three-machine-concurrent.result }}" = "success" ]
+
+  # The one place main.yaml pushes to ghcr.io. Nothing reaches the ":main"
+  # tag until every e2e lane passed, so the six ":main" images always name
+  # one commit that the whole suite agreed on.
+  #
+  # Two guards, because one is not enough. `needs: e2e-required` alone
+  # would let this job run whenever that job merely finished, and
+  # e2e-required carries `if: always()`, so it finishes even when a lane
+  # failed - its *result* is what says the lanes passed. And the
+  # branch/event test keeps the pull_request half of this workflow with no
+  # registry login at all, exactly as the images job used to.
+  #
+  # kezio-boot-artifacts joins the five service images here. The boot-
+  # artifacts job already uploaded dist/live as the "kezio-live-image"
+  # artifact for the VM lanes to download; this job downloads that same
+  # artifact and packages it, so the published image holds the identical
+  # live environment the lanes booted, and `lb build` runs once per run
+  # rather than twice.
+  publish:
+    name: Publish ${{ matrix.name }}
+    needs:
+      - e2e-required
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      needs.e2e-required.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: manager
+            image: kezio
+            dockerfile: Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - name: ingest
+            image: kezio-ingest
+            dockerfile: docker/ingest/Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - name: seeder
+            image: kezio-seeder
+            dockerfile: docker/seeder/Dockerfile
+            # amd64-only: ezio's C++ build (cmake/boost/libtorrent) is too
+            # slow under QEMU emulation.
+            platforms: linux/amd64
+          - name: image-service
+            image: kezio-image-service
+            dockerfile: docker/image-service/Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - name: bootd
+            image: kezio-bootd
+            dockerfile: docker/bootd/Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - name: boot-artifacts
+            image: kezio-boot-artifacts
+            dockerfile: docker/boot-artifacts/Dockerfile
+            # The packaged live environment is an amd64 kernel, initrd and
+            # squashfs - there is no arm64 variant to publish.
+            platforms: linux/amd64
+    steps:
+      - uses: actions/checkout@v7
+
+      # Only the boot-artifacts row has a COPY source outside the
+      # checkout: docker/boot-artifacts/Dockerfile copies dist/live/.
+      - name: Download the live boot image artifacts
+        if: matrix.name == 'boot-artifacts'
+        uses: actions/download-artifact@v8
+        with:
+          name: kezio-live-image
+          path: dist/live
+
+      - name: Fail fast if the downloaded boot artifacts are empty
+        if: matrix.name == 'boot-artifacts'
+        uses: ./.github/actions/assert-boot-artifacts-present
+
+      - uses: docker/setup-qemu-action@v4
+
+      - uses: docker/setup-buildx-action@v4
+
+      # Same cache scope the images job wrote, so the amd64 half is a cache
+      # hit and only arm64 is built here.
+      - name: Push to ghcr.io
+        uses: ./.github/actions/push-image-to-ghcr
+        with:
+          registry: ${{ env.REGISTRY }}
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}
+          tags-spec: |
+            type=ref,event=branch
+          dockerfile: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platforms }}
+          cache-scope: ${{ matrix.name }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}

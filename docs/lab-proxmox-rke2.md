@@ -487,12 +487,12 @@ in operation.
 
 ## 4. Get the kezio images
 
-kezio publishes six images. Five of them
-(`kezio`, `kezio-ingest`, `kezio-seeder`, `kezio-image-service`,
-`kezio-bootd`) get a `main` tag on each push to `main`, and a semantic
-version tag on each release tag. The sixth,
-`kezio-boot-artifacts`, is published on a release tag only
-(`.github/workflows/release.yaml`), and never as `main`.
+kezio publishes six images: `kezio`, `kezio-ingest`, `kezio-seeder`,
+`kezio-image-service`, `kezio-bootd`, and `kezio-boot-artifacts`. All six
+get a `main` tag on each push to `main`, and a semantic version tag on
+each release tag. The `main` tag of all six comes from the same commit,
+because `.github/workflows/main.yaml` pushes only after each e2e lane has
+passed.
 
 **The most recent release tag is older than the current tree.** The
 repository was rebuilt on a new operator-sdk scaffold after the last
@@ -520,10 +520,11 @@ export IMAGE_SERVICE_IMG=ghcr.io/tjjh89017/kezio-image-service:${KEZIO_VERSION}
 export INGEST_IMG=ghcr.io/tjjh89017/kezio-ingest:${KEZIO_VERSION}
 export SEEDER_IMG=ghcr.io/tjjh89017/kezio-seeder:${KEZIO_VERSION}
 export BOOTD_IMG=ghcr.io/tjjh89017/kezio-bootd:${KEZIO_VERSION}
+export BOOT_ARTIFACTS_IMG=ghcr.io/tjjh89017/kezio-boot-artifacts:${KEZIO_VERSION}
 ```
 
-Build the boot-artifacts image yourself, because no `main` tag of it
-exists. The build makes the live environment first, then packages it:
+To build the boot-artifacts image yourself instead, make the live
+environment first, then package it:
 
 ```sh
 hack/live-image/build.sh                # needs Docker; runs live-build privileged
