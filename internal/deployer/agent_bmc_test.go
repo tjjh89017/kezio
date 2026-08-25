@@ -65,6 +65,7 @@ type fakeBMC struct {
 	ignorePowerOff bool
 
 	gotCreds bmc.Credentials
+	gotOpts  bmc.Options
 }
 
 func (f *fakeBMC) PowerOn(context.Context) error {
@@ -156,10 +157,11 @@ func fakeBMCFor(key string) *fakeBMC {
 	return f
 }
 
-func fakeBMCConnect(_ context.Context, address *url.URL, creds bmc.Credentials, _ bmc.Options) (bmc.BMC, error) {
+func fakeBMCConnect(_ context.Context, address *url.URL, creds bmc.Credentials, opts bmc.Options) (bmc.BMC, error) {
 	f := fakeBMCFor(address.Host + address.Path)
 	f.mu.Lock()
 	f.gotCreds = creds
+	f.gotOpts = opts
 	f.mu.Unlock()
 	return f, nil
 }

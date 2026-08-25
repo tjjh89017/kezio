@@ -136,6 +136,48 @@ func TestAgentDeployerInspectFirstPassArmsPXEAndPowersOn(t *testing.T) {
 	}
 }
 
+func TestAgentDeployerConnectBMCInsecureSkipVerifyAnnotation(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		set   bool
+		want  bool
+	}{
+		{name: "absent verifies", want: false},
+		{name: "true skips verification", value: "true", set: true, want: true},
+		{name: "false verifies", value: "false", set: true, want: false},
+		// The webhook rejects this value, but a Machine that predates the
+		// webhook (or bypasses it) must still verify rather than read as
+		// enabled.
+		{name: "near-miss verifies", value: "True", set: true, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			machine := agentTestMachine(t)
+			if tt.set {
+				machine.Annotations = map[string]string{
+					keziov1alpha2.MachineAnnotationBMCInsecureSkipVerify: tt.value,
+				}
+			}
+			c := newAgentTestClient(t, machine, agentTestBMCSecret())
+			d := &AgentDeployer{Client: c}
+
+			if _, err := d.Inspect(context.Background(), machine, false); err != nil {
+				t.Fatalf("Inspect() error = %v", err)
+			}
+
+			f := fakeBMCForAddress(machine.Spec.BMC.Address)
+			f.mu.Lock()
+			got := f.gotOpts.InsecureSkipVerify
+			f.mu.Unlock()
+			if got != tt.want {
+				t.Errorf("InsecureSkipVerify = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAgentDeployerInspectFirstPassAlreadyOnPowerCycles(t *testing.T) {
 	machine := agentTestMachine(t)
 	c := newAgentTestClient(t, machine, agentTestBMCSecret())

@@ -353,6 +353,7 @@ Annotations, read directly off the object:
 | `kezio.kojuro.date/inspect-disable` | Set to exactly `true`, it skips hardware inspection. The webhook then requires `spec.bootMACAddress`. |
 | `kezio.kojuro.date/re-inspect` | Asks for a new inspection. The controller consumes the annotation, deletes the existing `MachineHardware`, and emits an Event. |
 | `kezio.kojuro.date/confirm-status-loss` | Releases the `StatusLossHold` condition. The controller consumes the annotation. |
+| `kezio.kojuro.date/bmc-insecure-skip-verify` | Set to exactly `true`, the BMC connection does not verify the TLS certificate. `false` means verify. The webhook refuses every other value. |
 
 ### MachineHardware
 

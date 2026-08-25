@@ -1135,10 +1135,10 @@ Four fields carry lab-specific detail:
   `/redfish/v1/Systems/<vmid>`.
 - **The scheme is `redfish+http`.** It agrees with the plain-HTTP unit
   in section 2.4. `redfish://` means HTTPS, and fails against that unit
-  with a connection error. There is currently no way to skip certificate
-  verification for a Machine: `internal/bmc.Options.InsecureSkipVerify`
-  exists, but nothing on the Machine sets it. If you give the daemon
-  TLS, its certificate must be one that the manager trusts.
+  with a connection error. If you give the daemon TLS, use `redfish://`
+  and either give it a certificate that the manager trusts, or put
+  `kezio.kojuro.date/bmc-insecure-skip-verify: "true"` on the Machine to
+  connect without certificate verification.
 - **`subnetRef` selects the Site.** A Machine never names its Site.
   kezio derives it as `subnetRef` -> `Subnet.spec.siteRef` -> `Site`
   (`internal/sitederive`). A machine therefore always leeches from the

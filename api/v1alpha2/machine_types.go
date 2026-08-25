@@ -272,6 +272,17 @@ const (
 	// MachineHardware is deleted (never patched) and a fresh one is
 	// created by the normal inspection walk.
 	MachineAnnotationReInspect = "kezio.kojuro.date/re-inspect"
+	// MachineAnnotationBMCInsecureSkipVerify, set to exactly "true", opts
+	// this Machine's BMC connection out of TLS certificate verification
+	// (internal/bmc.Options.InsecureSkipVerify): real BMCs commonly ship a
+	// self-signed certificate that no CA the manager trusts has signed.
+	// Only exactly "true" turns verification off; "false" is admitted and
+	// means verify, and the Machine webhook rejects every other value so a
+	// near-miss like "1" or "TRUE" cannot read as enabled while the runtime
+	// silently verifies. It is an annotation rather than a spec field
+	// because it is a transport-trust decision about reaching the BMC, not
+	// part of the machine's deployment intent.
+	MachineAnnotationBMCInsecureSkipVerify = "kezio.kojuro.date/bmc-insecure-skip-verify"
 	// MachineAnnotationConfirmStatusLoss, present with any value, releases
 	// the status-loss hold (MachineConditionStatusLossHold): an operator
 	// has checked the machine and confirms it is safe to resume the normal

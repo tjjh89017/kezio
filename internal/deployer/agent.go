@@ -148,7 +148,14 @@ func (d *AgentDeployer) connectBMC(ctx context.Context, machine *keziov1alpha2.M
 		return nil, fmt.Errorf("agent deployer: resolving BMC credentials: %w", err)
 	}
 
-	bmcClient, err := bmc.Connect(ctx, machine.Spec.BMC.Address, creds, bmc.Options{})
+	// Compared against exactly "true" here, the one place the trust
+	// decision is made: the Machine webhook admits only "true" or "false",
+	// so no other spelling can reach this and read as enabled.
+	opts := bmc.Options{
+		InsecureSkipVerify: machine.Annotations[keziov1alpha2.MachineAnnotationBMCInsecureSkipVerify] == "true",
+	}
+
+	bmcClient, err := bmc.Connect(ctx, machine.Spec.BMC.Address, creds, opts)
 	if err != nil {
 		return nil, fmt.Errorf("agent deployer: connecting to BMC: %w", err)
 	}

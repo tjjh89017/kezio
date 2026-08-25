@@ -57,6 +57,33 @@ endpoint is reachable over HTTPS; use `redfish://` for it. Reach for
 `redfish+http://` only against a lab endpoint you know has no TLS
 listener.
 
+### A BMC with a certificate that the manager does not trust
+
+`redfish://` verifies the TLS certificate of the BMC. Many BMCs ship a
+self-signed certificate, which no certificate authority in the manager
+image signed, so the connection fails. There are two ways out. The first
+is to make the manager trust the certificate: give the BMC a certificate
+from a certificate authority that the manager already trusts. The second
+is to stop the verification for that one machine:
+
+```yaml
+metadata:
+  annotations:
+    kezio.kojuro.date/bmc-insecure-skip-verify: "true"
+```
+
+Only the exact value `true` stops the verification. The value `false`
+means verify, and the Machine webhook refuses every other value: a value
+such as `1` or `TRUE` looks enabled to its author, but the controller
+verifies. The annotation applies to one Machine only. There is no
+cluster-wide switch, because trust in a BMC endpoint is a decision about
+that one endpoint.
+
+The annotation stops the verification of the certificate, not the
+encryption: the connection stays HTTPS. But an unverified connection
+gives no protection against a machine-in-the-middle attack, and the BMC
+credentials go across it. Use it only on a network that you control.
+
 ## ipmi:// is the recommended path for IPMI-only BMCs
 
 Use `ipmi://` for a BMC that only supports IPMI. Like `redfish://`, it

@@ -131,6 +131,31 @@ var _ = Describe("Machine Webhook", func() {
 		})
 	})
 
+	Context("annotation \"kezio.kojuro.date/bmc-insecure-skip-verify\"", func() {
+		It("admits the annotation set to \"true\"", func() {
+			obj.Annotations = map[string]string{keziov1alpha2.MachineAnnotationBMCInsecureSkipVerify: "true"}
+			Expect(validator.ValidateCreate(ctx, obj)).Error().NotTo(HaveOccurred())
+		})
+
+		It("admits the annotation set to \"false\"", func() {
+			obj.Annotations = map[string]string{keziov1alpha2.MachineAnnotationBMCInsecureSkipVerify: "false"}
+			Expect(validator.ValidateCreate(ctx, obj)).Error().NotTo(HaveOccurred())
+		})
+
+		It("denies a value that only looks like \"true\"", func() {
+			for _, value := range []string{"1", "TRUE", "True", "yes", ""} {
+				obj.Annotations = map[string]string{keziov1alpha2.MachineAnnotationBMCInsecureSkipVerify: value}
+				_, err := validator.ValidateCreate(ctx, obj)
+				Expect(err).To(HaveOccurred(), "value %q must be denied", value)
+			}
+		})
+
+		It("admits a Machine without the annotation", func() {
+			obj.Annotations = nil
+			Expect(validator.ValidateCreate(ctx, obj)).Error().NotTo(HaveOccurred())
+		})
+	})
+
 	Context("spec.subnetRef", func() {
 		It("admits a subnetRef naming a Subnet with a boot half", func() {
 			// obj.Spec.SubnetRef already names "default", the suite-wide

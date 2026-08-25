@@ -115,6 +115,9 @@ func (v *MachineCustomValidator) validateMachine(ctx context.Context, machine *k
 	if err := validateInspectDisable(machine); err != nil {
 		return err
 	}
+	if err := validateBMCInsecureSkipVerify(machine); err != nil {
+		return err
+	}
 	return v.validateSubnetRef(ctx, machine)
 }
 
@@ -179,6 +182,26 @@ func validateMachineBMC(machine *keziov1alpha2.Machine) error {
 			"spec.bmc.address %q has scheme %q, which has no registered BMC driver (known: %s)",
 			parsed.Redacted(), parsed.Scheme, strings.Join(known, ", "),
 		)
+	}
+	return nil
+}
+
+// validateBMCInsecureSkipVerify rejects a
+// MachineAnnotationBMCInsecureSkipVerify value that is not exactly "true"
+// or "false". The runtime that reads it (internal/deployer) compares it
+// with a plain == "true", not a general boolean parse, so a value like
+// "1" or "TRUE" would look enabled to its author yet verify at connect
+// time. Rejecting everything but the two exact strings the runtime
+// distinguishes catches that at admission, and keeps "true" the only
+// spelling that can ever turn certificate verification off.
+func validateBMCInsecureSkipVerify(machine *keziov1alpha2.Machine) error {
+	value, ok := machine.Annotations[keziov1alpha2.MachineAnnotationBMCInsecureSkipVerify]
+	if !ok {
+		return nil
+	}
+	if value != "true" && value != "false" {
+		return fmt.Errorf("annotation %q has value %q, expected exactly \"true\" or \"false\"",
+			keziov1alpha2.MachineAnnotationBMCInsecureSkipVerify, value)
 	}
 	return nil
 }
