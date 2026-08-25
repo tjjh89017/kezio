@@ -11,6 +11,9 @@ description: >-
   status.state leaves "" within a short timeout - proof the controller
   observed it and entered the Enrolling walk. Does not wait for
   AgentRegistered or Available - that belongs to wait-agent-registered.
+  A target-disk hint for the OS image belongs to the MachineClaim a
+  later deploy-machine call binds, not to this Machine - Machine no
+  longer carries a targetDisk field.
 
 inputs:
   namespace:
@@ -40,16 +43,6 @@ inputs:
   subnet-name:
     description: Machine.spec.subnetRef.name - the Subnet whose bootd instance answers this machine's PXE boot.
     required: true
-  target-disk-serial:
-    description: >-
-      Serial number of the disk the OS image deploys to, written to
-      spec.targetDisk.serialNumber. Leave empty to set no hint, which
-      only resolves when the machine reports exactly one disk - a VM
-      carrying a cloud-init disk alongside its data disk reports two,
-      and plan building then fails as ambiguous rather than guessing.
-      Must match create-target-vm's own disk-serial.
-    required: false
-    default: ""
   timeout:
     description: >-
       Timeout to wait for status.state to leave "" after creation, in
@@ -94,10 +87,9 @@ runs:
         BMC_ADDRESS: ${{ inputs.bmc-address }}
         BOOT_MAC: ${{ inputs.boot-mac }}
         SUBNET_NAME: ${{ inputs.subnet-name }}
-        TARGET_DISK_SERIAL: ${{ inputs.target-disk-serial }}
       run: |
         set -euo pipefail
-        machine_yaml="$(cat <<EOF
+        cat <<EOF | kubectl apply -f -
         apiVersion: kezio.kojuro.date/v1alpha3
         kind: Machine
         metadata:
@@ -112,11 +104,6 @@ runs:
           subnetRef:
             name: ${SUBNET_NAME}
         EOF
-        )"
-        if [ -n "${TARGET_DISK_SERIAL}" ]; then
-          machine_yaml+=$'\n  targetDisk:\n    serialNumber: '"${TARGET_DISK_SERIAL}"
-        fi
-        printf '%s\n' "${machine_yaml}" | kubectl apply -f -
 
     - name: Assert the Machine left its zero-value state
       # `kubectl apply` above already proved admission (the validating

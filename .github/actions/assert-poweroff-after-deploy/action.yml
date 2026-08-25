@@ -17,13 +17,13 @@ description: >-
   annotation) belongs strictly before this step in the job, not after -
   this step is deliberately wired in as the last disk-touching one.
 
-  Clears spec.postHookRefs (patched to null) alongside spec.imageRef:
-  planbuild.Builder.resolveMachineHooks's own doc comment is explicit
-  that a dataImages-only run with no postHookRefs on either side resolves
-  no hooks at all, which is what this assertion wants - the shipped
-  default hook's mkswap/efibootmgr builtins have no OS ESP to act on once
-  spec.imageRef is gone, and leaving the happy-path deploy's marker/
-  default-finalize pair in place would try to run them anyway (see
+  Clears the claim's spec.postHookRefs (patched to null) alongside
+  spec.imageRef: planbuild.Builder.resolveMachineHooks's own doc comment
+  is explicit that a dataImages-only run with no postHookRefs on either
+  side resolves no hooks at all, which is what this assertion wants - the
+  shipped default hook's mkswap/efibootmgr builtins have no OS ESP to act
+  on once spec.imageRef is gone, and leaving the happy-path deploy's
+  marker/default-finalize pair in place would try to run them anyway (see
   deriveBuiltinDefaults returning the zero value once osImage is nil) and
   fail the run for a reason unrelated to what this assertion is proving.
 
@@ -67,9 +67,9 @@ inputs:
   target-disk-serial:
     description: >-
       Serial number of the disk the data image deploys to, written to
-      each dataImages entry's own targetDisk.serialNumber. Required:
-      spec.targetDisk covers the OS image only and is ignored once
-      imageRef is gone, so without this the run's disk resolution is
+      each dataImages entry's own targetDisk.serialNumber. Required: the
+      claim's spec.targetDisk covers the OS image only and is ignored
+      once imageRef is gone, so without this the run's disk resolution is
       ambiguous on any machine reporting more than one disk - which
       this lane's VM does, since it carries a cloud-init disk beside
       its data disk.
@@ -120,7 +120,7 @@ runs:
         echo "previous-run-name=${prev_run}" >>"${GITHUB_OUTPUT}"
         echo "lastSuccessfulRunRef before this action: ${prev_run:-<none>}"
 
-    - name: Patch the Machine into a dataImages-only, PowerOff deploy intent
+    - name: Patch the MachineClaim into a dataImages-only, PowerOff deploy intent
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
@@ -137,7 +137,7 @@ runs:
             afterDeploy: "PowerOff"
           }
         }')"
-        kubectl patch machine "${MACHINE_NAME}" -n "${NAMESPACE}" --type=merge -p "${patch}"
+        kubectl patch machineclaim "${MACHINE_NAME}-claim" -n "${NAMESPACE}" --type=merge -p "${patch}"
 
     - name: Wait for a fresh DeployRun to reach Provisioned
       id: wait-provisioned

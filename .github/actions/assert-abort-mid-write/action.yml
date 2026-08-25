@@ -11,20 +11,20 @@ description: >-
   Starts from an Available Machine with no deploy intent and no run in
   flight (assert-two-axis-status, which runs immediately before this
   action, only ever touches plan-build - no DeployRun is created for its
-  own failing attempt, and its last step leaves spec.imageRef/
-  postHookRefs pointed at its own broken PostHook, not this action's own
-  target image). This action therefore sets the Machine's real deploy
-  intent itself, the same shape deploy-machine's own happy-path patch
-  uses (spec.imageRef.name plus spec.postHookRefs, --type=merge, same
-  posthook-names default and the same kezio-default-finalize footgun
-  guard - see this action's own doc comment below), waits for that patch
-  to produce a real DeployRun, and only then starts watching for
-  WritingContent. Runs strictly before deploy-machine:
-  deploy-machine's own merge patch right after this
-  action re-applies the identical spec.imageRef/postHookRefs values onto
-  whatever Machine this action leaves behind, so it is a harmless no-op
-  re-patch regardless of which DeployRun (the aborted one's retry) is
-  currently in flight when it runs.
+  own failing attempt, and its last step leaves the claim it applies
+  pointed at its own broken PostHook, not this action's own target
+  image). This action therefore applies the Machine's real deploy intent
+  itself as a MachineClaim, the same shape deploy-machine's own
+  happy-path claim apply uses (spec.imageRef.name plus
+  spec.postHookRefs, same posthook-names default and the same
+  kezio-default-finalize footgun guard - see this action's own doc
+  comment below), waits for the claim to bind and produce a real
+  DeployRun, and only then starts watching for WritingContent. Runs
+  strictly before deploy-machine: deploy-machine's own claim apply right
+  after this action re-applies the identical spec.imageRef/postHookRefs
+  values onto the same claim object this action leaves behind, so it is
+  a harmless no-op re-apply regardless of which DeployRun (the aborted
+  one's retry) is currently in flight when it runs.
 
   Design choice: aborting here (before the OS deploy's own patch+wait)
   rather than after it lets deploy-machine's own unmodified patch+wait
@@ -113,11 +113,11 @@ inputs:
     required: false
     default: "kezio-system"
   image-name:
-    description: Name of the Image to deploy as this machine's OS - written to spec.imageRef.name, same as deploy-machine's own image-name input.
+    description: Name of the Image to deploy as this machine's OS - written to the claim's spec.imageRef.name, same as deploy-machine's own image-name input.
     required: true
   posthook-names:
     description: >-
-      Newline-separated PostHook names, written in order to
+      Newline-separated PostHook names, written in order to the claim's
       spec.postHookRefs - same contract as deploy-machine's own
       posthook-names input (naming any hook at all opts out of the
       kezio-default-finalize substitution, so a named hook must be paired
@@ -171,11 +171,11 @@ runs:
       run: |
         set -euo pipefail
         if [ -n "${POSTHOOK_NAMES}" ] && ! grep -qxF "kezio-default-finalize" <<<"${POSTHOOK_NAMES}"; then
-          echo "::error::posthook-names names one or more hooks but omits kezio-default-finalize - see deploy-machine's own doc comment for why" >&2
+          echo "::error::posthook-names names one or more hooks but omits kezio-default-finalize - naming any hook at all opts the claim out of its automatic substitution, so the deployed disk would never get a boot entry. See deploy-machine's own doc comment for why" >&2
           exit 1
         fi
 
-    - name: Set the deploy intent to abort mid-write
+    - name: Apply the MachineClaim carrying the deploy intent to abort mid-write
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
@@ -185,9 +185,33 @@ runs:
       run: |
         set -euo pipefail
         posthook_refs="$(jq -nR '[inputs | select(length > 0) | {name: .}]' <<<"${POSTHOOK_NAMES}")"
-        patch="$(jq -n --arg image "${IMAGE_NAME}" --argjson postHookRefs "${posthook_refs}" \
-          '{spec: {imageRef: {name: $image}, postHookRefs: $postHookRefs}}')"
-        kubectl patch machine "${MACHINE_NAME}" -n "${NAMESPACE}" --type=merge -p "${patch}"
+        claim="$(jq -n \
+          --arg name "${MACHINE_NAME}-claim" \
+          --arg namespace "${NAMESPACE}" \
+          --arg machine "${MACHINE_NAME}" \
+          --arg image "${IMAGE_NAME}" \
+          --argjson postHookRefs "${posthook_refs}" \
+          '{
+            apiVersion: "kezio.kojuro.date/v1alpha3",
+            kind: "MachineClaim",
+            metadata: {name: $name, namespace: $namespace},
+            spec: {
+              machineName: $machine,
+              imageRef: {name: $image},
+              postHookRefs: $postHookRefs
+            }
+          }')"
+        echo "${claim}" | kubectl apply -f -
+
+    - name: Wait for the MachineClaim to bind
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        CLAIM_NAME: ${{ inputs.machine-name }}-claim
+      run: |
+        set -euo pipefail
+        kubectl wait "machineclaim/${CLAIM_NAME}" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.phase}'=Bound --timeout=120s
 
     - name: Wait for a real DeployRun to start, and capture the pre-abort agent session baseline
       id: before

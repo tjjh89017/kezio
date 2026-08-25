@@ -22,7 +22,7 @@ inputs:
     description: MAC address stamped on the VM's provisioning interface - must match the Machine CR's bootMACAddress create-bmc-machine creates later.
     required: true
   disk-serial:
-    description: Serial number stamped on the VM's data disk - must match the Machine CR's targetDisk.serialNumber, when one is set.
+    description: Serial number stamped on the VM's data disk - must match the bound MachineClaim's targetDisk.serialNumber, when one is set.
     required: true
   boot-network-name:
     description: Name of the empty-ipam Multus NetworkAttachmentDefinition the VM's provisioning interface attaches to (see create-provisioning-nads).

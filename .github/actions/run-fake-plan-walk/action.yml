@@ -5,8 +5,9 @@ description: >-
   distinct from run-fake-deploy-walk's dataImages-naming-nothing fixture:
   a mkfs-only Image (an ESP slot, a swap slot, a data slot - no
   PartitionContent, so it needs no seeder and reaches Ready purely
-  through the Image reconciler's own aggregation) plus a Machine whose
-  spec.imageRef names it. FakeDeployer.Provision still just walks
+  through the Image reconciler's own aggregation) plus a Machine bound to
+  a MachineClaim whose spec.imageRef names it. FakeDeployer.Provision
+  still just walks
   DeployRun phases without reading the resolved plan, so every assertion
   here is against DeployRunSpec, the snapshot MachineReconciler.
   createDeployRun writes before FakeDeployer ever runs. Three walks in
@@ -148,9 +149,37 @@ runs:
           bootMACAddress: "aa:bb:cc:dd:ee:21"
           subnetRef:
             name: ${SUBNET_NAME}
+        EOF
+
+    - name: Create the MachineClaim binding the default-postHookRefs Machine
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.default-hook-machine-name }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha3
+        kind: MachineClaim
+        metadata:
+          name: ${MACHINE_NAME}-claim
+          namespace: ${NAMESPACE}
+        spec:
+          machineName: ${MACHINE_NAME}
           imageRef:
             name: ${IMAGE_NAME}
         EOF
+
+    - name: Wait for the default-postHookRefs MachineClaim to bind
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.default-hook-machine-name }}
+      run: |
+        set -euo pipefail
+        kubectl wait "machineclaim/${MACHINE_NAME}-claim" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.phase}'=Bound --timeout=60s
 
     - name: Wait for the default-postHookRefs Machine to reach state Provisioned
       shell: bash
@@ -253,11 +282,40 @@ runs:
           bootMACAddress: "aa:bb:cc:dd:ee:22"
           subnetRef:
             name: ${SUBNET_NAME}
+        EOF
+
+    - name: Create the MachineClaim binding the custom-postHookRefs Machine
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.custom-hook-machine-name }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+        HOOK_NAME: ${{ inputs.custom-hook-name }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha3
+        kind: MachineClaim
+        metadata:
+          name: ${MACHINE_NAME}-claim
+          namespace: ${NAMESPACE}
+        spec:
+          machineName: ${MACHINE_NAME}
           imageRef:
             name: ${IMAGE_NAME}
           postHookRefs:
             - name: ${HOOK_NAME}
         EOF
+
+    - name: Wait for the custom-postHookRefs MachineClaim to bind
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.custom-hook-machine-name }}
+      run: |
+        set -euo pipefail
+        kubectl wait "machineclaim/${MACHINE_NAME}-claim" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.phase}'=Bound --timeout=60s
 
     - name: Wait for the custom-postHookRefs Machine to reach state Provisioned
       shell: bash
@@ -325,11 +383,42 @@ runs:
           bootMACAddress: "aa:bb:cc:dd:ee:23"
           subnetRef:
             name: ${SUBNET_NAME}
+        EOF
+
+    - name: Create the MachineClaim binding the missing-PostHook Machine
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.missing-hook-machine-name }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha3
+        kind: MachineClaim
+        metadata:
+          name: ${MACHINE_NAME}-claim
+          namespace: ${NAMESPACE}
+        spec:
+          machineName: ${MACHINE_NAME}
           imageRef:
             name: ${IMAGE_NAME}
           postHookRefs:
             - name: fake-plan-walk-posthook-does-not-exist
         EOF
+
+    - name: Wait for the missing-PostHook MachineClaim to bind
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.missing-hook-machine-name }}
+      run: |
+        set -euo pipefail
+        # Binding only needs the Machine to exist and be Available - it
+        # does not require the deploy plan to resolve, so this still
+        # succeeds even though the named PostHook does not exist.
+        kubectl wait "machineclaim/${MACHINE_NAME}-claim" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.phase}'=Bound --timeout=60s
 
     - name: Wait for it to reach state Available, then assert it never starts provisioning
       shell: bash
@@ -379,4 +468,5 @@ runs:
         MACHINE_NAME: ${{ inputs.missing-hook-machine-name }}
       run: |
         set -euo pipefail
+        kubectl delete "machineclaim/${MACHINE_NAME}-claim" -n "${NAMESPACE}" --wait=false --ignore-not-found
         kubectl delete "machine/${MACHINE_NAME}" -n "${NAMESPACE}" --wait=false --ignore-not-found

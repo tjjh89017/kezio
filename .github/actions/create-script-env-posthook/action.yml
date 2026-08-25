@@ -2,7 +2,7 @@ name: Create the PostHook that proves the script-step environment contract
 
 description: >-
   Creates a PostHook with one script step and waits for it to pass static
-  validation, so a lane can name it in a Machine's postHookRefs. The step
+  validation, so a lane can name it in a MachineClaim's postHookRefs. The step
   is the only end-to-end coverage of the environment contract a script
   step runs under (api/v1alpha3's PostHookStep.Script and
   internal/agent/deploy's scriptStepEnv/slotEnv): the agent hands the
@@ -46,7 +46,7 @@ description: >-
 
   The caller must name kezio-default-finalize in the same postHookRefs
   list (see deploy-machine's posthook-names input and its own guard):
-  naming any hook at all opts the Machine out of the automatic
+  naming any hook at all opts the claim out of the automatic
   substitution, and the deployed disk would never get its boot entry.
   Name this hook first in that list, so a broken contract fails the
   deploy before the finalize builtins change the disk or the NVRAM.
@@ -59,8 +59,8 @@ inputs:
   namespace:
     description: >-
       Namespace the PostHook is created in. Must be the namespace of the
-      Machine that names it - a Machine's postHookRefs resolve in the
-      Machine's own namespace unless the ref sets one.
+      MachineClaim that names it - a claim's postHookRefs resolve in the
+      claim's own namespace unless the ref sets one.
     required: false
     default: "kezio-system"
   timeout:

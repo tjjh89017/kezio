@@ -41,11 +41,12 @@ description: >-
   deployer (BMC/PXE/agent state) is never touched for this failing
   attempt - this action also asserts status.currentRunRef stays empty
   throughout, extra evidence that nothing here can leak into
-  deploy-machine's own DeployRun. spec.imageRef and spec.postHookRefs are
-  left patched to this action's failing values on return; deploy-machine's
-  own merge patch (a JSON merge patch replaces both fields wholesale)
-  overwrites them unconditionally on its very next step, which is what
-  proves recovery rather than this action reverting anything itself.
+  deploy-machine's own DeployRun. The claim's spec.imageRef and
+  spec.postHookRefs are left applied to this action's failing values on
+  return; deploy-machine's own claim apply (kubectl apply replaces the
+  whole spec) overwrites them unconditionally on its very next step,
+  which is what proves recovery rather than this action reverting
+  anything itself.
 
 inputs:
   machine-name:
@@ -58,8 +59,8 @@ inputs:
   image-name:
     description: >-
       Name of an already-Ready Image (e.g. build-deploy-test-image's own
-      output) to write to spec.imageRef.name. Must be Ready: an Image
-      that is not Ready yet maps to operationalStatus=delayed
+      output) to write to the claim's spec.imageRef.name. Must be Ready:
+      an Image that is not Ready yet maps to operationalStatus=delayed
       (NotReadyError), not the error this action asserts.
     required: true
   broken-posthook-name:
@@ -146,7 +147,7 @@ runs:
           sleep 5
         done
 
-    - name: Inject the failing deploy intent
+    - name: Apply the MachineClaim carrying the failing deploy intent
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
@@ -155,9 +156,33 @@ runs:
         BROKEN_POSTHOOK_NAME: ${{ inputs.broken-posthook-name }}
       run: |
         set -euo pipefail
-        patch="$(jq -n --arg image "${IMAGE_NAME}" --arg posthook "${BROKEN_POSTHOOK_NAME}" \
-          '{spec: {imageRef: {name: $image}, postHookRefs: [{name: $posthook}]}}')"
-        kubectl patch machine "${MACHINE_NAME}" -n "${NAMESPACE}" --type=merge -p "${patch}"
+        claim="$(jq -n \
+          --arg name "${MACHINE_NAME}-claim" \
+          --arg namespace "${NAMESPACE}" \
+          --arg machine "${MACHINE_NAME}" \
+          --arg image "${IMAGE_NAME}" \
+          --arg posthook "${BROKEN_POSTHOOK_NAME}" \
+          '{
+            apiVersion: "kezio.kojuro.date/v1alpha3",
+            kind: "MachineClaim",
+            metadata: {name: $name, namespace: $namespace},
+            spec: {
+              machineName: $machine,
+              imageRef: {name: $image},
+              postHookRefs: [{name: $posthook}]
+            }
+          }')"
+        echo "${claim}" | kubectl apply -f -
+
+    - name: Wait for the MachineClaim to bind
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        CLAIM_NAME: ${{ inputs.machine-name }}-claim
+      run: |
+        set -euo pipefail
+        kubectl wait "machineclaim/${CLAIM_NAME}" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.phase}'=Bound --timeout=120s
 
     - name: Wait for operationalStatus=error with state unchanged
       shell: bash

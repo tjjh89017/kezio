@@ -5,10 +5,10 @@ description: >-
   two-disk synthetic inventory (kezio.kojuro.date/fake-disks: "2" -
   internal/deployer.FakeDisksAnnotation), proving an ambiguous targetDisk
   hint stops the walk before any write and a disambiguating hint resolves
-  to the right disk. Three Machines, each with its own imageRef onto the
-  same mkfs-only Image fixture and its own BMC credentials Secret (so
-  deleting one Machine between assertions never cascades onto another's
-  Secret): Machine A's hint (rotational: false)
+  to the right disk. Three Machines, each bound to its own MachineClaim
+  naming an imageRef onto the same mkfs-only Image fixture, and its own
+  BMC credentials Secret (so deleting one Machine between assertions
+  never cascades onto another's Secret): Machine A's hint (rotational: false)
   matches both fabricated disks and must fail with an ambiguous-match
   error, never entering Provisioning or creating a DeployRun. Machine B's
   hint (serialNumber of the second disk) uniquely resolves it, and reaches
@@ -129,6 +129,24 @@ runs:
           bootMACAddress: "aa:bb:cc:dd:ee:31"
           subnetRef:
             name: ${SUBNET_NAME}
+        EOF
+
+    - name: "Machine A: create a MachineClaim with an ambiguous targetDisk hint"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.ambiguous-machine-name }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha3
+        kind: MachineClaim
+        metadata:
+          name: ${MACHINE_NAME}-claim
+          namespace: ${NAMESPACE}
+        spec:
+          machineName: ${MACHINE_NAME}
           imageRef:
             name: ${IMAGE_NAME}
           targetDisk:
@@ -191,6 +209,7 @@ runs:
         # requeuing on the failed-reconcile backoff timer - leaving it
         # around would move controller_runtime_reconcile_total during a
         # later churn-flatness assertion against a different Machine.
+        kubectl delete "machineclaim/${MACHINE_NAME}-claim" -n "${NAMESPACE}" --wait=false --ignore-not-found
         kubectl delete "machine/${MACHINE_NAME}" -n "${NAMESPACE}" --wait=false --ignore-not-found
         kubectl wait "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
           --for=delete --timeout=60s
@@ -237,11 +256,39 @@ runs:
           bootMACAddress: "aa:bb:cc:dd:ee:32"
           subnetRef:
             name: ${SUBNET_NAME}
+        EOF
+
+    - name: "Machine B: create a MachineClaim whose targetDisk hint uniquely selects the second fabricated disk"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.unique-machine-name }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha3
+        kind: MachineClaim
+        metadata:
+          name: ${MACHINE_NAME}-claim
+          namespace: ${NAMESPACE}
+        spec:
+          machineName: ${MACHINE_NAME}
           imageRef:
             name: ${IMAGE_NAME}
           targetDisk:
             serialNumber: fake-disk-1
         EOF
+
+    - name: "Machine B: wait for the MachineClaim to bind"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.unique-machine-name }}
+      run: |
+        set -euo pipefail
+        kubectl wait "machineclaim/${MACHINE_NAME}-claim" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.phase}'=Bound --timeout=60s
 
     - name: "Machine B: wait for it to reach Provisioned, then assert the resolved disk"
       shell: bash
@@ -280,6 +327,7 @@ runs:
         SECRET_NAME: ${{ inputs.unique-machine-name }}-bmc-creds
       run: |
         set -euo pipefail
+        kubectl delete "machineclaim/${MACHINE_NAME}-claim" -n "${NAMESPACE}" --wait=false --ignore-not-found
         kubectl delete "machine/${MACHINE_NAME}" -n "${NAMESPACE}" --wait=false --ignore-not-found
         kubectl wait "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
           --for=delete --timeout=60s
@@ -324,6 +372,24 @@ runs:
           bootMACAddress: "aa:bb:cc:dd:ee:33"
           subnetRef:
             name: ${SUBNET_NAME}
+        EOF
+
+    - name: "Machine C: create a MachineClaim with a targetDisk hint matching neither fabricated disk"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.no-match-machine-name }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha3
+        kind: MachineClaim
+        metadata:
+          name: ${MACHINE_NAME}-claim
+          namespace: ${NAMESPACE}
+        spec:
+          machineName: ${MACHINE_NAME}
           imageRef:
             name: ${IMAGE_NAME}
           targetDisk:
@@ -377,6 +443,7 @@ runs:
       run: |
         set -euo pipefail
         # Same error-backoff requeue concern as Machine A.
+        kubectl delete "machineclaim/${MACHINE_NAME}-claim" -n "${NAMESPACE}" --wait=false --ignore-not-found
         kubectl delete "machine/${MACHINE_NAME}" -n "${NAMESPACE}" --wait=false --ignore-not-found
         kubectl wait "machine/${MACHINE_NAME}" -n "${NAMESPACE}" \
           --for=delete --timeout=60s

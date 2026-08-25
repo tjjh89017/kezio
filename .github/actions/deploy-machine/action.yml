@@ -1,23 +1,25 @@
-name: Set a Machine's deploy intent and wait for Provisioned
+name: Bind a MachineClaim's deploy intent and wait for Provisioned
 
 description: >-
   The deploy half of the full-deploy e2e lane, paired with
-  create-bmc-machine (the enroll half): patches spec.imageRef and
-  spec.postHookRefs onto a Machine create-bmc-machine already created
-  and wait-agent-registered already brought to Available, then polls
-  status.state for "Provisioned". It never creates the Machine itself -
-  re-applying spec.bmc/spec.bootMACAddress/spec.subnetRef here would risk
-  racing the controller's own writes to a Machine it is actively
-  enrolling, and the register/inspect phase already needs a Machine with
-  no deploy intent set (create-bmc-machine's own doc comment).
+  create-bmc-machine (the enroll half): applies a MachineClaim
+  (spec.machineName, spec.imageRef, spec.postHookRefs, spec.targetDisk)
+  naming a Machine create-bmc-machine already created and
+  wait-agent-registered already brought to Available, waits for the
+  claim to bind, then polls the Machine's status.state for "Provisioned".
+  It never creates the Machine itself - the register/inspect phase
+  already needs a Machine with no claim bound yet
+  (create-bmc-machine's own doc comment). The claim is named
+  "<machine-name>-claim"; a caller that re-applies this action against
+  the same machine-name reuses the same claim object.
 
-  Guards the postHookRefs footgun from MachineSpec.PostHookRefs' doc
-  comment: naming any hook at all opts a Machine out of the
+  Guards the postHookRefs footgun from MachineClaimSpec.PostHookRefs' doc
+  comment: naming any hook at all opts a claim out of the
   kezio-default-finalize substitution the controller would otherwise
   apply, so a caller that names its own hook must name
   kezio-default-finalize alongside it to still get its mkswap/efibootmgr
   step, or the disk is written but never made bootable. This action
-  fails before patching anything if posthook-names is non-empty and
+  fails before applying the claim if posthook-names is non-empty and
   omits it, rather than silently deploying a disk that cannot boot.
   posthook-names is empty by default, which leaves spec.postHookRefs
   unset and lets the controller substitute kezio-default-finalize itself.
@@ -42,23 +44,30 @@ description: >-
 
 inputs:
   machine-name:
-    description: Name of the Machine to set a deploy intent on. Must already exist (see create-bmc-machine).
+    description: Name of the Machine to bind a claim to. Must already exist (see create-bmc-machine).
     required: true
   namespace:
-    description: Namespace the Machine (and its DeployRuns) live in.
+    description: Namespace the Machine, its MachineClaim, and its DeployRuns live in.
     required: false
     default: "kezio-system"
   image-name:
-    description: Name of the Image to deploy as this machine's OS - written to spec.imageRef.name.
+    description: Name of the Image to deploy as this machine's OS - written to the claim's spec.imageRef.name.
     required: true
   posthook-names:
     description: >-
-      Newline-separated PostHook names, written in order to
+      Newline-separated PostHook names, written in order to the claim's
       spec.postHookRefs. Blank lines are skipped. Empty by default, which
       leaves spec.postHookRefs unset so the controller substitutes
       kezio-default-finalize on its own. A caller that names its own hook
       must also name kezio-default-finalize - see this action's own
       description.
+    required: false
+    default: ""
+  target-disk-serial:
+    description: >-
+      Serial number of the disk the OS image deploys to, written to the
+      claim's spec.targetDisk.serialNumber. Leave empty to set no hint,
+      which only resolves when the machine reports exactly one disk.
     required: false
     default: ""
   timeout:
@@ -91,23 +100,49 @@ runs:
       run: |
         set -euo pipefail
         if [ -n "${POSTHOOK_NAMES}" ] && ! grep -qxF "kezio-default-finalize" <<<"${POSTHOOK_NAMES}"; then
-          echo "::error::posthook-names names one or more hooks but omits kezio-default-finalize - naming any hook at all opts the Machine out of its automatic substitution, so the deployed disk would never get a boot entry. Add it to posthook-names (in any order), or clear posthook-names entirely to let the controller substitute it on its own." >&2
+          echo "::error::posthook-names names one or more hooks but omits kezio-default-finalize - naming any hook at all opts the claim out of its automatic substitution, so the deployed disk would never get a boot entry. Add it to posthook-names (in any order), or clear posthook-names entirely to let the controller substitute it on its own." >&2
           exit 1
         fi
 
-    - name: Patch the Machine's deploy intent
+    - name: Apply the MachineClaim carrying the deploy intent
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
         MACHINE_NAME: ${{ inputs.machine-name }}
         IMAGE_NAME: ${{ inputs.image-name }}
         POSTHOOK_NAMES: ${{ inputs.posthook-names }}
+        TARGET_DISK_SERIAL: ${{ inputs.target-disk-serial }}
       run: |
         set -euo pipefail
         posthook_refs="$(jq -nR '[inputs | select(length > 0) | {name: .}]' <<<"${POSTHOOK_NAMES}")"
-        patch="$(jq -n --arg image "${IMAGE_NAME}" --argjson postHookRefs "${posthook_refs}" \
-          '{spec: {imageRef: {name: $image}, postHookRefs: $postHookRefs}}')"
-        kubectl patch machine "${MACHINE_NAME}" -n "${NAMESPACE}" --type=merge -p "${patch}"
+        claim="$(jq -n \
+          --arg name "${MACHINE_NAME}-claim" \
+          --arg namespace "${NAMESPACE}" \
+          --arg machine "${MACHINE_NAME}" \
+          --arg image "${IMAGE_NAME}" \
+          --arg serial "${TARGET_DISK_SERIAL}" \
+          --argjson postHookRefs "${posthook_refs}" \
+          '{
+            apiVersion: "kezio.kojuro.date/v1alpha3",
+            kind: "MachineClaim",
+            metadata: {name: $name, namespace: $namespace},
+            spec: ({
+              machineName: $machine,
+              imageRef: {name: $image},
+              postHookRefs: $postHookRefs
+            } + (if $serial != "" then {targetDisk: {serialNumber: $serial}} else {} end))
+          }')"
+        echo "${claim}" | kubectl apply -f -
+
+    - name: Wait for the MachineClaim to bind
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        CLAIM_NAME: ${{ inputs.machine-name }}-claim
+      run: |
+        set -euo pipefail
+        kubectl wait "machineclaim/${CLAIM_NAME}" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.phase}'=Bound --timeout=120s
 
     - name: Wait for status.state to reach Provisioned
       id: wait

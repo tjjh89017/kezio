@@ -2,8 +2,8 @@ name: Dump all kezio v1alpha3 resources in a namespace
 
 description: >-
   Best-effort YAML dump of every kezio.kojuro.date/v1alpha3 kind
-  (machines, machinehardwares, subnets, sites, deployruns, images,
-  partitioncontents) in one namespace - the YAML dump carries each
+  (machines, machineclaims, machinehardwares, subnets, sites, deployruns,
+  images, partitioncontents) in one namespace - the YAML dump carries each
   Site's status.conditions along with everything else, so no separate
   conditions-only step is needed. A companion to
   dump-e2e-diagnostics for the API half of the netboot lane: pass this
@@ -34,5 +34,5 @@ runs:
         # never reaches the "Upload diagnostics" artifact.
         exec > >(tee "${RUNNER_TEMP}/kezio-resources-dump.log") 2>&1
         echo "===== kezio v1alpha3 resources in ${NAMESPACE} ====="
-        kubectl get machines,machinehardwares,subnets,sites,deployruns,images,partitioncontents \
+        kubectl get machines,machineclaims,machinehardwares,subnets,sites,deployruns,images,partitioncontents \
           -n "${NAMESPACE}" -o yaml

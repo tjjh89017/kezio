@@ -2,14 +2,15 @@ name: Run a fake-deployer Machine walk
 
 description: >-
   Creates a Machine CR against a deployed kezio manager running the
-  FakeDeployer, with spec.dataImages already set so the reconciler drives
-  it straight through the full state walk (Enrolling -> Inspecting ->
-  Available -> Provisioning -> Provisioned) without a second patch, then
-  asserts the resulting DeployRun reached phase Succeeded with its
-  phaseTimings populated. A placeholder BMC credentials Secret is created
-  alongside the Machine: the webhook does not resolve credentialsSecretRef
-  (reference resolution is stubbed at this stage), but a real Secret costs
-  nothing and keeps the fixture honest for when resolution lands.
+  FakeDeployer, plus a MachineClaim naming its dataImages, so the
+  reconciler drives it straight through the full state walk (Enrolling ->
+  Inspecting -> Available -> Provisioning -> Provisioned) without a
+  second patch, then asserts the resulting DeployRun reached phase
+  Succeeded with its phaseTimings populated. A placeholder BMC
+  credentials Secret is created alongside the Machine: the webhook does
+  not resolve credentialsSecretRef (reference resolution is stubbed at
+  this stage), but a real Secret costs nothing and keeps the fixture
+  honest for when resolution lands.
 
 inputs:
   namespace:
@@ -50,15 +51,15 @@ inputs:
     default: "fake-deploy-walk-subnet"
   image-name:
     description: >-
-      spec.dataImages[0].imageRef name. dataImages is used instead of
-      imageRef so the trigger this action exercises stays on
-      MachineReconciler.shouldProvision's dataImages path rather than the
-      imageRef-readiness gate (see imageReadyForProvisioning). The named
-      Image still has to exist and reach Ready: MachineReconciler.Builder
-      (wired unconditionally in production) resolves every dataImages
-      entry through planbuild.Builder.Build before provisioning, and an
-      unresolvable entry now delays forever instead of ever reaching
-      Provisioned.
+      spec.dataImages[0].imageRef name, written to the MachineClaim.
+      dataImages is used instead of imageRef so the trigger this action
+      exercises stays on MachineReconciler.shouldProvision's dataImages
+      path rather than the imageRef-readiness gate (see
+      imageReadyForProvisioning). The named Image still has to exist and
+      reach Ready: MachineReconciler.Builder (wired unconditionally in
+      production) resolves every dataImages entry through
+      planbuild.Builder.Build before provisioning, and an unresolvable
+      entry now delays forever instead of ever reaching Provisioned.
     required: false
     default: "fake-deploy-walk-image"
   timeout:
@@ -132,7 +133,6 @@ runs:
         BMC_ADDRESS: ${{ inputs.bmc-address }}
         CREDENTIALS_SECRET_NAME: ${{ inputs.credentials-secret-name }}
         SUBNET_NAME: ${{ inputs.subnet-name }}
-        IMAGE_NAME: ${{ inputs.image-name }}
       run: |
         set -euo pipefail
         cat <<EOF | kubectl apply -f -
@@ -149,10 +149,38 @@ runs:
           bootMACAddress: ${BOOT_MAC_ADDRESS}
           subnetRef:
             name: ${SUBNET_NAME}
+        EOF
+
+    - name: Create the MachineClaim carrying the dataImages deploy intent
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha3
+        kind: MachineClaim
+        metadata:
+          name: ${MACHINE_NAME}-claim
+          namespace: ${NAMESPACE}
+        spec:
+          machineName: ${MACHINE_NAME}
           dataImages:
             - imageRef:
                 name: ${IMAGE_NAME}
         EOF
+
+    - name: Wait for the MachineClaim to bind
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.machine-name }}
+      run: |
+        set -euo pipefail
+        kubectl wait "machineclaim/${MACHINE_NAME}-claim" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.phase}'=Bound --timeout=60s
 
     - name: Wait for the Machine to reach state Provisioned
       shell: bash

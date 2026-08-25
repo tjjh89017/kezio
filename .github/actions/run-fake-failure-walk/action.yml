@@ -48,7 +48,7 @@ inputs:
     default: "aa:bb:cc:dd:ee:02"
   retry-image-name:
     description: >-
-      spec.dataImages[0].imageRef name for the Scenario A Machine.
+      The Scenario A MachineClaim's spec.dataImages[0].imageRef name.
       dataImages is used instead of imageRef because imageRef is gated on
       the named Image being Ready, which this Machine never checks - it
       exists only to keep the deploy payload non-empty and provoke the
@@ -153,7 +153,6 @@ runs:
         BMC_ADDRESS: ${{ inputs.bmc-address }}
         CREDENTIALS_SECRET_NAME: ${{ inputs.credentials-secret-name }}
         SUBNET_NAME: ${{ inputs.subnet-name }}
-        IMAGE_NAME: ${{ inputs.retry-image-name }}
       run: |
         set -euo pipefail
         cat <<EOF | kubectl apply -f -
@@ -172,10 +171,30 @@ runs:
           bootMACAddress: ${BOOT_MAC_ADDRESS}
           subnetRef:
             name: ${SUBNET_NAME}
+        EOF
+
+    - name: "Scenario A: bind its deploy intent via a MachineClaim"
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        MACHINE_NAME: ${{ inputs.retry-machine-name }}
+        IMAGE_NAME: ${{ inputs.retry-image-name }}
+      run: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha3
+        kind: MachineClaim
+        metadata:
+          name: ${MACHINE_NAME}-claim
+          namespace: ${NAMESPACE}
+        spec:
+          machineName: ${MACHINE_NAME}
           dataImages:
             - imageRef:
                 name: ${IMAGE_NAME}
         EOF
+        kubectl wait "machineclaim/${MACHINE_NAME}-claim" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.phase}'=Bound --timeout=60s
 
     - name: "Scenario A: wait for it to enter Provisioning"
       shell: bash

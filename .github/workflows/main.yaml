@@ -863,7 +863,6 @@ jobs:
           bmc-address: "redfish+http://${{ env.TARGET_VM_NAME }}-virtbmc.kezio-system.svc.cluster.local/redfish/v1/Systems/1"
           boot-mac: ${{ env.TARGET_VM_MAC }}
           subnet-name: ${{ env.SUBNET_NAME }}
-          target-disk-serial: "${{ env.TARGET_DISK_SERIAL }}"
 
       - name: Provision the target VM through a real KubeVirtBMC/Redfish endpoint
         uses: ./.github/actions/provision-target-vm-via-bmc
@@ -944,8 +943,8 @@ jobs:
       # Two-axis status proof, strictly before the happy-path deploy
       # below: injects one plan-build failure, asserts status.state stays
       # unchanged while status.operationalStatus becomes "error", then
-      # returns with the failing deploy intent still on the Machine.
-      # deploy-machine's own merge patch (next step, unmodified) overwrites
+      # returns with the failing deploy intent still on the claim.
+      # deploy-machine's own claim apply (next step, unmodified) overwrites
       # spec.imageRef/postHookRefs unconditionally, so it is itself the
       # retry-to-success proof - see this action's own doc comment for why
       # the injected failure cannot leak into the happy-path deploy.
@@ -958,9 +957,9 @@ jobs:
       # Abort-channel proof, still strictly before deploy-machine's own
       # happy-path patch: assert-two-axis-status's own failure never
       # reaches startProvisioningRun, so it leaves the Machine Available
-      # with no DeployRun in flight - this action therefore sets the
-      # Machine's own deploy intent itself (same shape deploy-machine's
-      # own patch uses), waits for that to start a real DeployRun, waits
+      # with no DeployRun in flight - this action therefore binds the
+      # claim's own deploy intent itself (same shape deploy-machine's
+      # own claim uses), waits for that to start a real DeployRun, waits
       # for it to actually reach WritingContent, deletes it mid-write, and
       # proves the sanctioned recovery path for a run that disappears out
       # from under a live deployment (recordCurrentRunDeleted) starts a
@@ -968,8 +967,8 @@ jobs:
       # reaches WritingContent again - see this action's own doc comment
       # for the full evidence trace, including why a deleted run's own
       # "failed" status is never observable after the fact. No Provisioned
-      # wait happens here: deploy-machine's own unmodified patch+wait
-      # (next step, a no-op re-patch of the same imageRef/postHookRefs)
+      # wait happens here: deploy-machine's own unmodified claim apply+wait
+      # (next step, a no-op re-apply of the same imageRef/postHookRefs)
       # and verify-deploy are what prove the controller's automatic retry
       # actually lands.
       - name: Assert deleting a mid-write DeployRun aborts the agent and retries cleanly
@@ -988,16 +987,17 @@ jobs:
       # posthook-names names two hooks, in this order: the script-step
       # environment contract check first, so a broken contract fails the
       # deploy before the finalize builtins change the disk or the NVRAM,
-      # then kezio-default-finalize. A Machine that names any hook does
+      # then kezio-default-finalize. A claim that names any hook does
       # not get the automatic substitution of kezio-default-finalize, thus
       # this list must name it too (see deploy-machine's own guard and
-      # MachineSpec.PostHookRefs).
-      - name: Set the Machine's deploy intent and wait for Provisioned
+      # MachineClaimSpec.PostHookRefs).
+      - name: Bind the MachineClaim's deploy intent and wait for Provisioned
         id: deploy
         uses: ./.github/actions/deploy-machine
         with:
           machine-name: ${{ env.TARGET_VM_NAME }}
           image-name: ${{ steps.build-image.outputs.image-name }}
+          target-disk-serial: "${{ env.TARGET_DISK_SERIAL }}"
           posthook-names: |
             ${{ steps.script-env-hook.outputs.posthook-name }}
             kezio-default-finalize
@@ -1032,7 +1032,7 @@ jobs:
           marker-path: ${{ steps.build-image.outputs.marker-path }}
 
       # Last disk-touching step in this lane, deliberately: it reshapes the
-      # Machine's spec away from the OS image just verified above onto a
+      # claim away from the OS image just verified above onto a
       # dataImages-only intent, overwriting the same disk. A future
       # assertion that still needs the deployed OS intact (an
       # abort-mid-write proof, or a post-deploy power-cycle proof through
@@ -1539,7 +1539,6 @@ jobs:
           bmc-address: "redfish+http://${{ env.VM_A_NAME }}-virtbmc.kezio-system.svc.cluster.local/redfish/v1/Systems/1"
           boot-mac: ${{ env.VM_A_MAC }}
           subnet-name: ${{ env.SUBNET_A_NAME }}
-          target-disk-serial: "${{ env.DISK_A_SERIAL }}"
 
       - name: Create Machine B
         uses: ./.github/actions/create-bmc-machine
@@ -1549,7 +1548,6 @@ jobs:
           bmc-address: "redfish+http://${{ env.VM_B_NAME }}-virtbmc.kezio-system.svc.cluster.local/redfish/v1/Systems/1"
           boot-mac: ${{ env.VM_B_MAC }}
           subnet-name: ${{ env.SUBNET_B_NAME }}
-          target-disk-serial: "${{ env.DISK_B_SERIAL }}"
 
       # Both machines' BMC/Redfish endpoints are stood up back-to-back,
       # before either wait-agent-registered below, so both power on and
@@ -1639,23 +1637,47 @@ jobs:
           fi
           echo "seeder-name=${prefix}${base}${suffix}" >>"${GITHUB_OUTPUT}"
 
-      # Both machines' deploy intent is patched in back-to-back, before
+      # Both machines' deploy intent is bound in back-to-back, before
       # either wait below - this is what starts both deploys inside the
-      # same window (proof 1). deploy-machine's own patch step later
-      # re-applies the identical merge patch (a no-op) before it waits.
-      - name: Set machine A's deploy intent
+      # same window (proof 1). deploy-machine's own claim apply step later
+      # re-applies the identical claim (a no-op) before it waits.
+      - name: Bind machine A's deploy intent
         shell: bash
         run: |
           set -euo pipefail
-          patch='{"spec":{"imageRef":{"name":"${{ steps.build-image.outputs.image-name }}"},"postHookRefs":[]}}'
-          kubectl patch machine "${{ env.VM_A_NAME }}" -n kezio-system --type=merge -p "${patch}"
+          cat <<EOF | kubectl apply -f -
+          apiVersion: kezio.kojuro.date/v1alpha3
+          kind: MachineClaim
+          metadata:
+            name: ${{ env.VM_A_NAME }}-claim
+            namespace: kezio-system
+          spec:
+            machineName: ${{ env.VM_A_NAME }}
+            imageRef:
+              name: ${{ steps.build-image.outputs.image-name }}
+            postHookRefs: []
+            targetDisk:
+              serialNumber: "${{ env.DISK_A_SERIAL }}"
+          EOF
 
-      - name: Set machine B's deploy intent
+      - name: Bind machine B's deploy intent
         shell: bash
         run: |
           set -euo pipefail
-          patch='{"spec":{"imageRef":{"name":"${{ steps.build-image.outputs.image-name }}"},"postHookRefs":[]}}'
-          kubectl patch machine "${{ env.VM_B_NAME }}" -n kezio-system --type=merge -p "${patch}"
+          cat <<EOF | kubectl apply -f -
+          apiVersion: kezio.kojuro.date/v1alpha3
+          kind: MachineClaim
+          metadata:
+            name: ${{ env.VM_B_NAME }}-claim
+            namespace: kezio-system
+          spec:
+            machineName: ${{ env.VM_B_NAME }}
+            imageRef:
+              name: ${{ steps.build-image.outputs.image-name }}
+            postHookRefs: []
+            targetDisk:
+              serialNumber: "${{ env.DISK_B_SERIAL }}"
+          EOF
 
       # Proof 1 (concurrency) and proof 5 (PartitionContent.status.seeders[]
       # reports one Site entry with machineCount 2) together: both machines
@@ -1711,6 +1733,7 @@ jobs:
         with:
           machine-name: ${{ env.VM_A_NAME }}
           image-name: ${{ steps.build-image.outputs.image-name }}
+          target-disk-serial: "${{ env.DISK_A_SERIAL }}"
 
       - name: Wait for machine B to reach Provisioned
         id: deploy-b
@@ -1718,6 +1741,7 @@ jobs:
         with:
           machine-name: ${{ env.VM_B_NAME }}
           image-name: ${{ steps.build-image.outputs.image-name }}
+          target-disk-serial: "${{ env.DISK_B_SERIAL }}"
 
       # Proof 7: the same three-layer verification the single-segment
       # deploy lane uses, for both machines.
@@ -2330,7 +2354,6 @@ jobs:
           bmc-address: "redfish+http://${{ env.VM_X_NAME }}-virtbmc.kezio-system.svc.cluster.local/redfish/v1/Systems/1"
           boot-mac: ${{ env.VM_X_MAC }}
           subnet-name: ${{ env.SUBNET_X_NAME }}
-          target-disk-serial: "${{ env.DISK_X_SERIAL }}"
 
       - name: Create Machine Y
         uses: ./.github/actions/create-bmc-machine
@@ -2340,7 +2363,6 @@ jobs:
           bmc-address: "redfish+http://${{ env.VM_Y_NAME }}-virtbmc.kezio-system.svc.cluster.local/redfish/v1/Systems/1"
           boot-mac: ${{ env.VM_Y_MAC }}
           subnet-name: ${{ env.SUBNET_Y_NAME }}
-          target-disk-serial: "${{ env.DISK_Y_SERIAL }}"
 
       # Both machines' BMC/Redfish endpoints are stood up back-to-back,
       # before either wait-agent-registered below, so both power on and
@@ -2407,23 +2429,47 @@ jobs:
           token: ${{ env.IMAGE_SERVICE_TOKEN }}
           marker-token: ${{ env.DEPLOY_MARKER_TOKEN }}
 
-      # Both machines' deploy intent is patched in back-to-back, before
+      # Both machines' deploy intent is bound in back-to-back, before
       # either wait below - this is what starts both deploys inside the
       # same window (proof 4) and what creates per-Site seeder demand for
       # both Sites at once.
-      - name: Set machine X's deploy intent
+      - name: Bind machine X's deploy intent
         shell: bash
         run: |
           set -euo pipefail
-          patch='{"spec":{"imageRef":{"name":"${{ steps.build-image.outputs.image-name }}"},"postHookRefs":[]}}'
-          kubectl patch machine "${{ env.VM_X_NAME }}" -n kezio-system --type=merge -p "${patch}"
+          cat <<EOF | kubectl apply -f -
+          apiVersion: kezio.kojuro.date/v1alpha3
+          kind: MachineClaim
+          metadata:
+            name: ${{ env.VM_X_NAME }}-claim
+            namespace: kezio-system
+          spec:
+            machineName: ${{ env.VM_X_NAME }}
+            imageRef:
+              name: ${{ steps.build-image.outputs.image-name }}
+            postHookRefs: []
+            targetDisk:
+              serialNumber: "${{ env.DISK_X_SERIAL }}"
+          EOF
 
-      - name: Set machine Y's deploy intent
+      - name: Bind machine Y's deploy intent
         shell: bash
         run: |
           set -euo pipefail
-          patch='{"spec":{"imageRef":{"name":"${{ steps.build-image.outputs.image-name }}"},"postHookRefs":[]}}'
-          kubectl patch machine "${{ env.VM_Y_NAME }}" -n kezio-system --type=merge -p "${patch}"
+          cat <<EOF | kubectl apply -f -
+          apiVersion: kezio.kojuro.date/v1alpha3
+          kind: MachineClaim
+          metadata:
+            name: ${{ env.VM_Y_NAME }}-claim
+            namespace: kezio-system
+          spec:
+            machineName: ${{ env.VM_Y_NAME }}
+            imageRef:
+              name: ${{ steps.build-image.outputs.image-name }}
+            postHookRefs: []
+            targetDisk:
+              serialNumber: "${{ env.DISK_Y_SERIAL }}"
+          EOF
 
       # Waits for both per-(Image, Site) seeder Deployments to exist, and
       # for each one's pod to hold an address - the earliest point the
@@ -2628,6 +2674,7 @@ jobs:
         with:
           machine-name: ${{ env.VM_X_NAME }}
           image-name: ${{ steps.build-image.outputs.image-name }}
+          target-disk-serial: "${{ env.DISK_X_SERIAL }}"
 
       - name: Wait for machine Y to reach Provisioned
         id: deploy-y
@@ -2635,6 +2682,7 @@ jobs:
         with:
           machine-name: ${{ env.VM_Y_NAME }}
           image-name: ${{ steps.build-image.outputs.image-name }}
+          target-disk-serial: "${{ env.DISK_Y_SERIAL }}"
 
       # Proof 6: the same three-layer verification the single-segment
       # deploy lane uses, for both machines.
@@ -3320,7 +3368,6 @@ jobs:
           bmc-address: "redfish+http://${{ env.VM_1_NAME }}-virtbmc.kezio-system.svc.cluster.local/redfish/v1/Systems/1"
           boot-mac: ${{ env.VM_1_MAC }}
           subnet-name: ${{ env.SUBNET_T_NAME }}
-          target-disk-serial: "${{ env.DISK_1_SERIAL }}"
 
       - name: Create Machine 2
         uses: ./.github/actions/create-bmc-machine
@@ -3330,7 +3377,6 @@ jobs:
           bmc-address: "redfish+http://${{ env.VM_2_NAME }}-virtbmc.kezio-system.svc.cluster.local/redfish/v1/Systems/1"
           boot-mac: ${{ env.VM_2_MAC }}
           subnet-name: ${{ env.SUBNET_T_NAME }}
-          target-disk-serial: "${{ env.DISK_2_SERIAL }}"
 
       - name: Create Machine 3
         uses: ./.github/actions/create-bmc-machine
@@ -3340,7 +3386,6 @@ jobs:
           bmc-address: "redfish+http://${{ env.VM_3_NAME }}-virtbmc.kezio-system.svc.cluster.local/redfish/v1/Systems/1"
           boot-mac: ${{ env.VM_3_MAC }}
           subnet-name: ${{ env.SUBNET_T_NAME }}
-          target-disk-serial: "${{ env.DISK_3_SERIAL }}"
 
       # All three BMC/Redfish endpoints are stood up back-to-back, before
       # any wait-agent-registered below, so all three power on and
@@ -3443,30 +3488,66 @@ jobs:
           fi
           echo "seeder-name=${prefix}${base}${suffix}" >>"${GITHUB_OUTPUT}"
 
-      # All three machines' deploy intent is patched in back-to-back,
+      # All three machines' deploy intent is bound in back-to-back,
       # before any wait below - this is what starts all three deploys
-      # inside the same window. deploy-machine's own patch step later
-      # re-applies the identical merge patch (a no-op) before it waits.
-      - name: Set machine 1's deploy intent
+      # inside the same window. deploy-machine's own claim apply step later
+      # re-applies the identical claim (a no-op) before it waits.
+      - name: Bind machine 1's deploy intent
         shell: bash
         run: |
           set -euo pipefail
-          patch='{"spec":{"imageRef":{"name":"${{ steps.build-image.outputs.image-name }}"},"postHookRefs":[]}}'
-          kubectl patch machine "${{ env.VM_1_NAME }}" -n kezio-system --type=merge -p "${patch}"
+          cat <<EOF | kubectl apply -f -
+          apiVersion: kezio.kojuro.date/v1alpha3
+          kind: MachineClaim
+          metadata:
+            name: ${{ env.VM_1_NAME }}-claim
+            namespace: kezio-system
+          spec:
+            machineName: ${{ env.VM_1_NAME }}
+            imageRef:
+              name: ${{ steps.build-image.outputs.image-name }}
+            postHookRefs: []
+            targetDisk:
+              serialNumber: "${{ env.DISK_1_SERIAL }}"
+          EOF
 
-      - name: Set machine 2's deploy intent
+      - name: Bind machine 2's deploy intent
         shell: bash
         run: |
           set -euo pipefail
-          patch='{"spec":{"imageRef":{"name":"${{ steps.build-image.outputs.image-name }}"},"postHookRefs":[]}}'
-          kubectl patch machine "${{ env.VM_2_NAME }}" -n kezio-system --type=merge -p "${patch}"
+          cat <<EOF | kubectl apply -f -
+          apiVersion: kezio.kojuro.date/v1alpha3
+          kind: MachineClaim
+          metadata:
+            name: ${{ env.VM_2_NAME }}-claim
+            namespace: kezio-system
+          spec:
+            machineName: ${{ env.VM_2_NAME }}
+            imageRef:
+              name: ${{ steps.build-image.outputs.image-name }}
+            postHookRefs: []
+            targetDisk:
+              serialNumber: "${{ env.DISK_2_SERIAL }}"
+          EOF
 
-      - name: Set machine 3's deploy intent
+      - name: Bind machine 3's deploy intent
         shell: bash
         run: |
           set -euo pipefail
-          patch='{"spec":{"imageRef":{"name":"${{ steps.build-image.outputs.image-name }}"},"postHookRefs":[]}}'
-          kubectl patch machine "${{ env.VM_3_NAME }}" -n kezio-system --type=merge -p "${patch}"
+          cat <<EOF | kubectl apply -f -
+          apiVersion: kezio.kojuro.date/v1alpha3
+          kind: MachineClaim
+          metadata:
+            name: ${{ env.VM_3_NAME }}-claim
+            namespace: kezio-system
+          spec:
+            machineName: ${{ env.VM_3_NAME }}
+            imageRef:
+              name: ${{ steps.build-image.outputs.image-name }}
+            postHookRefs: []
+            targetDisk:
+              serialNumber: "${{ env.DISK_3_SERIAL }}"
+          EOF
 
       # The overlap is ASSERTED, not hoped for: this polls until all
       # three Machines are observed mid-deploy (state != Provisioned,
@@ -3558,6 +3639,7 @@ jobs:
         with:
           machine-name: ${{ env.VM_1_NAME }}
           image-name: ${{ steps.build-image.outputs.image-name }}
+          target-disk-serial: "${{ env.DISK_1_SERIAL }}"
 
       - name: Wait for machine 2 to reach Provisioned
         id: deploy-2
@@ -3565,6 +3647,7 @@ jobs:
         with:
           machine-name: ${{ env.VM_2_NAME }}
           image-name: ${{ steps.build-image.outputs.image-name }}
+          target-disk-serial: "${{ env.DISK_2_SERIAL }}"
 
       - name: Wait for machine 3 to reach Provisioned
         id: deploy-3
@@ -3572,6 +3655,7 @@ jobs:
         with:
           machine-name: ${{ env.VM_3_NAME }}
           image-name: ${{ steps.build-image.outputs.image-name }}
+          target-disk-serial: "${{ env.DISK_3_SERIAL }}"
 
       # The same three-layer verification the single-machine deploy lane
       # uses (Machine status, booted-from-disk via the deployed guest's

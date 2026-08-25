@@ -2,9 +2,10 @@ name: Leech a PartitionContent and byte-compare it against the fixture
 
 description: >-
   Exercises the seeder lifecycle end to end against an already-Ready
-  PartitionContent: creates a Machine naming the content's Image as its OS
-  image (the seed-demand source the controller derives seeding from) and
-  waits for the content's seeder Deployment to become Available, runs a
+  PartitionContent: creates a Machine bound to a MachineClaim naming the
+  content's Image as its OS image (the seed-demand source the controller
+  derives seeding from) and waits for the content's seeder Deployment to
+  become Available, runs a
   leecher Pod (the same kezio-seeder image, default entrypoint - just
   ezio, gRPC-driven, no register sidecar) that downloads the content over
   BitTorrent via leechctl (built on the runner, copied in, and driven with
@@ -117,6 +118,7 @@ runs:
         }
         cleanup() {
           kubectl delete pod "${leecher_pod}" -n "${NAMESPACE}" --ignore-not-found --wait=false || true
+          kubectl delete machineclaim "${demand_machine}-claim" -n "${NAMESPACE}" --ignore-not-found --wait=false || true
           kubectl delete machine "${demand_machine}" -n "${NAMESPACE}" --ignore-not-found --wait=false || true
           kubectl delete secret "${demand_bmc_creds_secret}" -n "${NAMESPACE}" --ignore-not-found || true
         }
@@ -141,9 +143,24 @@ runs:
               name: ${demand_bmc_creds_secret}
           subnetRef:
             name: kezio-e2e-leecher-demand-subnet
+        EOF
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha3
+        kind: MachineClaim
+        metadata:
+          name: ${demand_machine}-claim
+          namespace: ${NAMESPACE}
+        spec:
+          machineName: ${demand_machine}
           imageRef:
             name: ${IMAGE_NAME}
         EOF
+
+        # The demand mechanism may resolve off the bound claim rather
+        # than the bare Machine, so wait for the claim to bind before
+        # relying on the seeder Deployment to notice the Image reference.
+        kubectl wait "machineclaim/${demand_machine}-claim" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.phase}'=Bound --timeout=30s
 
         echo "Waiting for the seeder Deployment owned by Image ${IMAGE_NAME} to appear"
         deadline=$(( $(date +%s) + SEEDER_WAIT_TIMEOUT_SECONDS ))

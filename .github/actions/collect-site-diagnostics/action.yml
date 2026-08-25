@@ -206,11 +206,11 @@ runs:
           namespace="$1"
           kezio_dir="${OUTPUT_DIR}/kezio-resources"
           mkdir -p "${kezio_dir}"
-          kubectl get machines,machinehardwares,subnets,sites,deployruns,images,imageimports,partitioncontents,posthooks \
+          kubectl get machines,machineclaims,machinehardwares,subnets,sites,deployruns,images,imageimports,partitioncontents,posthooks \
             -n "${namespace}" -o yaml >"${kezio_dir}/${namespace}.yaml" 2>&1
           # The wide listing stays readable when the YAML above is
           # thousands of lines: states, phases, and ages at a glance.
-          kubectl get machines,subnets,sites,deployruns,images,partitioncontents \
+          kubectl get machines,machineclaims,subnets,sites,deployruns,images,partitioncontents \
             -n "${namespace}" -o wide >"${kezio_dir}/${namespace}-summary.txt" 2>&1
         }
 

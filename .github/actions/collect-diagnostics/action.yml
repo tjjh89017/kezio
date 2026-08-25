@@ -49,6 +49,9 @@ runs:
 
         echo "===== Machine CRs ====="
         kubectl get machines.kezio.kojuro.date -n "${WORKLOAD_NAMESPACE}" -o yaml >"${OUTPUT_PATH}/machines.yaml" 2>&1
+        echo "===== MachineClaim CRs ====="
+        kubectl get machineclaims.kezio.kojuro.date -n "${WORKLOAD_NAMESPACE}" -o yaml \
+          >"${OUTPUT_PATH}/machineclaims.yaml" 2>&1
         echo "===== DeployRun CRs ====="
         kubectl get deployruns.kezio.kojuro.date -n "${WORKLOAD_NAMESPACE}" -o yaml \
           >"${OUTPUT_PATH}/deployruns.yaml" 2>&1

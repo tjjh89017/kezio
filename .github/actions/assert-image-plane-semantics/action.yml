@@ -248,9 +248,21 @@ runs:
             # Machine's demand unresolvable and the seeder Deployment
             # below would never appear.
             name: kezio-e2e-leecher-demand-subnet
+        EOF
+        cat <<EOF | kubectl apply -f -
+        apiVersion: kezio.kojuro.date/v1alpha3
+        kind: MachineClaim
+        metadata:
+          name: ${demand_machine}-claim
+          namespace: ${NAMESPACE}
+        spec:
+          machineName: ${demand_machine}
           imageRef:
             name: ${FIRST_IMAGE_NAME}
         EOF
+        kubectl wait "machineclaim/${demand_machine}-claim" -n "${NAMESPACE}" \
+          --for=jsonpath='{.status.phase}'=Bound --timeout=30s
+
         echo "Waiting for the seeder Deployment owned by Image ${FIRST_IMAGE_NAME} to appear"
         deadline=$(( $(date +%s) + SEEDER_WAIT_TIMEOUT_SECONDS ))
         while [ -z "${seeder_deployment}" ]; do
@@ -271,11 +283,15 @@ runs:
           --timeout="${SEEDER_WAIT_TIMEOUT_SECONDS}s"
 
         echo "Deleting the demand Machine ${demand_machine}"
+        # The claim is deleted first: MachineClaim and Machine are
+        # independent objects (not owner/owned), and deleting the claim
+        # first is what cleanly releases the Machine.
         # --ignore-not-found on the secret: the Machine's own delete walk
         # releases its finalizer and clears the Machine, letting the
         # credentials Secret's owner reference cascade-delete it (see
         # claimCredentialsSecret/releaseCredentialsSecretFinalizer) - this
         # explicit delete can race that cascade and find it already gone.
+        kubectl delete machineclaim "${demand_machine}-claim" -n "${NAMESPACE}" --wait=false --ignore-not-found
         kubectl delete machine "${demand_machine}" -n "${NAMESPACE}" --wait=false
         kubectl delete secret "${demand_bmc_creds_secret}" -n "${NAMESPACE}" --ignore-not-found
 
