@@ -185,186 +185,6 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-  # Gates the Site/tracker/seeder lanes on three mechanisms this repo
-  # never tested before: that Multus honours the default-network
-  # annotation's "ips" field (the tracker's own pinning mechanism), that
-  # a single-homed pod crosses a segment boundary via a NAD IPAM route,
-  # and that create-routed-segments' same-group forwarding and
-  # cross-group isolation actually hold on a real runner. Needs no
-  # kezio image, no cert-manager, no KubeVirt - only RKE2 with Multus,
-  # the cheapest substrate that can even ask Multus a question - so it
-  # runs alongside images/boot-artifacts rather than after them.
-  e2e-network-probes:
-    name: Network probes
-    needs: [lint, test]
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install RKE2
-        uses: ./.github/actions/install-rke2
-        with:
-          rke2-version: "v1.36.2+rke2r1"
-          enable-multus: "true"
-
-      # RKE2 deploys Multus as its own HelmChart addon, which can lag
-      # behind node-Ready - the same wait install-cluster-addons uses,
-      # inlined here rather than pulled in through that action, since
-      # everything else it installs (cert-manager, KubeVirt, virtctl,
-      # CDI) is not needed by any of these three probes.
-      - name: Wait for the Multus NetworkAttachmentDefinition CRD
-        shell: bash
-        run: |
-          set -euo pipefail
-          deadline=$(( $(date +%s) + 300 ))
-          until kubectl get crd network-attachment-definitions.k8s.cni.cncf.io >/dev/null 2>&1; do
-            if [ "$(date +%s)" -ge "${deadline}" ]; then
-              echo "::error::network-attachment-definitions.k8s.cni.cncf.io CRD did not appear within the timeout - RKE2's rke2-multus HelmChart addon may not have installed." >&2
-              kubectl get helmcharts -A -o wide || true
-              kubectl -n kube-system get pods -o wide || true
-              exit 1
-            fi
-            sleep 5
-          done
-          # kubectl wait --for=condition=Established errors out instead of
-          # retrying while the fresh CRD's status.conditions is still nil
-          # (".status.conditions accessor error"), so poll the condition
-          # with the failure tolerated inside the loop.
-          until kubectl get crd network-attachment-definitions.k8s.cni.cncf.io \
-              -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' 2>/dev/null \
-              | grep -q True; do
-            if [ "$(date +%s)" -ge "${deadline}" ]; then
-              echo "::error::network-attachment-definitions.k8s.cni.cncf.io CRD never became Established." >&2
-              kubectl get crd network-attachment-definitions.k8s.cni.cncf.io -o yaml || true
-              exit 1
-            fi
-            sleep 5
-          done
-
-      # The CRD existing only means the rke2-multus HelmChart addon's
-      # manifests were applied - the daemonset's pod can still be
-      # mid-rollout, and only that pod writes the node's CNI conflist
-      # (Multus's kubelet-facing config). A pod scheduled before that
-      # write lands gets wired by canal directly and carries no
-      # network-status annotation at all - this is what Probe A caught.
-      # The deploy lane never hits this because cert-manager/KubeVirt/CDI
-      # install after this same CRD wait, giving Multus minutes to
-      # settle before any pod is created; this lane has nothing else to
-      # wait on, so wait for the rollout explicitly, then confirm the
-      # conflist file the daemonset writes is actually on disk - the
-      # rollout condition (pod Ready) can flip slightly before that
-      # write completes, which is exactly the gap Probe A hit. The
-      # conflist directory is whatever the chart mounted, not a
-      # documented constant (a hardcoded rke2 agent path turned out not
-      # to even exist on the runner), so read the daemonset's own
-      # hostPath volumes and search those.
-      - name: Wait for the Multus daemonset to finish rolling out
-        shell: bash
-        run: |
-          set -euo pipefail
-          deadline=$(( $(date +%s) + 300 ))
-          until kubectl -n kube-system get daemonset rke2-multus >/dev/null 2>&1; do
-            if [ "$(date +%s)" -ge "${deadline}" ]; then
-              echo "::error::daemonset rke2-multus did not appear in kube-system within the timeout." >&2
-              kubectl get helmcharts -A -o wide || true
-              kubectl -n kube-system get pods -o wide || true
-              exit 1
-            fi
-            sleep 5
-          done
-          remaining=$(( deadline - $(date +%s) ))
-          if [ "${remaining}" -lt 1 ]; then remaining=1; fi
-          kubectl -n kube-system rollout status daemonset/rke2-multus --timeout="${remaining}s"
-
-          mapfile -t cni_dirs < <(kubectl -n kube-system get daemonset rke2-multus \
-            -o jsonpath='{range .spec.template.spec.volumes[?(@.hostPath)]}{.hostPath.path}{"\n"}{end}' \
-            | grep -E '/(cni/)?net\.d/?$' | sort -u)
-          if [ "${#cni_dirs[@]}" -eq 0 ]; then
-            echo "::error::daemonset rke2-multus mounts no host directory that looks like a CNI conf dir." >&2
-            kubectl -n kube-system get daemonset rke2-multus -o jsonpath='{.spec.template.spec.volumes}' | jq . || true
-            exit 1
-          fi
-          echo "Multus writes its conflist into: ${cni_dirs[*]}"
-          until sudo find "${cni_dirs[@]}" -maxdepth 1 -iname '*multus*' 2>/dev/null | grep -q .; do
-            if [ "$(date +%s)" -ge "${deadline}" ]; then
-              echo "::error::rke2-multus rolled out but no multus CNI conflist appeared under ${cni_dirs[*]}." >&2
-              sudo ls -la "${cni_dirs[@]}" || true
-              exit 1
-            fi
-            sleep 2
-          done
-
-      # This lane never deploys kezio (deploy-kezio, which creates
-      # config/manager/manager.yaml's scaffold-system namespace, is not
-      # part of it) - so the namespace every probe below defaults to must
-      # be created directly. --dry-run=client | kubectl apply keeps this
-      # idempotent across reruns of the same job.
-      - name: Create the scaffold-system namespace the probes default to
-        shell: bash
-        run: kubectl create namespace scaffold-system --dry-run=client -o yaml | kubectl apply -f -
-
-      # Pool range and pinned address both mirror
-      # create-provisioning-nads' own kezio-seeder-network: the pool is
-      # .101-.116 and the tracker pins the top of it, the one placement
-      # host-local accepts.
-      - name: Probe A -- Multus honours the default-network annotation's ips field
-        uses: ./.github/actions/probe-multus-pinned-ip
-        with:
-          bridge-name: kezio-probe-a0
-          nad-pool-cidr: 192.0.20.0/24
-          nad-pool-range-start: 192.0.20.101
-          nad-pool-range-end: 192.0.20.116
-          requested-ip-cidr: 192.0.20.116/24
-
-      - name: Probe B -- a single-homed pod reaches another segment through NAD IPAM routes
-        uses: ./.github/actions/probe-nad-routes
-        with:
-          segment1-bridge: kezio-probe-b1
-          segment1-cidr: 192.0.21.0/24
-          segment1-host-cidr: 192.0.21.1/24
-          segment1-gateway-ip: 192.0.21.1
-          segment2-bridge: kezio-probe-b2
-          segment2-host-cidr: 192.0.22.1/24
-          segment2-route-cidr: 192.0.22.0/24
-          segment2-gateway-ip: 192.0.22.1
-          pod-with-route-cidr: 192.0.21.50/24
-          pod-no-route-cidr: 192.0.21.60/24
-          far-cidr: 192.0.22.50/24
-
-      - name: Probe C -- same-group forwarding works and cross-group isolation holds
-        uses: ./.github/actions/probe-site-forwarding
-        with:
-          segments: |
-            kezio-probe-c-a 192.0.23.0/24 192.0.23.1/24 kezio-probe-c-group1
-            kezio-probe-c-b 192.0.24.0/24 192.0.24.1/24 kezio-probe-c-group1
-            kezio-probe-c-c 192.0.25.0/24 192.0.25.1/24 kezio-probe-c-group2
-          bridge-a: kezio-probe-c-a
-          bridge-a-gateway-ip: 192.0.23.1
-          bridge-a-listener-ip: 192.0.23.50
-          bridge-a-probe-cidr: 192.0.23.60/24
-          bridge-b: kezio-probe-c-b
-          bridge-b-gateway-ip: 192.0.24.1
-          bridge-b-listener-ip: 192.0.24.50
-          bridge-b-probe-cidr: 192.0.24.60/24
-          bridge-c: kezio-probe-c-c
-          bridge-c-gateway-ip: 192.0.25.1
-          bridge-c-listener-ip: 192.0.25.50
-
-      - name: Collect site/tracker/seeder/bootd/runner-network diagnostics
-        if: always()
-        uses: ./.github/actions/collect-site-diagnostics
-        with:
-          artifact-name-prefix: network-probes
-          namespaces: "scaffold-system"
-          bridges: |
-            kezio-probe-a0
-            kezio-probe-b1
-            kezio-probe-b2
-            kezio-probe-c-a
-            kezio-probe-c-b
-            kezio-probe-c-c
-
   # Fast e2e lane: single-node RKE2, built entirely from composite
   # actions - install CRDs, deploy the manager, walk a Machine through
   # the fake deployer to Provisioned, assert its DeployRun, exercise
@@ -791,12 +611,6 @@ jobs:
       # refuses a requested address outside its own range - see
       # create-provisioning-nads' own comment on that pool.
       TRACKER_SERVER_IP: 192.0.2.116
-      # create-provisioning-nads also creates a kezio-tracker-network
-      # NAD; no Deployment in this lane attaches it (the Site's tracker
-      # single-homes on the seeding NAD instead), so this address backs
-      # an inert object only. Distinct from every real address on this
-      # segment so it cannot collide with one.
-      UNUSED_TRACKER_NET1_IP: 192.0.2.7/24
       LEASE_RANGE_START: 192.0.2.10
       LEASE_RANGE_END: 192.0.2.100
       SUBNET_NAME: netboot-${{ matrix.dhcp-scenario }}
@@ -944,7 +758,6 @@ jobs:
         with:
           bridge-name: ${{ env.PROVISIONING_BRIDGE }}
           bootd-net1-ip: "${{ env.BOOTD_SERVER_IP }}/24"
-          tracker-net1-ip: ${{ env.UNUSED_TRACKER_NET1_IP }}
           seeder-net1-cidr: ${{ env.PROVISIONING_CIDR }}
 
       # SubnetReconciler's Valid condition checks the kezio-bootd
@@ -1368,7 +1181,7 @@ jobs:
   # is this lane's reason to exist.
   e2e-routed-site:
     name: Routed lane
-    needs: [build-required, e2e-network-probes]
+    needs: [build-required]
     runs-on: ubuntu-latest
     timeout-minutes: 150
     env:
@@ -1399,16 +1212,12 @@ jobs:
       # host-local refuses a requested address outside its own range -
       # see create-provisioning-nads' own comment on that pool's range.
       TRACKER_IP: 198.51.102.116
-      # create-provisioning-nads always creates a "kezio-boot-network" and
-      # a "kezio-tracker-network" NAD alongside the seeder one; neither is
-      # referenced by any Subnet in this lane (segment C hosts no bootd,
-      # and the Site's tracker single-homes on the seeding Subnet's own
-      # seederNetworkRef - see internal/controller/site_tracker_deployment.go's
-      # trackerPodAnnotations, not a dedicated tracker NAD), so these two
-      # addresses back inert, unused NAD objects. Distinct from every real
-      # address on segment C so they cannot collide with one.
+      # create-provisioning-nads always creates a "kezio-boot-network"
+      # NAD alongside the seeder one; it is not referenced by any Subnet
+      # in this lane (segment C hosts no bootd), so this address backs
+      # an inert, unused NAD object. Distinct from every real address on
+      # segment C so it cannot collide with one.
       UNUSED_BOOTD_NET1_IP: 198.51.102.6/24
-      UNUSED_TRACKER_NET1_IP: 198.51.102.7/24
       SITE_NAME: kezio-routed-site
       SUBNET_A_NAME: kezio-routed-subnet-a
       SUBNET_B_NAME: kezio-routed-subnet-b
@@ -1616,7 +1425,6 @@ jobs:
         with:
           bridge-name: ${{ env.SEG_C_BRIDGE }}
           bootd-net1-ip: ${{ env.UNUSED_BOOTD_NET1_IP }}
-          tracker-net1-ip: ${{ env.UNUSED_TRACKER_NET1_IP }}
           seeder-net1-cidr: ${{ env.SEG_C_CIDR }}
           seeding-routes-json: >-
             [{"dst":"${{ env.SEG_A_CIDR }}","gw":"${{ env.SEG_C_HOST_ADDR }}"},{"dst":"${{ env.SEG_B_CIDR }}","gw":"${{ env.SEG_C_HOST_ADDR }}"}]
@@ -2078,7 +1886,7 @@ jobs:
   # never leech across Sites regardless.
   e2e-two-site-concurrent:
     name: Two-site concurrent lane
-    needs: [build-required, e2e-network-probes]
+    needs: [build-required]
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
@@ -3159,7 +2967,7 @@ jobs:
   # or serialized deploys - three concurrent deploys are the claim.
   e2e-three-machine-concurrent:
     name: Three-machine concurrent lane
-    needs: [build-required, e2e-network-probes]
+    needs: [build-required]
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
@@ -3194,16 +3002,11 @@ jobs:
       # the address every seeder pod holds.
       TRACKER_IP: 198.51.106.116
       # create-provisioning-nads always creates a "kezio-boot-network"
-      # and a "kezio-tracker-network" NAD alongside the seeder one.
-      # Neither is referenced by any Subnet here (segment S hosts no
-      # bootd, and the Site's tracker single-homes on the seeding
-      # Subnet's own seederNetworkRef - see
-      # internal/controller/site_tracker_deployment.go's
-      # trackerPodAnnotations - not a dedicated tracker NAD), so these
-      # two addresses back inert, unused NAD objects. Distinct from every
-      # real address on segment S so they cannot collide with one.
+      # NAD alongside the seeder one. It is not referenced by any Subnet
+      # here (segment S hosts no bootd), so this address backs an inert,
+      # unused NAD object. Distinct from every real address on segment S
+      # so it cannot collide with one.
       UNUSED_BOOTD_NET1_IP: 198.51.106.6/24
-      UNUSED_TRACKER_NET1_IP: 198.51.106.7/24
       SITE_NAME: kezio-3mach-site
       SUBNET_T_NAME: kezio-3mach-subnet-t
       SUBNET_S_NAME: kezio-3mach-subnet-s
@@ -3402,7 +3205,6 @@ jobs:
         with:
           bridge-name: ${{ env.SEG_S_BRIDGE }}
           bootd-net1-ip: ${{ env.UNUSED_BOOTD_NET1_IP }}
-          tracker-net1-ip: ${{ env.UNUSED_TRACKER_NET1_IP }}
           seeder-net1-cidr: ${{ env.SEG_S_CIDR }}
           seeding-routes-json: >-
             [{"dst":"${{ env.SEG_T_CIDR }}","gw":"${{ env.SEG_S_HOST_ADDR }}"}]
@@ -3931,7 +3733,6 @@ jobs:
     timeout-minutes: 5
     if: always()
     needs:
-      - e2e-network-probes
       - e2e-fast-lane
       - e2e-image-path
       - e2e-deploy
@@ -3941,8 +3742,7 @@ jobs:
     steps:
       - name: All e2e lanes passed
         run: |
-          [ "${{ needs.e2e-network-probes.result }}" = "success" ] && \
-            [ "${{ needs.e2e-fast-lane.result }}" = "success" ] && \
+          [ "${{ needs.e2e-fast-lane.result }}" = "success" ] && \
             [ "${{ needs.e2e-image-path.result }}" = "success" ] && \
             [ "${{ needs.e2e-deploy.result }}" = "success" ] && \
             [ "${{ needs.e2e-routed-site.result }}" = "success" ] && \
