@@ -1000,7 +1000,7 @@ func TestAgentDeployerProvisionLaterPassStalledWithoutLastProgressFallsBackToPha
 	}
 }
 
-func TestAgentDeployerDeprovisionReportsDelayedUnsupported(t *testing.T) {
+func TestAgentDeployerDeprovisionReportsComplete(t *testing.T) {
 	machine := agentTestMachine(t)
 	d := &AgentDeployer{Client: newAgentTestClient(t)}
 
@@ -1008,11 +1008,8 @@ func TestAgentDeployerDeprovisionReportsDelayedUnsupported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Deprovision() error = %v", err)
 	}
-	if result.Outcome != Delayed {
-		t.Fatalf("Deprovision() outcome = %v, want Delayed", result.Outcome)
-	}
-	if result.ErrorMessage != agentDeployerUnsupportedMessage {
-		t.Errorf("Deprovision() ErrorMessage = %q, want %q", result.ErrorMessage, agentDeployerUnsupportedMessage)
+	if result.Outcome != Complete {
+		t.Fatalf("Deprovision() outcome = %v, want Complete", result.Outcome)
 	}
 }
 

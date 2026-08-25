@@ -101,14 +101,6 @@ const agentDeployerProvisionBootDeadline = 5 * time.Minute
 // of a Machine stuck in Provisioning forever.
 const agentDeployerProvisionStallDeadline = 30 * time.Minute
 
-// agentDeployerUnsupportedMessage is Deprovision's Result.ErrorMessage:
-// AgentDeployer does not drive deprovisioning yet.
-const agentDeployerUnsupportedMessage = "deprovisioning is not supported by this deployer"
-
-// agentDeployerUnsupportedRequeueInterval is Deprovision's
-// Result.RequeueAfter.
-const agentDeployerUnsupportedRequeueInterval = time.Hour
-
 // AgentDeployer drives hardware inspection, image provisioning, and power
 // through a Machine's BMC (internal/bmc), the live kezio-agent
 // registration recorded by internal/agentserver, and the DeployRun phase
@@ -660,10 +652,27 @@ func deployRunFailureMessage(run *keziov1alpha2.DeployRun) string {
 	return fmt.Sprintf("DeployRun %q failed", run.Name)
 }
 
-// Deprovision implements Deployer, mirroring Provision: see its doc
-// comment.
+// Deprovision implements Deployer. It reports Complete immediately and
+// touches neither the BMC nor the machine's disk: every piece of state
+// this deployer manages - agentDeployerPXEArmedAnnotation,
+// agentDeployerProvisionBootAnnotation, and status.netBoot - lives on the
+// Machine object itself, so it is already gone the moment the object is
+// removed, satisfying the interface's Complete contract with nothing left
+// to do here.
+//
+// kezio deliberately does not erase the deployed system as part of
+// deleting a Machine. Deleting a Machine removes it from kezio's
+// inventory - the record that this hardware is kezio's to manage - it is
+// not a request to destroy what was last written to its disk. Wiping the
+// disk on delete would turn an inventory edit into a destructive action
+// on hardware kezio no longer even tracks once the object is gone, with
+// no way to undo it if the delete was a mistake or the Machine is meant
+// to be re-enrolled elsewhere. The disk is left exactly as the last
+// Provision (or Inspect, if the machine was never provisioned) wrote it;
+// a caller that wants the data actually destroyed must do that before,
+// or independently of, deleting the Machine.
 func (d *AgentDeployer) Deprovision(ctx context.Context, machine *keziov1alpha2.Machine, restartOnFailure bool) (Result, error) {
-	return Result{Outcome: Delayed, RequeueAfter: agentDeployerUnsupportedRequeueInterval, ErrorMessage: agentDeployerUnsupportedMessage}, nil
+	return Result{Outcome: Complete}, nil
 }
 
 // PowerOff implements Deployer: a graceful shutdown request, escalated to

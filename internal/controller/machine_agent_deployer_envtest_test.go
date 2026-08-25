@@ -24,6 +24,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -160,5 +161,64 @@ var _ = Describe("Machine reconciliation with AgentDeployer", func() {
 		Expect(k8sClient.Get(ctx, key, &final)).To(Succeed())
 		Expect(final.Status.State).To(Equal(keziov1alpha2.MachineStateAvailable))
 		Expect(final.Status.OperationalStatus).To(Equal(keziov1alpha2.MachineOperationalStatusOK))
+	})
+
+	It("deletes a Machine through the real Deprovision step instead of stalling in Deprovisioning forever", func() {
+		name := fmt.Sprintf("agent-deployer-delete-%d", GinkgoRandomSeed())
+		secretName := name + "-bmc"
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: "default"},
+			Type:       corev1.SecretTypeBasicAuth,
+			Data: map[string][]byte{
+				"username": []byte("admin"),
+				"password": []byte("hunter2"),
+			},
+		}
+		Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+		DeferCleanup(func() {
+			Expect(k8sClient.Delete(ctx, secret)).To(Succeed())
+		})
+
+		machine := &keziov1alpha2.Machine{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec: keziov1alpha2.MachineSpec{
+				BMC: keziov1alpha2.MachineBMC{
+					Address:              machineBMCTestDriverScheme + "://" + name,
+					CredentialsSecretRef: keziov1alpha2.SecretReference{Name: secretName},
+				},
+				BootMACAddress: "aa:bb:cc:dd:ee:04",
+				SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+
+		reconciler := &MachineReconciler{
+			Client:   k8sClient,
+			Scheme:   k8sClient.Scheme(),
+			Deployer: &deployer.AgentDeployer{Client: k8sClient},
+		}
+		key := types.NamespacedName{Name: name, Namespace: "default"}
+
+		By("reconciling until the finalizer is added")
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+
+		By("deleting the Machine")
+		var toDelete keziov1alpha2.Machine
+		Expect(k8sClient.Get(ctx, key, &toDelete)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, &toDelete)).To(Succeed())
+
+		By("reconciling the delete walk to completion: a stubbed Deprovision would stall here forever")
+		var gone bool
+		var machine2 keziov1alpha2.Machine
+		for i := 0; i < 10; i++ {
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			if err := k8sClient.Get(ctx, key, &machine2); apierrors.IsNotFound(err) {
+				gone = true
+				break
+			}
+		}
+		Expect(gone).To(BeTrue(), "the Machine must be gone once the real AgentDeployer's delete walk finishes")
 	})
 })
