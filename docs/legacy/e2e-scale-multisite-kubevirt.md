@@ -48,7 +48,7 @@ boot segments, matching a real routed multi-subnet Site (see
 - **A full boot-to-disk chain for both machines**: real ingest
   (qemu-img/sfdisk/partclone), a real BitTorrent leech, a real in-guest
   reboot, and the same three-layer verification
-  (`docs/e2e-kubevirt-reusable.md`) other lanes use - run for both VMs
+  (`docs/legacy/e2e-kubevirt-reusable.md`) other lanes use - run for both VMs
   independently.
 - **`Site.status`**: both boot Subnets and the data Subnet appear in
   `status.subnetRefs`, and `Ready`/`Valid` are both True.

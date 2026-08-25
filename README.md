@@ -130,13 +130,6 @@ See `make help` for the full list of targets.
 - [`docs/secure-boot.md`](docs/secure-boot.md): the UEFI Secure Boot
   signature chain the network boot path relies on, the kernel-signing
   story, and what CI does and does not verify.
-- [`docs/e2e-kubevirt-reusable.md`](docs/e2e-kubevirt-reusable.md): how
-  another repository (the ezio repository in particular) can reuse
-  kezio's KubeVirt BT-transfer e2e steps by calling its composite
-  actions under `.github/actions/` directly.
-- [`docs/e2e-scale-multisite-kubevirt.md`](docs/e2e-scale-multisite-kubevirt.md):
-  what the routed multi-segment and two-site concurrent e2e lanes in
-  `main.yaml` prove, and what they deliberately do not claim.
 
 ## Continuous integration
 
@@ -144,8 +137,8 @@ See `make help` for the full list of targets.
 `main` and on every pull request. `release.yaml` publishes container
 images and boot artifacts on `v*` tags. Several KubeVirt-based e2e lanes
 verify the deploy chain end to end, from ingest through BitTorrent leech
-to a booted disk, including a routed multi-segment lane and a two-site
-concurrent lane.
+to a booted disk, including a routed multi-segment lane, a two-site
+concurrent lane, and a three-machine concurrent lane.
 
 ## License
 

@@ -597,6 +597,17 @@ comparing a lab run against a CI run.
   exactly two seeder Deployments exist (one per Site), and that
   injecting a fault into one Site's seeding `Subnet` degrades only that
   Site's status, leaving the other Site's status unaffected.
+- **`e2e-three-machine-concurrent` exercises three machines that deploy
+  the same Image at the same time**, in one Site with one boot `Subnet`
+  and a data-plane-only `Subnet` one routed hop away. The seeder and the
+  tracker sit on that second segment, off the machines' segment on
+  purpose: multicast does not cross a routed hop, so a machine has no
+  path to the seeder except the one the tracker mediates. The lane
+  asserts that the tracker's own peer table holds the seeder, which is
+  evidence that the announce succeeded and not evidence of how the
+  torrent was configured. It does not re-prove cross-Site isolation or
+  per-`Subnet` boot-server isolation - all three machines share one boot
+  `Subnet`.
 - **Tracker/seeder connectivity always uses the Multus, same-bridge
   shape** described in section 3, with a static tracker address and a
   `host-local` seeder pool - none of these lanes exercises a
@@ -613,9 +624,8 @@ comparing a lab run against a CI run.
   with Secure Boot, so this gap does not change any guidance in this
   document.
 
-See `docs/e2e-scale-multisite-kubevirt.md` for the full detail on what
-`e2e-routed-site` and `e2e-two-site-concurrent` each prove and what they
-deliberately do not claim.
+Each lane's own job in `.github/workflows/main.yaml` states what it
+proves and what it deliberately does not claim.
 
 ### Coverage note: which scenarios are proven by the packet lab, and which by the KubeVirt lanes
 
