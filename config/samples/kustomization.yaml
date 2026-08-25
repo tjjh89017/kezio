@@ -1,6 +1,7 @@
 ## Append samples of your project ##
 resources:
 - kezio_v1alpha3_machine.yaml
+- kezio_v1alpha3_machineclaim.yaml
 - kezio_v1alpha3_deployrun.yaml
 - kezio_v1alpha3_machinehardware.yaml
 - kezio_v1alpha3_image.yaml

@@ -251,6 +251,13 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	// nolint:goconst
+	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
+		if err := webhookv1alpha3.SetupMachineClaimWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "MachineClaim")
+			os.Exit(1)
+		}
+	}
 	// Shared with PartitionContentReconciler below: both need the same
 	// answer to "is a seeder image configured at all" - the Image
 	// reconciler to act on it, PartitionContent to explain an unavailable

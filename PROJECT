@@ -29,6 +29,19 @@ resources:
   controller: true
   domain: kojuro.date
   group: kezio
+  kind: MachineClaim
+  path: github.com/tjjh89017/kezio/api/v1alpha3
+  version: v1alpha3
+  webhooks:
+    defaulting: true
+    validation: true
+    webhookVersion: v1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: kojuro.date
+  group: kezio
   kind: DeployRun
   path: github.com/tjjh89017/kezio/api/v1alpha3
   version: v1alpha3

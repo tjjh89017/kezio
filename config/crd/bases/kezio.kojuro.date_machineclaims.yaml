@@ -1,0 +1,564 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: machineclaims.kezio.kojuro.date
+spec:
+  group: kezio.kojuro.date
+  names:
+    kind: MachineClaim
+    listKind: MachineClaimList
+    plural: machineclaims
+    singular: machineclaim
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.machineName
+      name: Machine
+      type: string
+    - jsonPath: .spec.imageRef.name
+      name: Image
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha3
+    schema:
+      openAPIV3Schema:
+        description: MachineClaim is the Schema for the machineclaims API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              MachineClaimSpec defines the desired state of MachineClaim: which
+              machine the claim wants, and what to deploy on it.
+            properties:
+              afterDeploy:
+                default: Reboot
+                description: |-
+                  AfterDeploy selects what happens when a deployment finishes
+                  without an OS image to reboot into. Defaults to Reboot.
+                enum:
+                - Reboot
+                - PowerOff
+                type: string
+              dataImages:
+                description: |-
+                  DataImages is an ordered list of additional, non-OS images
+                  deployed alongside the OS image in the same live session (or by
+                  themselves, when ImageRef is absent).
+                items:
+                  description: |-
+                    MachineDataImage is one additional, non-OS image deployed alongside (or
+                    instead of) the machine's OS image in the same live session. Each entry
+                    resolves against its own TargetDisk hints; all resolved disks across a
+                    Machine's OS image and its DataImages must be distinct.
+                  properties:
+                    imageRef:
+                      description: |-
+                        ImageRef names the Image to deploy. It is typically a non-bootable
+                        image (a data disk or a scratch layout), since only the OS image
+                        gets a boot entry.
+                      properties:
+                        name:
+                          description: |-
+                            Post-mutation admission always re-serialises this struct, so a
+                            zero-value Name would otherwise satisfy "required"; MinLength closes
+                            that gap. MaxLength mirrors the Kubernetes object name limit and
+                            bounds the CEL cost of any pattern-matching XValidation rule a
+                            field of this type carries (see ImageSlot.ContentRef).
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        namespace:
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    targetDisk:
+                      description: TargetDisk selects the disk this image deploys
+                        to.
+                      properties:
+                        deviceName:
+                          description: |-
+                            DeviceName is the kernel device path, for example "/dev/nvme0n1".
+                            This is the last-choice hint: device names are not stable across
+                            boots.
+                          maxLength: 255
+                          type: string
+                        hctl:
+                          description: |-
+                            HCTL is the disk's SCSI host:channel:target:lun address, for example
+                            "0:0:0:0".
+                          pattern: ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$
+                          type: string
+                        maxSizeGigabytes:
+                          description: MaxSizeGigabytes rejects disks larger than
+                            this size.
+                          format: int64
+                          minimum: 1
+                          type: integer
+                        minSizeGigabytes:
+                          description: MinSizeGigabytes rejects disks smaller than
+                            this size.
+                          format: int64
+                          minimum: 1
+                          type: integer
+                        model:
+                          description: Model is the disk's reported model string.
+                          maxLength: 255
+                          type: string
+                        pciePath:
+                          description: |-
+                            PciePath is the disk's PCIe address, read by resolving
+                            /sys/block/<dev>.
+                          maxLength: 255
+                          type: string
+                        rotational:
+                          description: |-
+                            Rotational matches on whether the disk is a spinning disk (true) or
+                            solid-state (false), read from /sys/block/*/queue/rotational.
+                          type: boolean
+                        serialNumber:
+                          description: |-
+                            SerialNumber is the disk's serial number, read from
+                            /sys/block/*/device/serial or udev.
+                          maxLength: 255
+                          type: string
+                        slotNumber:
+                          description: |-
+                            SlotNumber is the disk's NVMe namespace or PCIe slot number, read
+                            best-effort from DMI.
+                          format: int32
+                          type: integer
+                        vendor:
+                          description: Vendor is the disk's reported vendor string.
+                          maxLength: 255
+                          type: string
+                        wwn:
+                          description: WWN is the disk's World Wide Name, read from
+                            udev's ID_WWN.
+                          maxLength: 255
+                          type: string
+                      type: object
+                      x-kubernetes-validations:
+                      - message: minSizeGigabytes must be less than or equal to maxSizeGigabytes
+                        rule: '!has(self.minSizeGigabytes) || !has(self.maxSizeGigabytes)
+                          || self.minSizeGigabytes <= self.maxSizeGigabytes'
+                  required:
+                  - imageRef
+                  type: object
+                maxItems: 32
+                type: array
+              ezio:
+                description: |-
+                  Ezio overrides the operator's cluster-wide default EZIO tuning for
+                  the bound machine's leecher.
+                properties:
+                  aioThreads:
+                    description: AioThreads overrides the EZIO daemon's async I/O
+                      thread count.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  cacheSizeMB:
+                    description: |-
+                      CacheSizeMB overrides the EZIO daemon's unified cache size, in
+                      megabytes.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  maxConnections:
+                    description: |-
+                      MaxConnections overrides the per-torrent maximum peer connection
+                      count (ezio's AddTorrent max_connections).
+                    format: int32
+                    maximum: 1024
+                    minimum: 1
+                    type: integer
+                  maxUploads:
+                    description: |-
+                      MaxUploads overrides the per-torrent maximum upload slot count
+                      (ezio's AddTorrent max_uploads).
+                    format: int32
+                    maximum: 1024
+                    minimum: 1
+                    type: integer
+                  port:
+                    description: Port overrides the EZIO daemon's listen port.
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                type: object
+              imageRef:
+                description: |-
+                  ImageRef names the Image to deploy as the bound machine's OS. It
+                  must be a bootable image. May be absent when the claim deploys
+                  only DataImages and keeps the machine's existing OS.
+                properties:
+                  name:
+                    description: |-
+                      Post-mutation admission always re-serialises this struct, so a
+                      zero-value Name would otherwise satisfy "required"; MinLength closes
+                      that gap. MaxLength mirrors the Kubernetes object name limit and
+                      bounds the CEL cost of any pattern-matching XValidation rule a
+                      field of this type carries (see ImageSlot.ContentRef).
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  namespace:
+                    type: string
+                required:
+                - name
+                type: object
+              machineName:
+                description: |-
+                  MachineName binds this claim to exactly one Machine by name. Give
+                  this, or Selector, or neither - never both.
+                maxLength: 253
+                type: string
+              params:
+                description: Params is schemaless input for the attached hooks' templating.
+                x-kubernetes-preserve-unknown-fields: true
+              postHookRefs:
+                description: |-
+                  PostHookRefs is an ordered list of PostHook resources attached to
+                  this claim's deployment.
+                items:
+                  description: |-
+                    NameRef is a reference to a resource by name, optionally in another
+                    namespace. When Namespace is empty, the namespace of the referencing
+                    resource is used. Field names that hold a NameRef end in "Ref"; ordered
+                    lists of NameRef end in "Refs".
+                  properties:
+                    name:
+                      description: |-
+                        Post-mutation admission always re-serialises this struct, so a
+                        zero-value Name would otherwise satisfy "required"; MinLength closes
+                        that gap. MaxLength mirrors the Kubernetes object name limit and
+                        bounds the CEL cost of any pattern-matching XValidation rule a
+                        field of this type carries (see ImageSlot.ContentRef).
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    namespace:
+                      type: string
+                  required:
+                  - name
+                  type: object
+                maxItems: 64
+                type: array
+              selector:
+                description: |-
+                  Selector chooses candidate machines by label and hardware, when
+                  MachineName is not given.
+                properties:
+                  hardware:
+                    description: Hardware matches the candidate's MachineHardware.
+                    properties:
+                      disks:
+                        description: |-
+                          Disks lists per-disk requirements. Every entry must match a
+                          different disk of the same machine.
+                        items:
+                          description: |-
+                            ClaimHardwareDiskSelector matches one disk of a candidate machine's
+                            MachineHardware. Every given field must match the same disk.
+                          properties:
+                            minSizeGigabytes:
+                              description: MinSizeGigabytes rejects disks smaller
+                                than this size.
+                              format: int64
+                              minimum: 1
+                              type: integer
+                            model:
+                              description: Model matches the disk's reported model
+                                string exactly.
+                              maxLength: 255
+                              type: string
+                            rotational:
+                              description: |-
+                                Rotational matches on whether the disk is a spinning disk (true) or
+                                solid-state (false).
+                              type: boolean
+                            vendor:
+                              description: Vendor matches the disk's reported vendor
+                                string exactly.
+                              maxLength: 255
+                              type: string
+                          type: object
+                        maxItems: 64
+                        type: array
+                      minCPUCount:
+                        description: MinCPUCount rejects machines with fewer CPUs.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      minMemoryBytes:
+                        description: MinMemoryBytes rejects machines with less memory.
+                        format: int64
+                        minimum: 1
+                        type: integer
+                    type: object
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+              targetDisk:
+                description: |-
+                  TargetDisk selects the disk the OS image deploys to. Ignored when
+                  ImageRef is absent.
+                properties:
+                  deviceName:
+                    description: |-
+                      DeviceName is the kernel device path, for example "/dev/nvme0n1".
+                      This is the last-choice hint: device names are not stable across
+                      boots.
+                    maxLength: 255
+                    type: string
+                  hctl:
+                    description: |-
+                      HCTL is the disk's SCSI host:channel:target:lun address, for example
+                      "0:0:0:0".
+                    pattern: ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$
+                    type: string
+                  maxSizeGigabytes:
+                    description: MaxSizeGigabytes rejects disks larger than this size.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  minSizeGigabytes:
+                    description: MinSizeGigabytes rejects disks smaller than this
+                      size.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  model:
+                    description: Model is the disk's reported model string.
+                    maxLength: 255
+                    type: string
+                  pciePath:
+                    description: |-
+                      PciePath is the disk's PCIe address, read by resolving
+                      /sys/block/<dev>.
+                    maxLength: 255
+                    type: string
+                  rotational:
+                    description: |-
+                      Rotational matches on whether the disk is a spinning disk (true) or
+                      solid-state (false), read from /sys/block/*/queue/rotational.
+                    type: boolean
+                  serialNumber:
+                    description: |-
+                      SerialNumber is the disk's serial number, read from
+                      /sys/block/*/device/serial or udev.
+                    maxLength: 255
+                    type: string
+                  slotNumber:
+                    description: |-
+                      SlotNumber is the disk's NVMe namespace or PCIe slot number, read
+                      best-effort from DMI.
+                    format: int32
+                    type: integer
+                  vendor:
+                    description: Vendor is the disk's reported vendor string.
+                    maxLength: 255
+                    type: string
+                  wwn:
+                    description: WWN is the disk's World Wide Name, read from udev's
+                      ID_WWN.
+                    maxLength: 255
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: minSizeGigabytes must be less than or equal to maxSizeGigabytes
+                  rule: '!has(self.minSizeGigabytes) || !has(self.maxSizeGigabytes)
+                    || self.minSizeGigabytes <= self.maxSizeGigabytes'
+            type: object
+            x-kubernetes-validations:
+            - message: machineName and selector are mutually exclusive
+              rule: '!(has(self.machineName) && has(self.selector))'
+          status:
+            description: MachineClaimStatus defines the observed state of MachineClaim.
+            properties:
+              boundAt:
+                description: BoundAt is when the claim bound to MachineName.
+                format: date-time
+                type: string
+              conditions:
+                description: Conditions report the current state of the claim.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              currentRunRef:
+                description: |-
+                  CurrentRunRef names the DeployRun currently in flight for this
+                  claim's intent.
+                properties:
+                  name:
+                    description: |-
+                      Post-mutation admission always re-serialises this struct, so a
+                      zero-value Name would otherwise satisfy "required"; MinLength closes
+                      that gap. MaxLength mirrors the Kubernetes object name limit and
+                      bounds the CEL cost of any pattern-matching XValidation rule a
+                      field of this type carries (see ImageSlot.ContentRef).
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  namespace:
+                    type: string
+                required:
+                - name
+                type: object
+              lastSuccessfulRunRef:
+                description: |-
+                  LastSuccessfulRunRef names the most recent DeployRun that
+                  completed successfully for this claim's intent.
+                properties:
+                  name:
+                    description: |-
+                      Post-mutation admission always re-serialises this struct, so a
+                      zero-value Name would otherwise satisfy "required"; MinLength closes
+                      that gap. MaxLength mirrors the Kubernetes object name limit and
+                      bounds the CEL cost of any pattern-matching XValidation rule a
+                      field of this type carries (see ImageSlot.ContentRef).
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  namespace:
+                    type: string
+                required:
+                - name
+                type: object
+              machineName:
+                description: MachineName names the bound machine.
+                type: string
+              phase:
+                description: Phase is the claim's binding state.
+                enum:
+                - Pending
+                - Bound
+                - Failed
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

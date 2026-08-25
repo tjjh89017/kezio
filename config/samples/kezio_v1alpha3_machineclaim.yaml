@@ -1,0 +1,11 @@
+apiVersion: kezio.kojuro.date/v1alpha3
+kind: MachineClaim
+metadata:
+  labels:
+    app.kubernetes.io/name: kezio
+    app.kubernetes.io/managed-by: kustomize
+  name: machineclaim-sample
+spec:
+  machineName: machine-sample
+  imageRef:
+    name: image-sample

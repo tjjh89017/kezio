@@ -3,6 +3,7 @@
 # It should be run by config/default
 resources:
 - bases/kezio.kojuro.date_machines.yaml
+- bases/kezio.kojuro.date_machineclaims.yaml
 - bases/kezio.kojuro.date_deployruns.yaml
 - bases/kezio.kojuro.date_machinehardwares.yaml
 - bases/kezio.kojuro.date_images.yaml
