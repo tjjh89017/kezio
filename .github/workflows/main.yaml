@@ -734,7 +734,10 @@ jobs:
   # plain cluster, with no virtual machine involved. Every lane that
   # starts virtual machines hangs off this job, so a broken image plane
   # stops the run here instead of after three long lanes each rediscover
-  # it. Gate only; the required-check names stay "Build" and "E2E".
+  # it. This job proves behavior only - each lane that starts virtual
+  # machines names the image build it downloads from, so no edge here
+  # carries that ordering. Gate only; the required-check names stay
+  # "Build" and "E2E".
   e2e-novm-required:
     name: E2E without VMs
     runs-on: ubuntu-latest
@@ -768,7 +771,7 @@ jobs:
   # steps or jobs, not more matrix legs here.
   e2e-deploy:
     name: Deploy lane
-    needs: [boot-artifacts, e2e-novm-required]
+    needs: [images, boot-artifacts, e2e-novm-required]
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
@@ -1384,7 +1387,7 @@ jobs:
   # is this lane's reason to exist.
   e2e-routed-site:
     name: Routed lane
-    needs: [boot-artifacts, e2e-novm-required, e2e-network-probes]
+    needs: [images, boot-artifacts, e2e-novm-required, e2e-network-probes]
     runs-on: ubuntu-latest
     timeout-minutes: 150
     env:
@@ -2074,7 +2077,7 @@ jobs:
   # never leech across Sites regardless.
   e2e-two-site-concurrent:
     name: Two-site concurrent lane
-    needs: [boot-artifacts, e2e-novm-required, e2e-network-probes]
+    needs: [images, boot-artifacts, e2e-novm-required, e2e-network-probes]
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
