@@ -2067,9 +2067,15 @@ jobs:
       # Bare, like the routed lane's own TRACKER_IP: the announce URL
       # baked into every torrent must be the tracker's own address on
       # this segment, with nothing rewriting it on the way.
-      TRACKER_X_IP: 198.51.103.3
-      SEEDER_X_NET1_IP: 198.51.103.4/24
-      SEEDER_X_IP: 198.51.103.4
+      #
+      # .116 is the TOP of this Site's seeder host-local pool (.101-.116,
+      # derived from SEG_X_CIDR where the NADs are created below), not a
+      # free-standing low address: the tracker single-homes on the
+      # seeding NAD and asks for this address through a per-pod "ips"
+      # override, and host-local refuses a requested address outside its
+      # own range. At the top because host-local allocates upward from
+      # rangeStart, so no seeder pod can take it first.
+      TRACKER_X_IP: 198.51.103.116
       LEASE_X_START: 198.51.103.10
       LEASE_X_END: 198.51.103.100
       SEG_Y_BRIDGE: kezio-2site-y
@@ -2077,9 +2083,9 @@ jobs:
       SEG_Y_HOST_CIDR: 198.51.104.1/24
       SEG_Y_HOST_ADDR: 198.51.104.1
       BOOTD_Y_IP: 198.51.104.2
-      TRACKER_Y_IP: 198.51.104.3
-      SEEDER_Y_NET1_IP: 198.51.104.4/24
-      SEEDER_Y_IP: 198.51.104.4
+      # Top of Site Y's own .101-.116 pool, for the reason Site X's
+      # TRACKER_X_IP above spells out.
+      TRACKER_Y_IP: 198.51.104.116
       LEASE_Y_START: 198.51.104.10
       LEASE_Y_END: 198.51.104.100
       SITE_X_NAME: kezio-2site-x-site
@@ -2228,7 +2234,10 @@ jobs:
       # single-homes on its own seeding Subnet's seederNetworkRef,
       # requesting tracker.ip as an "ips" override on that same NAD's
       # network-selection element (site_tracker_deployment.go's
-      # trackerPodAnnotations), not a NAD of its own.
+      # trackerPodAnnotations), not a NAD of its own. Only the names
+      # differ from create-provisioning-nads: each NAD's ipam shape is
+      # the one that action documents and this step's own comments below
+      # repeat, so the two stay in step.
       - name: Create the boot and seeding NetworkAttachmentDefinitions for Site X and Site Y
         shell: bash
         env:
@@ -2237,14 +2246,14 @@ jobs:
           SEG_Y_BRIDGE: ${{ env.SEG_Y_BRIDGE }}
           BOOTD_X_IP: ${{ env.BOOTD_X_IP }}
           BOOTD_Y_IP: ${{ env.BOOTD_Y_IP }}
-          SEEDER_X_NET1_IP: ${{ env.SEEDER_X_NET1_IP }}
-          SEEDER_Y_NET1_IP: ${{ env.SEEDER_Y_NET1_IP }}
+          SEG_X_CIDR: ${{ env.SEG_X_CIDR }}
+          SEG_Y_CIDR: ${{ env.SEG_Y_CIDR }}
         run: |
           set -euo pipefail
           for site in x y; do
             case "${site}" in
-              x) bridge="${SEG_X_BRIDGE}"; bootd_addr="${BOOTD_X_IP}/24"; seeder_addr="${SEEDER_X_NET1_IP}" ;;
-              y) bridge="${SEG_Y_BRIDGE}"; bootd_addr="${BOOTD_Y_IP}/24"; seeder_addr="${SEEDER_Y_NET1_IP}" ;;
+              x) bridge="${SEG_X_BRIDGE}"; bootd_addr="${BOOTD_X_IP}/24"; seeder_cidr="${SEG_X_CIDR}" ;;
+              y) bridge="${SEG_Y_BRIDGE}"; bootd_addr="${BOOTD_Y_IP}/24"; seeder_cidr="${SEG_Y_CIDR}" ;;
             esac
             cat <<EOF | kubectl apply -f -
           apiVersion: k8s.cni.cncf.io/v1
@@ -2291,6 +2300,32 @@ jobs:
                 ]
               }
           EOF
+            # host-local with a narrowed pool, exactly like
+            # create-provisioning-nads' kezio-seeder-network: this NAD is
+            # attached by BOTH this Site's seeder Deployment pods and,
+            # single-homed, by its tracker pod pinning tracker.ip through
+            # a per-pod "ips" override. A single-address ipam cannot
+            # serve both - the CNI static plugin ADDS the requested
+            # address to its own configured one, so the tracker would
+            # hold the seeder's address too and two pods would answer to
+            # one address on this bridge.
+            #
+            # The pool is .101-.116 of this Site's own segment, above
+            # every other reservation on the same bridge: .1 is the
+            # runner's host address (SEG_?_HOST_CIDR), .2 is bootd
+            # (BOOTD_?_IP), .10-.100 is bootd's own DHCP lease range
+            # (LEASE_?_START/END) that real netbooting machines get
+            # addresses from, and .250/.252/.253 are the helper-netns
+            # probe addresses the isolation and announce assertions use.
+            # tracker.ip (TRACKER_?_IP) is .116, the top of this pool:
+            # host-local refuses a requested address outside its range,
+            # and allocates upward from rangeStart, so no seeder pod can
+            # take .116 before the tracker asks for it. That leaves
+            # .101-.115 for seeder pods - one Deployment of one replica
+            # per Site here, so far more than can run at once.
+            seeder_network_addr="${seeder_cidr%%/*}"
+            seeder_prefix="${seeder_cidr##*/}"
+            seeder_base="${seeder_network_addr%.*}"
             cat <<EOF | kubectl apply -f -
           apiVersion: k8s.cni.cncf.io/v1
           kind: NetworkAttachmentDefinition
@@ -2307,10 +2342,10 @@ jobs:
                     "type": "bridge",
                     "bridge": "${bridge}",
                     "ipam": {
-                      "type": "static",
-                      "addresses": [
-                        {"address": "${seeder_addr}"}
-                      ]
+                      "type": "host-local",
+                      "subnet": "${seeder_network_addr}/${seeder_prefix}",
+                      "rangeStart": "${seeder_base}.101",
+                      "rangeEnd": "${seeder_base}.116"
                     }
                   }
                 ]
@@ -2357,6 +2392,13 @@ jobs:
           gateway: none
           lease-range-start: ${{ env.LEASE_X_START }}
           lease-range-end: ${{ env.LEASE_X_END }}
+          # This Site's seeder NAD narrows its host-local pool with
+          # rangeStart/rangeEnd, which internal/nadvalidate does not
+          # model - CheckSeederOverlap can only report Indeterminate for
+          # it, so Valid never reaches True even though nothing about
+          # this Subnet is broken. Same input, same reason, as the
+          # single-segment deploy lane's own Subnet.
+          accept-valid-unknown: "true"
 
       - name: Create Subnet Y (segment Y, boot and data plane)
         uses: ./.github/actions/create-subnet
@@ -2372,9 +2414,15 @@ jobs:
           gateway: none
           lease-range-start: ${{ env.LEASE_Y_START }}
           lease-range-end: ${{ env.LEASE_Y_END }}
+          # Same host-local-range reason as Subnet X above.
+          accept-valid-unknown: "true"
 
       # Ready needs each Site's own tracker Deployment actually Available,
-      # which needs TRACKER_DEPLOYMENT_IMAGE (set on the manager above).
+      # which needs TRACKER_DEPLOYMENT_IMAGE (set on the manager above),
+      # and accept-unknown for the same host-local-range reason both
+      # Subnets above need accept-valid-unknown: CheckTrackerAddress on
+      # that same NAD is equally Indeterminate, so Ready never reaches
+      # True either.
       - name: Point Site X at its own seeding Subnet
         uses: ./.github/actions/create-site
         with:
@@ -2382,6 +2430,7 @@ jobs:
           seeder-subnet-name: ${{ env.SUBNET_X_NAME }}
           tracker-ip: ${{ env.TRACKER_X_IP }}
           wait-for: Ready
+          accept-unknown: "true"
 
       - name: Point Site Y at its own seeding Subnet
         uses: ./.github/actions/create-site
@@ -2390,6 +2439,7 @@ jobs:
           seeder-subnet-name: ${{ env.SUBNET_Y_NAME }}
           tracker-ip: ${{ env.TRACKER_Y_IP }}
           wait-for: Ready
+          accept-unknown: "true"
 
       # Proof 1, stage one (the always-present half): both Sites' tracker
       # Deployments exist as soon as Ready above returns, well before any
@@ -2559,11 +2609,19 @@ jobs:
           patch='{"spec":{"imageRef":{"name":"${{ steps.build-image.outputs.image-name }}"},"postHookRefs":[]}}'
           kubectl patch machine "${{ env.VM_Y_NAME }}" -n scaffold-system --type=merge -p "${patch}"
 
-      # Waits for both per-(Image, Site) seeder Deployments to exist -
-      # the earliest point the seeder half of isolation can be checked
-      # (see the tracker-only isolation check's own comment, above).
+      # Waits for both per-(Image, Site) seeder Deployments to exist, and
+      # for each one's pod to hold an address - the earliest point the
+      # seeder half of isolation can be checked (see the tracker-only
+      # isolation check's own comment, above).
       # Reproduces seederdeploy.Name(imageName, siteIdentity) faithfully
       # in shell, the same arithmetic assert-seeder-placement uses.
+      #
+      # The addresses are READ, not assumed: each seeder pod takes
+      # whatever its Site's seeding NAD's host-local pool hands it
+      # (.101 upward), so no step may name a seeder address as a
+      # literal. Read the same way resolve-seeder-torrent-url reads it -
+      # status.podIP, which for a single-homed seeder IS its address on
+      # the seeding NAD.
       - name: Wait for both per-Site seeder Deployments to appear
         id: wait-seeders
         shell: bash
@@ -2606,14 +2664,43 @@ jobs:
             fi
             sleep 5
           done
-          echo "seeder-x-name=${name_x}" >>"${GITHUB_OUTPUT}"
-          echo "seeder-y-name=${name_y}" >>"${GITHUB_OUTPUT}"
+
+          pod_ip() {
+            selector="$(kubectl get deployment "$1" -n "${NAMESPACE}" -o json |
+              jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")')"
+            kubectl get pods -n "${NAMESPACE}" -l "${selector}" \
+              -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || true
+          }
+          deadline=$(( $(date +%s) + 120 ))
+          while true; do
+            ip_x="$(pod_ip "${name_x}")"
+            ip_y="$(pod_ip "${name_y}")"
+            echo "$(date -Is) seeder-x-ip=${ip_x:-<none>} seeder-y-ip=${ip_y:-<none>}"
+            if [ -n "${ip_x}" ] && [ -n "${ip_y}" ]; then
+              break
+            fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::timed out waiting for both seeder pods (${name_x}, ${name_y}) to hold an address" >&2
+              kubectl get pods -n "${NAMESPACE}" -l app.kubernetes.io/component=image-seeder -o wide
+              exit 1
+            fi
+            sleep 5
+          done
+
+          {
+            echo "seeder-x-name=${name_x}"
+            echo "seeder-y-name=${name_y}"
+            echo "seeder-x-ip=${ip_x}"
+            echo "seeder-y-ip=${ip_y}"
+          } >>"${GITHUB_OUTPUT}"
 
       # Proof 1, stage two (the full guarantee): now that both seeder
       # Deployments are real, both directions are re-checked with tracker
       # AND seeder addresses together, before either deploy reaches
       # Provisioned - a leaked route fails the lane before either write
-      # completes.
+      # completes. The seeder addresses come from the step above, which
+      # read them off the running pods: they are pool addresses, not
+      # fixed ones.
       - name: Assert Site X cannot reach Site Y's tracker or seeder, and its own are reachable
         uses: ./.github/actions/assert-site-isolation
         with:
@@ -2623,12 +2710,12 @@ jobs:
           unreachable-bridge-name: ${{ env.SEG_Y_BRIDGE }}
           unreachable-endpoints: |
             ${{ env.TRACKER_Y_IP }}:6969
-            ${{ env.SEEDER_Y_IP }}:16881
-            ${{ env.SEEDER_Y_IP }}:8080
+            ${{ steps.wait-seeders.outputs.seeder-y-ip }}:16881
+            ${{ steps.wait-seeders.outputs.seeder-y-ip }}:8080
           reachable-endpoints: |
             ${{ env.TRACKER_X_IP }}:6969
-            ${{ env.SEEDER_X_IP }}:16881
-            ${{ env.SEEDER_X_IP }}:8080
+            ${{ steps.wait-seeders.outputs.seeder-x-ip }}:16881
+            ${{ steps.wait-seeders.outputs.seeder-x-ip }}:8080
           netns-name: "kezio-2site-isolation-x-full"
 
       - name: Assert Site Y cannot reach Site X's tracker or seeder, and its own are reachable
@@ -2640,12 +2727,12 @@ jobs:
           unreachable-bridge-name: ${{ env.SEG_X_BRIDGE }}
           unreachable-endpoints: |
             ${{ env.TRACKER_X_IP }}:6969
-            ${{ env.SEEDER_X_IP }}:16881
-            ${{ env.SEEDER_X_IP }}:8080
+            ${{ steps.wait-seeders.outputs.seeder-x-ip }}:16881
+            ${{ steps.wait-seeders.outputs.seeder-x-ip }}:8080
           reachable-endpoints: |
             ${{ env.TRACKER_Y_IP }}:6969
-            ${{ env.SEEDER_Y_IP }}:16881
-            ${{ env.SEEDER_Y_IP }}:8080
+            ${{ steps.wait-seeders.outputs.seeder-y-ip }}:16881
+            ${{ steps.wait-seeders.outputs.seeder-y-ip }}:8080
           netns-name: "kezio-2site-isolation-y-full"
 
       # Proof 4 (concurrency) and proof 5's own machine-count half
@@ -2738,6 +2825,10 @@ jobs:
 
       # Proof 2: each Site's tracker is Site-owned at its own pinned
       # address on its own seeding NAD, with no Service.
+      # expected-ready/valid-status are Unknown, not the action's own
+      # True default: each seeding NAD's host-local ipam is
+      # range-bounded, so CheckTrackerAddress can only ever report
+      # Indeterminate for it - see Proof 6's own comment below.
       - name: Assert Site X's tracker placement and status reflection
         uses: ./.github/actions/assert-tracker-placement
         with:
@@ -2745,6 +2836,8 @@ jobs:
           expected-seeding-nad-namespace: "scaffold-system"
           expected-seeding-nad-name: ${{ env.SEEDER_NAD_X_NAME }}
           expected-tracker-ip: ${{ env.TRACKER_X_IP }}
+          expected-ready-status: "Unknown"
+          expected-valid-status: "Unknown"
 
       - name: Assert Site Y's tracker placement and status reflection
         uses: ./.github/actions/assert-tracker-placement
@@ -2753,6 +2846,8 @@ jobs:
           expected-seeding-nad-namespace: "scaffold-system"
           expected-seeding-nad-name: ${{ env.SEEDER_NAD_Y_NAME }}
           expected-tracker-ip: ${{ env.TRACKER_Y_IP }}
+          expected-ready-status: "Unknown"
+          expected-valid-status: "Unknown"
 
       # Each machine's agent was handed its own Site's seeder URL, over
       # the one shared Image.
@@ -2801,6 +2896,18 @@ jobs:
           netns-name: "kezio-2site-announce-probe-y"
 
       # Proof 6: both Sites are healthy before any fault is injected.
+      # Ready/Valid land on Unknown, not True: each Site's seeding NAD
+      # uses host-local ipam narrowed by rangeStart/rangeEnd, and
+      # internal/nadvalidate does not model that narrowing, so
+      # CheckTrackerAddress can only ever report Indeterminate for it -
+      # the same reason both Subnets need accept-valid-unknown and both
+      # Point-at-its-seeding-Subnet steps need accept-unknown. The
+      # reason is asserted alongside the status, so an Unknown arriving
+      # from anything other than that narrowing still fails. The
+      # functional proofs above (two real torrents served, each
+      # announcing its own tracker, both seeder ports open from the
+      # machine's own segment, and neither Site reachable from the
+      # other) are what actually establishes health here.
       - name: Assert Site X's status is healthy
         uses: ./.github/actions/assert-site-status
         with:
@@ -2809,8 +2916,8 @@ jobs:
             ${{ env.SUBNET_X_NAME }}
           expected-seeder-ready: "true"
           expected-conditions: |
-            Ready|True
-            Valid|True
+            Ready|Unknown|TrackerIPAMHostLocalBounded
+            Valid|Unknown|TrackerIPAMHostLocalBounded
 
       - name: Assert Site Y's status is healthy
         uses: ./.github/actions/assert-site-status
@@ -2820,8 +2927,8 @@ jobs:
             ${{ env.SUBNET_Y_NAME }}
           expected-seeder-ready: "true"
           expected-conditions: |
-            Ready|True
-            Valid|True
+            Ready|Unknown|TrackerIPAMHostLocalBounded
+            Valid|Unknown|TrackerIPAMHostLocalBounded
 
       # Proof 5: a fault at Site Y must not touch Site X. Both deploys
       # already finished and were verified above, so this cannot disturb
@@ -2900,6 +3007,9 @@ jobs:
             Valid|Unknown|SeederNADNotFound
             Ready|False|TrackerDeploymentUnavailable
 
+      # Unchanged from Proof 6's own healthy assertion above, reason
+      # included: Site X must still carry the host-local-range Unknown
+      # it carried before the fault, not Site Y's SeederNADNotFound one.
       - name: Assert Site X's status is unaffected by Site Y's fault
         uses: ./.github/actions/assert-site-status
         with:
@@ -2908,8 +3018,8 @@ jobs:
             ${{ env.SUBNET_X_NAME }}
           expected-seeder-ready: "true"
           expected-conditions: |
-            Ready|True
-            Valid|True
+            Ready|Unknown|TrackerIPAMHostLocalBounded
+            Valid|Unknown|TrackerIPAMHostLocalBounded
 
       - name: Revert the fault at Site Y
         shell: bash
@@ -2918,18 +3028,23 @@ jobs:
           kubectl patch subnet "${{ env.SUBNET_Y_NAME }}" -n scaffold-system --type=merge \
             -p '{"spec":{"seederNetworkRef":{"name":"${{ env.SEEDER_NAD_Y_NAME }}"}}}'
 
+      # Recovery is the pre-fault state, which is Valid=Unknown with
+      # reason TrackerIPAMHostLocalBounded - the seeding NAD's own
+      # host-local narrowing, not the missing NAD. Waiting on Valid=True
+      # would wait forever; waiting on Unknown alone would accept the
+      # fault still being in place, so the reason is what is matched.
       - name: Wait for Site Y to recover
         shell: bash
         run: |
           set -euo pipefail
           deadline=$(( $(date +%s) + 60 ))
           while true; do
-            status="$(kubectl get site "${{ env.SITE_Y_NAME }}" -n scaffold-system \
-              -o jsonpath='{.status.conditions[?(@.type=="Valid")].status}' || true)"
-            echo "$(date -Is) Site Y Valid=${status:-<empty>}"
-            [ "${status}" = "True" ] && break
+            reason="$(kubectl get site "${{ env.SITE_Y_NAME }}" -n scaffold-system \
+              -o jsonpath='{.status.conditions[?(@.type=="Valid")].reason}' || true)"
+            echo "$(date -Is) Site Y Valid.reason=${reason:-<empty>}"
+            [ "${reason}" = "TrackerIPAMHostLocalBounded" ] && break
             if [ "$(date +%s)" -ge "${deadline}" ]; then
-              echo "::error::Site Y did not recover to Valid=True after reverting the fault" >&2
+              echo "::error::Site Y did not recover to Valid.reason=TrackerIPAMHostLocalBounded after reverting the fault" >&2
               kubectl get site "${{ env.SITE_Y_NAME }}" -n scaffold-system -o yaml
               exit 1
             fi
