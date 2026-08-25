@@ -193,6 +193,26 @@ func (r *ImageReconciler) mapPartitionContentToImages(ctx context.Context, obj c
 	return requests
 }
 
+// mapMachineToImages maps a Machine event to a reconcile request per
+// Image its bound MachineClaim (if any) is now (or, for a Delete event,
+// was) a demand source for - see machineClaimImageRefs' doc comment for
+// why the MachineClaim watch below cannot see this on its own.
+func (r *ImageReconciler) mapMachineToImages(ctx context.Context, obj client.Object) []reconcile.Request {
+	machine, ok := obj.(*keziov1alpha3.Machine)
+	if !ok {
+		return nil
+	}
+	refs, err := machineClaimImageRefs(ctx, r.Client, machine)
+	if err != nil {
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(refs))
+	for _, ref := range refs {
+		requests = append(requests, reconcile.Request{NamespacedName: ref})
+	}
+	return requests
+}
+
 // mapMachineClaimToImages maps a MachineClaim event to a reconcile
 // request per Image it (or, for a Delete event, it used to) demand-source,
 // directly via its own spec.imageRef/dataImages - no PartitionContent
@@ -237,6 +257,7 @@ func (r *ImageReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&appsv1.Deployment{}).
 		Watches(&keziov1alpha3.PartitionContent{}, handler.EnqueueRequestsFromMapFunc(r.mapPartitionContentToImages), builder.WithPredicates(partitionContentStatusChangedPredicate)).
+		Watches(&keziov1alpha3.Machine{}, handler.EnqueueRequestsFromMapFunc(r.mapMachineToImages), builder.WithPredicates(machineUpdatePredicate)).
 		Watches(&keziov1alpha3.MachineClaim{}, handler.EnqueueRequestsFromMapFunc(r.mapMachineClaimToImages), builder.WithPredicates(claimDemandPredicate)).
 		Watches(&keziov1alpha3.DeployRun{}, handler.EnqueueRequestsFromMapFunc(r.mapDeployRunToImages), builder.WithPredicates(deployRunDemandPredicate)).
 		Named("image").

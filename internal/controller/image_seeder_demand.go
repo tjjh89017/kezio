@@ -43,8 +43,9 @@ func (r *ImageReconciler) imageSeedDemandBySite(ctx context.Context, image *kezi
 }
 
 // demandMachinesForImage returns the deduplicated set of Machines that
-// currently demand image: every live Machine machineImageRefIndex names
-// (spec.imageRef/dataImages), plus - for the edge case where an active
+// currently demand image: every live Machine machinesReferencingImage
+// names (via its bound MachineClaim's spec.imageRef/dataImages), plus -
+// for the edge case where an active
 // DeployRun's resolved snapshot names image but the Machine's own current
 // spec has since moved on - the Machine each such active DeployRun names.
 // Mirrors PartitionContentReconciler's own resolveSeedDemand/

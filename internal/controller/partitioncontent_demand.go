@@ -160,6 +160,42 @@ func anyLiveClaim(claims []keziov1alpha3.MachineClaim) bool {
 	return false
 }
 
+// machineClaimImageRefs resolves machine's bound MachineClaim
+// (resolveClaimIntent) and returns the Images its spec.imageRef/dataImages
+// name (claimImageRefs), or nil when machine carries no resolvable claim.
+// Seeder placement is keyed off the Machine a claim is bound to (see
+// sitederive.Resolve), so a Machine event - binding or unbinding a claim,
+// or moving to a different Subnet - is its own demand-changing event,
+// distinct from anything the MachineClaim watch alone can see.
+func machineClaimImageRefs(ctx context.Context, c client.Client, machine *keziov1alpha3.Machine) ([]client.ObjectKey, error) {
+	claim, err := resolveClaimIntent(ctx, c, machine)
+	if err != nil {
+		return nil, err
+	}
+	if claim == nil {
+		return nil, nil
+	}
+	return claimImageRefs(claim), nil
+}
+
+// mapMachineToPartitionContents maps a Machine event to a reconcile
+// request per PartitionContent that Machine's bound MachineClaim (if any)
+// is now (or, for a Delete event, was) a demand source for. Binding
+// writes machine.spec.claimRef, not anything on the MachineClaim itself,
+// so mapMachineClaimToPartitionContents' own MachineClaim watch never
+// observes it - this is the watch that does.
+func (r *PartitionContentReconciler) mapMachineToPartitionContents(ctx context.Context, obj client.Object) []reconcile.Request {
+	machine, ok := obj.(*keziov1alpha3.Machine)
+	if !ok {
+		return nil
+	}
+	refs, err := machineClaimImageRefs(ctx, r.Client, machine)
+	if err != nil {
+		return nil
+	}
+	return r.imageRefsToPartitionContentRequests(ctx, refs)
+}
+
 // mapMachineClaimToPartitionContents maps a MachineClaim event to a
 // reconcile request per PartitionContent that claim is now (or, for a
 // Delete event, was) a demand source for: every content referenced by the

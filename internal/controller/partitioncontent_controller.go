@@ -343,6 +343,7 @@ func (r *PartitionContentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&batchv1.Job{}).
 		Watches(&keziov1alpha3.Image{}, handler.EnqueueRequestsFromMapFunc(r.mapImageToPartitionContents), builder.WithPredicates(imageCreateOrDeleteOnly)).
+		Watches(&keziov1alpha3.Machine{}, handler.EnqueueRequestsFromMapFunc(r.mapMachineToPartitionContents), builder.WithPredicates(machineUpdatePredicate)).
 		Watches(&keziov1alpha3.MachineClaim{}, handler.EnqueueRequestsFromMapFunc(r.mapMachineClaimToPartitionContents), builder.WithPredicates(claimDemandPredicate)).
 		Watches(&keziov1alpha3.DeployRun{}, handler.EnqueueRequestsFromMapFunc(r.mapDeployRunToPartitionContents), builder.WithPredicates(deployRunDemandPredicate)).
 		Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(r.mapSeederDeploymentToPartitionContents)).

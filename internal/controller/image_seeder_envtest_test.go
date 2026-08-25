@@ -25,9 +25,11 @@ import (
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -614,6 +616,103 @@ var _ = Describe("Image Controller seeder demand grouping", func() {
 		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
 		Expect(dep.Annotations).NotTo(HaveKey(imageSeederEmptySinceAnnotation))
 		Expect(dep.UID).To(Equal(firstUID))
+	})
+
+	It("creates a seeder Deployment once a MachineClaim binds to a Machine at that Machine's Site, and lets demand drain once the claim is deleted", func() {
+		// Regression coverage for the demand path missing a Machine
+		// binding: the Machine is created unbound (no claimRef, no
+		// pre-wired MachineClaim), and MachineClaimReconciler is the one
+		// that writes spec.claimRef - exactly the write the ImageReconciler
+		// Machine watch exists to notice, unlike a MachineClaim-only
+		// event.
+		siteIdentity := mustCreateSeedingSite(ctx, "seed-subnet-725", "site-725")
+		mustCreateMachineSubnet(ctx, "machine-subnet-725", "site-725")
+
+		contentName := "pc-" + imageSeederTestHash(725)
+		createReadyContent(ctx, contentName)
+
+		img := newTestImageWithSlots("image-725", []keziov1alpha3.ImageSlot{
+			{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentName}},
+		})
+		Expect(k8sClient.Create(ctx, img)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
+
+		machine := &keziov1alpha3.Machine{
+			ObjectMeta: metav1.ObjectMeta{Name: "machine-725", Namespace: "default"},
+			Spec: keziov1alpha3.MachineSpec{
+				BMC: keziov1alpha3.MachineBMC{
+					Address:              "redfish://198.51.100.20/redfish/v1/Systems/1",
+					CredentialsSecretRef: keziov1alpha3.SecretReference{Name: "machine-725-bmc-creds"},
+				},
+				SubnetRef: keziov1alpha3.NameRef{Name: "machine-subnet-725"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, machine)).To(Succeed())
+		machine.Status.State = keziov1alpha3.MachineStateAvailable
+		Expect(k8sClient.Status().Update(ctx, machine)).To(Succeed())
+
+		claim := &keziov1alpha3.MachineClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "machine-725-claim", Namespace: "default"},
+			Spec: keziov1alpha3.MachineClaimSpec{
+				MachineName: machine.Name,
+				ImageRef:    &keziov1alpha3.NameRef{Name: img.Name},
+			},
+		}
+		Expect(k8sClient.Create(ctx, claim)).To(Succeed())
+		claimKey := types.NamespacedName{Name: claim.Name, Namespace: "default"}
+
+		claimReconciler := &MachineClaimReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Recorder: record.NewFakeRecorder(20)}
+		_, err := claimReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: claimKey}) // adds the finalizer
+		Expect(err).NotTo(HaveOccurred())
+		_, err = claimReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: claimKey}) // binds
+		Expect(err).NotTo(HaveOccurred())
+
+		var bound keziov1alpha3.Machine
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: machine.Name, Namespace: "default"}, &bound)).To(Succeed())
+		Expect(bound.Spec.ClaimRef).NotTo(BeNil())
+		Expect(bound.Spec.ClaimRef.Name).To(Equal(claim.Name))
+
+		clock := &testClock{t: time.Now()}
+		grace := time.Minute
+		ir := &ImageReconciler{
+			Client: k8sClient,
+			Scheme: k8sClient.Scheme(),
+			Seeder: ImageSeederConfig{Image: "example.test/kezio-seeder:test", GracePeriod: grace, Now: clock.now},
+		}
+		imgKey := types.NamespacedName{Name: img.Name, Namespace: "default"}
+		_, err = ir.Reconcile(ctx, reconcile.Request{NamespacedName: imgKey})
+		Expect(err).NotTo(HaveOccurred())
+
+		depName := seederdeploy.Name(img.Name, siteIdentity)
+		depKey := types.NamespacedName{Name: depName, Namespace: "default"}
+		var dep appsv1.Deployment
+		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
+		Expect(dep.Spec.Replicas).NotTo(BeNil())
+		Expect(*dep.Spec.Replicas).To(Equal(int32(1)))
+
+		// The claim is deleted: MachineClaimReconciler clears claimRef on
+		// its bound Machine before removing its own finalizer, and demand
+		// must drain from there - first a grace-period countdown, then
+		// deletion once it elapses.
+		Expect(k8sClient.Delete(ctx, claim)).To(Succeed())
+		_, err = claimReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: claimKey})
+		Expect(err).NotTo(HaveOccurred())
+
+		var released keziov1alpha3.Machine
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: machine.Name, Namespace: "default"}, &released)).To(Succeed())
+		Expect(released.Spec.ClaimRef).To(BeNil())
+
+		result, err := ir.Reconcile(ctx, reconcile.Request{NamespacedName: imgKey})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.RequeueAfter).To(Equal(grace))
+		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
+		Expect(dep.Annotations).To(HaveKey(imageSeederEmptySinceAnnotation))
+
+		clock.t = clock.t.Add(grace + time.Second)
+		_, err = ir.Reconcile(ctx, reconcile.Request{NamespacedName: imgKey})
+		Expect(err).NotTo(HaveOccurred())
+		err = k8sClient.Get(ctx, depKey, &dep)
+		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the seeder Deployment must be deleted once demand has drained past the grace period")
 	})
 
 	It("does not let a Machine with an unresolvable Site block another Site's seeder demand", func() {
