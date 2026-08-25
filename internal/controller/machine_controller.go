@@ -39,9 +39,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/deployer"
@@ -1562,6 +1564,20 @@ var machineUpdatePredicate = predicate.Or(
 	finalizersChangedPredicate,
 )
 
+// mapClaimToMachine requeues the Machine bound to a changed MachineClaim,
+// via claim.status.machineName - the same primary lookup
+// MachineClaimReconciler.findBoundMachine uses. An unbound claim
+// (status.machineName empty) maps to nothing: no Machine's deploy intent
+// can depend on a claim it is not bound to yet, and the eventual bind
+// itself arrives through the Machine watch, not this one.
+func (r *MachineReconciler) mapClaimToMachine(ctx context.Context, obj client.Object) []reconcile.Request {
+	claim, ok := obj.(*keziov1alpha3.MachineClaim)
+	if !ok || claim.Status.MachineName == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: client.ObjectKey{Namespace: claim.Namespace, Name: claim.Status.MachineName}}}
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *MachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
@@ -1572,6 +1588,15 @@ func (r *MachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// controller-only owner match would never see it. No predicate:
 		// credential data edits must always reconcile the Machine.
 		Owns(&corev1.Secret{}, builder.MatchEveryOwner).
+		// The deploy intent lives on MachineClaim, not Machine, since the
+		// claim layer replaced Machine.spec's own intent fields - without
+		// this watch, a claim's imageRef/dataImages edit never reaches
+		// reconcileIdle's shouldProvision check at all.
+		// GenerationChangedPredicate: a claim spec edit (the only thing
+		// that can change deploy intent) always bumps generation, and
+		// this must not fire on the claim controller's own status-only
+		// writes (phase, conditions, the run-ref mirror).
+		Watches(&keziov1alpha3.MachineClaim{}, handler.EnqueueRequestsFromMapFunc(r.mapClaimToMachine), builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Named("machine").
 		Complete(r)
 }
