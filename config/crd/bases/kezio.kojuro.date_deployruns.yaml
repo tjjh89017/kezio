@@ -315,6 +315,15 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              lastProgressAt:
+                description: |-
+                  LastProgressAt is when the manager last accepted a progress report
+                  from the agent for this run, by the manager's own clock - unlike
+                  PhaseTimings, which carry the agent's timestamps, so that staleness
+                  decisions never depend on the live environment's clock being right.
+                  Absent until the run's first report (or its Pending commit) lands.
+                format: date-time
+                type: string
               partitions:
                 description: |-
                   Partitions is one entry per partition this run writes to, across

@@ -199,6 +199,10 @@ func (in *DeployRunStatus) DeepCopyInto(out *DeployRunStatus) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+	if in.LastProgressAt != nil {
+		in, out := &in.LastProgressAt, &out.LastProgressAt
+		*out = (*in).DeepCopy()
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]v1.Condition, len(*in))

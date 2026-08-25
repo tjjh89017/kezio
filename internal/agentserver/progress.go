@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -30,6 +31,9 @@ import (
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 	"github.com/tjjh89017/kezio/internal/agentapi"
 )
+
+// progressNow is overridden in tests to pin lastProgressAt.
+var progressNow = time.Now
 
 // persistProgress applies req onto the DeployRun it names, in machine's
 // namespace. It is a no-op - not an error - when that DeployRun does not
@@ -47,9 +51,9 @@ import (
 // is rejected. Without a retry that rejection is only logged - by
 // handleProgress here and by the agent's Reporter - and DeployRun
 // status carries the *only* record that the deploy finished, so losing
-// the terminal report strands the Machine in Provisioning forever
-// (AgentDeployer.Provision reports Continuing for every non-terminal
-// phase, with no deadline). The retry reads through the cache like the
+// the terminal report leaves the Machine polling a run that will never
+// advance, until AgentDeployer.Provision's stall deadline fails the
+// attempt a whole deadline later. The retry reads through the cache like the
 // first attempt: it converges as the cache catches up, which is the
 // same watch event that would have made the first read correct.
 func (s *Server) persistProgress(ctx context.Context, machine *keziov1alpha2.Machine, req agentapi.ProgressRequest) error {
@@ -87,6 +91,11 @@ func (s *Server) persistProgress(ctx context.Context, machine *keziov1alpha2.Mac
 // req.State alone.
 func applyProgressToDeployRun(run *keziov1alpha2.DeployRun, req agentapi.ProgressRequest) {
 	ts := metav1.NewTime(req.Timestamp)
+	// Stamped from this process's clock, not req.Timestamp: lastProgressAt
+	// exists for the deployer's stall deadline, which compares it against
+	// this same clock - see the field's doc comment.
+	stamp := metav1.NewTime(progressNow())
+	run.Status.LastProgressAt = &stamp
 	enterPhase(run, req.Step, ts)
 	applyPartitionProgress(run, req.Partitions)
 

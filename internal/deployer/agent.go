@@ -89,6 +89,18 @@ type agentDeployerProvisionBootMarker struct {
 // agentDeployerInspectDeadline.
 const agentDeployerProvisionBootDeadline = 5 * time.Minute
 
+// agentDeployerProvisionStallDeadline bounds how long Provision keeps
+// reporting Continuing for a non-terminal DeployRun phase with no new
+// progress report accepted (status.lastProgressAt unchanged). The agent
+// reports at least once per seeding-status poll tick while content is
+// written, but a single long-running command - one mkfs, one post hook -
+// reports only when it returns, so this must comfortably exceed the
+// longest legitimate silent stretch. Past it, Provision reports Failed
+// with ErrorType Restart, turning a run whose agent died (or whose
+// terminal report was lost) into a diagnosable, retried failure instead
+// of a Machine stuck in Provisioning forever.
+const agentDeployerProvisionStallDeadline = 30 * time.Minute
+
 // agentDeployerUnsupportedMessage is Deprovision's Result.ErrorMessage:
 // AgentDeployer does not drive deprovisioning yet.
 const agentDeployerUnsupportedMessage = "deprovisioning is not supported by this deployer"
@@ -398,7 +410,11 @@ func (d *AgentDeployer) pollAgentRegistration(ctx context.Context, machine *kezi
 // by internal/agentserver's POST /agent/progress handler as the agent
 // executes the plan: Succeeded reports Complete, Failed reports Failed
 // with ErrorType Restart and the recorded failure message, and every
-// other phase reports Continuing. Succeeded is recorded from the agent's
+// other phase reports Continuing - bounded by
+// agentDeployerProvisionStallDeadline against the run's lastProgressAt,
+// so a run whose agent has gone silent (or whose terminal report was
+// lost) fails with ErrorType Restart instead of being polled forever.
+// Succeeded is recorded from the agent's
 // terminal progress report, sent just before it runs the after-deploy
 // reboot/poweroff command - see the Deployer interface's own Provision
 // doc comment for what Complete does and does not confirm.
@@ -447,6 +463,7 @@ func (d *AgentDeployer) resetProvisionAttempt(ctx context.Context, run *keziov1a
 	run.Status.Phase = ""
 	run.Status.Partitions = nil
 	run.Status.PhaseTimings = nil
+	run.Status.LastProgressAt = nil
 	run.Status.Conditions = nil
 	if err := d.Client.Status().Update(ctx, run); err != nil {
 		return fmt.Errorf("agent deployer: resetting DeployRun %q for restart: %w", run.Name, err)
@@ -554,6 +571,10 @@ func (d *AgentDeployer) commitProvisionPending(ctx context.Context, machine *kez
 		Phase:     keziov1alpha2.DeployRunPhasePending,
 		StartedAt: now,
 	})
+	// Start the stall clock at the commit itself: an agent that never
+	// fetches the plan sends no report, so nothing else would ever set
+	// lastProgressAt and the Pending wait would be unbounded.
+	run.Status.LastProgressAt = &now
 	if err := d.Client.Status().Update(ctx, run); err != nil {
 		return Result{}, fmt.Errorf("agent deployer: recording DeployRun %q pending: %w", run.Name, err)
 	}
@@ -598,7 +619,32 @@ func provisionResultFromPhase(run *keziov1alpha2.DeployRun) Result {
 			ErrorMessage: deployRunFailureMessage(run),
 		}
 	default:
+		return provisionStallResult(run)
+	}
+}
+
+// provisionStallResult reports Continuing for a non-terminal phase still
+// making progress, or Failed with ErrorType Restart once no progress
+// report has been accepted for agentDeployerProvisionStallDeadline -
+// see that constant's doc comment. The baseline is
+// status.lastProgressAt; a run written before that field existed falls
+// back to the current phase's own start time, and a run with neither
+// (only reachable by hand-written status) is left Continuing rather
+// than failed on a clock this deployer never started.
+func provisionStallResult(run *keziov1alpha2.DeployRun) Result {
+	last := run.Status.LastProgressAt
+	if last == nil {
+		if n := len(run.Status.PhaseTimings); n > 0 {
+			last = &run.Status.PhaseTimings[n-1].StartedAt
+		}
+	}
+	if last == nil || time.Since(last.Time) <= agentDeployerProvisionStallDeadline {
 		return Result{Outcome: Continuing}
+	}
+	return Result{
+		Outcome:      Failed,
+		ErrorType:    keziov1alpha2.MachineErrorTypeRestart,
+		ErrorMessage: fmt.Sprintf("agent deployer: no deploy progress observed for %s with DeployRun %q in phase %s; treating the run as stalled", agentDeployerProvisionStallDeadline, run.Name, run.Status.Phase),
 	}
 }
 

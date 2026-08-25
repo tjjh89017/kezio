@@ -143,6 +143,13 @@ type DeployRunStatus struct {
 	// +kubebuilder:validation:MaxItems=16
 	// +optional
 	PhaseTimings []DeployRunPhaseTiming `json:"phaseTimings,omitempty"`
+	// LastProgressAt is when the manager last accepted a progress report
+	// from the agent for this run, by the manager's own clock - unlike
+	// PhaseTimings, which carry the agent's timestamps, so that staleness
+	// decisions never depend on the live environment's clock being right.
+	// Absent until the run's first report (or its Pending commit) lands.
+	// +optional
+	LastProgressAt *metav1.Time `json:"lastProgressAt,omitempty"`
 	// Conditions report the current state of this run.
 	// +optional
 	// +listType=map

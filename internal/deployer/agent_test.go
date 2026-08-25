@@ -604,6 +604,8 @@ func seedInProgressProvisionAttempt(t *testing.T, c client.Client, run *keziov1a
 		{Phase: keziov1alpha2.DeployRunPhasePending, StartedAt: metav1.Now()},
 		{Phase: keziov1alpha2.DeployRunPhaseWritingContent, StartedAt: metav1.Now()},
 	}
+	lastProgress := metav1.Now()
+	run.Status.LastProgressAt = &lastProgress
 	apimeta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
 		Type: keziov1alpha2.DeployRunConditionSucceeded, Status: metav1.ConditionFalse, Reason: "InProgress", Message: "in progress",
 	})
@@ -629,8 +631,8 @@ func TestAgentDeployerProvisionRestartOnFailureDiscardsInProgressAttempt(t *test
 	if run.Status.Phase != "" {
 		t.Errorf("run.Status.Phase = %q, want empty: the abandoned attempt's phase must be discarded", run.Status.Phase)
 	}
-	if len(run.Status.Partitions) != 0 || len(run.Status.PhaseTimings) != 0 || len(run.Status.Conditions) != 0 {
-		t.Errorf("run.Status = %+v, want Partitions/PhaseTimings/Conditions all cleared", run.Status)
+	if len(run.Status.Partitions) != 0 || len(run.Status.PhaseTimings) != 0 || len(run.Status.Conditions) != 0 || run.Status.LastProgressAt != nil {
+		t.Errorf("run.Status = %+v, want Partitions/PhaseTimings/LastProgressAt/Conditions all cleared", run.Status)
 	}
 
 	f := fakeBMCForAddress(machine.Spec.BMC.Address)
@@ -804,6 +806,9 @@ func TestAgentDeployerProvisionAgentBootedSuccessRecordsPendingAndContinues(t *t
 	if len(run.Status.PhaseTimings) != 1 || run.Status.PhaseTimings[0].Phase != keziov1alpha2.DeployRunPhasePending {
 		t.Fatalf("run.Status.PhaseTimings = %+v, want one Pending entry", run.Status.PhaseTimings)
 	}
+	if run.Status.LastProgressAt == nil {
+		t.Error("run.Status.LastProgressAt = nil, want the stall clock started at the Pending commit")
+	}
 	if _, armed := provisionBootMarker(machine); armed {
 		t.Error("provision-boot marker still present after Provision committed the run to Pending, want it cleared")
 	}
@@ -927,6 +932,71 @@ func TestAgentDeployerProvisionLaterPassInProgressReportsContinuing(t *testing.T
 	}
 	if result.Outcome != Continuing {
 		t.Fatalf("Provision() outcome = %v, want Continuing", result.Outcome)
+	}
+}
+
+func TestAgentDeployerProvisionLaterPassRecentProgressReportsContinuing(t *testing.T) {
+	machine := agentTestMachine(t)
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	run.Status.Phase = keziov1alpha2.DeployRunPhaseWritingContent
+	recent := metav1.NewTime(time.Now().Add(-time.Minute))
+	run.Status.LastProgressAt = &recent
+	c := newAgentTestClient(t, machine, agentTestBMCSecret())
+	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
+
+	result, err := d.Provision(context.Background(), machine, run, false)
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	if result.Outcome != Continuing {
+		t.Fatalf("Provision() outcome = %v, want Continuing", result.Outcome)
+	}
+}
+
+func TestAgentDeployerProvisionLaterPassStalledFailsRestart(t *testing.T) {
+	machine := agentTestMachine(t)
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	run.Status.Phase = keziov1alpha2.DeployRunPhaseWritingContent
+	stale := metav1.NewTime(time.Now().Add(-2 * agentDeployerProvisionStallDeadline))
+	run.Status.LastProgressAt = &stale
+	c := newAgentTestClient(t, machine, agentTestBMCSecret())
+	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
+
+	result, err := d.Provision(context.Background(), machine, run, false)
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	if result.Outcome != Failed {
+		t.Fatalf("Provision() outcome = %v, want Failed", result.Outcome)
+	}
+	if result.ErrorType != keziov1alpha2.MachineErrorTypeRestart {
+		t.Errorf("Provision() ErrorType = %q, want %q", result.ErrorType, keziov1alpha2.MachineErrorTypeRestart)
+	}
+	if !strings.Contains(result.ErrorMessage, keziov1alpha2.DeployRunPhaseWritingContent) {
+		t.Errorf("Provision() ErrorMessage = %q, want it to name the stalled phase", result.ErrorMessage)
+	}
+}
+
+// TestAgentDeployerProvisionLaterPassStalledWithoutLastProgressFallsBackToPhaseStart
+// covers a run written before status.lastProgressAt existed: the stall
+// baseline falls back to the current phase's own start time rather than
+// leaving such a run unbounded.
+func TestAgentDeployerProvisionLaterPassStalledWithoutLastProgressFallsBackToPhaseStart(t *testing.T) {
+	machine := agentTestMachine(t)
+	run := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	run.Status.Phase = keziov1alpha2.DeployRunPhasePending
+	run.Status.PhaseTimings = []keziov1alpha2.DeployRunPhaseTiming{
+		{Phase: keziov1alpha2.DeployRunPhasePending, StartedAt: metav1.NewTime(time.Now().Add(-2 * agentDeployerProvisionStallDeadline))},
+	}
+	c := newAgentTestClient(t, machine, agentTestBMCSecret())
+	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
+
+	result, err := d.Provision(context.Background(), machine, run, false)
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	if result.Outcome != Failed || result.ErrorType != keziov1alpha2.MachineErrorTypeRestart {
+		t.Fatalf("Provision() = %+v, want Failed/Restart", result)
 	}
 }
 

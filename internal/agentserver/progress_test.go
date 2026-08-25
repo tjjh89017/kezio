@@ -258,6 +258,39 @@ func TestPersistProgress_PartitionsAreUpsertedByNumber(t *testing.T) {
 	}
 }
 
+func TestPersistProgress_StampsLastProgressAtFromServerClock(t *testing.T) {
+	machine := newProgressTestMachine()
+	c := newProgressTestClient(t, machine)
+	run := newProgressTestRun(t, c)
+	s := &Server{Client: c}
+
+	// The agent's own clock is deliberately far off: lastProgressAt must
+	// come from this process's clock, not req.Timestamp.
+	serverNow := time.Now()
+	progressNow = func() time.Time { return serverNow }
+	t.Cleanup(func() { progressNow = time.Now })
+
+	req := agentapi.ProgressRequest{
+		RunName: run.Name, RunUID: string(run.UID),
+		Step: keziov1alpha2.DeployRunPhaseWritingContent, State: agentapi.ProgressStateRunning,
+		Timestamp: serverNow.Add(-24 * time.Hour),
+	}
+	if err := s.persistProgress(context.Background(), machine, req); err != nil {
+		t.Fatalf("persistProgress: %v", err)
+	}
+
+	var stored keziov1alpha2.DeployRun
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(run), &stored); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if stored.Status.LastProgressAt == nil {
+		t.Fatal("LastProgressAt = nil, want it stamped on every accepted report")
+	}
+	if !stored.Status.LastProgressAt.Time.Equal(serverNow.Truncate(time.Second)) {
+		t.Fatalf("LastProgressAt = %v, want the server clock's %v, not the agent's timestamp", stored.Status.LastProgressAt.Time, serverNow)
+	}
+}
+
 func TestPersistProgress_MissingRunIsNoop(t *testing.T) {
 	machine := newProgressTestMachine()
 	c := newProgressTestClient(t, machine)
