@@ -1,40 +1,25 @@
 name: Assert a seeder is reachable only across a real routed L3 hop
 
 description: >-
-  The lane's core assertion: proves internal/planbuild's per-Site seeder
-  placement actually delivers the capability a machine leeches from a
-  seeder in its own routable Site rather than its own broadcast domain,
-  ruling out a same-segment-only design that would otherwise also pass.
-  Three checks, in order:
+  The routed lane's core assertion, and the only claim this action adds
+  of its own: the torrent URL the plan handed the agent
+  (planbuild.resolveTorrentURL's own output, passed in as torrent-url)
+  names a host OUTSIDE the machine's own subnet (machine-cidr). That is
+  the check that fails on a design where the seeder is reachable only
+  because it happens to share a broadcast domain with the machine, and it
+  proves internal/planbuild's per-Site seeder placement delivers the
+  capability a machine leeches from a seeder in its own routable Site
+  rather than its own broadcast domain.
 
-  1. The torrent URL the plan handed the agent (planbuild.resolveTorrentURL's
-     own output, passed in as torrent-url) names a host OUTSIDE the
-     machine's own subnet (machine-cidr) - the check that fails on a
-     design where the seeder is reachable only because it happens to
-     share a broadcast domain with the machine.
-
-  2. The announce URL bencoded into the .torrent that same seeder serves
-     over HTTP is the Site's own tracker (expected-tracker-url), fetched
-     for real over HTTP rather than assumed from configuration.
-     store.BuildTorrentFile writes announce as bencode's dict, and
-     "announce" sorts first in it (this package's own dict key order),
-     so the served bytes always begin "d8:announce<len>:<url>..." - this
-     extracts that field with a small dependency-free Python stdlib
-     snippet (no bencode library), not a general parser.
-
-  3. Both the pinned BitTorrent port and the torrent HTTP port (the one
-     named in torrent-url) answer a TCP connect attempt from a probe
-     genuinely on the machine's own segment - reusing assert-site-isolation's
-     helper-netns technique (a dedicated network namespace with its own
-     veth pair and address on bridge-name, routed off-segment only
-     through the host's own forwarding path) so the probe traffic takes
-     the same FORWARD-hook path a real pod's traffic would. Unlike
-     assert-site-isolation, which treats a fast refusal as reachability
-     evidence and a full timeout as absence, here a successful TCP
-     connect alone is the pass condition: the no-NAT rule the whole
-     seeder/tracker placement design follows from means the announced
-     address and port are always the reachable ones, so "answers" and
-     "connects" coincide for these two ports at this Site.
+  The claim holds only where a Site spans more than one segment, so it
+  travels with this action alone. Everything a seeder must satisfy at
+  every Site - that it announces its own Site's tracker, and that its
+  ports answer from the machine's own segment - lives in
+  assert-seeder-announce, which this action runs afterwards with the same
+  inputs. A lane that gives each Site a single segment calls that action
+  directly: its machines reach their seeder without a routed hop by
+  design, so asserting the opposite there would assert a property its
+  topology does not have.
 
 inputs:
   machine-cidr:
@@ -70,7 +55,7 @@ inputs:
     required: false
     default: "5"
   netns-name:
-    description: Name of the helper network namespace this action creates and removes.
+    description: Name of the helper network namespace the probe creates and removes.
     required: false
     default: "kezio-seeder-l3-probe"
 
@@ -78,7 +63,6 @@ runs:
   using: composite
   steps:
     - name: Assert the torrent URL points outside the machine's own subnet
-      id: parse
       shell: bash
       env:
         MACHINE_CIDR: ${{ inputs.machine-cidr }}
@@ -86,12 +70,10 @@ runs:
       run: |
         set -euo pipefail
         host="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.urlsplit(sys.argv[1]).hostname)' "${TORRENT_URL}")"
-        port="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.urlsplit(sys.argv[1]).port)' "${TORRENT_URL}")"
-        if [ -z "${host}" ] || [ -z "${port}" ]; then
-          echo "::error::could not parse host/port out of torrent-url '${TORRENT_URL}'" >&2
+        if [ -z "${host}" ]; then
+          echo "::error::could not parse a host out of torrent-url '${TORRENT_URL}'" >&2
           exit 1
         fi
-        echo "torrent-url host=${host} port=${port}"
 
         inside="$(python3 -c 'import ipaddress, sys; print(ipaddress.ip_address(sys.argv[1]) in ipaddress.ip_network(sys.argv[2], strict=False))' "${host}" "${MACHINE_CIDR}")"
         if [ "${inside}" != "False" ]; then
@@ -100,78 +82,14 @@ runs:
         fi
         echo "confirmed: ${host} is outside ${MACHINE_CIDR}"
 
-        echo "host=${host}" >>"${GITHUB_OUTPUT}"
-        echo "torrent-port=${port}" >>"${GITHUB_OUTPUT}"
-
-    - name: Assert the served .torrent announces the Site's own tracker
-      shell: bash
-      env:
-        TORRENT_URL: ${{ inputs.torrent-url }}
-        EXPECTED_TRACKER_URL: ${{ inputs.expected-tracker-url }}
-      run: |
-        set -euo pipefail
-        torrent_file="$(mktemp)"
-        trap 'rm -f "${torrent_file}"' EXIT
-        curl -sf --max-time 10 -o "${torrent_file}" "${TORRENT_URL}"
-
-        announce="$(python3 "${GITHUB_ACTION_PATH}/extract_announce.py" "${torrent_file}")"
-        echo "served .torrent announce=${announce}"
-        if [ "${announce}" != "${EXPECTED_TRACKER_URL}" ]; then
-          echo "::error::served .torrent announces ${announce}, want ${EXPECTED_TRACKER_URL} (this Site's own tracker)" >&2
-          exit 1
-        fi
-        echo "announce URL assertion passed"
-
-    - name: Create the helper probe namespace on the machine's own segment
-      shell: bash
-      env:
-        BRIDGE_NAME: ${{ inputs.bridge-name }}
-        PROBE_CIDR: ${{ inputs.probe-cidr }}
-        GATEWAY_IP: ${{ inputs.gateway-ip }}
-        NETNS_NAME: ${{ inputs.netns-name }}
-      run: |
-        set -euo pipefail
-        veth_host="kzl3probe-h"
-        veth_ns="kzl3probe-n"
-
-        sudo ip netns add "${NETNS_NAME}"
-        sudo ip link add "${veth_host}" type veth peer name "${veth_ns}"
-        sudo ip link set "${veth_host}" master "${BRIDGE_NAME}"
-        sudo ip link set "${veth_host}" up
-        sudo ip link set "${veth_ns}" netns "${NETNS_NAME}"
-        sudo ip netns exec "${NETNS_NAME}" ip link set lo up
-        sudo ip netns exec "${NETNS_NAME}" ip link set "${veth_ns}" up
-        sudo ip netns exec "${NETNS_NAME}" ip addr add "${PROBE_CIDR}" dev "${veth_ns}"
-        sudo ip netns exec "${NETNS_NAME}" ip route add default via "${GATEWAY_IP}"
-
-    - name: Assert both ports answer a TCP connect from across the segment boundary
-      shell: bash
-      env:
-        NETNS_NAME: ${{ inputs.netns-name }}
-        HOST: ${{ steps.parse.outputs.host }}
-        BT_PORT: ${{ inputs.bt-port }}
-        TORRENT_PORT: ${{ steps.parse.outputs.torrent-port }}
-        TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
-      run: |
-        set -euo pipefail
-        fail=0
-        for port in "${BT_PORT}" "${TORRENT_PORT}"; do
-          if sudo ip netns exec "${NETNS_NAME}" \
-              timeout "${TIMEOUT_SECONDS}" bash -c "exec 3<>/dev/tcp/${HOST}/${port}" 2>/dev/null; then
-            echo "${HOST}:${port} connected"
-          else
-            echo "::error::${HOST}:${port} did not answer a TCP connect within ${TIMEOUT_SECONDS}s from across the segment boundary" >&2
-            fail=1
-          fi
-        done
-        [ "${fail}" -eq 0 ] && echo "cross-segment reachability assertion passed"
-
-    - name: Remove the helper probe namespace
-      if: always()
-      shell: bash
-      env:
-        NETNS_NAME: ${{ inputs.netns-name }}
-      run: |
-        set +e
-        sudo ip netns del "${NETNS_NAME}" 2>/dev/null
-        exit 0
+    - name: Assert the seeder announces this Site's tracker and answers across the segment boundary
+      uses: ./.github/actions/assert-seeder-announce
+      with:
+        torrent-url: ${{ inputs.torrent-url }}
+        expected-tracker-url: ${{ inputs.expected-tracker-url }}
+        bridge-name: ${{ inputs.bridge-name }}
+        probe-cidr: ${{ inputs.probe-cidr }}
+        gateway-ip: ${{ inputs.gateway-ip }}
+        bt-port: ${{ inputs.bt-port }}
+        timeout-seconds: ${{ inputs.timeout-seconds }}
+        netns-name: ${{ inputs.netns-name }}

@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -429,15 +430,37 @@ func (r *SiteReconciler) mapSubnetToSite(_ context.Context, obj client.Object) [
 	return []reconcile.Request{{NamespacedName: client.ObjectKey{Namespace: subnet.Namespace, Name: subnet.Spec.SiteRef.Name}}}
 }
 
+// mapSeederDeploymentToSite requeues the Site named in a seeder
+// Deployment's imageSeederSiteAnnotation. SiteStatus.SeederReady is
+// derived from that Deployment's availability (seederPlacementReady), but
+// the Deployment is controlled by the Image, not the Site, so Owns' watch
+// never sees it become Available - without this mapping a Site keeps
+// reporting seederReady false for as long as nothing else writes the
+// Site or one of its Subnets.
+func (r *SiteReconciler) mapSeederDeploymentToSite(_ context.Context, obj client.Object) []reconcile.Request {
+	dep, ok := obj.(*appsv1.Deployment)
+	if !ok || dep.Labels[partitionContentAppComponentLabel] != partitionContentSeederComponentValue {
+		return nil
+	}
+	ns, name, found := strings.Cut(dep.Annotations[imageSeederSiteAnnotation], "/")
+	if !found || ns == "" || name == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: client.ObjectKey{Namespace: ns, Name: name}}}
+}
+
 // SetupWithManager sets up the controller with the Manager. Owns
-// requeues a Site whenever a tracker Deployment it controls changes, and
+// requeues a Site whenever a tracker Deployment it controls changes,
 // Watches Subnet requeues it when a Subnet's own siteRef affects this
-// Site's status (see mapSubnetToSite).
+// Site's status (see mapSubnetToSite), and Watches Deployment requeues it
+// when a seeder Deployment it does not control changes (see
+// mapSeederDeploymentToSite).
 func (r *SiteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&keziov1alpha2.Site{}).
 		Owns(&appsv1.Deployment{}).
 		Watches(&keziov1alpha2.Subnet{}, handler.EnqueueRequestsFromMapFunc(r.mapSubnetToSite)).
+		Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(r.mapSeederDeploymentToSite)).
 		Named("site").
 		Complete(r)
 }

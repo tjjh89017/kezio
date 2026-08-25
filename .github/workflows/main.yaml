@@ -2758,31 +2758,35 @@ jobs:
           image-name: ${{ steps.build-image.outputs.image-name }}
           seeder-deployment-name: ${{ steps.wait-seeders.outputs.seeder-y-name }}
 
-      # Proof 3: each machine's torrent URL lies outside its own subnet,
-      # the served torrent announces ITS OWN Site's tracker (never the
-      # other Site's - it could not, proof 1 already showed the path does
-      # not exist), and the seeder answers across the segment boundary.
+      # Proof 3: the torrent each machine's own seeder serves announces
+      # ITS OWN Site's tracker and no other (never the other Site's - it
+      # could not, proof 1 already showed the path does not exist), and
+      # that seeder answers from the machine's own segment.
+      #
+      # assert-seeder-announce, not assert-seeder-l3: this lane gives
+      # each Site a single segment on purpose, so a machine reaches its
+      # Site's seeder without a routed hop. The cross-segment claim
+      # assert-seeder-l3 adds is the routed lane's own reason to exist
+      # and is false here by design, so this lane must not make it.
       - name: Assert machine X announces only to Site X's tracker
-        uses: ./.github/actions/assert-seeder-l3
+        uses: ./.github/actions/assert-seeder-announce
         with:
-          machine-cidr: ${{ env.SEG_X_CIDR }}
           torrent-url: ${{ steps.torrent-x.outputs.torrent-url }}
           expected-tracker-url: "http://${{ env.TRACKER_X_IP }}:6969/announce"
           bridge-name: ${{ env.SEG_X_BRIDGE }}
           probe-cidr: "198.51.103.253/24"
           gateway-ip: ${{ env.SEG_X_HOST_ADDR }}
-          netns-name: "kezio-2site-l3-probe-x"
+          netns-name: "kezio-2site-announce-probe-x"
 
       - name: Assert machine Y announces only to Site Y's tracker
-        uses: ./.github/actions/assert-seeder-l3
+        uses: ./.github/actions/assert-seeder-announce
         with:
-          machine-cidr: ${{ env.SEG_Y_CIDR }}
           torrent-url: ${{ steps.torrent-y.outputs.torrent-url }}
           expected-tracker-url: "http://${{ env.TRACKER_Y_IP }}:6969/announce"
           bridge-name: ${{ env.SEG_Y_BRIDGE }}
           probe-cidr: "198.51.104.253/24"
           gateway-ip: ${{ env.SEG_Y_HOST_ADDR }}
-          netns-name: "kezio-2site-l3-probe-y"
+          netns-name: "kezio-2site-announce-probe-y"
 
       # Proof 6: both Sites are healthy before any fault is injected.
       - name: Assert Site X's status is healthy
