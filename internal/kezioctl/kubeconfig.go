@@ -14,9 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package kezioctl implements the kezioctl CLI's commands and the logic
-// behind them, kept separate from cmd/kezioctl (which only wires up cobra)
-// so it can be unit tested directly.
 package kezioctl
 
 import (
