@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -51,4 +52,21 @@ func resolveClaimIntent(ctx context.Context, c client.Client, machine *keziov1al
 		return nil, nil
 	}
 	return claim, nil
+}
+
+// claimUnresolved reports whether machine carries a claimRef that
+// resolveClaimIntent could not resolve to a live claim: the transient
+// window between a lost binding (a deleted claim, or one recreated with a
+// different UID) and the claim controller clearing it. A nil claimRef is
+// not this case - that machine has no intent by construction, not an
+// unresolved one.
+func claimUnresolved(machine *keziov1alpha3.Machine, claim *keziov1alpha3.MachineClaim) bool {
+	return machine.Spec.ClaimRef != nil && claim == nil
+}
+
+// claimUnresolvedMessage renders why claimUnresolved is true, for the
+// Progressing condition markDelayedNotReady records.
+func claimUnresolvedMessage(machine *keziov1alpha3.Machine) string {
+	ref := machine.Spec.ClaimRef
+	return fmt.Sprintf("claimRef names MachineClaim %s/%s (uid %s), which does not exist or was recreated with a different uid", ref.Namespace, ref.Name, ref.UID)
 }

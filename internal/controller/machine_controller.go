@@ -341,6 +341,14 @@ func (r *MachineReconciler) onChange(ctx context.Context, machine *keziov1alpha3
 		return r.setState(ctx, machine, keziov1alpha3.MachineStateEnrolling)
 	}
 
+	if machine.Spec.ClaimRef == nil && releaseEligible(machine.Status.State) {
+		machine.Status.CurrentRunRef = nil
+		return r.setState(ctx, machine, keziov1alpha3.MachineStateReleased, func() {
+			r.Recorder.Event(machine, corev1.EventTypeNormal, "MachineReleased",
+				"claimRef is gone: moving to Released with the disk left as it is")
+		})
+	}
+
 	switch machine.Status.State {
 	case "":
 		return r.reconcileEmptyStatus(ctx, machine)
@@ -607,6 +615,11 @@ func (r *MachineReconciler) reInspectAcceptable(ctx context.Context, machine *ke
 			return false, err
 		}
 		return isEmptyDeployPayload(claim), nil
+	case keziov1alpha3.MachineStateReleased:
+		// A released machine's deploy payload is empty by construction
+		// (no claimRef, no intent): re-inspect is the only path back to
+		// Available, and it is always accepted here.
+		return true, nil
 	default:
 		return false, nil
 	}
@@ -683,6 +696,9 @@ func (r *MachineReconciler) reconcileIdle(ctx context.Context, machine *keziov1a
 	claim, err := resolveClaimIntent(ctx, r.Client, machine)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: resolving MachineClaim: %w", machine.Name, err)
+	}
+	if claimUnresolved(machine, claim) {
+		return r.markDelayedNotReady(ctx, machine, "ClaimUnresolved", claimUnresolvedMessage(machine))
 	}
 	if isEmptyDeployPayload(claim) {
 		return ctrl.Result{}, nil
@@ -880,6 +896,9 @@ func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("machine %q: resolving MachineClaim: %w", machine.Name, err)
 		}
+		if claimUnresolved(machine, claim) {
+			return r.markDelayedNotReady(ctx, machine, "ClaimUnresolved", claimUnresolvedMessage(machine))
+		}
 		return r.startProvisioningRun(ctx, machine, claim)
 	}
 
@@ -942,6 +961,14 @@ func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *
 func restartOnFailure(machine *keziov1alpha3.Machine) bool {
 	return machine.Status.OperationalStatus == keziov1alpha3.MachineOperationalStatusError &&
 		machine.Status.ErrorType == keziov1alpha3.MachineErrorTypeRestart
+}
+
+// releaseEligible reports whether state is one a Machine can be mid-way
+// through or have completed when its claimRef disappears: Provisioning or
+// Provisioned. Available/Enrolling/Inspecting never carry a claimRef to
+// begin with, so a cleared claimRef is a no-op for them.
+func releaseEligible(state string) bool {
+	return state == keziov1alpha3.MachineStateProvisioning || state == keziov1alpha3.MachineStateProvisioned
 }
 
 // hasUnknownErrorType reports whether the machine is recorded as errored
