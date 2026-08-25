@@ -1,0 +1,533 @@
+# Custom resource reference
+
+kezio defines nine custom resources in the group
+`kezio.kojuro.date`, version `v1alpha2`. Every kind is
+namespace-scoped. This document describes each kind, and how the kinds
+refer to each other.
+
+The order below is the order an operator meets these kinds: first the
+network, then the content, then the machines that receive the content.
+
+Each `*Ref` field is a `NameRef`: a `name`, and an optional
+`namespace`. An empty `namespace` means the namespace of the object
+that holds the reference (`api/v1alpha2/shared_types.go`).
+
+## How the kinds relate
+
+```
+NETWORK                        CONTENT
+-------                        -------
+
+ Site                           ImageImport
+  |                              |  one partclone run, in the cluster
+  |  spec.seederSubnetRef        |
+  |  (optional)                  +--> PartitionContent   (one per non-swap
+  v                              |      partition; immutable; owns a PVC)
+ Subnet                          |
+  ^  spec.siteRef                +--> Image              (created complete)
+  |                                      |
+  |                                      |  spec.layout.slots[].contentRef
+  |                                      v
+  |                              PartitionContent
+  |
+  |  spec.subnetRef
+  |
+ Machine ---- spec.imageRef ------------> Image
+  |     \---- spec.dataImages[].imageRef -> Image
+  |      \--- spec.postHookRefs ---------> PostHook
+  |                                          ^
+  |                                          |  spec.postHookRefs
+  |                                        Image
+  |
+  +--> MachineHardware   (same name, owned by the Machine)
+  +--> DeployRun         (owned by the Machine)
+```
+
+The Site of a Machine is derived, never written by hand. The chain is
+`Machine.spec.subnetRef` to `Subnet.spec.siteRef` to `Site`
+(`internal/sitederive`).
+
+## 1. The network model
+
+### Site
+
+A `Site` is a maximal routable domain. Every `Subnet` that belongs to
+one `Site` can route to every other `Subnet` of that `Site`. No VRF,
+firewall, or other barrier is between them. The user declares this;
+kezio never probes it.
+
+Two different Sites are not assumed to reach each other at all. This
+is why seeder and tracker placement are Site-scoped, and not
+cluster-wide.
+
+| Field | Purpose |
+|---|---|
+| `spec.seederSubnetRef` | The `Subnet` of this Site that seeder pods and the tracker attach to. Optional. A Site without it runs no seeder and no tracker. |
+| `spec.tracker.ip` | A pinned IPv4 address for a tracker that kezio runs for this Site. |
+| `spec.tracker.externalURL` | A tracker that the operator already runs. kezio creates no tracker for this Site, and checks nothing about the address. |
+| `status.subnetRefs` | The names of the Subnets in this Site's namespace whose `spec.siteRef` names this Site. |
+| `status.trackerURL` | The resolved announce URL. It comes from `tracker.ip`, or it echoes `tracker.externalURL`. It is empty when the Site has no tracker. |
+| `status.seederReady` | Whether the seeder placement of this Site is healthy. Always false for a Site with no `seederSubnetRef`. |
+
+`tracker.ip` and `tracker.externalURL` are mutually exclusive. Both
+are meaningless without `seederSubnetRef`, because a Site with no
+seeder has nothing to announce.
+
+`tracker.ip` is pinned, and never allocated by an IPAM plugin. kezio
+writes this address into every `.torrent` that the seeders of this
+Site serve. The address must stay the same across tracker pod
+restarts.
+
+Conditions: `Valid` (schema checks, plus the checks of the Site
+reconciler against `seederSubnetRef`) and `Ready` (the tracker
+Deployment is available). A Site with no tracker Deployment of its own
+is Ready as soon as it is Valid.
+
+### Subnet
+
+A `Subnet` is one broadcast domain.
+
+| Field | Purpose |
+|---|---|
+| `spec.siteRef` | The `Site` this Subnet belongs to. Required. |
+| `spec.cidr` | The IPv4 network of this Subnet, for example `192.0.2.0/24`. Required. |
+| `spec.bootdServerIP` | The IPv4 address of bootd on this Subnet. Firmware reads it back as the PXE boot server, and as the TFTP next-server. |
+| `spec.bootdNetworkRef` | The `NetworkAttachmentDefinition` that the bootd Deployment attaches through. |
+| `spec.dhcp` | The DHCP behavior of bootd on this Subnet. |
+| `spec.seederNetworkRef` | The `NetworkAttachmentDefinition` that seeder and tracker pods attach through, when this Subnet is the seeding Subnet of its Site. |
+| `spec.nodeSelector` | Holds bootd pods, and seeder pods, on nodes that are attached to this broadcast domain. Empty means no constraint. |
+
+`bootdServerIP`, `bootdNetworkRef`, and `dhcp` are the **boot half**.
+They are optional as a group. Set all three, and the Subnet gets a
+bootd Deployment. Leave all three unset, and the Subnet carries no
+machines.
+
+`seederNetworkRef` is the **data half**. A Subnet must declare at
+least one half. The schema rejects a Subnet that declares neither,
+because such a Subnet hosts nothing.
+
+A Subnet with `seederNetworkRef` and no boot half is a
+**data-plane-only Subnet**. It carries no machines. It exists only to
+hold the seeder and tracker pods of its Site on their own segment.
+`SubnetSpec.HasBootPlane()` reports which shape a Subnet has.
+
+`bootdServerIP` is pinned, and never allocated by an IPAM plugin.
+Firmware caches it during the boot, so a new address after a pod
+restart strands a TFTP fetch that is in progress.
+
+Conditions: `Valid` (schema checks, plus the checks of the Subnet
+reconciler against the referenced network attachments and the DHCP
+configuration) and `Ready` (the bootd Deployment is available).
+
+### The three states of `dhcp.gateway`
+
+`spec.dhcp.mode` is `proxy` or `lease`:
+
+- `proxy`: the production DHCP server of the segment keeps all
+  ownership of leases. bootd answers only the PXE part of the
+  exchange.
+- `lease`: bootd is the DHCP lease authority of the segment. Use this
+  for a segment that has no DHCP server of its own.
+
+`dhcp.gateway` is the router option (DHCP option 3) that bootd hands
+out. It has three states, and each state has a different result:
+
+| State | In `lease` mode | In `proxy` mode |
+|---|---|---|
+| Absent | Rejected at admission. | Accepted. bootd hands out no router option. |
+| Empty string `""` | Accepted. bootd hands out no router option. Use this for a segment with no exit. | Accepted. It means the same as absent. |
+| An IPv4 address | Accepted. bootd hands out this address as the router of the segment. | Rejected at admission. |
+
+Lease mode makes the field mandatory on purpose. If the field stays
+optional, dnsmasq fills the gap. It advertises the address of bootd
+itself. bootd is a pod, and it forwards nothing. The machines then
+receive a default route into a black hole. This defect shows itself
+only after a Site gets a second segment, far away from its cause.
+
+Set an address whenever the seeder or the tracker of the Site is on a
+different Subnet. The router option is the only thing that tells a
+machine how to get there.
+
+In proxy mode bootd is not the DHCP server. It cannot hand out a
+router option that the DHCP server of the segment owns. kezio rejects
+a non-empty address there, and does not ignore it. If kezio ignored
+it, an operator could write an address, believe that the machines
+receive it, and find out much later that they do not.
+
+## 2. Content
+
+### ImageImport
+
+An `ImageImport` is the request to turn one source disk image into a
+set of `PartitionContent` objects, and the `Image` that binds them.
+
+One import runs partclone exactly once, in the cluster. Only that run
+can know the partition table, the role and file system of each
+partition, and the size of each content. For this reason nothing in
+the spec describes them.
+
+| Field | Purpose |
+|---|---|
+| `spec.source.url` | Where the ingest Job fetches the source disk image from. |
+| `spec.source.checksum` | `sha256:<hex digest>`. Ingest verifies the fetched image before it converts it. |
+| `spec.imageName` | The name of the `Image` this import creates, in its own namespace. |
+| `spec.contentPrefix` | The name prefix of the content this import captures. Partition N becomes `<contentPrefix>-p<N>`. |
+| `spec.osFamily` | Copied onto `Image.spec.osFamily`. `Linux`, `Windows`, `FreeBSD`, or `Other`. Default `Linux`. |
+| `spec.bootable` | Copied onto `Image.spec.bootable`. Default true. |
+| `spec.params` | Copied onto `Image.spec.params`. |
+| `spec.postHookRefs` | Copied onto `Image.spec.postHookRefs`. |
+| `status.state` | `Pending`, `Ingesting`, `Ready`, or `Failed`. |
+| `status.imageRef` | The `Image` this import created. |
+| `status.contentRefs` | Every `PartitionContent` this import created, in partition order. |
+
+The spec is immutable after creation.
+
+The import fails if a name it must create is already taken. It never
+writes over an existing content, and never writes over an existing
+Image.
+
+A swap partition gets no content. The import gives it a blank slot
+that carries only its file-system UUID. The agent runs `mkswap` on it.
+
+### PartitionContent
+
+A `PartitionContent` is the immutable record of the data of one
+partition.
+
+| Field | Purpose |
+|---|---|
+| `spec.fsType` | The file system of the partition, for example `ext4`. Empty when the partition carries no file system that partclone recognizes. Recorded for audit only. |
+| `spec.usedBytes` | The number of bytes of real data in the partition, measured at capture. |
+| `spec.sizeBytes` | The size of the partition at capture. |
+| `spec.lastExtentEnd` | The end offset of the highest extent that ingest wrote. Extents write at absolute offsets, so a target partition must be at least this large. |
+| `spec.pieceLength` | The BitTorrent piece length used to hash this content. A pinned constant. |
+| `spec.source.importName` | The `ImageImport` that captured this content. |
+| `spec.source.partitionNumber` | The partition of the source disk this content comes from. Audit data only. |
+| `status.state` | `Pending`, `Publishing`, `Ready`, or `Failed`. |
+| `status.infoHash` | The BitTorrent v1 info hash, in lowercase hex. Absent until the publish succeeds. |
+| `status.pvcRef` | The PVC that holds the bytes of this content. |
+| `status.seeders` | One entry per Site that has an available seeder for this content, with the number of machines at that Site that deploy an Image which references it. |
+
+The spec is immutable. The user chooses the name, so the name pins
+nothing about the bytes. An `Image` slot that references the name must
+be able to trust that the bytes behind it never change. Immutability
+is what gives that trust.
+
+Each content owns its own PVC. The PVC has an owner reference back to
+the content, so Kubernetes removes the PVC when the content goes away.
+
+`PartitionContentFinalizer` (`kezio.kojuro.date/partitioncontent`)
+holds the actual removal of a content while an `Image` slot or an
+active `DeployRun` still references it. The
+`DeletionBlocked` condition reports this hold.
+
+Conditions: `Ready` (the `.torrent` exists and the content is
+seedable), `Valid` (spec-level validity only; it makes no claim about
+the integrity of the bytes), `SeederDegraded`, and `DeletionBlocked`.
+
+### Image
+
+An `Image` binds a disk layout to an ordered list of slots. Each slot
+optionally references a `PartitionContent`.
+
+| Field | Purpose |
+|---|---|
+| `spec.osFamily` | `Linux`, `Windows`, `FreeBSD`, or `Other`. Default `Linux`. It gates OS-specific validation and builtins. |
+| `spec.bootable` | Default true. A bootable image needs an ESP slot, and finalize creates a boot entry for it. Set false for a data disk or a scratch layout. |
+| `spec.layout.partitionTable` | `gpt` or `mbr`. |
+| `spec.layout.sfdiskJSON` | The `sfdisk --dump --json` output that describes the partition table. `sfdisk` accepts it back to recreate the table. |
+| `spec.layout.slots` | The ordered list of slots, in partition-table order. |
+| `spec.params` | Schemaless input for the templating of the attached hooks. |
+| `spec.postHookRefs` | An ordered list of `PostHook` objects that the content of this image needs. |
+| `status.state` | `Pending`, `Ready`, or `Failed`. |
+
+Each slot has these fields:
+
+| Field | Purpose |
+|---|---|
+| `number` | The partition number, 1-based. Unique in the slot list. |
+| `role` | `esp`, `data`, `swap`, or `msr`. The roles are OS-neutral. |
+| `contentRef` | The `PartitionContent` this slot restores. Absent makes this a blank slot. |
+| `fsType` | The file system to create at deploy time, for a blank `data` slot. |
+| `uuid` | The file-system UUID to restore, for a `swap` slot that has no content. |
+| `typeGUID` | The partition type this slot is written with. |
+| `partUUID` | The unique GPT partition GUID. Empty for an `mbr` table. |
+| `sizeBytes` | The size of this slot, when it is known before deploy time. |
+
+`contentRef` and `fsType` are mutually exclusive. The schema rejects a
+slot that sets both. Restored content already carries its own file
+system.
+
+`contentRef.namespace`, if it is set, must equal the namespace of the
+Image. The webhook denies any other value, because the deletion
+finalizer of `PartitionContent` looks only for a referencing Image in
+the namespace of the content.
+
+`typeGUID`, `partUUID`, and `sizeBytes` carry no restore behavior of
+their own. They are present so that a future adopt mode can match a
+slot against partitions that are already on a target disk.
+
+The whole spec is immutable after creation. A `contentRef` binds into
+a BitTorrent swarm. If the layout could change, an Image that is in
+use could start to describe different content, and nothing would say
+so. To publish a different layout or content set, create an Image with
+a new name.
+
+An `Image` never ingests anything. It is always a declaration over
+`PartitionContent` objects that already exist. An `ImageImport`
+creates the Image only when it knows the whole layout, so the spec is
+complete at creation, and nothing patches it later. A slot can
+therefore never reference content that does not exist.
+
+The Image reconciler is thin. It aggregates the readiness of the
+referenced content, and it drives the per-Site seeder Deployments.
+
+Conditions: `Ready`, `Valid` (every referenced content resolves, and
+its `lastExtentEnd` fits the slot), and `SeederDegraded`.
+
+## 3. Machines and deploys
+
+### Machine
+
+A `Machine` is one bare-metal machine.
+
+| Field | Purpose |
+|---|---|
+| `spec.bmc.address` | The BMC endpoint URL. The scheme selects the driver, for example `redfish://` or `ipmi://`. Required. |
+| `spec.bmc.credentialsSecretRef` | The Secret that holds the BMC user name and password. Required. |
+| `spec.subnetRef` | The `Subnet` this machine network boots through. Required. A Machine with no Subnet cannot network boot. |
+| `spec.bootMACAddress` | The MAC address of the NIC that network boots. Inspection usually discovers it. It is mandatory only when the inspect-disable annotation skips inspection. |
+| `spec.imageRef` | The `Image` to deploy as the OS. It must be bootable. It may be absent when the machine deploys only data images. |
+| `spec.dataImages` | Additional non-OS images, deployed in the same live session. Each entry has its own `imageRef` and `targetDisk`. |
+| `spec.targetDisk` | The hints that select the disk for the OS image. |
+| `spec.postHookRefs` | An ordered list of `PostHook` objects attached to this machine. |
+| `spec.params` | Schemaless input for the templating of the attached hooks. |
+| `spec.ezio` | Per-machine overrides of the cluster-wide ezio tuning of the leecher. |
+| `spec.afterDeploy` | `Reboot` or `PowerOff`. Default `Reboot`. It applies only when the deployment ends with no OS image to reboot into. |
+
+**There is no power intent field on a Machine.** Power follows the
+deploy lifecycle, and the `afterDeploy` mechanism. To reboot a machine
+outside that lifecycle, use the reboot annotation.
+
+The `Site` of a Machine is derived, and never written by hand. kezio
+follows `Machine.spec.subnetRef` to the `Subnet`, then
+`Subnet.spec.siteRef` to the `Site` (`internal/sitederive`). This
+closes a class of misconfiguration. With a hand-written field, a
+machine could boot from the bootd of one segment but declare a
+different Site, and then leech from a distant seeder instead of the
+one beside it.
+
+`spec.targetDisk` and each `dataImages[].targetDisk` hold disk hints:
+`deviceName`, `serialNumber`, `wwn`, `model`, `vendor`,
+`minSizeGigabytes`, `maxSizeGigabytes`, `rotational`, `pciePath`,
+`hctl`, and `slotNumber`. All given fields must match the same disk.
+The controller matches the hints against the reported disk inventory,
+and needs exactly one match before it writes anything. All disks
+resolved for one Machine must be different from each other.
+
+`status.state` is `Enrolling`, `Inspecting`, `Available`,
+`Provisioning`, `Provisioned`, `Deprovisioning`, or `PoweringOff`. The
+last two occur only after a deletion timestamp is set. There is no
+Error state. `status.operationalStatus` (`OK`, `error`, `delayed`,
+`detached`) is a separate axis, so a failure never erases the position
+of the machine in the workflow.
+
+Other status fields include `currentRunRef`, `lastSuccessfulRunRef`,
+`poweredOn`, `lastUpdated`, the observed BMC credentials, and the
+hashes of the net-boot token and the agent session token. kezio stores
+only the hash and the expiry of each token, and never the token
+itself.
+
+Conditions: `Ready`, `Progressing`, `AgentCompatible`,
+`AgentRegistered`, and `StatusLossHold`.
+
+Annotations, read directly off the object:
+
+| Annotation | Result |
+|---|---|
+| `kezio.kojuro.date/paused` | The reconciler returns at once. No status writes, no deployer calls, no requeue. It also blocks the delete walk. |
+| `kezio.kojuro.date/detached` | The controller calls no deployer action, but keeps status current. `operationalStatus` reports `detached`. |
+| `kezio.kojuro.date/reboot` | Asks for a reboot. The value is `{"mode":"hard"}` or `{"mode":"soft"}`. A `-<client>` suffix gives a client its own copy of the annotation. |
+| `kezio.kojuro.date/inspect-disable` | Set to exactly `true`, it skips hardware inspection. The webhook then requires `spec.bootMACAddress`. |
+| `kezio.kojuro.date/re-inspect` | Asks for a new inspection. The controller consumes the annotation, deletes the existing `MachineHardware`, and emits an Event. |
+| `kezio.kojuro.date/confirm-status-loss` | Releases the `StatusLossHold` condition. The controller consumes the annotation. |
+
+### MachineHardware
+
+A `MachineHardware` is the hardware inventory that the agent reports
+at registration. It has the same name as its `Machine`, it is in the
+same namespace, and the `Machine` owns it.
+
+It carries no status, because it is itself the observed state.
+
+`spec.disks` lists the disks. The field set matches the disk hints of
+a `Machine`, so a hint matches an entry with no unit conversion.
+`spec.nics` lists the network interfaces. `spec.memoryBytes` and
+`spec.cpuCount` complete the inventory. Every field is optional. The
+object starts empty, and the controller fills it in when inspection
+ends.
+
+### DeployRun
+
+A `DeployRun` is the resolved snapshot of one deployment attempt. The
+Machine reconciler writes the spec once, at creation. The `Machine`
+owns the object.
+
+| Field | Purpose |
+|---|---|
+| `spec.machineRef` | The `Machine` this run deploys to. |
+| `spec.imageRef` | The OS `Image` resolved for this run. Absent for a run that has only data images. |
+| `spec.dataImages` | The resolved non-OS image list. |
+| `spec.resolvedDisks` | The disk each image resolved to, against the inventory known at creation. |
+| `spec.hooksHash` | A content hash of every resolved hook step for this run. |
+| `status.phase` | `Pending`, `Partitioning`, `WritingContent`, `RunningPostHook`, `Finalizing`, `Succeeded`, or `Failed`. |
+| `status.partitions` | One entry per partition this run writes, with a percentage and a byte count. |
+| `status.phaseTimings` | The start time and the end time of each phase the run entered. |
+
+The spec is immutable, because it is the historical record of what
+this attempt was resolved to run.
+
+The trigger that starts a new run compares the current deploy intent
+against the snapshot of the last successful run. `spec.resolvedDisks`
+is excluded from that comparison. Device names drift between boots, so
+a difference there alone must never start a new run. `spec.hooksHash`
+is included, so a change to a hook does start a new run.
+
+Condition: `Succeeded`. It is absent while the run is in progress.
+
+### PostHook
+
+A `PostHook` is a named, reusable, ordered list of steps. A `Machine`
+or an `Image` attaches it. The steps run after the content is written.
+
+| Field | Purpose |
+|---|---|
+| `spec.params` | The named inputs the steps can reference through templating, each with an optional default. |
+| `spec.steps` | The steps, in list order. At least one step is required. |
+
+Each step is exactly one of a builtin or a script. A step can also set
+`osFamily` to restrict itself to one target OS family.
+
+The builtins are:
+
+| Builtin | Action |
+|---|---|
+| `mkswap` | Runs `mkswap` with the saved UUID of the source partition. |
+| `efibootmgr` | Creates a UEFI NVRAM boot entry on the ESP of the target. |
+| `growLastPartition` | Grows the last partition and its file system when the target disk is larger than the source. |
+| `install-removable-fallback` | Copies a shim or grub bootloader onto the removable-media fallback path of the ESP. |
+
+The boot entry that `efibootmgr` writes points only at the
+removable-media fallback path: `\EFI\BOOT\BOOTX64.EFI` on x86_64, and
+`\EFI\BOOT\BOOTAA64.EFI` on aarch64. kezio selects the path from the
+architecture of the machine, and never examines the loader path of a
+distribution. The image must supply the fallback file. See the
+boot-entry contract section of
+[`docs/physical-lab-deployment.md`](physical-lab-deployment.md).
+
+A script step takes its content from exactly one of `script` (inline),
+`configMapRef`, or `secretRef`. The manager fetches and templates the
+content, so the agent needs no cluster access.
+
+A script runs in the live environment of the agent, and never in the
+deployed OS. The target disk holds its content, but no file system on
+it is mounted. The agent gives the device paths to the script through
+the environment: `KEZIO_TARGET_DISK`, `KEZIO_PARTITIONS`,
+`KEZIO_PART_<number>`, `KEZIO_DATA_DISKS`, and the related
+`KEZIO_DATA_DISK_<index>` variables. A script that mounts a device
+must unmount it before the script ends. A mount that stays can disturb
+the steps that follow, and the reboot into the deployed disk.
+
+Each step has a `timeoutSeconds`. The default is 60.
+
+The steps can reference three reserved names without a declaration:
+`machineName`, `imageName`, and `targetDisk`. The plan builder injects
+them.
+
+Params merge in this order: the declared defaults of the PostHook,
+then `Image.spec.params`, then `Machine.spec.params`. A later entry
+overrides an earlier one.
+
+Conditions: `Ready` and `Valid`.
+
+### Hook order, and the shipped default hook
+
+kezio ships one default `PostHook`, named `kezio-default-finalize`, in
+the namespace of the manager. Its steps are `mkswap`,
+`install-removable-fallback`, and `efibootmgr`, all Linux-only.
+
+Hooks run in this order: the `postHookRefs` of the OS `Image` first,
+then the `postHookRefs` of the `Machine`.
+
+kezio substitutes the default hook only when **all** of these hold
+(`internal/planbuild`, `resolveMachineHooks`):
+
+- `Machine.spec.postHookRefs` is empty, and
+- the `postHookRefs` of the OS Image is empty, and
+- the Machine deploys an OS image.
+
+**A caller that names any hook opts out of the substitution.** This
+holds for a hook named on the Machine, and for a hook named on the
+Image. If the caller still wants a boot entry, the caller must name
+`kezio-default-finalize` as well, or supply the equivalent steps.
+
+A run that has only data images and no `postHookRefs` on either side
+resolves no hooks at all. Such a run ends at its after-deploy power
+state, with no OS to boot, so the boot-entry builtins would have no
+ESP to act on.
+
+## 4. The workloads kezio creates
+
+| Workload | Scope | Owner | Network |
+|---|---|---|---|
+| bootd Deployment | One per `Subnet` that declares a boot half | The `Subnet` | Attached to `bootdNetworkRef`, pinned at `bootdServerIP` |
+| Seeder Deployment | One per (`Image`, `Site`) | The `Image` | Single-homed on the seeding network of the Site |
+| Tracker Deployment | One per `Site` that sets `tracker.ip` | The `Site` | Single-homed on the seeding network of the Site |
+| Ingest Job | One per `ImageImport` | The `ImageImport` | The cluster network |
+| Ingest scratch PVC | One per `ImageImport` | The `ImageImport` | - |
+| Publish Job | One per `PartitionContent` | The `PartitionContent` | The cluster network |
+| Content PVC | One per `PartitionContent` | The `PartitionContent` | - |
+
+The ingest scratch PVC outlives the ingest Job. The publish Job of a
+`PartitionContent` reads the already-sliced content out of the scratch
+PVC of the `ImageImport` that `spec.source.importName` names. Only the
+deletion of the `ImageImport` reclaims that PVC, so do not delete an
+import until every content it created is Ready.
+
+A seeder Deployment is per (`Image`, `Site`), and not per Site. A Site
+that deploys several Images at the same time therefore needs that many
+addresses on its seeding network attachment at the same time, plus the
+pinned address of the tracker.
+
+**No Service fronts a seeder or a tracker.** A ClusterIP would DNAT
+the connection. A BitTorrent peer connects to the address that the
+announce response gives it, so that address must be the address the
+pod listens on. Both workloads are single-homed with a Multus
+default-network annotation for the same reason. See
+`docs/network-model.md` for the full no-NAT rule.
+
+## Summary of the rules that are easy to get wrong
+
+- The `Site` of a Machine is derived through
+  `Machine.spec.subnetRef` and `Subnet.spec.siteRef`. There is no
+  Site field on a Machine.
+- `dhcp.gateway` is mandatory in `lease` mode. An empty string is a
+  decision. An absent field was an oversight.
+- A slot cannot set both `contentRef` and `fsType`.
+- The specs of `ImageImport`, `PartitionContent`, `Image`, and
+  `DeployRun` are all immutable after creation.
+- Any `postHookRefs` on a Machine or on its OS Image stops the
+  substitution of `kezio-default-finalize`.
+- A Machine has no power intent field.
+- A `Subnet` must declare a boot half, or `seederNetworkRef`, or both.
+- A seeder is per (`Image`, `Site`). A tracker is per `Site`.
+
+## See also
+
+- [`docs/network-model.md`](network-model.md): what a `Site`
+  guarantees and does not guarantee, the no-NAT rule, and the
+  address-pool sizing rule.
+- [`docs/physical-lab-deployment.md`](physical-lab-deployment.md): the
+  operational setup, including both DHCP scenarios.
+- The types themselves, in `api/v1alpha2/`. Their doc comments are the
+  authority for anything this document does not cover.

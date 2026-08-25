@@ -22,7 +22,7 @@ never probes it (`SiteSpec`'s own doc comment,
   `Subnet` or a reference to one the operator already runs
   (`Site.spec.tracker`, mutually exclusive `ip`/`externalURL`).
 - At most one seeder Deployment per `Image` currently deploying at that
-  Site (`internal/controller/image_seeder.go`'s
+  Site (`internal/controller/image_seeder_placement.go`'s
   `buildImageSeederDeployment`): every `Subnet` of the Site shares the
   same seeder and tracker, so a machine on any of them leeches from the
   same swarm.
@@ -102,7 +102,8 @@ rewriting it in between.
 ## The address-pool sizing rule
 
 A seeder Deployment exists per `(Image, Site)`, not per Site
-(`internal/controller/image_seeder.go`): a Site where several Images can
+(`internal/controller/image_seeder.go`, and
+`image_seeder_placement.go`): a Site where several Images can
 be deploying at once needs that many addresses available on its seeding
 `Subnet`'s network attachment at once, plus the tracker's own pinned
 address. `internal/nadvalidate.CheckSeederStaticMultiImage` raises an

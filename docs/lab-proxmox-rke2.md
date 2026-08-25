@@ -14,11 +14,12 @@ when your site does not match the shape below.
 The lab is one Site with one Subnet. The steps scale to more sites
 without change; see `config/bootd/README.md`'s "Per-site addressing".
 
-`docs/lab-all-in-one.yaml` holds everything sections 5, 6, and 8 create,
-in one file. Read this guide first: that file assumes the cluster from
-sections 2 to 4 already exists, and every address, image tag, and
-credential in it needs editing before it works. Sections 5 and 6 stay
-the explanation of what it contains.
+An older single-file version of everything sections 5, 6, and 8 create
+is kept at `docs/legacy/lab-all-in-one.yaml`. It is **not** current: its
+sample objects still declare `kezio.kojuro.date/v1alpha1`, it holds
+webhook configurations the manager no longer serves, and its embedded
+Subnet CRD is behind `config/crd/bases/`. Follow the commands in this
+guide instead. `config/` is the source of truth.
 
 ## 1. What the lab looks like
 
@@ -804,7 +805,6 @@ spec:
   bootMACAddress: "52:54:00:be:ef:01"
   subnetRef:
     name: lab-prov
-  online: true
   imageRef:
     name: lab-ubuntu
   targetDisk:

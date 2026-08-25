@@ -41,6 +41,10 @@ kezio defines these CRDs under the `kezio.kojuro.date/v1alpha2` group:
 | `DeployRun` | The resolved, immutable snapshot of one deployment attempt: which images, which disks, which hooks, and its phase (Partitioning, WritingContent, RunningPostHook, Finalizing, ...). |
 | `PostHook` | A named, reusable, ordered sequence of steps (builtins or scripts) that a `Machine` or `Image` can attach to run after content is written. A script step runs in the live environment, not in the deployed OS: no deployed file system is mounted for it, the plan's device paths come to it in the environment (`KEZIO_TARGET_DISK`, `KEZIO_PARTITIONS`, `KEZIO_PART_<number>`, and the `KEZIO_DATA_DISK_*` set), and a script that mounts a device must unmount it before it ends. |
 
+See [`docs/crd-reference.md`](docs/crd-reference.md) for every field of
+each kind, the references between them, and the rules the schema
+enforces.
+
 ## How a deploy works
 
 1. An `ImageImport`'s ingest Job reads a source disk image, slices every
@@ -105,6 +109,10 @@ See `make help` for the full list of targets.
 
 ## Documentation
 
+- [`docs/crd-reference.md`](docs/crd-reference.md): every custom
+  resource and how they relate - the network model, the content
+  model, and the machine and deploy model, with the rules that are
+  easiest to get wrong.
 - [`docs/network-model.md`](docs/network-model.md): what a `Site`
   guarantees and does not, data-plane-only `Subnet`s, the no-NAT rule,
   the address-pool sizing rule, and why the tracker is scoped per `Site`.
