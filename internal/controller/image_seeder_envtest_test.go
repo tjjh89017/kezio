@@ -33,6 +33,7 @@ import (
 
 	keziov1alpha2 "github.com/tjjh89017/kezio/api/v1alpha2"
 	"github.com/tjjh89017/kezio/internal/ingest"
+	"github.com/tjjh89017/kezio/internal/planbuild"
 	"github.com/tjjh89017/kezio/internal/seederdeploy"
 	"github.com/tjjh89017/kezio/internal/store"
 )
@@ -285,6 +286,64 @@ var _ = Describe("Image Controller seeder placement", func() {
 		// end. What this test adds is proving the two Deployments' own
 		// selectors are themselves mutually exclusive at the source.
 		Expect(depA.Spec.Selector.MatchLabels).NotTo(Equal(depB.Spec.Selector.MatchLabels))
+
+		// Drive planbuild.Builder itself - the actual caller
+		// resolveTorrentURL exists for - through both (Image, Site)
+		// pairs with both Deployments and both pods present at once, and
+		// pin that each resolves to its own pod's address, never the
+		// other's.
+		mhA := &keziov1alpha2.MachineHardware{
+			ObjectMeta: metav1.ObjectMeta{Name: "seeder-lookup-703a", Namespace: "default"},
+			Spec:       keziov1alpha2.MachineHardwareSpec{Disks: []keziov1alpha2.MachineHardwareDisk{{DeviceName: "/dev/vda", SizeBytes: 32 << 30}}},
+		}
+		Expect(k8sClient.Create(ctx, mhA)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, mhA) })
+		mhB := &keziov1alpha2.MachineHardware{
+			ObjectMeta: metav1.ObjectMeta{Name: "seeder-lookup-703b", Namespace: "default"},
+			Spec:       keziov1alpha2.MachineHardwareSpec{Disks: []keziov1alpha2.MachineHardwareDisk{{DeviceName: "/dev/vda", SizeBytes: 32 << 30}}},
+		}
+		Expect(k8sClient.Create(ctx, mhB)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, mhB) })
+
+		// DataImages, not ImageRef: neither image carries an ESP, and a
+		// dataImages-only Machine attaches no default finalize hook (see
+		// planbuild.Builder.resolveMachineHooks), so nothing here needs a
+		// PostHook fixture.
+		builder := &planbuild.Builder{Client: k8sClient}
+
+		machineForA := &keziov1alpha2.Machine{
+			ObjectMeta: metav1.ObjectMeta{Name: mhA.Name, Namespace: "default"},
+			Spec: keziov1alpha2.MachineSpec{
+				DataImages: []keziov1alpha2.MachineDataImage{{ImageRef: keziov1alpha2.NameRef{Name: imgA.Name}}},
+				SubnetRef:  keziov1alpha2.NameRef{Name: "machine-subnet-703"},
+			},
+		}
+		runA := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run-703a", UID: types.UID("run-703a")}}
+		planA, _, err := builder.Build(ctx, machineForA, runA)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(planA.DataImages).To(HaveLen(1))
+		Expect(planA.DataImages[0].Slots).To(HaveLen(1))
+		torrentA := planA.DataImages[0].Slots[0].Torrent
+		Expect(torrentA).NotTo(BeNil())
+		Expect(torrentA.URL).To(ContainSubstring(podA.Status.PodIP), "must resolve to dep A's own pod")
+		Expect(torrentA.URL).NotTo(ContainSubstring(podB.Status.PodIP), "must never resolve to dep B's pod")
+
+		machineForB := &keziov1alpha2.Machine{
+			ObjectMeta: metav1.ObjectMeta{Name: mhB.Name, Namespace: "default"},
+			Spec: keziov1alpha2.MachineSpec{
+				DataImages: []keziov1alpha2.MachineDataImage{{ImageRef: keziov1alpha2.NameRef{Name: imgB.Name}}},
+				SubnetRef:  keziov1alpha2.NameRef{Name: "machine-subnet-703"},
+			},
+		}
+		runB := &keziov1alpha2.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "run-703b", UID: types.UID("run-703b")}}
+		planB, _, err := builder.Build(ctx, machineForB, runB)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(planB.DataImages).To(HaveLen(1))
+		Expect(planB.DataImages[0].Slots).To(HaveLen(1))
+		torrentB := planB.DataImages[0].Slots[0].Torrent
+		Expect(torrentB).NotTo(BeNil())
+		Expect(torrentB.URL).To(ContainSubstring(podB.Status.PodIP), "must resolve to dep B's own pod")
+		Expect(torrentB.URL).NotTo(ContainSubstring(podA.Status.PodIP), "must never resolve to dep A's pod")
 	})
 
 	It("gives each container the environment its contract requires, pins the BitTorrent port, and carries the Site's tracker URL", func() {
