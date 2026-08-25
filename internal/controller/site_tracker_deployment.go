@@ -106,12 +106,14 @@ func trackerIPWithPrefix(subnetCIDR, ip string) (string, error) {
 // trackerPodAnnotations returns the pod template annotations placing
 // seedingSubnet's SeederNetworkRef as the pod's default (and only)
 // network, pinned to ip in seedingSubnet's own CIDR notation - or nil
-// when seedingSubnet carries no SeederNetworkRef at all (callers
-// withhold the Deployment in that case; see
-// SiteReconciler.resolveTrackerPlacement). An error means
-// seedingSubnet.Spec.CIDR itself does not parse; the caller surfaces
-// that as a Site misconfiguration rather than falling back to a bare
-// address the bridge CNI plugin would reject.
+// when seedingSubnet carries no SeederNetworkRef at all (SiteReconciler.
+// onChange returns a SeederNetworkRefMissing failure before this is ever
+// called in that case, so callers never actually see the nil return
+// today; it stays defensive rather than assuming that check can never
+// change). An error means seedingSubnet.Spec.CIDR itself does not
+// parse; the caller surfaces that as a Site misconfiguration rather
+// than falling back to a bare address the bridge CNI plugin would
+// reject.
 //
 // Single-homed via multusDefaultNetworkAnnotation, not the additive one,
 // for the same no-NAT reason seederPodAnnotations is: a peer connects to

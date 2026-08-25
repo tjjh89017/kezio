@@ -85,8 +85,8 @@ const (
 	// PartitionContentStatePublishing means the .torrent is being built
 	// and the content is being made available to seed.
 	PartitionContentStatePublishing = "Publishing"
-	// PartitionContentStateReady means the .torrent exists at
-	// status.torrentPath and the content is seedable.
+	// PartitionContentStateReady means status.infoHash is set and the
+	// content is seedable.
 	PartitionContentStateReady = "Ready"
 	// PartitionContentStateFailed means publishing failed.
 	PartitionContentStateFailed = "Failed"
@@ -95,8 +95,8 @@ const (
 // Condition types set on PartitionContentStatus.Conditions.
 const (
 	// PartitionContentConditionReady mirrors
-	// PartitionContentStatus.State == Ready: the .torrent exists at
-	// status.torrentPath and the content is seedable. It never carries a
+	// PartitionContentStatus.State == Ready: status.infoHash is set and
+	// the content is seedable. It never carries a
 	// seeder's address - plan builders resolve the seeder Pod address at
 	// plan time, not from this status.
 	PartitionContentConditionReady = "Ready"
