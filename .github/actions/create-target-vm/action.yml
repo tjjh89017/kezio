@@ -37,9 +37,14 @@ inputs:
     required: false
     default: "4Gi"
   memory:
-    description: Memory request/limit for the VM's domain.
+    description: >-
+      Memory request for the VM's domain (spec.domain.resources.requests.memory;
+      no limit is set, so this is also what the guest sees as its RAM).
+      Every lane runs at 2Gi. A lane that starts several machines at once
+      is bounded by the runner's own memory budget, not by per-VM
+      headroom, so this value is deliberately not raised for those lanes.
     required: false
-    default: "3Gi"
+    default: "2Gi"
   cpus:
     description: CPU core count for the VM's domain.
     required: false

@@ -1,0 +1,126 @@
+name: Assert the seeder actually registered with its Site's tracker
+
+description: >-
+  Reads the SWARM the Site's tracker itself holds for one content, and
+  fails unless the tracker has at least one completed peer (a seeder) in
+  it. This is the announce actually happening, measured at the only
+  place that can know: opentracker's peer table is built exclusively
+  from announce requests it received over the network, so a non-empty
+  "complete" count for this info hash means a peer holding the whole
+  content reached this tracker, was accepted, and was recorded.
+
+  Deliberately not a configuration check. assert-seeder-announce reads
+  the announce URL bencoded into the served .torrent, which says only
+  what the seeder was TOLD to announce to - it stays green while every
+  announce to that URL fails, which is exactly how a lane can pass with
+  transfers running entirely over libtorrent's Local Service Discovery
+  (multicast, same L2 segment) and the tracker never participating at
+  all. That failure mode leaves the torrent bytes untouched and the
+  tracker's peer table empty, so only the peer table can tell the two
+  apart.
+
+  Reads through /scrape, not /stats: scrape is the BitTorrent protocol
+  endpoint opentracker always serves, while the /stats endpoint is
+  gated by opentracker's own build/config-time stats access list and
+  cannot be relied on for a pass/fail gate.
+
+  Call this while the deploy is in flight. A seeder Deployment is
+  demand-driven and is torn down once its Site's demand is gone, and
+  the tracker forgets a peer that stops announcing, so a swarm read
+  after every machine is Provisioned is measuring the wrong moment.
+
+inputs:
+  tracker-ip:
+    description: Bare address (no prefix) of the Site's tracker - Site.spec.tracker.ip, the same address baked into the torrent's announce URL.
+    required: true
+  tracker-port:
+    description: The tracker's announce/scrape port (site_tracker_deployment.go's trackerAnnouncePort).
+    required: false
+    default: "6969"
+  info-hash:
+    description: >-
+      The content's BitTorrent info hash as 40 hex characters -
+      resolve-seeder-torrent-url's own info-hash output, which reads
+      PartitionContent.status.infoHash.
+    required: true
+  min-complete:
+    description: >-
+      Minimum number of completed peers (seeders) the tracker must
+      report for this info hash. The default of 1 is the claim this
+      action exists to make: at least one seeder announced for real.
+    required: false
+    default: "1"
+  timeout-seconds:
+    description: >-
+      How long to poll before failing. A seeder announces on start-up,
+      so this covers the gap between the seeder pod becoming ready and
+      its first announce landing, not a full announce interval.
+    required: false
+    default: "180"
+
+runs:
+  using: composite
+  steps:
+    - name: Poll the tracker's scrape endpoint for a completed peer
+      # curl runs on the runner, which holds an address on the seeding
+      # segment's own bridge and forwards for it (create-routed-segments)
+      # - the tracker is single-homed on that segment with no Service in
+      # front of it, so the runner is the one place outside the segment
+      # that can reach it without inventing a route.
+      shell: bash
+      env:
+        TRACKER_IP: ${{ inputs.tracker-ip }}
+        TRACKER_PORT: ${{ inputs.tracker-port }}
+        INFO_HASH: ${{ inputs.info-hash }}
+        MIN_COMPLETE: ${{ inputs.min-complete }}
+        TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
+      run: |
+        set -euo pipefail
+
+        if [[ ! "${INFO_HASH}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+          echo "::error::info-hash '${INFO_HASH}' is not 40 hex characters - a BitTorrent info hash is a 20-byte SHA-1" >&2
+          exit 1
+        fi
+
+        # The scrape query wants the RAW 20 bytes, percent-encoded - not
+        # the hex text. sed inserts a "%" before every hex pair, which is
+        # the percent-encoding of those same bytes.
+        encoded="$(printf '%s' "${INFO_HASH}" | tr 'A-F' 'a-f' | sed 's/../%&/g')"
+        url="http://${TRACKER_IP}:${TRACKER_PORT}/scrape?info_hash=${encoded}"
+        echo "scraping ${url}"
+
+        deadline=$(( $(date +%s) + TIMEOUT_SECONDS ))
+        body=""
+        complete=""
+        while true; do
+          # --max-time bounds one attempt; a tracker that is unreachable
+          # answers nothing at all, which is itself the failure this
+          # action reports once the deadline passes.
+          body="$(curl -sf --max-time 10 "${url}" | tr -d '\0' || true)"
+          # opentracker answers bencode:
+          #   d5:filesd20:<raw info hash>d8:completei1e10:downloadedi0e10:incompletei0eeee
+          # Only the one integer is needed, and the raw-byte key makes a
+          # general bencode parse awkward here, so it is matched
+          # directly rather than parsed.
+          complete="$(sed -n 's/.*8:completei\([0-9]\{1,\}\)e.*/\1/p' <<<"${body}")"
+          echo "$(date -Is) complete=${complete:-<none>} raw=$(printf '%s' "${body}" | tr -c '[:print:]' '.')"
+          if [ -n "${complete}" ] && [ "${complete}" -ge "${MIN_COMPLETE}" ]; then
+            echo "tracker ${TRACKER_IP}:${TRACKER_PORT} reports ${complete} completed peer(s) for ${INFO_HASH}"
+            {
+              echo "### Tracker participation evidence"
+              echo "The Site's tracker at ${TRACKER_IP}:${TRACKER_PORT} reports **${complete}** completed peer(s)"
+              echo "for info hash \`${INFO_HASH}\`. A tracker only knows a peer that announced to it,"
+              echo "so the seeder's announces are reaching this tracker and being recorded -"
+              echo "the transfer is not running on Local Service Discovery alone."
+            } >>"${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          if [ "$(date +%s)" -ge "${deadline}" ]; then
+            break
+          fi
+          sleep 5
+        done
+
+        echo "::error::the tracker at ${TRACKER_IP}:${TRACKER_PORT} never reported ${MIN_COMPLETE} or more completed peer(s) for info hash ${INFO_HASH} within ${TIMEOUT_SECONDS}s - no seeder announce reached it, so any transfer in this lane is running without the tracker (Local Service Discovery, or nothing at all)" >&2
+        echo "last scrape response (non-printable bytes shown as '.'): $(printf '%s' "${body}" | tr -c '[:print:]' '.')" >&2
+        exit 1
