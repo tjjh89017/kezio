@@ -18,10 +18,12 @@ package agentserver
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apimachineryruntime "k8s.io/apimachinery/pkg/runtime"
@@ -368,12 +370,14 @@ func TestPersistProgress_TerminalSucceededSurvivesAStaleRead(t *testing.T) {
 	assertRunSucceeded(t, c, run)
 }
 
-// TestPersistProgress_TerminalSucceededSurvivesAnArbitrarilyLaggingCache
-// is the stale-read case taken to its limit: the cache never catches up,
-// so retrying against it alone would conflict forever. Only re-reading
-// through APIReader lets the terminal report land - the property that
-// has to hold on a cluster whose cache lags for reasons CI never shows.
-func TestPersistProgress_TerminalSucceededSurvivesAnArbitrarilyLaggingCache(t *testing.T) {
+// TestPersistProgress_ExhaustedRetriesReportTheConflict is the stale-read
+// case taken past what a retry can fix: the cache never catches up, so
+// every attempt conflicts. The retry reads through the cache, so this
+// bound is real - what must not happen is losing the report quietly.
+// persistProgress has to return the conflict so its caller logs a
+// terminal report it failed to record, rather than answering as though
+// the write landed.
+func TestPersistProgress_ExhaustedRetriesReportTheConflict(t *testing.T) {
 	machine := newProgressTestMachine()
 	c := newProgressTestClient(t, machine)
 	run := newProgressTestRun(t, c)
@@ -395,14 +399,14 @@ func TestPersistProgress_TerminalSucceededSurvivesAnArbitrarilyLaggingCache(t *t
 		t.Fatalf("persistProgress: %v", err)
 	}
 
-	lagging := &Server{
-		Client:    &laggingReadClient{Client: c, stale: &stale, staleReads: -1},
-		APIReader: c,
+	lagging := &Server{Client: &laggingReadClient{Client: c, stale: &stale, staleReads: -1}}
+	err := lagging.persistProgress(ctx, machine, terminalSucceededRequest(run))
+	if err == nil {
+		t.Fatal("persistProgress(terminal) = nil, want the conflict: a terminal report that never landed must not be reported as persisted")
 	}
-	if err := lagging.persistProgress(ctx, machine, terminalSucceededRequest(run)); err != nil {
-		t.Fatalf("persistProgress(terminal): %v", err)
+	if !apierrors.IsConflict(errors.Unwrap(err)) {
+		t.Fatalf("persistProgress(terminal) = %v, want a wrapped conflict", err)
 	}
-	assertRunSucceeded(t, c, run)
 }
 
 func TestPersistProgress_StaleRunUIDIsNoop(t *testing.T) {

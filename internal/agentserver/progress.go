@@ -38,35 +38,26 @@ import (
 // the same name): a same-name DeployRun created after the one a stale
 // report names must never have that report's progress applied to it.
 //
-// The read-modify-write retries on conflict, and every retry re-reads
-// through s.progressReader - the uncached APIReader when one is wired.
+// The read-modify-write retries on conflict, re-reading each time.
 // deploy.Executor.Execute sends its last four reports (a phase's
 // succeeded, the next phase's running/succeeded, then the terminal
 // DeployRunPhaseSucceeded) back to back with no work between them, so
-// the cache this server ordinarily reads through is routinely still
-// serving the state before the previous report's write. A cached retry
-// would only conflict again for as long as the cache lags; a live one
-// converges on the first attempt however far behind the cache is. That
-// matters most for the terminal report: handleProgress only logs a
-// failure to persist, and DeployRun status carries the *only* record
-// that the deploy finished, so losing that one report strands the
-// Machine in Provisioning forever (AgentDeployer.Provision reports
-// Continuing for every non-terminal phase, with no deadline).
+// the cache this server reads through is routinely still serving the
+// state before the previous report's write, and the update built on it
+// is rejected. Without a retry that rejection is only logged - by
+// handleProgress here and by the agent's Reporter - and DeployRun
+// status carries the *only* record that the deploy finished, so losing
+// the terminal report strands the Machine in Provisioning forever
+// (AgentDeployer.Provision reports Continuing for every non-terminal
+// phase, with no deadline). The retry reads through the cache like the
+// first attempt: it converges as the cache catches up, which is the
+// same watch event that would have made the first read correct.
 func (s *Server) persistProgress(ctx context.Context, machine *keziov1alpha2.Machine, req agentapi.ProgressRequest) error {
 	key := client.ObjectKey{Namespace: machine.Namespace, Name: req.RunName}
 
-	// Only the first attempt reads through the cache; a conflict means
-	// that read was stale, so every retry pays for a live one.
-	retrying := false
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		reader := client.Reader(s.Client)
-		if retrying {
-			reader = s.progressReader()
-		}
-		retrying = true
-
 		var run keziov1alpha2.DeployRun
-		if err := reader.Get(ctx, key, &run); err != nil {
+		if err := s.Client.Get(ctx, key, &run); err != nil {
 			return err
 		}
 		if req.RunUID != "" && string(run.UID) != req.RunUID {
@@ -83,18 +74,6 @@ func (s *Server) persistProgress(ctx context.Context, machine *keziov1alpha2.Mac
 	default:
 		return fmt.Errorf("persisting progress onto DeployRun %q: %w", req.RunName, err)
 	}
-}
-
-// progressReader is the reader persistProgress re-reads through after a
-// conflict: the uncached APIReader when one is wired, falling back to
-// the (cached) Client otherwise, so a Server built without one - every
-// test in this package, and any caller that has no APIReader to hand -
-// still retries, just against the cache.
-func (s *Server) progressReader() client.Reader {
-	if s.APIReader != nil {
-		return s.APIReader
-	}
-	return s.Client
 }
 
 // applyProgressToDeployRun maps one ProgressRequest onto run's status in
