@@ -53,7 +53,26 @@ runs:
         RKE2_VERSION: ${{ inputs.rke2-version }}
       run: |
         set -euo pipefail
-        curl -sfL https://get.rke2.io | sudo INSTALL_RKE2_VERSION="${RKE2_VERSION}" sh -
+
+        # Retried because the installer downloads its own tarball from the
+        # GitHub release, and a connection reset there fails this step
+        # about a minute into a lane that runs for twenty. The installer
+        # only unpacks into /usr/local and rewrites the same files, so a
+        # second attempt over a partial first one is safe. Only the
+        # download is retried - systemctl comes after, so a unit that
+        # fails to start is still reported on the first try.
+        for attempt in 1 2 3; do
+          if curl -sfL https://get.rke2.io | sudo INSTALL_RKE2_VERSION="${RKE2_VERSION}" sh -; then
+            break
+          fi
+          if [ "${attempt}" -eq 3 ]; then
+            echo "::error::the RKE2 installer failed ${attempt} times; the last attempt's output is above" >&2
+            exit 1
+          fi
+          echo "RKE2 installer attempt ${attempt} failed; retrying in $((attempt * 10))s" >&2
+          sleep "$((attempt * 10))"
+        done
+
         sudo systemctl enable --now rke2-server.service
 
         # kubectl/ctr/crictl ship under /var/lib/rancher/rke2/bin, not on
