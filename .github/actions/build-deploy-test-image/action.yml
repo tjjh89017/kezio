@@ -2,8 +2,8 @@ name: Build and ingest the full-deploy test image
 
 description: >-
   Builds the OS test image the full-deploy e2e lane writes to a target
-  VM's disk over BitTorrent: downloads a pinned Ubuntu minimal cloud
-  image (UEFI/GPT bootable, ~250MiB compressed - small enough to keep
+  VM's disk over BitTorrent: downloads an Ubuntu minimal cloud image
+  (UEFI/GPT bootable, ~250MiB compressed - small enough to keep
   this lane's own surface minimal), injects qemu-guest-agent into it
   offline, converts it to raw, then uploads it, requests an ImageImport,
   and waits for the Image that import creates to reach Ready.
@@ -79,13 +79,23 @@ inputs:
     required: false
     default: "600"
   cloud-image-url:
-    description: 'URL of the pristine Ubuntu minimal cloud image to download.'
+    description: >-
+      URL of the pristine Ubuntu minimal cloud image to download. The file
+      name and the release directory the SHA256SUMS list is read from are
+      both taken from this one URL, so nothing else has to be changed to
+      move this action to a different image or release.
     required: false
     default: "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img"
   cloud-image-sha256:
-    description: 'Expected sha256 of cloud-image-url''s content, verified before any tool touches it.'
+    description: >-
+      Optional sha256 to pin cloud-image-url's content to. Leave it empty
+      (the default) to trust the SHA256SUMS list the release directory
+      publishes beside the image. Set it only to hold this action on one
+      specific build: the URL points at a rolling "latest build" location,
+      so a pinned value fails every run after the next republish, which is
+      the failure the empty default removes.
     required: false
-    default: "b3064efb500d71d6ccbe619b1716062b803e285116e040627b430aaee14cced6"
+    default: ""
 
 outputs:
   image-name:
@@ -116,24 +126,119 @@ runs:
       shell: bash
       run: go build -o bin/kezioctl ./cmd/kezioctl
 
-    - name: Download and verify the base cloud image
+    # The expected checksum comes from the SHA256SUMS list the release
+    # directory publishes beside the image, not from a value written into
+    # this file. cloud-image-url points at Ubuntu's "latest build"
+    # location, which is republished in place, so a checksum kept here
+    # goes stale on its own and turns every lane that starts a VM red
+    # with nothing changed in the repository.
+    #
+    # Be clear about what this check proves: the bytes match what the
+    # server publishes for that file right now. It is not proof that the
+    # build is one anyone reviewed. That is weaker than a real pin - but
+    # the URL was already rolling, so this is the trust level the action
+    # already operated at; the value kept here never pinned the build, it
+    # only made the mismatch fail loudly.
+    - name: Read the base image's published checksum
+      id: base-image
       shell: bash
       env:
         CLOUD_IMAGE_URL: ${{ inputs.cloud-image-url }}
         CLOUD_IMAGE_SHA256: ${{ inputs.cloud-image-sha256 }}
       run: |
         set -euo pipefail
-        curl -fL --retry 3 --max-time 300 -o "${RUNNER_TEMP}/base.img" "${CLOUD_IMAGE_URL}"
-        echo "${CLOUD_IMAGE_SHA256}  ${RUNNER_TEMP}/base.img" | sha256sum -c -
 
-    - name: Download the base image's package manifest
+        image_file="${CLOUD_IMAGE_URL##*/}"
+        sums_url="${CLOUD_IMAGE_URL%/*}/SHA256SUMS"
+
+        if [ -n "${CLOUD_IMAGE_SHA256}" ]; then
+          echo "cloud-image-sha256 is set: ${image_file} is pinned to ${CLOUD_IMAGE_SHA256}, and ${sums_url} is not read"
+          sha256="${CLOUD_IMAGE_SHA256}"
+        else
+          sums_file="${RUNNER_TEMP}/SHA256SUMS"
+          if ! curl -fsSL --retry 3 --max-time 60 -o "${sums_file}" "${sums_url}"; then
+            echo "::error::could not download ${sums_url}; without it the base image has no expected checksum, so this action does not download it" >&2
+            exit 1
+          fi
+          # Every line is "<sha256> *<file name>" (binary mode) or
+          # "<sha256>  <file name>"; the leading "*" is not part of the name.
+          sha256="$(awk -v want="${image_file}" '{ name = $2; sub(/^\*/, "", name); if (name == want) { print $1; exit } }' "${sums_file}")"
+          if [ -z "${sha256}" ]; then
+            echo "::error::${sums_url} has no line for '${image_file}'; refusing to download it unverified. Check that cloud-image-url still names a file that release directory publishes." >&2
+            exit 1
+          fi
+          echo "${sums_url} gives ${image_file} the checksum ${sha256}"
+        fi
+
+        echo "file-name=${image_file}" >>"${GITHUB_OUTPUT}"
+        echo "sha256=${sha256}" >>"${GITHUB_OUTPUT}"
+
+    # The checksum is part of the key, so a republished image is a miss
+    # rather than a stale hit. No restore-keys: a near match is a
+    # different build, which is exactly what must not be restored. The
+    # cached copy stays pristine - the customized image is a separate
+    # working copy below - so the post-job save cannot write a
+    # virt-customize output back under the pristine image's key.
+    - name: Restore the base cloud image from the runner cache
+      id: cloud-image-cache
+      uses: actions/cache@v6
+      with:
+        path: ${{ runner.temp }}/cloud-image
+        key: cloud-image-${{ steps.base-image.outputs.file-name }}-${{ steps.base-image.outputs.sha256 }}
+
+    # The manifest is fetched with the image and cached with it: the two
+    # must describe one build, and both come from the same rolling
+    # location.
+    - name: Download the base cloud image and its package manifest
+      if: steps.cloud-image-cache.outputs.cache-hit != 'true'
       shell: bash
       env:
         CLOUD_IMAGE_URL: ${{ inputs.cloud-image-url }}
+        IMAGE_FILE: ${{ steps.base-image.outputs.file-name }}
       run: |
         set -euo pipefail
-        manifest_url="${CLOUD_IMAGE_URL%.img}.manifest"
-        curl -fsSL --retry 3 -o "${RUNNER_TEMP}/base.manifest" "${manifest_url}"
+        cache_dir="${RUNNER_TEMP}/cloud-image"
+        mkdir -p "${cache_dir}"
+        curl -fL --retry 3 --max-time 300 -o "${cache_dir}/${IMAGE_FILE}" "${CLOUD_IMAGE_URL}"
+        curl -fsSL --retry 3 --max-time 60 \
+          -o "${cache_dir}/${IMAGE_FILE%.img}.manifest" "${CLOUD_IMAGE_URL%.img}.manifest"
+
+    # Runs on a hit as well as a miss: a restored cache entry is not
+    # self-evidently intact, and it is the only copy nothing verified on
+    # the way in.
+    - name: Verify the base cloud image and take a working copy
+      shell: bash
+      env:
+        IMAGE_FILE: ${{ steps.base-image.outputs.file-name }}
+        EXPECTED_SHA256: ${{ steps.base-image.outputs.sha256 }}
+        CACHE_HIT: ${{ steps.cloud-image-cache.outputs.cache-hit }}
+      run: |
+        set -euo pipefail
+
+        cache_dir="${RUNNER_TEMP}/cloud-image"
+        image="${cache_dir}/${IMAGE_FILE}"
+        manifest="${cache_dir}/${IMAGE_FILE%.img}.manifest"
+
+        for file in "${image}" "${manifest}"; do
+          if [ ! -f "${file}" ]; then
+            echo "::error::${file} is missing after the download/restore step (cache-hit=${CACHE_HIT:-false})" >&2
+            exit 1
+          fi
+        done
+
+        if ! echo "${EXPECTED_SHA256}  ${image}" | sha256sum -c -; then
+          if [ "${CACHE_HIT}" = "true" ]; then
+            echo "::error::the cached copy of ${IMAGE_FILE} does not match ${EXPECTED_SHA256}; the cache entry is damaged. Delete the cache entry for this key and run the lane again." >&2
+          else
+            echo "::error::the downloaded ${IMAGE_FILE} does not match ${EXPECTED_SHA256}, the checksum its own release directory publishes for it. The download is incomplete or the file changed while it ran; run the lane again before treating this as tampering." >&2
+          fi
+          exit 1
+        fi
+
+        # The steps below customize the image in place, so they work on a
+        # copy and leave the cached bytes as downloaded.
+        cp "${image}" "${RUNNER_TEMP}/base.img"
+        cp "${manifest}" "${RUNNER_TEMP}/base.manifest"
 
     - name: Inject qemu-guest-agent and the marker token offline
       # --no-network + dpkg -i rather than --network + --install: booting
