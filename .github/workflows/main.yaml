@@ -3896,3 +3896,30 @@ jobs:
             docker tag "${BOOT_ARTIFACTS_IMG}" "${tag}"
             docker push "${tag}"
           done
+
+  # One result that says every ":main" tag from this commit landed.
+  # `publish` is a matrix of five and publish-boot-artifacts is a sixth
+  # push, so without this a reader has to check six rows to know the
+  # registry agrees with the commit.
+  #
+  # Gated the same way the two publish jobs are, because outside that
+  # gate there is nothing to collect: no publish runs on a pull_request,
+  # and none runs when a lane failed - e2e-required already carries that
+  # report, and failing here too would only say it a second time.
+  publish-required:
+    name: Publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: >-
+      always() &&
+      github.event_name == 'push' &&
+      needs.e2e-required.result == 'success'
+    needs:
+      - e2e-required
+      - publish
+      - publish-boot-artifacts
+    steps:
+      - name: Every image reached the registry
+        run: |
+          [ "${{ needs.publish.result }}" = "success" ] && \
+            [ "${{ needs.publish-boot-artifacts.result }}" = "success" ]
