@@ -1080,6 +1080,11 @@ does. Watch the import beside the Image: an import that fails never
 creates the Image at all, so the Image alone would show only the
 time-out.
 
+Give `--wait` to `image upload` to do this in the command itself. The
+command then returns only when the `Image` is `Ready`, or stops with the
+reason of the import as soon as the import fails. `--wait-timeout`
+changes how long it waits.
+
 No seeder runs yet. A seeder Deployment exists only while a Machine at
 that Site deploys that Image.
 

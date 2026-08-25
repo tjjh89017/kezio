@@ -46,6 +46,8 @@ func newImageUploadCmd(flags *globalFlags) *cobra.Command {
 		token         string
 		tokenFile     string
 		uploadTimeout time.Duration
+		wait          bool
+		waitTimeout   time.Duration
 	)
 
 	cmd := &cobra.Command{
@@ -61,6 +63,12 @@ The import creates one PartitionContent per non-swap partition, named
 "<--content-prefix>-p<partition number>", and then the Image binding
 them. Both names are rejected if something already holds them: content
 and Image are immutable, so an import never writes over one.
+
+The command returns as soon as it creates the ImageImport. Use --wait to
+keep it running until the import creates the Image and that Image becomes
+Ready. --wait also watches the ImageImport: an import that fails stops the
+wait immediately and reports the import's own reason, because a failed
+import never creates the Image.
 
 The image service's URL and bearer token can be given on the command
 line, or left to environment variables/a token file:
@@ -103,13 +111,22 @@ The first source in each list that is set wins.`,
 				Server:        resolvedServer,
 				Token:         resolvedToken,
 				Progress:      cmd.ErrOrStderr(),
+				Wait:          wait,
+				WaitTimeout:   waitTimeout,
 			})
+			// The ImageImport is reported before the error: with --wait the
+			// import can be created and then fail, and the operator needs
+			// the name of the object that holds the failure.
+			if result.Import != nil {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "imageimport.kezio.kojuro.date/%s created in namespace %q (staged at %s, checksum %s); it will create image.kezio.kojuro.date/%s\n",
+					result.Import.Name, result.Import.Namespace, result.Upload.URL, result.Upload.Checksum, result.Import.Spec.ImageName)
+			}
 			if err != nil {
 				return err
 			}
-
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "imageimport.kezio.kojuro.date/%s created in namespace %q (staged at %s, checksum %s); it will create image.kezio.kojuro.date/%s\n",
-				result.Import.Name, result.Import.Namespace, result.Upload.URL, result.Upload.Checksum, result.Import.Spec.ImageName)
+			if wait {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "image.kezio.kojuro.date/%s is Ready\n", result.Import.Spec.ImageName)
+			}
 			return nil
 		},
 	}
@@ -126,6 +143,10 @@ The first source in each list that is set wins.`,
 		"path to a file holding the bearer token (or set "+TokenFileEnvVar+")")
 	cmd.Flags().DurationVar(&uploadTimeout, "upload-timeout", 0,
 		"HTTP timeout for the upload request. 0 disables the timeout, appropriate for large files.")
+	cmd.Flags().BoolVar(&wait, "wait", false,
+		"wait until the import creates the Image and that Image becomes Ready")
+	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 30*time.Minute,
+		"give up waiting after this long (only with --wait). 0 waits until the command is interrupted.")
 
 	return cmd
 }

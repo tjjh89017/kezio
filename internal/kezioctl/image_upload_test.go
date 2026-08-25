@@ -17,6 +17,7 @@ limitations under the License.
 package kezioctl
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -25,7 +26,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -182,6 +185,179 @@ func TestImageUpload_UploadFailureDoesNotCreateImageImport(t *testing.T) {
 	}
 	if len(list.Items) != 0 {
 		t.Fatalf("ImageImport CR created despite upload failure: %+v", list.Items)
+	}
+}
+
+// waitLines returns only the lines --wait wrote, dropping the byte-count
+// lines the upload itself writes to the same writer.
+func waitLines(progress string) []string {
+	var lines []string
+	for _, line := range strings.Split(strings.TrimRight(progress, "\n"), "\n") {
+		if strings.HasPrefix(line, "imageimport ") {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+// TestImageUpload_WaitReturnsOnceTheImageIsReady covers the journey the
+// flag exists for: the import runs and the operator ends up holding an
+// Image they can deploy.
+func TestImageUpload_WaitReturnsOnceTheImageIsReady(t *testing.T) {
+	srv := newImageServiceTestServer(t, "test-token")
+	defer srv.Close()
+
+	path := writeTestImageFile(t, []byte("raw disk bytes"))
+	c := fake.NewClientBuilder().WithScheme(Scheme).Build()
+
+	// The ingest Job is what creates the Image; here a goroutine stands in
+	// for it, so the wait has to observe a state it did not start in.
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		image := &keziov1alpha2.Image{
+			ObjectMeta: metav1.ObjectMeta{Name: testUploadName, Namespace: "kezio-system"},
+			Status:     keziov1alpha2.ImageStatus{State: keziov1alpha2.ImageStateReady},
+		}
+		_ = c.Create(context.Background(), image)
+		_ = c.Update(context.Background(), image)
+	}()
+
+	var progress bytes.Buffer
+	_, err := ImageUpload(context.Background(), srv.Client(), c, ImageUploadOptions{
+		File:             path,
+		Name:             testUploadName,
+		Namespace:        "kezio-system",
+		Server:           srv.URL,
+		Token:            "test-token",
+		Progress:         &progress,
+		Wait:             true,
+		WaitTimeout:      2 * time.Second,
+		WaitPollInterval: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("ImageUpload() error = %v", err)
+	}
+
+	lines := waitLines(progress.String())
+	if len(lines) == 0 {
+		t.Fatalf("progress = %q, want at least one wait line", progress.String())
+	}
+	if !strings.Contains(lines[len(lines)-1], keziov1alpha2.ImageStateReady) {
+		t.Errorf("last wait line = %q, want it to report the Image as Ready", lines[len(lines)-1])
+	}
+}
+
+// TestImageUpload_WaitReportsTheImportFailureReason is the reason the wait
+// watches the ImageImport at all: an import that fails terminally never
+// creates the Image, so watching the Image alone would report nothing but
+// a timeout and leave the operator without the cause.
+func TestImageUpload_WaitReportsTheImportFailureReason(t *testing.T) {
+	srv := newImageServiceTestServer(t, "test-token")
+	defer srv.Close()
+
+	path := writeTestImageFile(t, []byte("raw disk bytes"))
+	c := fake.NewClientBuilder().WithScheme(Scheme).Build()
+
+	const failureMessage = `partitioncontent "ubuntu-2404-golden-p1" already exists`
+	go func() {
+		key := client.ObjectKey{Namespace: "kezio-system", Name: testUploadName}
+		imp := &keziov1alpha2.ImageImport{}
+		for range 200 {
+			if err := c.Get(context.Background(), key, imp); err == nil {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		imp.Status.State = keziov1alpha2.ImageImportStateFailed
+		imp.Status.Conditions = []metav1.Condition{{
+			Type:               keziov1alpha2.ImageImportConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             "ImportFailed",
+			Message:            failureMessage,
+			LastTransitionTime: metav1.Now(),
+		}}
+		_ = c.Update(context.Background(), imp)
+	}()
+
+	var progress bytes.Buffer
+	_, err := ImageUpload(context.Background(), srv.Client(), c, ImageUploadOptions{
+		File:             path,
+		Name:             testUploadName,
+		Namespace:        "kezio-system",
+		Server:           srv.URL,
+		Token:            "test-token",
+		Progress:         &progress,
+		Wait:             true,
+		WaitTimeout:      2 * time.Second,
+		WaitPollInterval: time.Millisecond,
+	})
+	if err == nil {
+		t.Fatal("expected an error when the ImageImport fails terminally")
+	}
+	if strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error = %q, want the import's own failure rather than a timeout", err.Error())
+	}
+	if !strings.Contains(err.Error(), "ImportFailed") || !strings.Contains(err.Error(), failureMessage) {
+		t.Errorf("error = %q, want it to carry the import's reason and message", err.Error())
+	}
+}
+
+func TestImageUpload_WaitTimesOutWhileTheImportIsStillRunning(t *testing.T) {
+	srv := newImageServiceTestServer(t, "test-token")
+	defer srv.Close()
+
+	path := writeTestImageFile(t, []byte("raw disk bytes"))
+	c := fake.NewClientBuilder().WithScheme(Scheme).Build()
+
+	var progress bytes.Buffer
+	_, err := ImageUpload(context.Background(), srv.Client(), c, ImageUploadOptions{
+		File:             path,
+		Name:             testUploadName,
+		Namespace:        "kezio-system",
+		Server:           srv.URL,
+		Token:            "test-token",
+		Progress:         &progress,
+		Wait:             true,
+		WaitTimeout:      50 * time.Millisecond,
+		WaitPollInterval: time.Millisecond,
+	})
+	if err == nil {
+		t.Fatal("expected an error when the Image never becomes Ready")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error = %q, want it to report the timeout", err.Error())
+	}
+}
+
+// TestImageUpload_WaitPrintsOnlyChangedStates guards the poll from being
+// chatty: ingest takes minutes, and an unchanged state must not produce a
+// line per poll.
+func TestImageUpload_WaitPrintsOnlyChangedStates(t *testing.T) {
+	srv := newImageServiceTestServer(t, "test-token")
+	defer srv.Close()
+
+	path := writeTestImageFile(t, []byte("raw disk bytes"))
+	c := fake.NewClientBuilder().WithScheme(Scheme).Build()
+
+	var progress bytes.Buffer
+	_, err := ImageUpload(context.Background(), srv.Client(), c, ImageUploadOptions{
+		File:             path,
+		Name:             testUploadName,
+		Namespace:        "kezio-system",
+		Server:           srv.URL,
+		Token:            "test-token",
+		Progress:         &progress,
+		Wait:             true,
+		WaitTimeout:      50 * time.Millisecond,
+		WaitPollInterval: time.Millisecond,
+	})
+	if err == nil {
+		t.Fatal("expected an error when the Image never becomes Ready")
+	}
+
+	lines := waitLines(progress.String())
+	if len(lines) != 1 {
+		t.Fatalf("wait lines = %q, want exactly one line while nothing changed", lines)
 	}
 }
 
