@@ -76,14 +76,17 @@ while :; do sleep 0.05; done
 
 func TestDnsmasq_WritesConfigAndInitialHostsfile(t *testing.T) {
 	d, runDir := newTestDnsmasq(t, longRunningScript)
+	sink := &recordingSink{}
 
-	ctx, cancel := context.WithCancel(logf.IntoContext(context.Background(), logf.Log))
+	ctx, cancel := context.WithCancel(logf.IntoContext(context.Background(), newRecordingLogger(sink)))
 	done := make(chan error, 1)
 	go func() { done <- d.Start(ctx) }()
 
-	waitFor(t, "config file", func() bool {
-		_, err := os.Stat(filepath.Join(runDir, "dnsmasq.conf"))
-		return err == nil
+	// Wait for the child spawn, which Start does after every start-up
+	// write - not for the config file, which exists before it holds
+	// its content.
+	waitFor(t, "dnsmasq child start", func() bool {
+		return containsSubstring(sink.messages(), "dnsmasq started")
 	})
 	conf, err := os.ReadFile(filepath.Join(runDir, "dnsmasq.conf"))
 	if err != nil {
