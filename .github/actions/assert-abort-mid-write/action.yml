@@ -115,6 +115,12 @@ inputs:
   image-name:
     description: Name of the Image to deploy as this machine's OS - written to the claim's spec.imageRef.name, same as deploy-machine's own image-name input.
     required: true
+  target-disk-serial:
+    description: >-
+      Serial of the disk the claim's spec.targetDisk.serialNumber names.
+      Leave empty to set no hint.
+    required: false
+    default: ""
   posthook-names:
     description: >-
       Newline-separated PostHook names, written in order to the claim's
@@ -182,6 +188,7 @@ runs:
         MACHINE_NAME: ${{ inputs.machine-name }}
         IMAGE_NAME: ${{ inputs.image-name }}
         POSTHOOK_NAMES: ${{ inputs.posthook-names }}
+        TARGET_DISK_SERIAL: ${{ inputs.target-disk-serial }}
       run: |
         set -euo pipefail
         posthook_refs="$(jq -nR '[inputs | select(length > 0) | {name: .}]' <<<"${POSTHOOK_NAMES}")"
@@ -191,15 +198,16 @@ runs:
           --arg machine "${MACHINE_NAME}" \
           --arg image "${IMAGE_NAME}" \
           --argjson postHookRefs "${posthook_refs}" \
+          --arg serial "${TARGET_DISK_SERIAL}" \
           '{
             apiVersion: "kezio.kojuro.date/v1alpha3",
             kind: "MachineClaim",
             metadata: {name: $name, namespace: $namespace},
-            spec: {
+            spec: ({
               machineName: $machine,
               imageRef: {name: $image},
               postHookRefs: $postHookRefs
-            }
+            } + (if $serial != "" then {targetDisk: {serialNumber: $serial}} else {} end))
           }')"
         echo "${claim}" | kubectl apply -f -
 

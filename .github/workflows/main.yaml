@@ -976,6 +976,7 @@ jobs:
         with:
           machine-name: ${{ env.TARGET_VM_NAME }}
           image-name: ${{ steps.build-image.outputs.image-name }}
+          target-disk-serial: "${{ env.TARGET_DISK_SERIAL }}"
 
       # The only lane that runs a PostHook script step at all. Created
       # here, one step before the deploy that names it, so the hook is
