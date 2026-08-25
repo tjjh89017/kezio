@@ -80,6 +80,45 @@ func TestStatus_PrintsCurrentDeployRunOnce(t *testing.T) {
 	}
 }
 
+// TestStatus_PrintsLastAttemptedDeployRun covers the report after a
+// deployment did not succeed and the Machine no longer names a current
+// run: the failed run is what an operator needs, so it must be reported
+// in place of the older successful one.
+func TestStatus_PrintsLastAttemptedDeployRun(t *testing.T) {
+	failedRun := &keziov1alpha2.DeployRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1-failed", Namespace: "default"},
+		Spec:       keziov1alpha2.DeployRunSpec{MachineRef: keziov1alpha2.NameRef{Name: "node-1"}},
+		Status:     keziov1alpha2.DeployRunStatus{Phase: keziov1alpha2.DeployRunPhaseFailed},
+	}
+	successfulRun := &keziov1alpha2.DeployRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1-older", Namespace: "default"},
+		Spec:       keziov1alpha2.DeployRunSpec{MachineRef: keziov1alpha2.NameRef{Name: "node-1"}},
+		Status:     keziov1alpha2.DeployRunStatus{Phase: keziov1alpha2.DeployRunPhaseSucceeded},
+	}
+	machine := &keziov1alpha2.Machine{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1", Namespace: "default"},
+		Status: keziov1alpha2.MachineStatus{
+			State:                keziov1alpha2.MachineStateEnrolling,
+			LastAttemptedRunRef:  &keziov1alpha2.NameRef{Name: "node-1-failed"},
+			LastSuccessfulRunRef: &keziov1alpha2.NameRef{Name: "node-1-older"},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(Scheme).WithObjects(machine, failedRun, successfulRun).Build()
+
+	var out bytes.Buffer
+	if err := Status(context.Background(), c, StatusOptions{MachineName: "node-1", Namespace: "default", Out: &out}); err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+
+	got := out.String()
+	if !strings.Contains(got, "node-1-failed") {
+		t.Errorf("output = %q, want it to name the last attempted DeployRun", got)
+	}
+	if strings.Contains(got, "node-1-older") {
+		t.Errorf("output = %q, want the last attempt reported instead of the older successful run", got)
+	}
+}
+
 func TestStatus_MachineNotFound(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(Scheme).Build()
 

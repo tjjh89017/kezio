@@ -484,6 +484,17 @@ type MachineStatus struct {
 	// intent against this run's resolved snapshot.
 	// +optional
 	LastSuccessfulRunRef *NameRef `json:"lastSuccessfulRunRef,omitempty"`
+	// LastAttemptedRunRef names the most recent DeployRun whose
+	// provisioning step ended, whether it succeeded or failed. The
+	// controller writes it when that step reports its outcome, not when
+	// the run starts, so it keeps naming the previous attempt while a new
+	// run is in progress. It is the only reference that can name a failed
+	// run: CurrentRunRef is cleared when the run it named goes away, and
+	// LastSuccessfulRunRef records successes only. It is a report field,
+	// never an input to the provisioning trigger, because a failed run
+	// must not stop a redeploy.
+	// +optional
+	LastAttemptedRunRef *NameRef `json:"lastAttemptedRunRef,omitempty"`
 	// PoweredOn reports the machine's last observed power state.
 	// +optional
 	PoweredOn *bool `json:"poweredOn,omitempty"`

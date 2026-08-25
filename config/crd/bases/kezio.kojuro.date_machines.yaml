@@ -524,6 +524,33 @@ spec:
                     - name
                     type: object
                 type: object
+              lastAttemptedRunRef:
+                description: |-
+                  LastAttemptedRunRef names the most recent DeployRun whose
+                  provisioning step ended, whether it succeeded or failed. The
+                  controller writes it when that step reports its outcome, not when
+                  the run starts, so it keeps naming the previous attempt while a new
+                  run is in progress. It is the only reference that can name a failed
+                  run: CurrentRunRef is cleared when the run it named goes away, and
+                  LastSuccessfulRunRef records successes only. It is a report field,
+                  never an input to the provisioning trigger, because a failed run
+                  must not stop a redeploy.
+                properties:
+                  name:
+                    description: |-
+                      Post-mutation admission always re-serialises this struct, so a
+                      zero-value Name would otherwise satisfy "required"; MinLength closes
+                      that gap. MaxLength mirrors the Kubernetes object name limit and
+                      bounds the CEL cost of any pattern-matching XValidation rule a
+                      field of this type carries (see ImageSlot.ContentRef).
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  namespace:
+                    type: string
+                required:
+                - name
+                type: object
               lastSuccessfulRunRef:
                 description: |-
                   LastSuccessfulRunRef names the most recent DeployRun that completed

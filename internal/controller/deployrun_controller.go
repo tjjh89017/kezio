@@ -47,10 +47,12 @@ type DeployRunReconciler struct {
 
 // Reconcile garbage-collects a Machine's older DeployRuns, keeping the
 // newest retainedRunsPerMachine plus status.currentRunRef/
-// lastSuccessfulRunRef even when either falls outside that window: deleting
-// the last successful run would manufacture the provisioning trigger's
-// missing-run redeploy case, and deleting the current run would fabricate a
-// provisioning failure (the Machine reconciler's own job to report).
+// lastSuccessfulRunRef/lastAttemptedRunRef even when any of them falls
+// outside that window: deleting the last successful run would manufacture
+// the provisioning trigger's missing-run redeploy case, deleting the
+// current run would fabricate a provisioning failure (the Machine
+// reconciler's own job to report), and deleting the last attempted run
+// would take away the only record of a failed deployment.
 func (r *DeployRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -94,7 +96,8 @@ func (r *DeployRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 // runsToGC picks the runs to delete out of a single Machine's DeployRuns:
 // every run beyond the newest retain, except a run named by
-// machine.status.currentRunRef or lastSuccessfulRunRef. A protected run
+// machine.status.currentRunRef, lastSuccessfulRunRef, or
+// lastAttemptedRunRef. A protected run
 // outside the retained window still counts toward nothing - it simply
 // survives alongside the newest retain, so the kept count can exceed retain
 // when a protected run is old.
@@ -127,12 +130,15 @@ func runsToGC(runs []keziov1alpha2.DeployRun, machine *keziov1alpha2.Machine, re
 }
 
 func protectedRunNames(machine *keziov1alpha2.Machine) map[string]bool {
-	protected := make(map[string]bool, 2)
+	protected := make(map[string]bool, 3)
 	if machine.Status.CurrentRunRef != nil {
 		protected[machine.Status.CurrentRunRef.Name] = true
 	}
 	if machine.Status.LastSuccessfulRunRef != nil {
 		protected[machine.Status.LastSuccessfulRunRef.Name] = true
+	}
+	if machine.Status.LastAttemptedRunRef != nil {
+		protected[machine.Status.LastAttemptedRunRef.Name] = true
 	}
 	return protected
 }

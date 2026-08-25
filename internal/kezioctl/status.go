@@ -58,11 +58,11 @@ var terminalDeployRunPhases = map[string]bool{
 // Status implements `kezioctl status`: it reports the named Machine's
 // deploy progress by reading its current DeployRun - Machine.status
 // carries no phase/progress of its own, only a reference to the DeployRun
-// that does (see DeployRunStatus). CurrentRunRef is preferred over
-// LastSuccessfulRunRef so a run in progress is what gets reported; once a
-// run finishes, the Machine controller clears CurrentRunRef and (on
-// success) sets LastSuccessfulRunRef, so a Machine with no deploy ever
-// requested reports neither.
+// that does (see DeployRunStatus). The reference is chosen newest first:
+// CurrentRunRef, so a run in progress is what gets reported; then
+// LastAttemptedRunRef, which names the last run that ended whether it
+// succeeded or failed; then LastSuccessfulRunRef. A Machine with no
+// deploy ever requested has none of the three and reports that.
 //
 // Without Watch, this prints exactly one line and returns. With Watch, it
 // polls (see statusPollInterval) - this codebase's established
@@ -135,6 +135,12 @@ func statusLine(ctx context.Context, c client.Client, opts StatusOptions) (strin
 
 	runRef := machine.Status.CurrentRunRef
 	if runRef == nil {
+		runRef = machine.Status.LastAttemptedRunRef
+	}
+	if runRef == nil {
+		// Reached only for a Machine whose status an older controller
+		// wrote: every write of lastSuccessfulRunRef also writes
+		// lastAttemptedRunRef.
 		runRef = machine.Status.LastSuccessfulRunRef
 	}
 	if runRef == nil {

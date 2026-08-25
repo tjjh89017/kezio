@@ -884,11 +884,18 @@ func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *
 		}
 	}
 	if result.Outcome != deployer.Complete {
+		if result.Outcome == deployer.Failed {
+			// The only place a reference to a failed run is kept:
+			// applyNonCompleteOutcome writes this field with the failure it
+			// records, in the same patch.
+			machine.Status.LastAttemptedRunRef = &keziov1alpha2.NameRef{Name: run.Name}
+		}
 		return r.applyNonCompleteOutcome(ctx, machine, result, restarting)
 	}
 
 	machine.Status.State = keziov1alpha2.MachineStateProvisioned
 	machine.Status.LastSuccessfulRunRef = &keziov1alpha2.NameRef{Name: run.Name}
+	machine.Status.LastAttemptedRunRef = &keziov1alpha2.NameRef{Name: run.Name}
 	machine.Status.OperationalStatus = keziov1alpha2.MachineOperationalStatusOK
 	machine.Status.ErrorCount = 0
 	stampLastUpdated(machine)

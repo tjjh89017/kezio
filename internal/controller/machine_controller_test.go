@@ -1754,6 +1754,102 @@ var _ = Describe("Machine Controller", func() {
 		})
 	})
 
+	Context("When a provisioning attempt ends", func() {
+		ctx := context.Background()
+
+		It("names the failed run in lastAttemptedRunRef, and updates both run references once a later run succeeds", func() {
+			machineName := fmt.Sprintf("last-attempted-%d", GinkgoRandomSeed())
+			name := types.NamespacedName{Name: machineName, Namespace: "default"}
+			imageRef := keziov1alpha2.NameRef{Name: "test-image"}
+			resource := &keziov1alpha2.Machine{
+				ObjectMeta: metav1.ObjectMeta{Name: machineName, Namespace: "default"},
+				Spec: keziov1alpha2.MachineSpec{
+					BMC: keziov1alpha2.MachineBMC{
+						Address:              "redfish://10.0.0.10/redfish/v1/Systems/1",
+						CredentialsSecretRef: keziov1alpha2.SecretReference{Name: "bmc-creds"},
+					},
+					BootMACAddress: fmt.Sprintf("aa:bb:cc:dd:93:%02x", GinkgoRandomSeed()%256),
+					SubnetRef:      keziov1alpha2.NameRef{Name: "default"},
+					ImageRef:       &imageRef,
+				},
+			}
+			Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, resource)).To(Succeed()) })
+
+			failNextProvision := true
+			parkProvision := false
+			passthrough := &deployer.FakeDeployer{Client: k8sClient}
+			fakeDeployer := &deployer.FakeDeployer{Client: k8sClient}
+			fakeDeployer.ProvisionFunc = func(c context.Context, m *keziov1alpha2.Machine, run *keziov1alpha2.DeployRun, restarting bool) (deployer.Result, error) {
+				switch {
+				case failNextProvision:
+					failNextProvision = false
+					return deployer.Result{Outcome: deployer.Failed, ErrorType: keziov1alpha2.MachineErrorTypeTransient, ErrorMessage: "boom"}, nil
+				case parkProvision:
+					return deployer.Result{Outcome: deployer.Continuing}, nil
+				default:
+					return passthrough.Provision(c, m, run, restarting)
+				}
+			}
+			reconciler := &MachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Deployer: fakeDeployer}
+
+			reconcileUntil := func(description string, cond func(*keziov1alpha2.Machine) bool) *keziov1alpha2.Machine {
+				GinkgoHelper()
+				machine := &keziov1alpha2.Machine{}
+				for range 60 {
+					_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+					Expect(err).NotTo(HaveOccurred())
+					Expect(k8sClient.Get(ctx, name, machine)).To(Succeed())
+					if cond(machine) {
+						return machine
+					}
+				}
+				Fail("the machine never reached: " + description)
+				return nil
+			}
+
+			By("failing the first provisioning attempt")
+			machine := reconcileUntil("a recorded provisioning failure", func(m *keziov1alpha2.Machine) bool {
+				return m.Status.State == keziov1alpha2.MachineStateProvisioning &&
+					m.Status.OperationalStatus == keziov1alpha2.MachineOperationalStatusError
+			})
+			Expect(machine.Status.LastAttemptedRunRef).NotTo(BeNil(), "a failed attempt must leave a reference to the run that failed")
+			Expect(machine.Status.CurrentRunRef).NotTo(BeNil())
+			Expect(machine.Status.LastAttemptedRunRef.Name).To(Equal(machine.Status.CurrentRunRef.Name))
+			Expect(machine.Status.LastSuccessfulRunRef).To(BeNil(), "a failed attempt is not a success")
+			firstRun := machine.Status.LastAttemptedRunRef.Name
+
+			By("retrying the same run to success")
+			machine = reconcileUntil("Provisioned", func(m *keziov1alpha2.Machine) bool {
+				return m.Status.State == keziov1alpha2.MachineStateProvisioned
+			})
+			Expect(machine.Status.LastSuccessfulRunRef).NotTo(BeNil())
+			Expect(machine.Status.LastSuccessfulRunRef.Name).To(Equal(firstRun))
+			Expect(machine.Status.LastAttemptedRunRef.Name).To(Equal(firstRun))
+
+			By("starting a second run and holding it in flight")
+			parkProvision = true
+			Expect(k8sClient.Get(ctx, name, machine)).To(Succeed())
+			newImageRef := keziov1alpha2.NameRef{Name: "other-image"}
+			machine.Spec.ImageRef = &newImageRef
+			Expect(k8sClient.Update(ctx, machine)).To(Succeed())
+
+			machine = reconcileUntil("a second run in flight", func(m *keziov1alpha2.Machine) bool {
+				return m.Status.CurrentRunRef != nil && m.Status.CurrentRunRef.Name != firstRun
+			})
+			secondRun := machine.Status.CurrentRunRef.Name
+			Expect(machine.Status.LastAttemptedRunRef.Name).To(Equal(firstRun), "a run that has not ended yet must not replace the last attempt on record")
+			Expect(machine.Status.LastSuccessfulRunRef.Name).To(Equal(firstRun))
+
+			By("completing the second run")
+			parkProvision = false
+			machine = reconcileUntil("the second run recorded as successful", func(m *keziov1alpha2.Machine) bool {
+				return m.Status.LastSuccessfulRunRef != nil && m.Status.LastSuccessfulRunRef.Name == secondRun
+			})
+			Expect(machine.Status.LastAttemptedRunRef.Name).To(Equal(secondRun))
+		})
+	})
+
 	Context("Credential lifecycle", func() {
 		ctx := context.Background()
 

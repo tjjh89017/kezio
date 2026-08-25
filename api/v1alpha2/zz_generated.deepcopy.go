@@ -901,6 +901,11 @@ func (in *MachineStatus) DeepCopyInto(out *MachineStatus) {
 		*out = new(NameRef)
 		**out = **in
 	}
+	if in.LastAttemptedRunRef != nil {
+		in, out := &in.LastAttemptedRunRef, &out.LastAttemptedRunRef
+		*out = new(NameRef)
+		**out = **in
+	}
 	if in.PoweredOn != nil {
 		in, out := &in.PoweredOn, &out.PoweredOn
 		*out = new(bool)

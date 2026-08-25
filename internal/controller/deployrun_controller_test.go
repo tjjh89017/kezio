@@ -97,6 +97,17 @@ func TestRunsToGC(t *testing.T) {
 			retain: 5,
 			want:   []string{"oldest"},
 		},
+		{
+			name: "lastAttemptedRunRef outside the newest N survives",
+			runs: []keziov1alpha2.DeployRun{
+				run("oldest", 1), run("old", 2), run("r3", 3), run("r4", 4), run("r5", 5), run("r6", 6), run("r7", 7),
+			},
+			machine: keziov1alpha2.Machine{Status: keziov1alpha2.MachineStatus{
+				LastAttemptedRunRef: &keziov1alpha2.NameRef{Name: "old"},
+			}},
+			retain: 5,
+			want:   []string{"oldest"},
+		},
 	}
 
 	for _, tc := range cases {

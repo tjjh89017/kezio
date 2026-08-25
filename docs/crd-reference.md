@@ -333,6 +333,8 @@ Error state. `status.operationalStatus` (`OK`, `error`, `delayed`,
 of the machine in the workflow.
 
 Other status fields include `currentRunRef`, `lastSuccessfulRunRef`,
+`lastAttemptedRunRef` (the last DeployRun that ended, successful or
+not - the only reference that can name a failed run),
 `poweredOn`, `lastUpdated`, the observed BMC credentials, and the
 hashes of the net-boot token and the agent session token. kezio stores
 only the hash and the expiry of each token, and never the token
