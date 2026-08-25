@@ -89,21 +89,56 @@ runs:
         url="http://${TRACKER_IP}:${TRACKER_PORT}/scrape?info_hash=${encoded}"
         echo "scraping ${url}"
 
+        # opentracker answers bencode:
+        #   d5:filesd20:<20 raw bytes>d8:completei1e10:downloadedi0e10:incompletei0eeee
+        # Those 20 bytes are the raw info hash. They are arbitrary binary and
+        # can hold digits, ':', 'i', 'e', 0xff, a newline or a NUL, so any
+        # pattern that scans from the start of the response can stop inside
+        # the hash or match a bencode key the hash itself spells. The header
+        # has a constant length instead: "d5:filesd20:" is 12 bytes and the
+        # hash is 20 bytes, so the count always starts at byte 33. Skip to
+        # that byte and the remainder is plain ASCII, which no hash byte can
+        # reach. Read from a file, not from a variable: command substitution
+        # deletes NUL bytes and would move the offset. LC_ALL=C keeps each
+        # tool bytewise - in a UTF-8 locale a hash byte that is not valid
+        # UTF-8 stops "." from matching, which is how the earlier pattern
+        # kept the leading segment and returned text instead of a number.
+        read_complete() {
+          local rendered="$2"
+          # opentracker leaves an info hash it does not know out of the files
+          # dict. That answer is a true count of zero, not a bad response.
+          if [ "${rendered}" = 'd5:filesdee' ]; then
+            echo 0
+            return 0
+          fi
+          if [ "${rendered:0:12}" != 'd5:filesd20:' ]; then
+            return 0
+          fi
+          LC_ALL=C tail -c +33 "$1" | LC_ALL=C sed -n 's/^d8:completei\([0-9]\{1,\}\)e.*/\1/p'
+        }
+
         deadline=$(( $(date +%s) + TIMEOUT_SECONDS ))
-        body=""
+        body_file="$(mktemp)"
+        trap 'rm -f "${body_file}"' EXIT
+        rendered=""
         complete=""
+        unparsed=""
         while true; do
           # --max-time bounds one attempt; a tracker that is unreachable
           # answers nothing at all, which is itself the failure this
           # action reports once the deadline passes.
-          body="$(curl -sf --max-time 10 "${url}" | tr -d '\0' || true)"
-          # opentracker answers bencode:
-          #   d5:filesd20:<raw info hash>d8:completei1e10:downloadedi0e10:incompletei0eeee
-          # Only the one integer is needed, and the raw-byte key makes a
-          # general bencode parse awkward here, so it is matched
-          # directly rather than parsed.
-          complete="$(sed -n 's/.*8:completei\([0-9]\{1,\}\)e.*/\1/p' <<<"${body}")"
-          echo "$(date -Is) complete=${complete:-<none>} raw=$(printf '%s' "${body}" | tr -c '[:print:]' '.')"
+          if ! curl -sf --max-time 10 -o "${body_file}" "${url}"; then
+            : >"${body_file}"
+          fi
+          # tr in the C locale writes one character for one byte, so the
+          # rendered text keeps the byte offsets of the response.
+          rendered="$(LC_ALL=C tr -c '[:print:]' '.' <"${body_file}")"
+          complete="$(read_complete "${body_file}" "${rendered}")"
+          unparsed=""
+          if [ -s "${body_file}" ] && [ -z "${complete}" ]; then
+            unparsed="yes"
+          fi
+          echo "$(date -Is) complete=${complete:-<none>} raw=${rendered:-<no response>}"
           if [ -n "${complete}" ] && [ "${complete}" -ge "${MIN_COMPLETE}" ]; then
             echo "tracker ${TRACKER_IP}:${TRACKER_PORT} reports ${complete} completed peer(s) for ${INFO_HASH}"
             {
@@ -121,6 +156,15 @@ runs:
           sleep 5
         done
 
+        # A response this action cannot read says nothing about announces.
+        # Report it as what it is, so the next reader does not look for a
+        # seeder fault that the tracker never reported.
+        if [ -n "${unparsed}" ]; then
+          echo "::error::the tracker at ${TRACKER_IP}:${TRACKER_PORT} answered, but this check could not read a completed-peer count out of the scrape response for info hash ${INFO_HASH}. Expected 'd5:filesd20:<20-byte info hash>d8:completei<number>e...' or the empty dict 'd5:filesdee'. This is a parse failure in this check, NOT a report that no seeder announced - the swarm is unmeasured, not empty" >&2
+          echo "last scrape response (non-printable bytes shown as '.'): ${rendered}" >&2
+          exit 1
+        fi
+
         echo "::error::the tracker at ${TRACKER_IP}:${TRACKER_PORT} never reported ${MIN_COMPLETE} or more completed peer(s) for info hash ${INFO_HASH} within ${TIMEOUT_SECONDS}s - no seeder announce reached it, so any transfer in this lane is running without the tracker (Local Service Discovery, or nothing at all)" >&2
-        echo "last scrape response (non-printable bytes shown as '.'): $(printf '%s' "${body}" | tr -c '[:print:]' '.')" >&2
+        echo "last scrape response (non-printable bytes shown as '.'): ${rendered:-<no response>}" >&2
         exit 1
