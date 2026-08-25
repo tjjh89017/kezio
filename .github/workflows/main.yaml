@@ -11,6 +11,15 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAMESPACE: tjjh89017
   IMAGE_SERVICE_TOKEN: "kezio-e2e-image-path-token"
+  # One marker token for the whole run. Every lane that builds the deploy
+  # test image bakes this value into it, and reads it back out of the
+  # booted guest to prove the disk holds content this run wrote - a claim
+  # about the run, not about the lane, so all lanes share one token.
+  # The run identity is the token: it is unique per run (run_attempt
+  # separates re-runs), every job of one run computes the same value with
+  # no producer job, no needs edge, and no artifact to carry it, and a
+  # marker found in a guest names the run that wrote it.
+  DEPLOY_MARKER_TOKEN: "${{ github.run_id }}-${{ github.run_attempt }}"
 
 jobs:
   lint:
@@ -1114,6 +1123,7 @@ jobs:
         uses: ./.github/actions/build-deploy-test-image
         with:
           token: ${{ env.IMAGE_SERVICE_TOKEN }}
+          marker-token: ${{ env.DEPLOY_MARKER_TOKEN }}
 
       # Two-axis status proof, strictly before the happy-path deploy
       # below: injects one plan-build failure, asserts status.state stays
@@ -1806,6 +1816,7 @@ jobs:
         uses: ./.github/actions/build-deploy-test-image
         with:
           token: ${{ env.IMAGE_SERVICE_TOKEN }}
+          marker-token: ${{ env.DEPLOY_MARKER_TOKEN }}
 
       # Both machines' deploy intent is patched in back-to-back, before
       # either wait below - this is what starts both deploys inside the
@@ -2528,6 +2539,7 @@ jobs:
         uses: ./.github/actions/build-deploy-test-image
         with:
           token: ${{ env.IMAGE_SERVICE_TOKEN }}
+          marker-token: ${{ env.DEPLOY_MARKER_TOKEN }}
 
       # Both machines' deploy intent is patched in back-to-back, before
       # either wait below - this is what starts both deploys inside the

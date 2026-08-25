@@ -12,12 +12,15 @@ description: >-
   every partition in the cluster, exactly once - so this action does no
   partclone run, no blkid probe, and no partition-table read of its own.
 
-  The same offline virt-customize call also writes a fresh per-run marker
+  The same offline virt-customize call also writes the caller's marker
   token to marker-path in the image, and this action reports the token and
   that path as outputs. A later step reads the file back out of the booted
   guest through the guest agent: the token is new on every CI run and the
   target disk starts blank, so reading it back is proof that the guest
-  runs content this run wrote. The guest agent is baked in at build time rather
+  runs content this run wrote. The claim is about the run, so the token
+  comes from the caller and every lane of one run passes the same value;
+  this action never makes one of its own.
+  The guest agent is baked in at build time rather
   than installed by a deploy-time hook: the provisioning network a
   deployed guest boots into has no guaranteed internet egress, so
   package installation belongs on the runner (which already needs
@@ -52,6 +55,14 @@ inputs:
   token:
     description: Bearer token kezioctl authenticates the upload with.
     required: true
+  marker-token:
+    description: >-
+      Marker token to bake into the image at marker-path. Required, with no
+      fallback to a token this action makes itself: a default would let a
+      caller that forgets it get a lane-local token back, which is the drift
+      that made the token one-per-run in the first place. One run must write
+      one token, so the run - not this action - owns the value.
+    required: true
   image-service-service-name:
     description: 'Name of the image-service Service to port-forward.'
     required: false
@@ -84,8 +95,8 @@ outputs:
     description: 'Guest path the marker token was written to (this action''s own marker-path input, echoed back so a verifying step needs no second copy of it).'
     value: ${{ inputs.marker-path }}
   marker-token:
-    description: 'Marker token baked into the image for this run. A verifying step reads marker-path back out of the booted guest and compares it against this value.'
-    value: ${{ steps.marker.outputs.token }}
+    description: 'Marker token baked into the image for this run (this action''s own marker-token input, echoed back so a verifying step needs no second copy of it). A verifying step reads marker-path back out of the booted guest and compares it against this value.'
+    value: ${{ inputs.marker-token }}
 
 runs:
   using: composite
@@ -124,11 +135,6 @@ runs:
         manifest_url="${CLOUD_IMAGE_URL%.img}.manifest"
         curl -fsSL --retry 3 -o "${RUNNER_TEMP}/base.manifest" "${manifest_url}"
 
-    - name: Generate this run's marker token
-      id: marker
-      shell: bash
-      run: echo "token=$(openssl rand -hex 16)" >>"${GITHUB_OUTPUT}"
-
     - name: Inject qemu-guest-agent and the marker token offline
       # --no-network + dpkg -i rather than --network + --install: booting
       # the appliance's networking hit unresolvable passt/DHCP failures
@@ -163,7 +169,7 @@ runs:
       shell: bash
       env:
         MARKER_PATH: ${{ inputs.marker-path }}
-        MARKER_TOKEN: ${{ steps.marker.outputs.token }}
+        MARKER_TOKEN: ${{ inputs.marker-token }}
       run: |
         set -euo pipefail
 
