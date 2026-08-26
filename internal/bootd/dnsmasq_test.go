@@ -384,6 +384,136 @@ func TestDnsmasq_NoReleaseForMACWithoutALease(t *testing.T) {
 	<-done
 }
 
+// TestDnsmasq_ReleasesLeaseWhenReservationMovesToAnotherSubnet proves a
+// MAC that stays in the allowlist but loses its reservation entry gets an
+// active DHCPRELEASE when SubnetMember reports it no longer targets this
+// bootd's own Subnet - the spec.subnetRef-change case, which SetAllowedMACs'
+// own diff cannot see because the MAC never left the allowlist.
+func TestDnsmasq_ReleasesLeaseWhenReservationMovesToAnotherSubnet(t *testing.T) {
+	d, runDir := newTestDnsmasq(t, longRunningScript)
+	d.Config.LeaseMode = true
+	rel := &recordingRelease{}
+	d.Release = rel.release
+	d.SubnetMember = func(mac string) bool { return false } // moved elsewhere
+
+	leasePath := filepath.Join(runDir, leasefileName)
+	if err := os.WriteFile(leasePath, []byte(testLeaseLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(logf.IntoContext(context.Background(), logf.Log))
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+
+	d.SetAllowedMACs([]string{"aa:bb:cc:dd:ee:01"})
+	d.SetReservations(testDHCPRevision1, map[string]string{"aa:bb:cc:dd:ee:01": "192.0.2.50"})
+	waitFor(t, "hostsfile with the reservation", func() bool {
+		got, err := os.ReadFile(HostsfilePath(runDir))
+		return err == nil && strings.Contains(string(got), "192.0.2.50")
+	})
+
+	// The reservation disappears (moved to another Subnet's own status),
+	// but the MAC stays enrolled cluster-wide.
+	d.SetReservations("rev-2", map[string]string{})
+	waitFor(t, "DHCPRELEASE for the moved MAC", func() bool {
+		return len(rel.snapshot()) > 0
+	})
+
+	got := rel.snapshot()
+	want := []releaseCall{{iface: "net1", ip: "192.0.2.50", mac: "aa:bb:cc:dd:ee:01"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Release calls = %#v, want %#v", got, want)
+	}
+
+	cancel()
+	<-done
+}
+
+// TestDnsmasq_NoReleaseWhenReservationDropsForCompletedDeploy proves a
+// MAC that stays in the allowlist and loses its reservation entry
+// triggers no release when SubnetMember reports it still targets this
+// bootd's own Subnet - the ordinary Complete-release case, where the OS
+// must keep renewing its lease undisturbed.
+func TestDnsmasq_NoReleaseWhenReservationDropsForCompletedDeploy(t *testing.T) {
+	d, runDir := newTestDnsmasq(t, longRunningScript)
+	d.Config.LeaseMode = true
+	rel := &recordingRelease{}
+	d.Release = rel.release
+	d.SubnetMember = func(mac string) bool { return true } // still enrolled here
+
+	leasePath := filepath.Join(runDir, leasefileName)
+	if err := os.WriteFile(leasePath, []byte(testLeaseLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(logf.IntoContext(context.Background(), logf.Log))
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+
+	d.SetAllowedMACs([]string{"aa:bb:cc:dd:ee:01"})
+	d.SetReservations(testDHCPRevision1, map[string]string{"aa:bb:cc:dd:ee:01": "192.0.2.50"})
+	waitFor(t, "hostsfile with the reservation", func() bool {
+		got, err := os.ReadFile(HostsfilePath(runDir))
+		return err == nil && strings.Contains(string(got), "192.0.2.50")
+	})
+
+	d.SetReservations("rev-2", map[string]string{})
+	waitFor(t, "hostsfile without the reservation", func() bool {
+		got, err := os.ReadFile(HostsfilePath(runDir))
+		return err == nil && !strings.Contains(string(got), "192.0.2.50")
+	})
+
+	if got := rel.snapshot(); len(got) != 0 {
+		t.Errorf("Release called %v for a Machine still enrolled on this Subnet, want no calls", got)
+	}
+
+	cancel()
+	<-done
+}
+
+// TestDnsmasq_NoReleaseFromReservationWithoutSubnetMember proves that
+// with SubnetMember unset, a reservation disappearing never triggers a
+// release on its own: bootd cannot tell a Complete release apart from a
+// subnetRef change, and the documented behavior is to never guess.
+func TestDnsmasq_NoReleaseFromReservationWithoutSubnetMember(t *testing.T) {
+	d, runDir := newTestDnsmasq(t, longRunningScript)
+	d.Config.LeaseMode = true
+	rel := &recordingRelease{}
+	d.Release = rel.release
+
+	leasePath := filepath.Join(runDir, leasefileName)
+	if err := os.WriteFile(leasePath, []byte(testLeaseLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(logf.IntoContext(context.Background(), logf.Log))
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+
+	d.SetAllowedMACs([]string{"aa:bb:cc:dd:ee:01"})
+	d.SetReservations(testDHCPRevision1, map[string]string{"aa:bb:cc:dd:ee:01": "192.0.2.50"})
+	waitFor(t, "hostsfile with the reservation", func() bool {
+		got, err := os.ReadFile(HostsfilePath(runDir))
+		return err == nil && strings.Contains(string(got), "192.0.2.50")
+	})
+
+	d.SetReservations("rev-2", map[string]string{})
+	waitFor(t, "hostsfile without the reservation", func() bool {
+		got, err := os.ReadFile(HostsfilePath(runDir))
+		return err == nil && !strings.Contains(string(got), "192.0.2.50")
+	})
+
+	if got := rel.snapshot(); len(got) != 0 {
+		t.Errorf("Release called %v with no SubnetMember to tell Complete apart from a subnetRef change, want no calls", got)
+	}
+
+	cancel()
+	<-done
+}
+
 // TestDnsmasq_StartupFilterDropsLeasesOutsideAllowlist proves Start
 // rewrites the persisted lease file against the current Machine
 // allowlist before dnsmasq ever launches: a lease surviving a bootd

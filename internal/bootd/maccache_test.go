@@ -38,6 +38,28 @@ func machine(name, mac string) *keziov1alpha3.Machine {
 	}
 }
 
+// machineOnSubnet is machine, plus a spec.subnetRef naming subnetName -
+// for the HasLocalMember tests, which need a Machine's Subnet identity,
+// not just its MAC.
+func machineOnSubnet(name, mac, subnetName string) *keziov1alpha3.Machine {
+	m := machine(name, mac)
+	m.Spec.SubnetRef = keziov1alpha3.NameRef{Name: subnetName}
+	return m
+}
+
+func newTestMACCacheWithLocalSubnet(localName string) (*MACCache, *macSinkRecorder) {
+	sink := &macSinkRecorder{}
+	c := &MACCache{
+		counts:      make(map[string]int),
+		localCounts: make(map[string]int),
+		records:     make(map[string]machineRecord),
+		localName:   localName,
+		sink:        sink,
+	}
+	c.synced.Store(true)
+	return c, sink
+}
+
 // macSinkRecorder records every push it receives, so tests can assert
 // both the final allowlist and that a push happened at all.
 type macSinkRecorder struct {
@@ -62,7 +84,12 @@ func (s *macSinkRecorder) last() ([]string, bool) {
 
 func newTestMACCache() (*MACCache, *macSinkRecorder) {
 	sink := &macSinkRecorder{}
-	c := &MACCache{counts: make(map[string]int), sink: sink}
+	c := &MACCache{
+		counts:      make(map[string]int),
+		localCounts: make(map[string]int),
+		records:     make(map[string]machineRecord),
+		sink:        sink,
+	}
 	c.synced.Store(true)
 	return c, sink
 }
@@ -80,7 +107,12 @@ func wantLast(t *testing.T, sink *macSinkRecorder, want []string) {
 
 func TestMACCache_NoPushUntilSynced(t *testing.T) {
 	sink := &macSinkRecorder{}
-	c := &MACCache{counts: make(map[string]int), sink: sink}
+	c := &MACCache{
+		counts:      make(map[string]int),
+		localCounts: make(map[string]int),
+		records:     make(map[string]machineRecord),
+		sink:        sink,
+	}
 
 	c.onAdd(machine("m1", "aa:bb:cc:dd:ee:01"))
 	if _, ok := sink.last(); ok {
@@ -182,7 +214,7 @@ func TestMACCache_StartGatesOnSync(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	c, err := NewMACCache(ctx, fakeInformers, sink)
+	c, err := NewMACCache(ctx, fakeInformers, sink, "", "")
 	if err != nil {
 		t.Fatalf("NewMACCache: %v", err)
 	}
@@ -215,5 +247,64 @@ func TestMACCache_StartGatesOnSync(t *testing.T) {
 	cancel()
 	if err := <-startErrCh; err != nil {
 		t.Errorf("Start returned an error after ctx cancellation: %v", err)
+	}
+}
+
+// TestMACCache_HasLocalMemberTracksSubnetRef proves HasLocalMember
+// follows a Machine's spec.subnetRef, including a subnetRef-only change
+// that leaves the MAC itself untouched - the signal Dnsmasq needs to
+// tell a spec.subnetRef change apart from an ordinary Complete release.
+func TestMACCache_HasLocalMemberTracksSubnetRef(t *testing.T) {
+	c, _ := newTestMACCacheWithLocalSubnet("subnet-a")
+	mac := "aa:bb:cc:dd:ee:01"
+
+	onA := machineOnSubnet("m1", mac, "subnet-a")
+	c.onAdd(onA)
+	if !c.HasLocalMember(mac) {
+		t.Fatal("HasLocalMember false for a Machine on the local Subnet")
+	}
+
+	onB := machineOnSubnet("m1", mac, "subnet-b")
+	c.onUpdate(onA, onB)
+	if c.HasLocalMember(mac) {
+		t.Error("HasLocalMember true after the Machine's subnetRef moved away from the local Subnet")
+	}
+	// The MAC is still enrolled (moved, not deleted): SetAllowedMACs'
+	// own allowlist must still carry it.
+	if !slices.Contains(c.Snapshot(), mac) {
+		t.Error("Snapshot dropped the MAC after a subnetRef-only change")
+	}
+
+	c.onUpdate(onB, onA)
+	if !c.HasLocalMember(mac) {
+		t.Error("HasLocalMember false after the Machine's subnetRef moved back to the local Subnet")
+	}
+}
+
+// TestMACCache_HasLocalMemberFalseWithNoLocalSubnet proves HasLocalMember
+// always reports false when the cache was built with no local Subnet
+// identity (BOOTD_SUBNET_NAME unset) - there is nothing to compare a
+// subnetRef against.
+func TestMACCache_HasLocalMemberFalseWithNoLocalSubnet(t *testing.T) {
+	c, _ := newTestMACCache()
+	mac := "aa:bb:cc:dd:ee:01"
+	c.onAdd(machineOnSubnet("m1", mac, "subnet-a"))
+	if c.HasLocalMember(mac) {
+		t.Error("HasLocalMember true with no local Subnet identity configured")
+	}
+}
+
+// TestMACCache_HasLocalMemberFalseBeforeSync mirrors Snapshot's own
+// fail-secure gate: no answer is trustworthy before the informer's
+// initial sync completes.
+func TestMACCache_HasLocalMemberFalseBeforeSync(t *testing.T) {
+	c := &MACCache{
+		counts:      make(map[string]int),
+		localCounts: make(map[string]int),
+		records:     make(map[string]machineRecord),
+		localName:   "subnet-a",
+	}
+	if c.HasLocalMember("aa:bb:cc:dd:ee:01") {
+		t.Error("HasLocalMember true before the cache reported synced")
 	}
 }

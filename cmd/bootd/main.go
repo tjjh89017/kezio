@@ -100,7 +100,7 @@ func main() {
 		BinaryPath: cfg.DnsmasqPath,
 	}
 
-	macCache, err := bootd.NewMACCache(ctx, mgr.GetCache(), dnsmasq)
+	macCache, err := bootd.NewMACCache(ctx, mgr.GetCache(), dnsmasq, cfg.SubnetNamespace, cfg.SubnetName)
 	if err != nil {
 		setupLog.Error(err, "unable to set up Machine MAC cache")
 		os.Exit(1)
@@ -111,6 +111,12 @@ func main() {
 	}
 
 	if cfg.SubnetName != "" {
+		// Wired only when this bootd owns a Subnet: SetReservations'
+		// release trigger needs to tell a Machine still enrolled on this
+		// same Subnet apart from one that has moved to another, and with
+		// no Subnet identity there is nothing local to compare against.
+		dnsmasq.SubnetMember = macCache.HasLocalMember
+
 		subnetCache, err := bootd.NewSubnetDHCPCache(
 			ctx, mgr.GetCache(), mgr.GetClient(), cfg.SubnetNamespace, cfg.SubnetName, dnsmasq)
 		if err != nil {
@@ -353,10 +359,15 @@ type bootdConfig struct {
 //     DHCP address reservations from its status.dhcp.reservations into
 //     the hostsfile alongside the MAC allowlist, and writes
 //     status.dhcp.appliedRevision back once dnsmasq has actually picked
-//     up a revision (see bootd.SubnetDHCPCache). Unset (BOOTD_SUBNET_NAME
-//     empty), reservations are never rendered or acknowledged - the
-//     behavior before this pair of variables existed. BOOTD_SUBNET_NAMESPACE
-//     empty with BOOTD_SUBNET_NAME set defaults to bootd's own namespace.
+//     up a revision (see bootd.SubnetDHCPCache). It also lets bootd tell
+//     a Machine's spec.subnetRef change apart from an ordinary Complete
+//     release when its reservation disappears (bootd.Dnsmasq.SubnetMember,
+//     wired to bootd.MACCache.HasLocalMember) - see that method's doc
+//     comment. Unset (BOOTD_SUBNET_NAME empty), reservations are never
+//     rendered or acknowledged, and a reservation disappearing never
+//     triggers a release on its own - the behavior before this pair of
+//     variables existed. BOOTD_SUBNET_NAMESPACE empty with
+//     BOOTD_SUBNET_NAME set defaults to bootd's own namespace.
 //
 // BOOTD_DHCP_ADDR, BOOTD_PXE_ADDR, and BOOTD_DHCP_RELAY_SERVER are not
 // supported (dnsmasq's DHCP ports are the well-known 67/4011 only, and
@@ -385,6 +396,47 @@ func gatewayFromEnv(leaseMode bool) (*string, error) {
 		}
 	}
 	return &s, nil
+}
+
+// leaseRangeFromEnv resolves BOOTD_LEASE_RANGE_START/END: both set gives
+// explicit lease-mode dhcp-range bounds, both unset auto-derives them
+// from BOOTD_PROVISIONING_CIDR, and setting only one is an error.
+func leaseRangeFromEnv() (start, end net.IP, err error) {
+	startStr, endStr := os.Getenv("BOOTD_LEASE_RANGE_START"), os.Getenv("BOOTD_LEASE_RANGE_END")
+	if (startStr == "") != (endStr == "") {
+		return nil, nil, fmt.Errorf(
+			"BOOTD_LEASE_RANGE_START and BOOTD_LEASE_RANGE_END must both be set, or both left unset")
+	}
+	if startStr == "" {
+		return nil, nil, nil
+	}
+	start = net.ParseIP(startStr)
+	if start == nil || start.To4() == nil {
+		return nil, nil, fmt.Errorf("BOOTD_LEASE_RANGE_START %q is not a valid IPv4 address", startStr)
+	}
+	end = net.ParseIP(endStr)
+	if end == nil || end.To4() == nil {
+		return nil, nil, fmt.Errorf("BOOTD_LEASE_RANGE_END %q is not a valid IPv4 address", endStr)
+	}
+	return start, end, nil
+}
+
+// leaseTimeFromEnv resolves BOOTD_LEASE_TIME, parsed by
+// time.ParseDuration. Unset returns the zero Duration - bootd.Config's
+// own default (bootd.DefaultLeaseTime) applies from there.
+func leaseTimeFromEnv() (time.Duration, error) {
+	s := os.Getenv("BOOTD_LEASE_TIME")
+	if s == "" {
+		return 0, nil
+	}
+	leaseTime, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("BOOTD_LEASE_TIME %q is not a valid duration: %w", s, err)
+	}
+	if leaseTime < 2*time.Minute {
+		return 0, fmt.Errorf("BOOTD_LEASE_TIME %q must be at least 2m", s)
+	}
+	return leaseTime, nil
 }
 
 func bootdConfigFromEnv() (bootdConfig, error) {
@@ -438,21 +490,9 @@ func bootdConfigFromEnv() (bootdConfig, error) {
 	}
 
 	leaseMode := os.Getenv("BOOTD_LEASE_MODE") == "true"
-	var leaseRangeStart, leaseRangeEnd net.IP
-	startStr, endStr := os.Getenv("BOOTD_LEASE_RANGE_START"), os.Getenv("BOOTD_LEASE_RANGE_END")
-	if (startStr == "") != (endStr == "") {
-		return bootdConfig{}, fmt.Errorf(
-			"BOOTD_LEASE_RANGE_START and BOOTD_LEASE_RANGE_END must both be set, or both left unset")
-	}
-	if startStr != "" {
-		leaseRangeStart = net.ParseIP(startStr)
-		if leaseRangeStart == nil || leaseRangeStart.To4() == nil {
-			return bootdConfig{}, fmt.Errorf("BOOTD_LEASE_RANGE_START %q is not a valid IPv4 address", startStr)
-		}
-		leaseRangeEnd = net.ParseIP(endStr)
-		if leaseRangeEnd == nil || leaseRangeEnd.To4() == nil {
-			return bootdConfig{}, fmt.Errorf("BOOTD_LEASE_RANGE_END %q is not a valid IPv4 address", endStr)
-		}
+	leaseRangeStart, leaseRangeEnd, err := leaseRangeFromEnv()
+	if err != nil {
+		return bootdConfig{}, err
 	}
 
 	gateway, err := gatewayFromEnv(leaseMode)
@@ -460,15 +500,9 @@ func bootdConfigFromEnv() (bootdConfig, error) {
 		return bootdConfig{}, err
 	}
 
-	var leaseTime time.Duration
-	if s := os.Getenv("BOOTD_LEASE_TIME"); s != "" {
-		leaseTime, err = time.ParseDuration(s)
-		if err != nil {
-			return bootdConfig{}, fmt.Errorf("BOOTD_LEASE_TIME %q is not a valid duration: %w", s, err)
-		}
-		if leaseTime < 2*time.Minute {
-			return bootdConfig{}, fmt.Errorf("BOOTD_LEASE_TIME %q must be at least 2m", s)
-		}
+	leaseTime, err := leaseTimeFromEnv()
+	if err != nil {
+		return bootdConfig{}, err
 	}
 
 	proxyCfg := bootd.ProxyConfig{

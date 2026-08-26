@@ -89,6 +89,16 @@ type Dnsmasq struct {
 	// hold is found to still have (see releaseLeases). Nil means
 	// execDHCPRelease(resolved DHCPReleasePath) - a test seam otherwise.
 	Release ReleaseFunc
+	// SubnetMember, if set, reports whether a Machine still enrolled with
+	// mac as its boot MAC targets this bootd instance's own Subnet (see
+	// MACCache.HasLocalMember). SetReservations uses it to tell a
+	// Machine's ordinary Complete release (reservation gone, Machine
+	// still enrolled on this Subnet - the OS keeps its lease) apart from
+	// a spec.subnetRef change (reservation gone, Machine now enrolled
+	// elsewhere - the address must be actively released). Nil means
+	// bootd cannot tell the two apart, so a reservation disappearing
+	// alone never triggers a release.
+	SubnetMember func(mac string) bool
 
 	mu           sync.Mutex
 	macs         []string
@@ -187,11 +197,39 @@ func (d *Dnsmasq) SetAllowedMACs(macs []string) {
 // the revision it was computed from, then nudges the hostsfile loop the
 // same way SetAllowedMACs does. Once the loop writes+SIGHUPs dnsmasq for
 // this exact revision, OnApplied (if set) is called with it.
+//
+// In LeaseMode, a MAC that held a reservation in the previous push but
+// has none now, while still present in the allowlist (a MAC that also
+// left the allowlist is SetAllowedMACs' own release to queue, not this
+// one's), is queued for an active DHCPRELEASE only when SubnetMember
+// reports it no longer targets this bootd's own Subnet - a
+// spec.subnetRef change, whose old Subnet must not keep holding its
+// address. A MAC SubnetMember still finds local is left alone: an
+// ordinary Complete release also drops the reservation, and a completed
+// deployment's OS must keep renewing its lease undisturbed. With
+// SubnetMember unset, the two cases cannot be told apart, so nothing is
+// ever released from a reservation disappearing alone (see
+// Dnsmasq.SubnetMember).
 func (d *Dnsmasq) SetReservations(revision string, reservations map[string]string) {
 	d.mu.Lock()
+	old := d.reservations
+	macs := d.macs
 	d.reservations = maps.Clone(reservations)
 	d.revision = revision
 	d.revSet = true
+	if d.Config.LeaseMode && d.SubnetMember != nil {
+		for mac := range old {
+			if _, stillReserved := reservations[mac]; stillReserved {
+				continue
+			}
+			if !slices.Contains(macs, mac) {
+				continue
+			}
+			if !d.SubnetMember(mac) {
+				d.pendingReleases = append(d.pendingReleases, mac)
+			}
+		}
+	}
 	d.mu.Unlock()
 	select {
 	case d.dirtyCh() <- struct{}{}:

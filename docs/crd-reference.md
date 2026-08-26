@@ -236,13 +236,23 @@ is torn down before a new one starts rather than both briefly running.
 
 ### What releases a DHCP lease
 
-In `lease` mode, a lease ends one of three ways:
+In `lease` mode, a lease ends one of four ways:
 
 - **Expiry.** dnsmasq's own lease timer, unchanged by anything below.
 - **An active DHCPRELEASE bootd sends** when a MAC that held a lease
   drops out of the enrolled-Machine allowlist - the Machine was deleted,
   or its `spec.bootMACAddress` changed away from that MAC. The address
   returns to the pool immediately rather than waiting out `leaseTime`.
+- **An active DHCPRELEASE bootd sends when a Machine's `spec.subnetRef`
+  changes to a different Subnet.** The MAC stays in the cluster-wide
+  allowlist (the Machine is still enrolled), but its reservation
+  disappears from this Subnet's own `status.dhcp.reservations`. bootd
+  tells this case apart from an ordinary Complete release (below) by
+  checking, through its own Machine informer, whether the Machine still
+  targets this Subnet: if it does not, the address is released instead
+  of left to expire. A bootd instance with no Subnet identity configured
+  (`BOOTD_SUBNET_NAME` unset) cannot make that check and never releases
+  from a reservation disappearing alone.
 - **The startup filter.** On every bootd start in `lease` mode, once the
   Machine allowlist's first sync completes, bootd rewrites the persisted
   lease file to drop any lease held by a MAC no longer in that allowlist,
@@ -251,9 +261,11 @@ In `lease` mode, a lease ends one of three ways:
   get silently renewed.
 
 What does **not** release a lease: a Machine's ordinary
-Deployed-to-Complete transition. A completed deployment's operating
-system keeps renewing its lease as normal DHCP traffic - nothing about
-finishing a deployment removes a Machine's MAC from the allowlist.
+Deployed-to-Complete transition. Its reservation disappears the same way
+a `spec.subnetRef` change's does, but the Machine still targets this
+Subnet, so bootd's check above tells them apart and leaves the lease
+alone - the completed deployment's operating system keeps renewing it as
+normal DHCP traffic.
 
 In proxy mode bootd is not the DHCP server. It cannot hand out a
 router option that the DHCP server of the segment owns. kezio rejects

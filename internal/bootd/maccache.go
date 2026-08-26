@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
+	"github.com/tjjh89017/kezio/internal/subnetdhcp"
 )
 
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines,verbs=get;list;watch
@@ -55,25 +56,59 @@ type MACSink interface {
 type MACCache struct {
 	mu     sync.Mutex
 	counts map[string]int // normalized MAC -> number of Machines currently claiming it
+	// localCounts tracks, of the Machines counted in counts, how many
+	// currently resolve spec.subnetRef to localNamespace/localName - this
+	// bootd instance's own Subnet. HasLocalMember reads it: the signal
+	// Dnsmasq.SetReservations needs to tell a Machine's ordinary Complete
+	// release (still enrolled, reservation gone because the deploy
+	// finished on this same Subnet) apart from a spec.subnetRef change
+	// (still enrolled, reservation gone because it now targets a
+	// different Subnet).
+	localCounts map[string]int
+	// records remembers each currently-known Machine's own (mac, local)
+	// pair, keyed by "namespace/name", so onUpdate/onDelete can undo
+	// exactly what onAdd/onUpdate applied - including a subnetRef-only
+	// change that leaves the MAC untouched, which counts alone cannot
+	// detect.
+	records map[string]machineRecord
+
+	// localNamespace/localName name this bootd instance's own Subnet.
+	// localName empty (the zero value) means HasLocalMember always
+	// reports false - no Subnet identity to compare against, so a
+	// reservation disappearing is never attributed to a subnetRef change.
+	localNamespace, localName string
 
 	synced    atomic.Bool
 	informers ctrlcache.Informers
 	sink      MACSink
 }
 
+// machineRecord is one Machine's last-applied contribution to counts and
+// localCounts.
+type machineRecord struct {
+	mac   string
+	local bool
+}
+
 var _ manager.Runnable = (*MACCache)(nil)
 
 // NewMACCache builds a MACCache pushing into sink and registers its
-// event handler on informers' Machine informer. It does not block on
-// the initial sync - call mgr.Add on the returned MACCache (it
-// implements manager.Runnable) to have that wait happen as part of the
-// manager's own startup, or call Start directly in a standalone
-// binary.
-func NewMACCache(ctx context.Context, informers ctrlcache.Informers, sink MACSink) (*MACCache, error) {
+// event handler on informers' Machine informer. localNamespace/localName
+// name this bootd instance's own Subnet (see HasLocalMember); pass empty
+// strings when no Subnet is configured (BOOTD_SUBNET_NAME unset).
+// It does not block on the initial sync - call mgr.Add on the returned
+// MACCache (it implements manager.Runnable) to have that wait happen as
+// part of the manager's own startup, or call Start directly in a
+// standalone binary.
+func NewMACCache(ctx context.Context, informers ctrlcache.Informers, sink MACSink, localNamespace, localName string) (*MACCache, error) {
 	c := &MACCache{
-		counts:    make(map[string]int),
-		informers: informers,
-		sink:      sink,
+		counts:         make(map[string]int),
+		localCounts:    make(map[string]int),
+		records:        make(map[string]machineRecord),
+		localNamespace: localNamespace,
+		localName:      localName,
+		informers:      informers,
+		sink:           sink,
 	}
 
 	informer, err := informers.GetInformer(ctx, &keziov1alpha3.Machine{})
@@ -151,7 +186,10 @@ func (c *MACCache) onAdd(obj any) {
 	if !ok {
 		return
 	}
-	c.add(machine.Spec.BootMACAddress)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.applyLocked(machine, machine)
+	c.pushLocked()
 }
 
 func (c *MACCache) onUpdate(oldObj, newObj any) {
@@ -163,13 +201,9 @@ func (c *MACCache) onUpdate(oldObj, newObj any) {
 	if !ok {
 		return
 	}
-	if oldMachine.Spec.BootMACAddress == newMachine.Spec.BootMACAddress {
-		return
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.removeLocked(oldMachine.Spec.BootMACAddress)
-	c.addLocked(newMachine.Spec.BootMACAddress)
+	c.applyLocked(oldMachine, newMachine)
 	c.pushLocked()
 }
 
@@ -189,44 +223,90 @@ func (c *MACCache) onDelete(obj any) {
 			return
 		}
 	}
-	c.remove(machine.Spec.BootMACAddress)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.applyLocked(machine, nil)
+	c.pushLocked()
 }
 
-// add and remove maintain counts keyed by normalized MAC, not a plain
-// set, because bootMACAddress uniqueness is only a convention (see
+// applyLocked replaces identity's record with the one derived from
+// newMachine (nil for a delete), undoing the old contribution and adding
+// the new one. identity and newMachine name the same Machine (namespace
+// and name never change), except on delete where newMachine is nil.
+// Called for every Add/Update/Delete event, including a subnetRef-only
+// change that leaves the MAC untouched - counts alone would miss that,
+// but localCounts must not.
+func (c *MACCache) applyLocked(identity, newMachine *keziov1alpha3.Machine) {
+	key := identity.Namespace + "/" + identity.Name
+	if prev, ok := c.records[key]; ok {
+		c.removeRecordLocked(prev)
+		delete(c.records, key)
+	}
+	if newMachine == nil {
+		return
+	}
+	mac, ok := NormalizeMAC(newMachine.Spec.BootMACAddress)
+	if !ok {
+		return
+	}
+	rec := machineRecord{mac: mac, local: c.isLocalLocked(newMachine)}
+	c.records[key] = rec
+	c.addRecordLocked(rec)
+}
+
+// isLocalLocked reports whether machine's spec.subnetRef resolves to
+// this cache's own configured Subnet. Always false when localName is
+// empty (no Subnet configured).
+func (c *MACCache) isLocalLocked(machine *keziov1alpha3.Machine) bool {
+	if c.localName == "" {
+		return false
+	}
+	ns := subnetdhcp.ResolveNamespace(machine.Spec.SubnetRef, machine.Namespace)
+	return ns == c.localNamespace && machine.Spec.SubnetRef.Name == c.localName
+}
+
+// addRecordLocked and removeRecordLocked maintain counts/localCounts
+// keyed by normalized MAC, not a plain set, because bootMACAddress
+// uniqueness is only a convention (see
 // internal/bootserver.Server.lookupMachine) - a plain set would let
 // deleting one of two Machines sharing a MAC revoke the gate for the
 // other still-enrolled one.
-func (c *MACCache) add(rawMAC string) {
+func (c *MACCache) addRecordLocked(rec machineRecord) {
+	c.counts[rec.mac]++
+	if rec.local {
+		c.localCounts[rec.mac]++
+	}
+}
+
+func (c *MACCache) removeRecordLocked(rec machineRecord) {
+	if c.counts[rec.mac] <= 1 {
+		delete(c.counts, rec.mac)
+	} else {
+		c.counts[rec.mac]--
+	}
+	if rec.local {
+		if c.localCounts[rec.mac] <= 1 {
+			delete(c.localCounts, rec.mac)
+		} else {
+			c.localCounts[rec.mac]--
+		}
+	}
+}
+
+// HasLocalMember reports whether any Machine currently claiming mac (as
+// its normalized boot MAC address) resolves spec.subnetRef to this
+// bootd instance's own Subnet. Dnsmasq.SetReservations uses it to tell a
+// Machine's ordinary Complete release (still enrolled, still on this
+// Subnet - its reservation disappearing means the deploy finished, and
+// the OS keeps its lease) apart from a spec.subnetRef change (no longer
+// claimed locally - the address must be actively released instead of
+// waiting out the lease). Always false before the cache has synced, or
+// when it was built with no local Subnet identity (see NewMACCache).
+func (c *MACCache) HasLocalMember(mac string) bool {
+	if !c.synced.Load() {
+		return false
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.addLocked(rawMAC)
-	c.pushLocked()
-}
-
-func (c *MACCache) addLocked(rawMAC string) {
-	mac, ok := NormalizeMAC(rawMAC)
-	if !ok {
-		return
-	}
-	c.counts[mac]++
-}
-
-func (c *MACCache) remove(rawMAC string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.removeLocked(rawMAC)
-	c.pushLocked()
-}
-
-func (c *MACCache) removeLocked(rawMAC string) {
-	mac, ok := NormalizeMAC(rawMAC)
-	if !ok {
-		return
-	}
-	if c.counts[mac] <= 1 {
-		delete(c.counts, mac)
-		return
-	}
-	c.counts[mac]--
+	return c.localCounts[mac] > 0
 }
