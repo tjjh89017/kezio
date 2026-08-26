@@ -74,6 +74,9 @@ type fakeQemuImg struct {
 	rawSize int64
 	infoErr error
 	convErr error
+	// convertCalls counts ConvertToRaw invocations, so a test asserting
+	// that a raw source skips conversion entirely has something to check.
+	convertCalls int
 }
 
 func (f *fakeQemuImg) Info(_ context.Context, _ string) (QemuImgInfo, error) {
@@ -84,6 +87,7 @@ func (f *fakeQemuImg) Info(_ context.Context, _ string) (QemuImgInfo, error) {
 }
 
 func (f *fakeQemuImg) ConvertToRaw(_ context.Context, _, _, dst string) error {
+	f.convertCalls++
 	if f.convErr != nil {
 		return f.convErr
 	}

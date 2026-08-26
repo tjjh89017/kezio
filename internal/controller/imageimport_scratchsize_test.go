@@ -42,7 +42,7 @@ func TestComputeIngestScratchSizeBytes(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := computeIngestScratchSizeBytes(floor, tc.source, tc.known)
+			got := computeIngestScratchSizeBytes(floor, tc.source, tc.known, scratchSizeSourceFactor)
 			if tc.wantScaled {
 				want := roundUpGiB(tc.source * scratchSizeSourceFactor)
 				if got != want {
@@ -55,6 +55,25 @@ func TestComputeIngestScratchSizeBytes(t *testing.T) {
 				t.Errorf("computeIngestScratchSizeBytes(%d, %d, %v) = %d, want floor %d", floor, tc.source, tc.known, got, floor)
 			}
 		})
+	}
+}
+
+// TestComputeIngestScratchSizeBytes_RawFactorIsSmaller checks that a raw
+// source's factor produces a smaller scratch request than a converted
+// source's for the same discovered size, matching the smaller peak-usage
+// layout a raw source needs (see scratchSizeSourceFactorRaw's doc
+// comment).
+func TestComputeIngestScratchSizeBytes_RawFactorIsSmaller(t *testing.T) {
+	const floor = 1 * gibiByte
+	const source = 20 * gibiByte
+
+	rawSize := computeIngestScratchSizeBytes(floor, source, true, scratchSizeSourceFactorRaw)
+	convertedSize := computeIngestScratchSizeBytes(floor, source, true, scratchSizeSourceFactor)
+	if rawSize >= convertedSize {
+		t.Errorf("raw-factor size %d, want it smaller than the converted-factor size %d", rawSize, convertedSize)
+	}
+	if want := roundUpGiB(source * scratchSizeSourceFactorRaw); rawSize != want {
+		t.Errorf("computeIngestScratchSizeBytes(raw factor) = %d, want %d", rawSize, want)
 	}
 }
 

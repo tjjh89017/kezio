@@ -150,7 +150,11 @@ func (r *ImageImportReconciler) ingestScratchSizeBytes(ctx context.Context, imp 
 	if !known && r.Recorder != nil {
 		r.Recorder.Event(imp, corev1.EventTypeWarning, scratchSizeUnknownEventReason, scratchSizeUnknownEventMessage(imp.Spec.Source.URL))
 	}
-	return computeIngestScratchSizeBytes(floor, sourceSize, known)
+	factor := int64(scratchSizeSourceFactor)
+	if strings.EqualFold(r.Ingest.sourceFormat(), "raw") {
+		factor = scratchSizeSourceFactorRaw
+	}
+	return computeIngestScratchSizeBytes(floor, sourceSize, known, factor)
 }
 
 // buildIngestScratchPVC constructs the (not yet created) PVC backing an

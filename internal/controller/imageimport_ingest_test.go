@@ -471,7 +471,7 @@ var _ = Describe("ImageImport Controller", func() {
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 
-			want := computeIngestScratchSizeBytes(defaultIngestScratchSizeBytes, 20*gibiByte, true)
+			want := computeIngestScratchSizeBytes(defaultIngestScratchSizeBytes, 20*gibiByte, true, scratchSizeSourceFactor)
 			Expect(scratchPVCSizeBytes(imp)).To(Equal(want))
 			Expect(want).To(BeNumerically(">", int64(defaultIngestScratchSizeBytes)), "20Gi source should scale the scratch PVC past the 16Gi floor")
 		})
@@ -495,7 +495,7 @@ var _ = Describe("ImageImport Controller", func() {
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 
-			want := computeIngestScratchSizeBytes(defaultIngestScratchSizeBytes, 20*gibiByte, true)
+			want := computeIngestScratchSizeBytes(defaultIngestScratchSizeBytes, 20*gibiByte, true, scratchSizeSourceFactor)
 			Expect(scratchPVCSizeBytes(imp)).To(Equal(want))
 		})
 

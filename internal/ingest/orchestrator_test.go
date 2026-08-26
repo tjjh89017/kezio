@@ -207,6 +207,72 @@ func TestRun_FormatMismatch(t *testing.T) {
 	}
 }
 
+// TestRun_RawSourceSkipsConversion checks that a raw-format source is
+// sliced in place - no disk.raw conversion copy - and that the
+// downloaded source.img is removed once every partition has been
+// extracted from it, leaving no large scratch file behind Run.
+func TestRun_RawSourceSkipsConversion(t *testing.T) {
+	deps := baseDeps()
+	qemuImg := &fakeQemuImg{format: "raw", rawSize: fixtureRawSize}
+	deps.QemuImg = qemuImg
+	// With no conversion, extraction reads straight from the downloaded
+	// file - it must already be disk-sized, unlike the qcow2 fixture
+	// tests where the fake ConvertToRaw fabricates disk.raw.
+	deps.Downloader = &fakeDownloader{content: make([]byte, fixtureRawSize)}
+
+	workDir := t.TempDir()
+	cfg := Config{
+		SourceURL:    "https://example.com/golden.raw",
+		SourceFormat: "raw",
+		WorkDir:      workDir,
+	}
+
+	res := Run(context.Background(), cfg, deps)
+	if !res.Success {
+		t.Fatalf("expected success, got error %q", res.Error)
+	}
+	if qemuImg.convertCalls != 0 {
+		t.Errorf("ConvertToRaw called %d times, want 0 for a raw source", qemuImg.convertCalls)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "disk.raw")); !os.IsNotExist(err) {
+		t.Errorf("expected no disk.raw for a raw source, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "source.img")); !os.IsNotExist(err) {
+		t.Errorf("expected source.img to be removed once every partition was extracted, stat err = %v", err)
+	}
+}
+
+// TestRun_NonRawSourceRemovesEachScratchFileAsSoonAsPossible checks the
+// peak-scratch layout for a converted (non-raw) source: source.img is
+// gone once disk.raw exists, at most one partition slice exists at a
+// time, and disk.raw itself is gone once Run returns.
+func TestRun_NonRawSourceRemovesEachScratchFileAsSoonAsPossible(t *testing.T) {
+	workDir := t.TempDir()
+	deps := baseDeps()
+
+	res := Run(context.Background(), Config{
+		SourceURL:    "https://example.com/golden.qcow2",
+		SourceFormat: "qcow2",
+		WorkDir:      workDir,
+	}, deps)
+	if !res.Success {
+		t.Fatalf("expected success, got error %q", res.Error)
+	}
+
+	if _, err := os.Stat(filepath.Join(workDir, "source.img")); !os.IsNotExist(err) {
+		t.Errorf("expected source.img to be removed after conversion, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "disk.raw")); !os.IsNotExist(err) {
+		t.Errorf("expected disk.raw to be removed once every partition was extracted, stat err = %v", err)
+	}
+	for _, num := range []int32{1, 2, 3} {
+		slice := filepath.Join(workDir, fmt.Sprintf("part-%d.raw", num))
+		if _, err := os.Stat(slice); !os.IsNotExist(err) {
+			t.Errorf("expected partition %d's slice to be removed, stat err = %v", num, err)
+		}
+	}
+}
+
 // When the work directory does not have enough available space for even
 // the first partition's content, Run fails fast with a clear error
 // before partclone is ever invoked - not partway through with an

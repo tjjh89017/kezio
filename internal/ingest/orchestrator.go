@@ -51,14 +51,23 @@ type Config struct {
 	// digest>"), or empty if none was given.
 	SourceChecksum string
 	// WorkDir is a scratch directory this run fills with temporary
-	// files: the downloaded/staged source, the raw conversion, each
-	// partition's extracted slice, and - unlike the shared-store-root
+	// files: the downloaded/staged source (deleted as soon as it is no
+	// longer needed - see ensureRawDisk and run), at most one partition's
+	// extracted slice at a time (deleted as soon as that partition is
+	// done - see processPartition), and - unlike the shared-store-root
 	// legacy layout - each partition's own content directory (extent
 	// files plus torrent.info), since each content's own PVC does not
 	// exist yet when Run starts (see publish.go). The caller creates
 	// WorkDir and is responsible
 	// for removing it after Run returns.
 	WorkDir string
+	// IOBandwidthBytesPerSec caps the write rate of the two file copies
+	// this package performs itself (the source download and each
+	// partition's slice extraction) - see newThrottledWriter. It does
+	// not throttle qemu-img or partclone, which write directly; those
+	// get a best-effort ionice/nice priority instead (see cmd/ingest). 0
+	// or negative disables throttling.
+	IOBandwidthBytesPerSec int64
 }
 
 // Dependencies are the small interfaces Run drives; cmd/ingest wires the
@@ -114,9 +123,9 @@ func run(ctx context.Context, cfg Config, deps Dependencies) (*ResultDisk, error
 		return nil, fmt.Errorf("source format mismatch: qemu-img reports %q, Image declares %q", info.Format, cfg.SourceFormat)
 	}
 
-	rawPath := filepath.Join(cfg.WorkDir, "disk.raw")
-	if err := deps.QemuImg.ConvertToRaw(ctx, sourcePath, info.Format, rawPath); err != nil {
-		return nil, fmt.Errorf("convert source image to raw: %w", err)
+	rawPath, err := ensureRawDisk(ctx, cfg, deps, sourcePath, info.Format, staged)
+	if err != nil {
+		return nil, err
 	}
 
 	diskSize, err := fileSize(rawPath)
@@ -140,6 +149,17 @@ func run(ctx context.Context, cfg Config, deps Dependencies) (*ResultDisk, error
 			return nil, fmt.Errorf("partition %d: %w", part.Number, err)
 		}
 		partitions = append(partitions, resultPart)
+	}
+
+	// rawPath is only read while extracting partition slices above;
+	// nothing needs it once the last one is done. A staged raw source
+	// (rawPath == sourcePath, no conversion ran) lives on the read-only
+	// staging volume, not WorkDir, and is left alone here - staging's own
+	// cleanup, below, is what removes it.
+	if !staged || rawPath != sourcePath {
+		if err := os.Remove(rawPath); err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("remove %s: %w", rawPath, err)
+		}
 	}
 
 	if staged && deps.StagedRemover != nil {
@@ -176,6 +196,36 @@ func compactJSON(data []byte) (string, error) {
 	return buf.String(), nil
 }
 
+// ensureRawDisk returns the path to a raw disk image ingest can slice
+// partitions out of: sourcePath itself, unchanged, when sourceFormat is
+// already "raw" (a source this close to its final shape needs no
+// conversion copy - doubling the ingest scratch volume's peak usage for
+// nothing), or a freshly converted WorkDir/disk.raw file otherwise.
+//
+// When a conversion does run, sourcePath is removed immediately
+// afterward if it is ingest's own downloaded copy (not staged): once
+// disk.raw exists, source.img is fully redundant, and deleting it now -
+// rather than waiting for every partition to be processed - keeps the
+// scratch volume's peak usage from ever holding source.img, disk.raw,
+// and a partition slice all at once.
+func ensureRawDisk(ctx context.Context, cfg Config, deps Dependencies, sourcePath, sourceFormat string, staged bool) (string, error) {
+	if strings.EqualFold(sourceFormat, "raw") {
+		return sourcePath, nil
+	}
+
+	rawPath := filepath.Join(cfg.WorkDir, "disk.raw")
+	if err := deps.QemuImg.ConvertToRaw(ctx, sourcePath, sourceFormat, rawPath); err != nil {
+		return "", fmt.Errorf("convert source image to raw: %w", err)
+	}
+
+	if !staged {
+		if err := os.Remove(sourcePath); err != nil && !os.IsNotExist(err) {
+			return "", fmt.Errorf("remove converted source %s: %w", sourcePath, err)
+		}
+	}
+	return rawPath, nil
+}
+
 // processPartition slices one partition out of the converted raw disk,
 // detects its file system, classifies its role, and - for every role
 // except swap - clones its content into its own scratch content
@@ -183,9 +233,15 @@ func compactJSON(data []byte) (string, error) {
 // that partition.
 func processPartition(ctx context.Context, cfg Config, deps Dependencies, rawPath string, part ParsedPartition) (ResultPartition, error) {
 	slicePath := filepath.Join(cfg.WorkDir, fmt.Sprintf("part-%d.raw", part.Number))
-	if err := extractPartition(rawPath, part.StartBytes, part.SizeBytes, slicePath); err != nil {
+	if err := extractPartition(rawPath, part.StartBytes, part.SizeBytes, slicePath, cfg.IOBandwidthBytesPerSec); err != nil {
 		return ResultPartition{}, fmt.Errorf("extract partition slice: %w", err)
 	}
+	// The slice is a scratch copy of rawPath's own bytes: once this
+	// partition's clone (or, for swap, its file system detection below)
+	// has read it, nothing needs it again. Removing it here - rather
+	// than at the end of Run - keeps at most one partition's slice on
+	// the scratch volume at a time instead of one per partition.
+	defer func() { _ = os.Remove(slicePath) }()
 
 	fsInfo, err := deps.Blkid.Detect(ctx, slicePath)
 	if err != nil {
@@ -279,8 +335,10 @@ func finalizeContent(contentDir string) (usedBytes, lastExtentEnd int64, err err
 // a new file at dst. This is how ingest turns one slot of the converted
 // raw disk into the standalone file partclone reads as its source: a
 // plain Go file copy, needing no loop device, no nbd, no elevated
-// privilege of any kind (see the package doc comment).
-func extractPartition(src string, start, size int64, dst string) (err error) {
+// privilege of any kind (see the package doc comment). bytesPerSec caps
+// the write rate (see newThrottledWriter); 0 or negative leaves it
+// unthrottled.
+func extractPartition(src string, start, size int64, dst string, bytesPerSec int64) (err error) {
 	in, err := os.Open(src) //nolint:gosec // src is an ingest-controlled scratch path
 	if err != nil {
 		return fmt.Errorf("open %s: %w", src, err)
@@ -302,7 +360,7 @@ func extractPartition(src string, start, size int64, dst string) (err error) {
 		}
 	}()
 
-	if _, err := io.CopyN(out, in, size); err != nil {
+	if _, err := io.CopyN(NewThrottledWriter(out, bytesPerSec), in, size); err != nil {
 		return fmt.Errorf("copy %d bytes from %s at %d: %w", size, src, start, err)
 	}
 	return nil
