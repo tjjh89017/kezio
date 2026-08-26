@@ -47,6 +47,7 @@ func TestRenderDnsmasqConf_ProxyOnly(t *testing.T) {
 		"dhcp-hostsfile=/run/bootd/dhcp-hosts.conf\n",
 		`pxe-service=tag:kezio,x86-64_EFI,"kezio network boot",shimx64.efi,192.0.2.2` + "\n",
 		"dhcp-ignore=tag:!kezio\n",
+		"dhcp-ignore-clid\n",
 	} {
 		if !strings.Contains(conf, want) {
 			t.Errorf("rendered config missing %q:\n%s", want, conf)
@@ -94,6 +95,9 @@ func TestRenderDnsmasqConf_AnswerAllDropsMACGate(t *testing.T) {
 	if !strings.Contains(conf, `pxe-service=x86-64_EFI,"kezio network boot",shimx64.efi,192.0.2.2`+"\n") {
 		t.Errorf("AnswerAll pxe-service still tag-gated:\n%s", conf)
 	}
+	if !strings.Contains(conf, "dhcp-ignore-clid\n") {
+		t.Errorf("AnswerAll config drops dhcp-ignore-clid:\n%s", conf)
+	}
 }
 
 func TestRenderDnsmasqConf_NoInterface(t *testing.T) {
@@ -138,6 +142,7 @@ func TestRenderDnsmasqConf_LeaseModeAutoDerivesRange(t *testing.T) {
 		"dhcp-match=set:efi-x86_64,option:client-arch,7\n",
 		"dhcp-boot=tag:efi-x86_64,shimx64.efi,,192.0.2.2\n",
 		"dhcp-ignore=tag:!kezio\n",
+		"dhcp-ignore-clid\n",
 	} {
 		if !strings.Contains(conf, want) {
 			t.Errorf("lease-mode config missing %q:\n%s", want, conf)
@@ -277,6 +282,9 @@ func TestRenderDnsmasqConf_LeaseModeMACGateUnchanged(t *testing.T) {
 	if !strings.Contains(conf, "dhcp-ignore=tag:!kezio\n") {
 		t.Errorf("lease-mode config drops dhcp-ignore:\n%s", conf)
 	}
+	if !strings.Contains(conf, "dhcp-ignore-clid\n") {
+		t.Errorf("lease-mode config drops dhcp-ignore-clid:\n%s", conf)
+	}
 
 	cfg.AnswerAll = true
 	conf, err = RenderDnsmasqConf(cfg, "/run/bootd")
@@ -285,6 +293,9 @@ func TestRenderDnsmasqConf_LeaseModeMACGateUnchanged(t *testing.T) {
 	}
 	if strings.Contains(conf, "dhcp-ignore=") {
 		t.Errorf("lease-mode AnswerAll config still carries dhcp-ignore:\n%s", conf)
+	}
+	if !strings.Contains(conf, "dhcp-ignore-clid\n") {
+		t.Errorf("lease-mode AnswerAll config drops dhcp-ignore-clid:\n%s", conf)
 	}
 }
 
@@ -310,6 +321,7 @@ func TestRenderDnsmasqConf_LeaseModeHTTPBoot(t *testing.T) {
 		"dhcp-boot=tag:efi-x86_64,shimx64.efi,,192.0.2.2\n",
 		"dhcp-boot=shimx64.efi,,192.0.2.2\n",
 		"dhcp-ignore=tag:!kezio\n",
+		"dhcp-ignore-clid\n",
 	} {
 		if !strings.Contains(conf, want) {
 			t.Errorf("lease-mode HTTP Boot config missing %q:\n%s", want, conf)
@@ -342,6 +354,7 @@ func TestRenderDnsmasqConf_ProxyModeHTTPBoot(t *testing.T) {
 		`pxe-service=tag:kezio,x86-64_EFI,"kezio network boot",shimx64.efi,192.0.2.2` + "\n",
 		"dhcp-range=192.0.2.0,proxy,255.255.255.0\n",
 		"dhcp-ignore=tag:!kezio\n",
+		"dhcp-ignore-clid\n",
 	} {
 		if !strings.Contains(conf, want) {
 			t.Errorf("proxy-mode HTTP Boot config missing %q:\n%s", want, conf)

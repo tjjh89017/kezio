@@ -246,6 +246,15 @@ func RenderDnsmasqConf(cfg Config, runDir string) (string, error) {
 	// BOOTP header fields (file/sname) instead of moving them into
 	// options 67/66 - the header fields are what PXE firmware reads.
 	b.WriteString("dhcp-no-override\n")
+	// dhcp-ignore-clid: identify a client by MAC alone, ignoring any
+	// DHCP client-id option (61). A DUT presents up to three different
+	// client identities across one deploy - UEFI PXE firmware sends
+	// none, the live image's dhcpcd sends an RFC4361 client-id, the
+	// installed OS sends its own DUID - and kezio's identity
+	// (spec.bootMACAddress, the dhcp-hostsfile entries) is MAC-keyed;
+	// in proxy mode this still governs how dnsmasq identifies clients
+	// for its proxy replies.
+	b.WriteString("dhcp-ignore-clid\n")
 	return b.String(), nil
 }
 
