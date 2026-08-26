@@ -1106,7 +1106,10 @@ that Site deploys that Image.
 
 Do not delete the `ImageImport` until each content that it created is
 Ready. The scratch PVC of the import outlives the ingest Job, and each
-publish Job reads the already-cut content out of it.
+publish Job reads the already-cut content out of it. The same care
+applies to `spec.ttlSecondsAfterFinished`: it is unset by default, so
+the manager never deletes a finished import on its own; set it only
+once every content the import created has published.
 
 ## 8. Enroll the target machine
 

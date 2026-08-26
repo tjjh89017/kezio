@@ -186,15 +186,22 @@ the spec describes them.
 | `spec.params` | Copied onto `Image.spec.params`. |
 | `spec.postHookRefs` | Copied onto `Image.spec.postHookRefs`. |
 | `spec.scratchSize` | Overrides the size of the ingest scratch volume. Left unset, the manager sizes it from the source image (about twice its size for a raw source, three times for one that ingest must convert first), with a floor for a source it cannot size. |
+| `spec.ttlSecondsAfterFinished` | How long a `Succeeded` or `Failed` import stays around after `status.completionTime`, before the controller deletes it. Left unset, a finished import is kept forever. Set only at creation - the spec is immutable. |
 | `status.state` | `Pending`, `Ingesting`, `Succeeded`, or `Failed`. |
 | `status.imageRef` | The `Image` this import created. |
 | `status.contentRefs` | Every `PartitionContent` this import created, in partition order. |
+| `status.completionTime` | When the import first reached `Succeeded` or `Failed`. Absent while the import is in progress. |
 
 The spec is immutable after creation.
 
 The import fails if a name it must create is already taken. It never
 writes over an existing content, and never writes over an existing
 Image.
+
+Deleting a finished `ImageImport` (by hand, or once
+`spec.ttlSecondsAfterFinished` elapses) never deletes the `Image` or
+the `PartitionContent` objects it created. Both outlive the import
+that captured them.
 
 A swap partition gets no content. The import gives it a blank slot
 that carries only its file-system UUID. The agent runs `mkswap` on it.

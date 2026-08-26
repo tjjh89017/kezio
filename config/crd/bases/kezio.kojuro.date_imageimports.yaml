@@ -159,6 +159,19 @@ spec:
                 - checksum
                 - url
                 type: object
+              ttlSecondsAfterFinished:
+                description: |-
+                  TTLSecondsAfterFinished bounds how long a Succeeded or Failed import
+                  stays around before the controller deletes it, measured from
+                  status.completionTime, mirroring batch/Job's field of the same name.
+                  Left unset, a finished import is kept forever. Deleting it never
+                  deletes the Image or PartitionContent objects it created - see
+                  ImageImportReconciler's doc comment. Because the spec is immutable
+                  once created (see the type-level XValidation rule), this can only be
+                  set at create time.
+                format: int32
+                minimum: 0
+                type: integer
             required:
             - contentPrefix
             - imageName
@@ -170,6 +183,12 @@ spec:
           status:
             description: ImageImportStatus defines the observed state of ImageImport.
             properties:
+              completionTime:
+                description: |-
+                  CompletionTime is when the import first entered Succeeded or Failed.
+                  spec.ttlSecondsAfterFinished counts from this timestamp.
+                format: date-time
+                type: string
               conditions:
                 description: |-
                   Conditions report the current state of the import. Every write

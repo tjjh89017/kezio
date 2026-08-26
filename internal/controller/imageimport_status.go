@@ -20,7 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -108,17 +110,19 @@ func (r *ImageImportReconciler) recordIngesting(ctx context.Context, imp *keziov
 
 // recordImportSucceeded records Succeeded: every PartitionContent this
 // import captured, and the Image binding them, now exist. Their own
-// controllers take it from here - this import has nothing left to do.
+// controllers take it from here - this import has nothing left to do but
+// the completionTime/TTL bookkeeping enforceTTL owns.
 func (r *ImageImportReconciler) recordImportSucceeded(ctx context.Context, imp *keziov1alpha3.ImageImport, contentRefs []keziov1alpha3.NameRef) (ctrl.Result, error) {
 	imp.Status.State = keziov1alpha3.ImageImportStateSucceeded
 	imp.Status.ImageRef = &keziov1alpha3.NameRef{Name: imp.Spec.ImageName}
 	imp.Status.ContentRefs = contentRefs
+	stampCompletionTime(imp)
 	setImageImportReadyCondition(imp, metav1.ConditionTrue, "ImportComplete",
 		fmt.Sprintf("captured %d partition content object(s) and created Image %q", len(contentRefs), imp.Spec.ImageName))
 	if err := r.applyImageImportStatus(ctx, imp); err != nil {
 		return ctrl.Result{}, fmt.Errorf("imageimport %q: recording Succeeded: %w", imp.Name, err)
 	}
-	return ctrl.Result{}, nil
+	return r.enforceImportTTL(ctx, imp)
 }
 
 // recordImportFailed records Failed: the ingest Job failed terminally,
@@ -127,21 +131,72 @@ func (r *ImageImportReconciler) recordImportSucceeded(ctx context.Context, imp *
 // for retry semantics.
 func (r *ImageImportReconciler) recordImportFailed(ctx context.Context, imp *keziov1alpha3.ImageImport, message string) (ctrl.Result, error) {
 	imp.Status.State = keziov1alpha3.ImageImportStateFailed
+	stampCompletionTime(imp)
 	setImageImportReadyCondition(imp, metav1.ConditionFalse, "ImportFailed", message)
 	if err := r.applyImageImportStatus(ctx, imp); err != nil {
 		return ctrl.Result{}, fmt.Errorf("imageimport %q: recording Failed: %w", imp.Name, err)
 	}
-	return ctrl.Result{}, nil
+	return r.enforceImportTTL(ctx, imp)
 }
 
-// migrateLegacyReadyState rewrites a pre-rename Ready import to
-// Succeeded, once, without touching ingest - see legacyReadyState's doc
-// comment. The content refs and Image ref it already recorded are left
-// as they are; only status.state changes.
+// stampCompletionTime sets imp.Status.CompletionTime to now, if it is not
+// already set - an import only ever enters Succeeded or Failed once, but
+// this guard also lets the same call sit safely in the legacy Ready
+// rewrite and the terminal-state backfill path, both of which may find it
+// already set.
+func stampCompletionTime(imp *keziov1alpha3.ImageImport) {
+	if imp.Status.CompletionTime == nil {
+		now := metav1.Now()
+		imp.Status.CompletionTime = &now
+	}
+}
+
+// migrateLegacyReadyState rewrites a pre-rename Ready import to Succeeded,
+// once, without touching ingest - see legacyReadyState's doc comment. The
+// content refs and Image ref it already recorded are left as they are;
+// only status.state (and status.completionTime, if this import predates
+// that field too) change.
 func (r *ImageImportReconciler) migrateLegacyReadyState(ctx context.Context, imp *keziov1alpha3.ImageImport) (ctrl.Result, error) {
 	imp.Status.State = keziov1alpha3.ImageImportStateSucceeded
+	stampCompletionTime(imp)
 	if err := r.applyImageImportStatus(ctx, imp); err != nil {
 		return ctrl.Result{}, fmt.Errorf("imageimport %q: rewriting legacy Ready state to Succeeded: %w", imp.Name, err)
+	}
+	return r.enforceImportTTL(ctx, imp)
+}
+
+// reconcileFinished keeps a Succeeded or Failed import's
+// status.completionTime backfilled (for one recorded before that field
+// existed) and applies spec.ttlSecondsAfterFinished. It never re-runs
+// ingest - see onChange's doc comment.
+func (r *ImageImportReconciler) reconcileFinished(ctx context.Context, imp *keziov1alpha3.ImageImport) (ctrl.Result, error) {
+	if imp.Status.CompletionTime == nil {
+		stampCompletionTime(imp)
+		if err := r.applyImageImportStatus(ctx, imp); err != nil {
+			return ctrl.Result{}, fmt.Errorf("imageimport %q: backfilling completionTime: %w", imp.Name, err)
+		}
+	}
+	return r.enforceImportTTL(ctx, imp)
+}
+
+// enforceImportTTL deletes imp once spec.ttlSecondsAfterFinished has
+// elapsed since status.completionTime, or requeues for the remaining
+// duration. An unset TTL keeps the import forever. Deleting the
+// ImageImport never deletes the Image or PartitionContent objects it
+// created - neither carries an owner reference to it, only an annotation
+// (see imageImportAnnotation) or its own Source.ImportName, precisely so
+// that this delete cannot take them with it.
+func (r *ImageImportReconciler) enforceImportTTL(ctx context.Context, imp *keziov1alpha3.ImageImport) (ctrl.Result, error) {
+	if imp.Spec.TTLSecondsAfterFinished == nil {
+		return ctrl.Result{}, nil
+	}
+	ttl := time.Duration(*imp.Spec.TTLSecondsAfterFinished) * time.Second
+	remaining := ttl - time.Since(imp.Status.CompletionTime.Time)
+	if remaining > 0 {
+		return ctrl.Result{RequeueAfter: remaining}, nil
+	}
+	if err := r.Delete(ctx, imp); err != nil && !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, fmt.Errorf("imageimport %q: deleting after ttlSecondsAfterFinished: %w", imp.Name, err)
 	}
 	return ctrl.Result{}, nil
 }

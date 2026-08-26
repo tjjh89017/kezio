@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -311,6 +312,7 @@ var _ = Describe("ImageImport Controller", func() {
 		var got keziov1alpha3.ImageImport
 		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
 		Expect(got.Status.State).To(Equal(keziov1alpha3.ImageImportStateSucceeded))
+		Expect(got.Status.CompletionTime).NotTo(BeNil())
 		Expect(got.Status.ImageRef.Name).To(Equal(imp.Spec.ImageName))
 		Expect(got.Status.ContentRefs).To(HaveLen(2))
 	})
@@ -361,6 +363,7 @@ var _ = Describe("ImageImport Controller", func() {
 		var got keziov1alpha3.ImageImport
 		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
 		Expect(got.Status.State).To(Equal(keziov1alpha3.ImageImportStateSucceeded))
+		Expect(got.Status.CompletionTime).NotTo(BeNil())
 		Expect(got.Status.ImageRef.Name).To(Equal(imp.Spec.ImageName))
 
 		// No ingest Job was ever created for this import - if the rewrite
@@ -368,6 +371,84 @@ var _ = Describe("ImageImport Controller", func() {
 		var job batchv1.Job
 		err = k8sClient.Get(ctx, types.NamespacedName{Name: ingestJobName(imp), Namespace: "default"}, &job)
 		Expect(apierrors.IsNotFound(err)).To(BeTrue())
+	})
+
+	Describe("ttlSecondsAfterFinished", func() {
+		It("requeues for the remaining duration while the TTL has not yet elapsed", func() {
+			imp := newTestImageImport("import-ttl-pending", "https://example.test/disk.img", 41)
+			ttl := int32(3600)
+			imp.Spec.TTLSecondsAfterFinished = &ttl
+			nn := createImport(imp)
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			fakeIngestJobSucceeded(ctx, imp, diskResult())
+			res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(BeNumerically(">", 0))
+			Expect(res.RequeueAfter).To(BeNumerically("<=", time.Duration(ttl)*time.Second))
+
+			var got keziov1alpha3.ImageImport
+			Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
+			Expect(got.Status.State).To(Equal(keziov1alpha3.ImageImportStateSucceeded))
+
+			// A second reconcile before the TTL elapses must not delete it.
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
+
+			for i := int32(1); i <= 2; i++ {
+				var pc keziov1alpha3.PartitionContent
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: store.ContentName(imp.Spec.ContentPrefix, i), Namespace: "default"}, &pc); err == nil {
+					DeferCleanup(func() { _ = k8sClient.Delete(ctx, &pc) })
+				}
+			}
+			var img keziov1alpha3.Image
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: imp.Spec.ImageName, Namespace: "default"}, &img); err == nil {
+				DeferCleanup(func() { _ = k8sClient.Delete(ctx, &img) })
+			}
+		})
+
+		It("deletes the import once the TTL has elapsed since completion, leaving the Image and content behind", func() {
+			imp := newTestImageImport("import-ttl-elapsed", "https://example.test/disk.img", 42)
+			ttl := int32(1)
+			imp.Spec.TTLSecondsAfterFinished = &ttl
+			nn := createImport(imp)
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			fakeIngestJobSucceeded(ctx, imp, diskResult())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			var got keziov1alpha3.ImageImport
+			Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
+			Expect(got.Status.CompletionTime).NotTo(BeNil())
+			// Backdate completion so the 1s TTL has already elapsed, rather
+			// than sleeping the test out.
+			past := metav1.NewTime(got.Status.CompletionTime.Add(-1 * time.Hour))
+			got.Status.CompletionTime = &past
+			Expect(k8sClient.Status().Update(ctx, &got)).To(Succeed())
+
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			err = k8sClient.Get(ctx, nn, &keziov1alpha3.ImageImport{})
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the ImageImport must be deleted once its TTL elapses")
+
+			var img keziov1alpha3.Image
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: imp.Spec.ImageName, Namespace: "default"}, &img)).To(Succeed(),
+				"the Image the import created must survive the import's own deletion")
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, &img) })
+
+			var pc1 keziov1alpha3.PartitionContent
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: store.ContentName(imp.Spec.ContentPrefix, 1), Namespace: "default"}, &pc1)).To(Succeed(),
+				"the PartitionContent the import created must survive the import's own deletion")
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, &pc1) })
+			var pc2 keziov1alpha3.PartitionContent
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: store.ContentName(imp.Spec.ContentPrefix, 2), Namespace: "default"}, &pc2)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, &pc2) })
+		})
 	})
 
 	It("fails the import rather than writing over a PartitionContent name another import holds", func() {

@@ -91,6 +91,17 @@ type ImageImportSpec struct {
 	// +kubebuilder:validation:XValidation:rule="quantity(self).isGreaterThan(quantity('0'))",message="scratchSize must be positive"
 	// +optional
 	ScratchSize *resource.Quantity `json:"scratchSize,omitempty"`
+	// TTLSecondsAfterFinished bounds how long a Succeeded or Failed import
+	// stays around before the controller deletes it, measured from
+	// status.completionTime, mirroring batch/Job's field of the same name.
+	// Left unset, a finished import is kept forever. Deleting it never
+	// deletes the Image or PartitionContent objects it created - see
+	// ImageImportReconciler's doc comment. Because the spec is immutable
+	// once created (see the type-level XValidation rule), this can only be
+	// set at create time.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
 }
 
 // ImageImport state enum values for ImageImportStatus.State.
@@ -132,6 +143,10 @@ type ImageImportStatus struct {
 	// +kubebuilder:validation:MaxItems=128
 	// +optional
 	ContentRefs []NameRef `json:"contentRefs,omitempty"`
+	// CompletionTime is when the import first entered Succeeded or Failed.
+	// spec.ttlSecondsAfterFinished counts from this timestamp.
+	// +optional
+	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 	// Conditions report the current state of the import. Every write
 	// carries observedGeneration set to the generation the write observed.
 	// +optional

@@ -105,13 +105,14 @@ func (r *ImageImportReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 const legacyReadyState = "Ready"
 
 // onChange drives one step of the import walk: Pending -> Ingesting ->
-// Succeeded|Failed. A finished import never re-enters it - the Image and
-// the content it created are immutable, so there is nothing left to
-// converge.
+// Succeeded|Failed. A finished import never re-enters ingest - the Image
+// and the content it created are immutable, so there is nothing left to
+// converge but status.completionTime bookkeeping and
+// spec.ttlSecondsAfterFinished.
 func (r *ImageImportReconciler) onChange(ctx context.Context, imp *keziov1alpha3.ImageImport) (ctrl.Result, error) {
 	switch imp.Status.State {
 	case keziov1alpha3.ImageImportStateSucceeded, keziov1alpha3.ImageImportStateFailed:
-		return ctrl.Result{}, nil
+		return r.reconcileFinished(ctx, imp)
 	case legacyReadyState:
 		return r.migrateLegacyReadyState(ctx, imp)
 	}

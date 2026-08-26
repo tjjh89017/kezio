@@ -94,6 +94,29 @@ var _ = Describe("ImageImport CRD schema", func() {
 		Expect(k8sClient.Update(ctx, imp)).To(HaveOccurred())
 	})
 
+	It("rejects a negative ttlSecondsAfterFinished", func() {
+		imp := newImageImport()
+		ttl := int32(-1)
+		imp.Spec.TTLSecondsAfterFinished = &ttl
+		Expect(k8sClient.Create(ctx, imp)).To(HaveOccurred())
+	})
+
+	It("admits a zero ttlSecondsAfterFinished", func() {
+		imp := newImageImport()
+		ttl := int32(0)
+		imp.Spec.TTLSecondsAfterFinished = &ttl
+		Expect(k8sClient.Create(ctx, imp)).To(Succeed())
+	})
+
+	It("rejects setting ttlSecondsAfterFinished on an update, since the spec is immutable", func() {
+		imp := newImageImport()
+		Expect(k8sClient.Create(ctx, imp)).To(Succeed())
+
+		ttl := int32(60)
+		imp.Spec.TTLSecondsAfterFinished = &ttl
+		Expect(k8sClient.Update(ctx, imp)).To(HaveOccurred())
+	})
+
 	It("admits a status update that leaves spec untouched", func() {
 		imp := newImageImport()
 		Expect(k8sClient.Create(ctx, imp)).To(Succeed())
