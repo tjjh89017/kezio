@@ -43,6 +43,14 @@ inputs:
   subnet-name:
     description: Machine.spec.subnetRef.name - the Subnet whose bootd instance answers this machine's PXE boot.
     required: true
+  console:
+    description: >-
+      One Machine.spec.console entry, for example "ttyS0,115200n8" - left
+      empty (the default), spec.console is omitted and the boot server's
+      BOOT_DEFAULT_CONSOLE applies instead. Single entry only: this action
+      does not need spec.console's full list shape.
+    required: false
+    default: ""
   timeout:
     description: >-
       Timeout to wait for status.state to leave "" after creation, in
@@ -87,8 +95,13 @@ runs:
         BMC_ADDRESS: ${{ inputs.bmc-address }}
         BOOT_MAC: ${{ inputs.boot-mac }}
         SUBNET_NAME: ${{ inputs.subnet-name }}
+        CONSOLE: ${{ inputs.console }}
       run: |
         set -euo pipefail
+        console_yaml=""
+        if [ -n "${CONSOLE}" ]; then
+          console_yaml="$(printf '  console:\n    - "%s"' "${CONSOLE}")"
+        fi
         cat <<EOF | kubectl apply -f -
         apiVersion: kezio.kojuro.date/v1alpha3
         kind: Machine
@@ -103,6 +116,7 @@ runs:
           bootMACAddress: "${BOOT_MAC}"
           subnetRef:
             name: ${SUBNET_NAME}
+        ${console_yaml}
         EOF
 
     - name: Assert the Machine left its zero-value state

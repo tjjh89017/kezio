@@ -863,6 +863,12 @@ jobs:
           bmc-address: "redfish+http://${{ env.TARGET_VM_NAME }}-virtbmc.kezio-system.svc.cluster.local/redfish/v1/Systems/1"
           boot-mac: ${{ env.TARGET_VM_MAC }}
           subnet-name: ${{ env.SUBNET_NAME }}
+          # KubeVirt's default serial console (what capture-vm-console's
+          # virtctl console attach reads) is the guest's ttyS0 - this
+          # names it as the machine's own kernel console= target so this
+          # lane's captured console.log is also the proof that
+          # spec.console reaches the live environment's cmdline.
+          console: "ttyS0,115200n8"
 
       - name: Provision the target VM through a real KubeVirtBMC/Redfish endpoint
         uses: ./.github/actions/provision-target-vm-via-bmc
@@ -886,6 +892,27 @@ jobs:
         with:
           scenario: ${{ matrix.dhcp-scenario }}
           bootd-deployment-name: "kezio-bootd-${{ env.SUBNET_NAME }}"
+
+      # Proves Machine.spec.console (set above) actually reaches the live
+      # environment: kezio-agent's own startup banner
+      # (cmd/agent/main.go's "kezio-agent: booted") only reaches this
+      # captured serial console at all through console=ttyS0,115200n8 on
+      # the kernel cmdline (internal/bootserver's grub.go) plus the live
+      # image's journald->console forwarding (hack/live-image's
+      # 50-kezio-console.conf) - a break in either would leave the
+      # banner in the journal but never on this log.
+      - name: Assert kezio-agent's boot banner reached the captured serial console
+        shell: bash
+        env:
+          LOGFILE: ${{ runner.temp }}/console-${{ matrix.dhcp-scenario }}.log
+        run: |
+          set -euo pipefail
+          if ! grep -q "kezio-agent: booted" "${LOGFILE}"; then
+            echo "::error::kezio-agent's startup banner ('kezio-agent: booted') is not in ${LOGFILE} - Machine.spec.console is not reaching the live environment's console." >&2
+            cat "${LOGFILE}" >&2 || true
+            exit 1
+          fi
+          echo "kezio-agent's startup banner is present in the captured console log."
 
       - name: Create the unenrolled-MAC VM
         uses: ./.github/actions/create-target-vm
