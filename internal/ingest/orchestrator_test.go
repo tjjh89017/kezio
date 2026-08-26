@@ -413,6 +413,49 @@ func TestRun_AttachIsDefault(t *testing.T) {
 	}
 }
 
+// TestRun_AttachDetachesBeforeStagedCleanup checks the fix for the
+// silly-rename bug: on the nbd-attach path, the source stays open under
+// qemu-nbd until detach runs, so detach must happen before the staged
+// upload is removed - not after, and not left to the deferred safety net
+// alone.
+func TestRun_AttachDetachesBeforeStagedCleanup(t *testing.T) {
+	deps, attacher := attachDeps()
+	stagedPath := filepath.Join(t.TempDir(), "staged-upload.bin")
+	if err := os.WriteFile(stagedPath, []byte("qcow2-body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	staging := &fakeStaging{paths: map[string]string{"golden": stagedPath}}
+	deps.Staging = staging
+	deps.StagedRemover = staging
+
+	var order []string
+	attacher.order = &order
+	staging.order = &order
+
+	res := Run(context.Background(), Config{
+		SourceURL:    "kezio-staged://golden",
+		SourceFormat: "qcow2",
+		WorkDir:      t.TempDir(),
+	}, deps)
+	if !res.Success {
+		t.Fatalf("expected success, got error %q", res.Error)
+	}
+	if len(order) != 2 || order[0] != eventDetach || order[1] != "remove:golden" {
+		t.Errorf("order = %v, want [detach remove:golden]", order)
+	}
+	// detach must still run exactly once (sync.OnceFunc) even though it
+	// is called explicitly and the deferred safety net also fires.
+	detachCount := 0
+	for _, e := range attacher.events {
+		if e == eventDetach {
+			detachCount++
+		}
+	}
+	if detachCount != 1 {
+		t.Errorf("detach ran %d times, want exactly 1", detachCount)
+	}
+}
+
 // TestRun_AttachDetachesOnFailure checks that a failure partway through
 // (here, blkid) still runs the Attacher's detach - a connected nbd
 // device must never leak just because a later step failed.
@@ -431,7 +474,7 @@ func TestRun_AttachDetachesOnFailure(t *testing.T) {
 	if !attacher.detached {
 		t.Error("expected the attacher to be detached even though the run failed")
 	}
-	if len(attacher.events) != 2 || attacher.events[0] != "attach" || attacher.events[1] != "detach" {
+	if len(attacher.events) != 2 || attacher.events[0] != eventAttach || attacher.events[1] != eventDetach {
 		t.Errorf("events = %v, want [attach detach]", attacher.events)
 	}
 }

@@ -26,6 +26,13 @@ import (
 	"github.com/tjjh89017/kezio/internal/store"
 )
 
+// eventAttach and eventDetach are the fakeAttacher.events/order values
+// recorded by Attach and its returned detach func.
+const (
+	eventAttach = "attach"
+	eventDetach = "detach"
+)
+
 // fakeDownloader records what it was asked to download and writes fixed
 // content to destPath, simulating a successful fetch.
 type fakeDownloader struct {
@@ -48,6 +55,10 @@ type fakeStaging struct {
 	paths      map[string]string
 	removed    []string
 	resolveErr error
+	// order, when set, additionally records "remove:<name>" into a
+	// timeline shared with another fake (e.g. fakeAttacher's "detach"),
+	// so a test can assert cleanup ordering across both.
+	order *[]string
 }
 
 func (f *fakeStaging) ResolveUpload(name string) (string, error) {
@@ -63,6 +74,9 @@ func (f *fakeStaging) ResolveUpload(name string) (string, error) {
 
 func (f *fakeStaging) RemoveUpload(name string) error {
 	f.removed = append(f.removed, name)
+	if f.order != nil {
+		*f.order = append(*f.order, "remove:"+name)
+	}
 	return nil
 }
 
@@ -123,6 +137,10 @@ type fakeAttacher struct {
 	// events records, in order, "attach" and "detach" so a test can
 	// assert detach only ever happens after attach, exactly once.
 	events []string
+	// order, when set, additionally records "detach" into a timeline
+	// shared with another fake (e.g. fakeStaging's "remove:<name>"), so a
+	// test can assert cleanup ordering across both.
+	order *[]string
 }
 
 func (f *fakeAttacher) Attach(_ context.Context, _, _ string) (string, func(), error) {
@@ -130,10 +148,13 @@ func (f *fakeAttacher) Attach(_ context.Context, _, _ string) (string, func(), e
 		return "", nil, f.attachErr
 	}
 	f.attached = true
-	f.events = append(f.events, "attach")
+	f.events = append(f.events, eventAttach)
 	detach := func() {
 		f.detached = true
-		f.events = append(f.events, "detach")
+		f.events = append(f.events, eventDetach)
+		if f.order != nil {
+			*f.order = append(*f.order, eventDetach)
+		}
 	}
 	dev := f.dev
 	if dev == "" {

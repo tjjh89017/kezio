@@ -22,9 +22,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/store"
@@ -228,9 +230,12 @@ func run(ctx context.Context, cfg Config, deps Dependencies) (*ResultDisk, error
 	if staged && deps.StagedRemover != nil {
 		// Best-effort: the content is already durably stored at this
 		// point, so a cleanup failure must not fail an otherwise
-		// successful ingest. A leftover staged upload is at worst
-		// wasted staging space, not a correctness problem.
-		_ = CleanupStagedSource(deps.StagedRemover, StagedNameFromURL(cfg.SourceURL))
+		// successful ingest. A leftover staged upload is at worst wasted
+		// staging space, not a correctness problem - but it is worth
+		// knowing about, so log it rather than swallowing it outright.
+		if err := CleanupStagedSource(deps.StagedRemover, StagedNameFromURL(cfg.SourceURL)); err != nil {
+			log.Printf("kezio-ingest: %v", err)
+		}
 	}
 
 	compactSfdisk, err := compactJSON(sfdiskJSON)
@@ -253,10 +258,15 @@ func run(ctx context.Context, cfg Config, deps Dependencies) (*ResultDisk, error
 // device node. No disk.raw conversion copy and no part-N.raw slice ever
 // exist in WorkDir - only each partition's own content-N output does.
 func runAttached(ctx context.Context, cfg Config, deps Dependencies, sourcePath string, info QemuImgInfo, staged bool) (*ResultDisk, error) {
-	dev, detach, err := deps.Attacher.Attach(ctx, sourcePath, info.Format)
+	dev, rawDetach, err := deps.Attacher.Attach(ctx, sourcePath, info.Format)
 	if err != nil {
 		return nil, fmt.Errorf("attach source via nbd: %w", err)
 	}
+	// detach runs at most once (sync.OnceFunc): called explicitly below,
+	// before sourcePath is touched, once every partition has been read;
+	// the deferred call is only a safety net for an error path above that
+	// point, so a failed run still never leaks a connected nbd device.
+	detach := sync.OnceFunc(rawDetach)
 	defer detach()
 
 	sfdiskJSON, err := deps.Sfdisk.Dump(ctx, dev)
@@ -281,10 +291,14 @@ func runAttached(ctx context.Context, cfg Config, deps Dependencies, sourcePath 
 		partitions = append(partitions, resultPart)
 	}
 
-	// Every partition has been read by now (partclone, or blkid alone
-	// for swap) - the deferred detach above only runs once this function
-	// returns, so it is safe to remove the downloaded source file here,
-	// same as the copy path does once it no longer needs it.
+	// Every partition has been read by now (partclone, or blkid alone for
+	// swap): detach explicitly here, before touching sourcePath below.
+	// qemu-nbd keeps sourcePath open for as long as it stays attached, and
+	// on an NFS-backed staging volume an unlink (or the staging server's
+	// own cleanup) of a still-open file becomes a silly-rename instead of
+	// a real removal, leaving the staged upload directory behind.
+	detach()
+
 	if !staged {
 		if err := os.Remove(sourcePath); err != nil && !os.IsNotExist(err) {
 			return nil, fmt.Errorf("remove %s: %w", sourcePath, err)
@@ -292,7 +306,11 @@ func runAttached(ctx context.Context, cfg Config, deps Dependencies, sourcePath 
 	}
 
 	if staged && deps.StagedRemover != nil {
-		_ = CleanupStagedSource(deps.StagedRemover, StagedNameFromURL(cfg.SourceURL))
+		// Best-effort, same as the copy path above: log rather than fail
+		// an otherwise-successful ingest over a leftover staged upload.
+		if err := CleanupStagedSource(deps.StagedRemover, StagedNameFromURL(cfg.SourceURL)); err != nil {
+			log.Printf("kezio-ingest: %v", err)
+		}
 	}
 
 	compactSfdisk, err := compactJSON(sfdiskJSON)
