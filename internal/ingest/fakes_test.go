@@ -107,6 +107,48 @@ func (f *fakeSfdisk) Dump(_ context.Context, _ string) ([]byte, error) {
 	return f.json, nil
 }
 
+// fakeAttacher simulates the nbd-attach path with no real device: Attach
+// returns a fixed dev path and records attach/detach ordering (and
+// whether detach ran at all) so tests can assert Run always detaches,
+// even on a later failure. PartitionDevice fabricates "<dev>p<num>"
+// unless partitionErr is set, simulating a partition node that never
+// appeared.
+type fakeAttacher struct {
+	dev          string
+	attachErr    error
+	partitionErr error
+
+	attached bool
+	detached bool
+	// events records, in order, "attach" and "detach" so a test can
+	// assert detach only ever happens after attach, exactly once.
+	events []string
+}
+
+func (f *fakeAttacher) Attach(_ context.Context, _, _ string) (string, func(), error) {
+	if f.attachErr != nil {
+		return "", nil, f.attachErr
+	}
+	f.attached = true
+	f.events = append(f.events, "attach")
+	detach := func() {
+		f.detached = true
+		f.events = append(f.events, "detach")
+	}
+	dev := f.dev
+	if dev == "" {
+		dev = "/dev/nbd0"
+	}
+	return dev, detach, nil
+}
+
+func (f *fakeAttacher) PartitionDevice(_ context.Context, dev string, num int) (string, error) {
+	if f.partitionErr != nil {
+		return "", f.partitionErr
+	}
+	return fmt.Sprintf("%sp%d", dev, num), nil
+}
+
 // fakeBlkid maps a partition slice path (matched by substring) to a
 // fixed FSInfo.
 type fakeBlkid struct {

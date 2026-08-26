@@ -59,6 +59,31 @@ func TestBuildFromEnv_Valid(t *testing.T) {
 	if deps.Staging != nil {
 		t.Errorf("deps.Staging = %v, want nil when STAGING_ROOT is unset", deps.Staging)
 	}
+	if cfg.AttachMode != "" {
+		t.Errorf("AttachMode = %q, want empty (IMAGE_INGEST_ATTACH unset)", cfg.AttachMode)
+	}
+	if deps.Attacher == nil {
+		t.Error("deps.Attacher is nil, want an Attacher wired by default (IMAGE_INGEST_ATTACH unset means nbd)")
+	}
+}
+
+func TestBuildFromEnv_AttachModeCopySkipsAttacher(t *testing.T) {
+	workDir := filepath.Join(t.TempDir(), "work")
+	t.Setenv("SOURCE_URL", "https://example.com/image.qcow2")
+	t.Setenv("SOURCE_FORMAT", "qcow2")
+	t.Setenv("WORK_DIR", workDir)
+	t.Setenv("IMAGE_INGEST_ATTACH", "copy")
+
+	cfg, deps, err := buildFromEnv()
+	if err != nil {
+		t.Fatalf("buildFromEnv: %v", err)
+	}
+	if cfg.AttachMode != ingest.AttachModeCopy {
+		t.Errorf("AttachMode = %q, want %q", cfg.AttachMode, ingest.AttachModeCopy)
+	}
+	if deps.Attacher != nil {
+		t.Errorf("deps.Attacher = %v, want nil for AttachModeCopy", deps.Attacher)
+	}
 }
 
 func TestBuildFromEnv_MissingRequiredEnv(t *testing.T) {

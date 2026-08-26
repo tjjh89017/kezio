@@ -37,6 +37,21 @@ import (
 // and the Job template's mount can never drift apart.
 const DefaultWorkDir = "/work"
 
+// AttachModeNBD is Config.AttachMode's value selecting the nbd-attach
+// path: the source image is connected to a kernel nbd device with
+// qemu-nbd and every step below reads straight from that device (and its
+// kernel-created partition device nodes) instead of copying bytes into
+// scratch files. This is the default (an empty AttachMode behaves
+// identically - see run()); AttachModeCopy is the opt-out.
+const AttachModeNBD = "nbd"
+
+// AttachModeCopy is Config.AttachMode's opt-out value: the original
+// unprivileged pipeline, unchanged (see ensureRawDisk and
+// extractPartition) - a raw disk file or conversion copy in WorkDir, and
+// each partition sliced out with a plain file copy. Selected by clusters
+// that cannot run a privileged ingest Job.
+const AttachModeCopy = "copy"
+
 // Config parametrizes one Run: everything about the source image being
 // ingested and the work volume this Job's pod mounts.
 type Config struct {
@@ -68,6 +83,20 @@ type Config struct {
 	// get a best-effort ionice/nice priority instead (see cmd/ingest). 0
 	// or negative disables throttling.
 	IOBandwidthBytesPerSec int64
+	// AttachMode selects how Run gets from the downloaded/staged source
+	// to something partclone can read: AttachModeNBD (also the default,
+	// for an empty value) attaches the source with qemu-nbd and reads
+	// straight from the kernel block device, writing no part-N.raw slice
+	// or disk.raw conversion copy to WorkDir; AttachModeCopy is today's
+	// unprivileged file-copy pipeline. See run().
+	AttachMode string
+}
+
+// usesAttach reports whether cfg selects the nbd-attach path - true for
+// AttachModeNBD and for an unset AttachMode, false only for
+// AttachModeCopy.
+func (cfg Config) usesAttach() bool {
+	return cfg.AttachMode != AttachModeCopy
 }
 
 // Dependencies are the small interfaces Run drives; cmd/ingest wires the
@@ -82,11 +111,35 @@ type Dependencies struct {
 	Sfdisk        Sfdisk
 	Blkid         Blkid
 	Partclone     Partclone
+	// Attacher connects the source image to a kernel block device via
+	// qemu-nbd. Required when Config.usesAttach() is true (the default);
+	// nil is only valid for AttachModeCopy.
+	Attacher Attacher
 	// Statfs backs the work-directory space pre-flight check
 	// (ensureScratchSpace) run before each partition's content is
 	// cloned. nil means the real syscall.Statfs-backed implementation;
 	// tests set it to simulate an arbitrary reported free-space figure.
 	Statfs statfsFunc
+}
+
+// Attacher attaches a source disk image to a kernel block device with
+// qemu-nbd, so Run can read partitions straight off a live device instead
+// of copying bytes into scratch files (see AttachModeNBD). The
+// exec-backed implementation lives in cmd/ingest; tests use a fake.
+type Attacher interface {
+	// Attach connects image (already known to be in the given format -
+	// never left for qemu-nbd to probe) read-only to a free nbd device
+	// and returns its path (e.g. "/dev/nbd0"). detach disconnects it;
+	// the caller must call detach on every exit path, including error
+	// paths, so a failed run never leaks a connected nbd device.
+	Attach(ctx context.Context, image, format string) (dev string, detach func(), err error)
+	// PartitionDevice returns the path of partition number num on dev
+	// (e.g. "/dev/nbd0p1"), waiting a bounded time for the kernel to
+	// create it. A node that never appears - most likely because the
+	// nbd module was not loaded with max_part>0 - is reported as a clear
+	// error rather than left to whatever cryptic failure partclone would
+	// produce trying to open a missing device.
+	PartitionDevice(ctx context.Context, dev string, num int) (string, error)
 }
 
 // Run executes the full ingest pipeline described in the package doc
@@ -121,6 +174,10 @@ func run(ctx context.Context, cfg Config, deps Dependencies) (*ResultDisk, error
 	}
 	if !strings.EqualFold(info.Format, cfg.SourceFormat) {
 		return nil, fmt.Errorf("source format mismatch: qemu-img reports %q, Image declares %q", info.Format, cfg.SourceFormat)
+	}
+
+	if cfg.usesAttach() {
+		return runAttached(ctx, cfg, deps, sourcePath, info, staged)
 	}
 
 	rawPath, err := ensureRawDisk(ctx, cfg, deps, sourcePath, info.Format, staged)
@@ -177,6 +234,68 @@ func run(ctx context.Context, cfg Config, deps Dependencies) (*ResultDisk, error
 
 	return &ResultDisk{
 		SizeBytes:      diskSize,
+		PartitionTable: parsed.PartitionTable,
+		SfdiskJSON:     compactSfdisk,
+		Partitions:     partitions,
+	}, nil
+}
+
+// runAttached is run()'s nbd-attach path (Config.usesAttach() true): it
+// connects sourcePath to a kernel block device instead of converting it
+// to a raw scratch file, dumps the partition table straight off that
+// device, and clones each partition from its kernel-created partition
+// device node. No disk.raw conversion copy and no part-N.raw slice ever
+// exist in WorkDir - only each partition's own content-N output does.
+func runAttached(ctx context.Context, cfg Config, deps Dependencies, sourcePath string, info QemuImgInfo, staged bool) (*ResultDisk, error) {
+	dev, detach, err := deps.Attacher.Attach(ctx, sourcePath, info.Format)
+	if err != nil {
+		return nil, fmt.Errorf("attach source via nbd: %w", err)
+	}
+	defer detach()
+
+	sfdiskJSON, err := deps.Sfdisk.Dump(ctx, dev)
+	if err != nil {
+		return nil, fmt.Errorf("dump partition table: %w", err)
+	}
+	parsed, err := ParseSfdiskJSON(sfdiskJSON)
+	if err != nil {
+		return nil, fmt.Errorf("parse partition table: %w", err)
+	}
+
+	partitions := make([]ResultPartition, 0, len(parsed.Partitions))
+	for _, part := range parsed.Partitions {
+		partDev, err := deps.Attacher.PartitionDevice(ctx, dev, int(part.Number))
+		if err != nil {
+			return nil, fmt.Errorf("partition %d: %w", part.Number, err)
+		}
+		resultPart, err := processPartitionDevice(ctx, cfg, deps, partDev, part)
+		if err != nil {
+			return nil, fmt.Errorf("partition %d: %w", part.Number, err)
+		}
+		partitions = append(partitions, resultPart)
+	}
+
+	// Every partition has been read by now (partclone, or blkid alone
+	// for swap) - the deferred detach above only runs once this function
+	// returns, so it is safe to remove the downloaded source file here,
+	// same as the copy path does once it no longer needs it.
+	if !staged {
+		if err := os.Remove(sourcePath); err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("remove %s: %w", sourcePath, err)
+		}
+	}
+
+	if staged && deps.StagedRemover != nil {
+		_ = CleanupStagedSource(deps.StagedRemover, StagedNameFromURL(cfg.SourceURL))
+	}
+
+	compactSfdisk, err := compactJSON(sfdiskJSON)
+	if err != nil {
+		return nil, fmt.Errorf("compact partition table dump: %w", err)
+	}
+
+	return &ResultDisk{
+		SizeBytes:      info.VirtualSizeBytes,
 		PartitionTable: parsed.PartitionTable,
 		SfdiskJSON:     compactSfdisk,
 		Partitions:     partitions,
@@ -243,7 +362,25 @@ func processPartition(ctx context.Context, cfg Config, deps Dependencies, rawPat
 	// the scratch volume at a time instead of one per partition.
 	defer func() { _ = os.Remove(slicePath) }()
 
-	fsInfo, err := deps.Blkid.Detect(ctx, slicePath)
+	return finishPartition(ctx, cfg, deps, slicePath, part)
+}
+
+// processPartitionDevice is runAttached's counterpart to processPartition:
+// partDev is already a live partition device node (e.g. "/dev/nbd0p1"),
+// so there is no slice to extract or clean up - blkid and partclone read
+// it directly.
+func processPartitionDevice(ctx context.Context, cfg Config, deps Dependencies, partDev string, part ParsedPartition) (ResultPartition, error) {
+	return finishPartition(ctx, cfg, deps, partDev, part)
+}
+
+// finishPartition is the part of processing one partition that is
+// identical whether its bytes come from a scratch slice file
+// (processPartition) or a live nbd partition device node
+// (processPartitionDevice): detect its file system, classify its role,
+// and - for every role except swap - clone its content into its own
+// scratch content directory under cfg.WorkDir.
+func finishPartition(ctx context.Context, cfg Config, deps Dependencies, source string, part ParsedPartition) (ResultPartition, error) {
+	fsInfo, err := deps.Blkid.Detect(ctx, source)
 	if err != nil {
 		return ResultPartition{}, fmt.Errorf("detect file system: %w", err)
 	}
@@ -280,7 +417,7 @@ func processPartition(ctx context.Context, cfg Config, deps Dependencies, rawPat
 	if err := os.MkdirAll(contentDir, 0o750); err != nil {
 		return ResultPartition{}, fmt.Errorf("create content scratch dir: %w", err)
 	}
-	if err := deps.Partclone.Clone(ctx, fsInfo.FSType, slicePath, contentDir); err != nil {
+	if err := deps.Partclone.Clone(ctx, fsInfo.FSType, source, contentDir); err != nil {
 		return ResultPartition{}, fmt.Errorf("clone partition content: %w", err)
 	}
 

@@ -24,16 +24,23 @@ limitations under the License.
 // (internal/controller/imageimport_ingest.go, partitioncontent_job.go)
 // for the authoritative env var contract.
 //
-// Privilege requirements: none. Every external tool this binary shells
-// out to (qemu-img, sfdisk, blkid, partclone.<fs>) reads and writes plain
-// files - a downloaded/staged source file, a converted raw disk file,
-// and per-partition slice files this binary extracts with a plain Go
-// file copy (see internal/ingest's package doc comment). No nbd
-// attach, no loop device, no CAP_SYS_ADMIN, no privileged container is
-// needed. This binary also never talks to the Kubernetes API in either
-// mode - internal/ingest.Run and RunPublish only touch mounted volumes
-// (see their doc comments); the controllers map a successful Result onto
-// Kubernetes objects themselves.
+// Privilege requirements: depend on IMAGE_INGEST_ATTACH (see
+// ingest.Config.AttachMode). Left unset or set to "nbd" - the default -
+// this binary attaches the source image to a kernel nbd device with
+// qemu-nbd (execAttacher) and needs CAP_SYS_ADMIN, access to /dev, and
+// the "nbd" kernel module loaded on the node with max_part>0; see
+// internal/controller's Job builder for the exact securityContext this
+// grants, and docs/crd-reference.md for the node requirement. Set to
+// "copy", every external tool this binary shells out to (qemu-img,
+// sfdisk, blkid, partclone.<fs>) instead reads and writes plain files - a
+// downloaded/staged source file, a converted raw disk file, and
+// per-partition slice files this binary extracts with a plain Go file
+// copy (see internal/ingest's package doc comment) - needing no elevated
+// privilege at all; that mode exists for clusters that cannot run a
+// privileged ingest Job. This binary also never talks to the Kubernetes
+// API in either mode - internal/ingest.Run and RunPublish only touch
+// mounted volumes (see their doc comments); the controllers map a
+// successful Result onto Kubernetes objects themselves.
 //
 // Result handoff: this binary always writes an internal/ingest.Result as
 // JSON to its container's termination message path (default
@@ -170,6 +177,11 @@ func buildFromEnv() (ingest.Config, ingest.Dependencies, error) {
 		SourceChecksum:         os.Getenv("SOURCE_CHECKSUM"),
 		WorkDir:                workDir,
 		IOBandwidthBytesPerSec: bytesPerSec,
+		// IMAGE_INGEST_ATTACH unset behaves exactly like "nbd" - see
+		// ingest.Config.usesAttach - so leaving cfg.AttachMode at its zero
+		// value here already selects the right default; only "copy"
+		// needs to be read explicitly at all.
+		AttachMode: os.Getenv("IMAGE_INGEST_ATTACH"),
 	}
 
 	deps := ingest.Dependencies{
@@ -178,6 +190,9 @@ func buildFromEnv() (ingest.Config, ingest.Dependencies, error) {
 		Sfdisk:     execSfdisk{},
 		Blkid:      execBlkid{},
 		Partclone:  execPartclone{},
+	}
+	if cfg.AttachMode != ingest.AttachModeCopy {
+		deps.Attacher = execAttacher{}
 	}
 
 	if stagingRoot := os.Getenv("STAGING_ROOT"); stagingRoot != "" {

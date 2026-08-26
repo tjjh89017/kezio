@@ -69,6 +69,7 @@ func TestRun_Success(t *testing.T) {
 		SourceURL:    "https://example.com/golden.qcow2",
 		SourceFormat: "qcow2",
 		WorkDir:      t.TempDir(),
+		AttachMode:   AttachModeCopy,
 	}
 
 	res := Run(context.Background(), cfg, baseDeps())
@@ -145,6 +146,7 @@ func TestRun_StagedSourceRemovedOnSuccess(t *testing.T) {
 		SourceURL:    "kezio-staged://golden",
 		SourceFormat: "qcow2",
 		WorkDir:      t.TempDir(),
+		AttachMode:   AttachModeCopy,
 	}
 
 	res := Run(context.Background(), cfg, deps)
@@ -181,6 +183,7 @@ func TestRun_ChecksumMatchSucceeds(t *testing.T) {
 		SourceFormat:   "qcow2",
 		SourceChecksum: "sha256:" + hex.EncodeToString(sum[:]),
 		WorkDir:        t.TempDir(),
+		AttachMode:     AttachModeCopy,
 	}
 	deps := baseDeps()
 	deps.Downloader = &fakeDownloader{content: content}
@@ -225,6 +228,7 @@ func TestRun_RawSourceSkipsConversion(t *testing.T) {
 		SourceURL:    "https://example.com/golden.raw",
 		SourceFormat: "raw",
 		WorkDir:      workDir,
+		AttachMode:   AttachModeCopy,
 	}
 
 	res := Run(context.Background(), cfg, deps)
@@ -254,6 +258,7 @@ func TestRun_NonRawSourceRemovesEachScratchFileAsSoonAsPossible(t *testing.T) {
 		SourceURL:    "https://example.com/golden.qcow2",
 		SourceFormat: "qcow2",
 		WorkDir:      workDir,
+		AttachMode:   AttachModeCopy,
 	}, deps)
 	if !res.Success {
 		t.Fatalf("expected success, got error %q", res.Error)
@@ -287,6 +292,7 @@ func TestRun_InsufficientScratchSpaceFailsFast(t *testing.T) {
 		SourceURL:    "https://example.com/golden.qcow2",
 		SourceFormat: "qcow2",
 		WorkDir:      t.TempDir(),
+		AttachMode:   AttachModeCopy,
 	}
 
 	res := Run(context.Background(), cfg, deps)
@@ -322,6 +328,7 @@ func TestRun_PartcloneFailurePropagates(t *testing.T) {
 		SourceURL:    "https://example.com/golden.qcow2",
 		SourceFormat: "qcow2",
 		WorkDir:      t.TempDir(),
+		AttachMode:   AttachModeCopy,
 	}
 
 	res := Run(context.Background(), cfg, deps)
@@ -355,6 +362,119 @@ func writeFixtureContentDir(t *testing.T, dir string, content []byte) {
 	defer func() { _ = f.Close() }()
 	if err := store.WriteTorrentInfo(f, info); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// attachDeps returns a Dependencies wired for the nbd-attach path
+// (default AttachMode): baseDeps() plus a fakeAttacher whose fabricated
+// partition device paths ("/dev/nbd0p<N>") the fake blkid map matches.
+func attachDeps() (Dependencies, *fakeAttacher) {
+	deps := baseDeps()
+	deps.Blkid = &fakeBlkid{byPathSubstring: map[string]FSInfo{
+		"nbd0p1": {FSType: "vfat"},
+		"nbd0p2": {FSType: "ext4"},
+		"nbd0p3": {FSType: "swap", UUID: "CCCC-UUID"},
+	}}
+	attacher := &fakeAttacher{}
+	deps.Attacher = attacher
+	return deps, attacher
+}
+
+// TestRun_AttachIsDefault checks that an unset AttachMode drives the
+// nbd-attach path: no disk.raw or part-N.raw scratch file is ever
+// written, and Run reads straight through the Attacher.
+func TestRun_AttachIsDefault(t *testing.T) {
+	deps, attacher := attachDeps()
+	workDir := t.TempDir()
+
+	res := Run(context.Background(), Config{
+		SourceURL:    "https://example.com/golden.qcow2",
+		SourceFormat: "qcow2",
+		WorkDir:      workDir,
+	}, deps)
+	if !res.Success {
+		t.Fatalf("expected success, got error %q", res.Error)
+	}
+	if res.Disk == nil || len(res.Disk.Partitions) != 3 {
+		t.Fatalf("Disk = %+v, want 3 partitions", res.Disk)
+	}
+	if !attacher.attached || !attacher.detached {
+		t.Errorf("attacher.attached=%v detached=%v, want both true", attacher.attached, attacher.detached)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "disk.raw")); !os.IsNotExist(err) {
+		t.Errorf("expected no disk.raw under the attach path, stat err = %v", err)
+	}
+	for _, num := range []int32{1, 2, 3} {
+		slice := filepath.Join(workDir, fmt.Sprintf("part-%d.raw", num))
+		if _, err := os.Stat(slice); !os.IsNotExist(err) {
+			t.Errorf("expected no partition %d slice under the attach path, stat err = %v", num, err)
+		}
+	}
+}
+
+// TestRun_AttachDetachesOnFailure checks that a failure partway through
+// (here, blkid) still runs the Attacher's detach - a connected nbd
+// device must never leak just because a later step failed.
+func TestRun_AttachDetachesOnFailure(t *testing.T) {
+	deps, attacher := attachDeps()
+	deps.Blkid = &fakeBlkid{err: fmt.Errorf("boom")}
+
+	res := Run(context.Background(), Config{
+		SourceURL:    "https://example.com/golden.qcow2",
+		SourceFormat: "qcow2",
+		WorkDir:      t.TempDir(),
+	}, deps)
+	if res.Success {
+		t.Fatal("expected failure when blkid fails")
+	}
+	if !attacher.detached {
+		t.Error("expected the attacher to be detached even though the run failed")
+	}
+	if len(attacher.events) != 2 || attacher.events[0] != "attach" || attacher.events[1] != "detach" {
+		t.Errorf("events = %v, want [attach detach]", attacher.events)
+	}
+}
+
+// TestRun_AttachMissingPartitionDevice checks that a partition device
+// node that never appears is reported as a clear failure (not a panic or
+// an opaque tool error), and still detaches.
+func TestRun_AttachMissingPartitionDevice(t *testing.T) {
+	deps, attacher := attachDeps()
+	attacher.partitionErr = fmt.Errorf("partition device /dev/nbd0p1 did not appear")
+
+	res := Run(context.Background(), Config{
+		SourceURL:    "https://example.com/golden.qcow2",
+		SourceFormat: "qcow2",
+		WorkDir:      t.TempDir(),
+	}, deps)
+	if res.Success {
+		t.Fatal("expected failure when a partition device node never appears")
+	}
+	if !strings.Contains(res.Error, "did not appear") {
+		t.Errorf("Error = %q, want it to mention the missing partition device", res.Error)
+	}
+	if !attacher.detached {
+		t.Error("expected the attacher to be detached even though the run failed")
+	}
+}
+
+// TestRun_AttachFailurePropagates checks that Attach itself failing (for
+// example, no free nbd device) is reported as a clear failure with no
+// detach call - there is nothing to detach.
+func TestRun_AttachFailurePropagates(t *testing.T) {
+	deps, attacher := attachDeps()
+	attacher.attachErr = fmt.Errorf("no free /dev/nbd* device found")
+
+	res := Run(context.Background(), Config{
+		SourceURL:    "https://example.com/golden.qcow2",
+		SourceFormat: "qcow2",
+		WorkDir:      t.TempDir(),
+	}, deps)
+	if res.Success {
+		t.Fatal("expected failure when Attach fails")
+	}
+	if attacher.detached {
+		t.Error("expected no detach call when Attach itself failed")
 	}
 }
 
