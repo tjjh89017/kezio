@@ -382,4 +382,70 @@ var _ = Describe("Image Controller", func() {
 		Expect(k8sClient.Get(ctx, nn, &ready)).To(Succeed())
 		Expect(ready.Status.State).To(Equal(keziov1alpha3.ImageStateReady))
 	})
+
+	Describe("content owner references", func() {
+		It("sets a non-controller owner reference on every PartitionContent it references", func() {
+			contentName := "pc-" + imageTestHash(12)
+			createReadyContent(ctx, contentName)
+
+			img := newTestImageWithSlots("image-owner-ref", []keziov1alpha3.ImageSlot{
+				{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentName}},
+			})
+			Expect(k8sClient.Create(ctx, img)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, img) })
+
+			r := &ImageReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			nn := types.NamespacedName{Name: img.Name, Namespace: "default"}
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			var got keziov1alpha3.Image
+			Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
+
+			var pc keziov1alpha3.PartitionContent
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: contentName, Namespace: "default"}, &pc)).To(Succeed())
+			Expect(pc.OwnerReferences).To(HaveLen(1))
+			ref := pc.OwnerReferences[0]
+			Expect(ref.Name).To(Equal(img.Name))
+			Expect(ref.UID).To(Equal(got.UID))
+			Expect(ref.Controller == nil || !*ref.Controller).To(BeTrue(), "the reference must not make this Image the content's controller")
+			Expect(ref.BlockOwnerDeletion == nil || !*ref.BlockOwnerDeletion).To(BeTrue())
+
+			// A second reconcile (e.g. once the Image reaches Ready and
+			// takes the fast path) must not duplicate the reference.
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: contentName, Namespace: "default"}, &pc)).To(Succeed())
+			Expect(pc.OwnerReferences).To(HaveLen(1))
+		})
+
+		It("carries an owner reference for every Image sharing the same PartitionContent", func() {
+			contentName := "pc-" + imageTestHash(13)
+			createReadyContent(ctx, contentName)
+
+			img1 := newTestImageWithSlots("image-owner-ref-shared-1", []keziov1alpha3.ImageSlot{
+				{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentName}},
+			})
+			Expect(k8sClient.Create(ctx, img1)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, img1) })
+
+			img2 := newTestImageWithSlots("image-owner-ref-shared-2", []keziov1alpha3.ImageSlot{
+				{Number: 1, Role: keziov1alpha3.PartitionRoleData, ContentRef: &keziov1alpha3.NameRef{Name: contentName}},
+			})
+			Expect(k8sClient.Create(ctx, img2)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, img2) })
+
+			r := &ImageReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: img1.Name, Namespace: "default"}})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: img2.Name, Namespace: "default"}})
+			Expect(err).NotTo(HaveOccurred())
+
+			var pc keziov1alpha3.PartitionContent
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: contentName, Namespace: "default"}, &pc)).To(Succeed())
+			Expect(pc.OwnerReferences).To(HaveLen(2))
+			names := []string{pc.OwnerReferences[0].Name, pc.OwnerReferences[1].Name}
+			Expect(names).To(ConsistOf(img1.Name, img2.Name))
+		})
+	})
 })

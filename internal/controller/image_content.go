@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
@@ -124,6 +125,81 @@ func (r *ImageReconciler) aggregateSlotContents(ctx context.Context, image *kezi
 		}
 	}
 	return agg, nil
+}
+
+// ensureContentOwnerRefs adds a non-controller ownerReference to image on
+// every PartitionContent a layout slot references, so ordinary Kubernetes
+// garbage collection can reclaim a PartitionContent - and the content PVC
+// and publish Job owner-referenced to it in turn - once every Image that
+// ever named it is gone, instead of it staying orphaned forever once its
+// creating Image is deleted.
+//
+// The reference is deliberately non-controller (SetOwnerReference, not
+// SetControllerReference): a PartitionContent can be named by more than
+// one Image's layout, and garbage collection only deletes a dependent
+// once its entire owner set is gone, so a content shared this way
+// survives any one owning Image's deletion. PartitionContentFinalizer's
+// own DeletionBlocked handling (partitioncontent_finalizer.go) is
+// unchanged and still gates actual removal while an Image slot or an
+// active DeployRun references the content - this ownerReference only
+// ever gets that finalizer's onDelete to run at all, once every owning
+// Image is gone, in place of nothing ever doing so.
+//
+// ImageSpec is immutable once created, so a slot's contentRef, once set,
+// never needs to be un-referenced later - only added, the first time
+// each PartitionContent this Image names is seen. This runs on every
+// reconcile, including one that finds image already Ready, so an Image
+// admitted before this ownerReference existed still picks it up. A slot
+// naming a PartitionContent that does not exist yet is skipped silently:
+// aggregateSlotContents already reports that slot as not-ready, and the
+// PartitionContent watch (mapPartitionContentToImages) re-triggers this
+// reconciler once it is created.
+func (r *ImageReconciler) ensureContentOwnerRefs(ctx context.Context, image *keziov1alpha3.Image) error {
+	for _, slot := range image.Spec.Layout.Slots {
+		if slot.ContentRef == nil {
+			continue
+		}
+
+		namespace := slot.ContentRef.Namespace
+		if namespace == "" {
+			namespace = image.Namespace
+		}
+
+		var content keziov1alpha3.PartitionContent
+		key := client.ObjectKey{Namespace: namespace, Name: slot.ContentRef.Name}
+		if err := r.Get(ctx, key, &content); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return fmt.Errorf("image %q: getting PartitionContent %q for owner reference: %w", image.Name, slot.ContentRef.Name, err)
+		}
+
+		if hasOwnerReference(&content, image) {
+			continue
+		}
+
+		before := content.DeepCopy()
+		if err := controllerutil.SetOwnerReference(image, &content, r.Scheme); err != nil {
+			return fmt.Errorf("image %q: setting owner reference on PartitionContent %q: %w", image.Name, content.Name, err)
+		}
+		if err := r.Patch(ctx, &content, client.MergeFrom(before)); err != nil {
+			return fmt.Errorf("image %q: patching PartitionContent %q owner reference: %w", image.Name, content.Name, err)
+		}
+	}
+	return nil
+}
+
+// hasOwnerReference reports whether content already carries an owner
+// reference to owner, matched by UID - the same identity
+// controllerutil.SetOwnerReference itself keys on - so a reconcile that
+// already recorded it does not re-patch the object every time.
+func hasOwnerReference(content *keziov1alpha3.PartitionContent, owner metav1.Object) bool {
+	for _, ref := range content.OwnerReferences {
+		if ref.UID == owner.GetUID() {
+			return true
+		}
+	}
+	return false
 }
 
 // boundedMessage joins items with "; ", truncating to

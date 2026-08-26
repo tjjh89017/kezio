@@ -67,7 +67,7 @@ type ImageReconciler struct {
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=images,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=images/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=images/finalizers,verbs=update
-// +kubebuilder:rbac:groups=kezio.kojuro.date,resources=partitioncontents,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups=kezio.kojuro.date,resources=partitioncontents,verbs=get;list;watch;create;patch
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines,verbs=get;list;watch
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=deployruns,verbs=get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
@@ -94,6 +94,10 @@ func (r *ImageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 // changing (Machines coming and going) long after an Image itself
 // reaches Ready.
 func (r *ImageReconciler) onChange(ctx context.Context, image *keziov1alpha3.Image) (ctrl.Result, error) {
+	if err := r.ensureContentOwnerRefs(ctx, image); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	if image.Status.State == keziov1alpha3.ImageStateReady {
 		return r.reconcileImageSeeder(ctx, image)
 	}
