@@ -489,10 +489,11 @@ in operation.
 
 kezio publishes six images: `kezio`, `kezio-ingest`, `kezio-seeder`,
 `kezio-image-service`, `kezio-bootd`, and `kezio-boot-artifacts`. All six
-get a `main` tag on each push to `main`, and a semantic version tag on
-each release tag. The `main` tag of all six comes from the same commit,
-because `.github/workflows/main.yaml` pushes only after each e2e lane has
-passed.
+get a `main` tag on each push to `main`, and a tag matching the git tag
+verbatim (e.g. `v0.3.2`) on each release tag. The `main` tag of all six
+comes from the same commit, because `.github/workflows/main.yaml` pushes
+only after each e2e lane has passed. Tags before `v0.3.2` were published
+without the leading `v` (e.g. `0.1.8`).
 
 **The most recent release tag is older than the current tree.** The
 repository was rebuilt on a new operator-sdk scaffold after the last
