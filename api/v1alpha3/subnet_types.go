@@ -78,6 +78,19 @@ type SubnetDHCP struct {
 	// +kubebuilder:validation:Pattern=`^$|^(\d{1,3}\.){3}\d{1,3}$`
 	// +optional
 	Gateway *string `json:"gateway,omitempty"`
+	// LeaseTime is the DHCP lease duration bootd hands out in
+	// SubnetDHCPModeLease, rendered as dnsmasq's dhcp-range lease time (for
+	// example "30m" or "1h"). Ignored in SubnetDHCPModeProxy, where the
+	// segment's own DHCP server owns lease lifetime.
+	//
+	// Left unset defaults to 30 minutes. Set at least 2 minutes: dnsmasq
+	// renews well before expiry, but a shorter lease turns any bootd outage
+	// past its duration into lost addresses for every machine mid-deploy
+	// (see the Subnet doc's operational note).
+	// +kubebuilder:validation:Format=duration
+	// +kubebuilder:validation:XValidation:rule="self >= duration('2m')",message="leaseTime must be at least 2 minutes"
+	// +optional
+	LeaseTime *metav1.Duration `json:"leaseTime,omitempty"`
 }
 
 // SubnetSpec defines the desired state of Subnet.

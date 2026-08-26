@@ -153,6 +153,22 @@ spec:
                       addresses). Ignored unless Mode is SubnetDHCPModeLease.
                     pattern: ^(\d{1,3}\.){3}\d{1,3}$
                     type: string
+                  leaseTime:
+                    description: |-
+                      LeaseTime is the DHCP lease duration bootd hands out in
+                      SubnetDHCPModeLease, rendered as dnsmasq's dhcp-range lease time (for
+                      example "30m" or "1h"). Ignored in SubnetDHCPModeProxy, where the
+                      segment's own DHCP server owns lease lifetime.
+
+                      Left unset defaults to 30 minutes. Set at least 2 minutes: dnsmasq
+                      renews well before expiry, but a shorter lease turns any bootd outage
+                      past its duration into lost addresses for every machine mid-deploy
+                      (see the Subnet doc's operational note).
+                    format: duration
+                    type: string
+                    x-kubernetes-validations:
+                    - message: leaseTime must be at least 2 minutes
+                      rule: self >= duration('2m')
                   mode:
                     description: |-
                       Mode selects proxyDHCP (defer to an existing DHCP server on the
