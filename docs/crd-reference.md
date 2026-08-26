@@ -198,6 +198,63 @@ Set an address whenever the seeder or the tracker of the Site is on a
 different Subnet. The router option is the only thing that tells a
 machine how to get there.
 
+### `dhcp.leaseTime`
+
+`spec.dhcp.leaseTime` sets the DHCP lease duration bootd hands out in
+`lease` mode, for example `30m` or `1h`. Left unset, it defaults to 30
+minutes. The admission schema rejects anything under 2 minutes.
+
+Ignored in `proxy` mode: the segment's own DHCP server owns lease
+lifetime there.
+
+Operational risk: if bootd is unavailable for longer than `leaseTime`, a
+machine mid-deploy loses its address once its lease expires with nobody
+to renew it against. A short lease time shrinks that safety margin.
+
+### The bootd lease PVC
+
+A `lease`-mode Subnet gets a second object alongside its bootd
+Deployment: a PersistentVolumeClaim named `kezio-bootd-<subnet>-leases`,
+`ReadWriteOnce`, 64Mi, owned by the Subnet (it is deleted with the
+Subnet, taking every persisted lease with it). It is mounted into the
+bootd pod and holds dnsmasq's lease file alone - the rest of bootd's
+writable state (its rendered config, the dhcp-hostsfile MAC allowlist)
+still lives on an ephemeral `emptyDir`.
+
+Without this PVC, every pod recreate (an upgrade, a rollout, a node
+eviction, or switching a Subnet between `lease` and `proxy` mode and
+back) would forget every lease dnsmasq had handed out. With it, leases
+outlive the pod.
+
+A `proxy`-mode Subnet gets no lease PVC: proxy mode never runs its own
+lease file at all.
+
+The bootd Deployment's update strategy is `Recreate` in `lease` mode (the
+default `RollingUpdate` otherwise): the lease PVC is `ReadWriteOnce`, and
+dnsmasq is meant to be the segment's sole DHCP authority, so the old pod
+is torn down before a new one starts rather than both briefly running.
+
+### What releases a DHCP lease
+
+In `lease` mode, a lease ends one of three ways:
+
+- **Expiry.** dnsmasq's own lease timer, unchanged by anything below.
+- **An active DHCPRELEASE bootd sends** when a MAC that held a lease
+  drops out of the enrolled-Machine allowlist - the Machine was deleted,
+  or its `spec.bootMACAddress` changed away from that MAC. The address
+  returns to the pool immediately rather than waiting out `leaseTime`.
+- **The startup filter.** On every bootd start in `lease` mode, once the
+  Machine allowlist's first sync completes, bootd rewrites the persisted
+  lease file to drop any lease held by a MAC no longer in that allowlist,
+  before dnsmasq ever reads it back - so a lease surviving a bootd
+  restart on behalf of a Machine deleted while bootd was down does not
+  get silently renewed.
+
+What does **not** release a lease: a Machine's ordinary
+Deployed-to-Complete transition. A completed deployment's operating
+system keeps renewing its lease as normal DHCP traffic - nothing about
+finishing a deployment removes a Machine's MAC from the allowlist.
+
 In proxy mode bootd is not the DHCP server. It cannot hand out a
 router option that the DHCP server of the segment owns. kezio rejects
 a non-empty address there, and does not ignore it. If kezio ignored
