@@ -43,9 +43,19 @@ func newAgentTestClientWithWatch(t *testing.T, objs ...client.Object) client.Wit
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme(corev1) error = %v", err)
 	}
+	hasSubnet := false
+	for _, o := range objs {
+		if _, ok := o.(*keziov1alpha3.Subnet); ok {
+			hasSubnet = true
+			break
+		}
+	}
+	if !hasSubnet {
+		objs = append(objs, agentTestProxySubnet())
+	}
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&keziov1alpha3.DeployRun{}, &keziov1alpha3.Machine{}).
+		WithStatusSubresource(&keziov1alpha3.DeployRun{}, &keziov1alpha3.Machine{}, &keziov1alpha3.Subnet{}).
 		WithObjects(objs...).
 		Build()
 }

@@ -35,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -235,7 +236,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	machineDeployer, err := deployerFromEnv(mgr.GetClient(), bootTokens, bootTokenTTL)
+	machineDeployer, err := deployerFromEnv(
+		mgr.GetClient(), mgr.GetEventRecorderFor("machine-controller"), bootTokens, bootTokenTTL)
 	if err != nil {
 		setupLog.Error(err, "invalid DEPLOYER configuration")
 		os.Exit(1)
@@ -471,13 +473,15 @@ func main() {
 // bootserver in this process still arms and powers machines on exactly
 // the same, it just mints no token anyone would read.
 func deployerFromEnv(
-	c client.Client, tokens *bootserver.TokenStore, tokenTTL time.Duration,
+	c client.Client, recorder record.EventRecorder, tokens *bootserver.TokenStore, tokenTTL time.Duration,
 ) (deployer.Deployer, error) {
 	switch v := os.Getenv("DEPLOYER"); v {
 	case "", "fake":
 		return &deployer.FakeDeployer{Client: c}, nil
 	case "agent":
-		return &deployer.AgentDeployer{Client: c, PlanBuilder: planBuilder(c), Tokens: tokens, TokenTTL: tokenTTL}, nil
+		return &deployer.AgentDeployer{
+			Client: c, PlanBuilder: planBuilder(c), Tokens: tokens, TokenTTL: tokenTTL, Recorder: recorder,
+		}, nil
 	default:
 		return nil, fmt.Errorf("unknown DEPLOYER %q (want \"fake\" or \"agent\")", v)
 	}

@@ -65,7 +65,11 @@ func setAgentRegistered(machine *keziov1alpha3.Machine) {
 const agentTestBMCSecretName = "m1-bmc"
 
 // newAgentTestClient builds a fake client seeded with objs, with both the
-// kezio and core (Secret) schemes registered.
+// kezio and core (Secret) schemes registered. A proxy-mode Subnet named
+// "default" (newTestMachine's spec.subnetRef) is seeded automatically
+// unless objs already names one: reserveAndAwaitDHCP resolves it on every
+// arm call, and proxy mode is a no-op there, keeping every test that
+// predates DHCP reservations unaffected.
 func newAgentTestClient(t *testing.T, objs ...client.Object) client.Client {
 	t.Helper()
 	scheme := apimachineryruntime.NewScheme()
@@ -75,11 +79,54 @@ func newAgentTestClient(t *testing.T, objs ...client.Object) client.Client {
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme(corev1) error = %v", err)
 	}
+	hasSubnet := false
+	for _, o := range objs {
+		if _, ok := o.(*keziov1alpha3.Subnet); ok {
+			hasSubnet = true
+			break
+		}
+	}
+	if !hasSubnet {
+		objs = append(objs, agentTestProxySubnet())
+	}
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&keziov1alpha3.DeployRun{}, &keziov1alpha3.Machine{}).
+		WithStatusSubresource(&keziov1alpha3.DeployRun{}, &keziov1alpha3.Machine{}, &keziov1alpha3.Subnet{}).
 		WithObjects(objs...).
 		Build()
+}
+
+// agentTestProxySubnet is the default Subnet newAgentTestClient seeds:
+// proxy mode, so reserveAndAwaitDHCP always proceeds with no reservation.
+func agentTestProxySubnet() *keziov1alpha3.Subnet {
+	return &keziov1alpha3.Subnet{
+		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
+		Spec: keziov1alpha3.SubnetSpec{
+			SiteRef: keziov1alpha3.NameRef{Name: "site"},
+			CIDR:    "192.0.2.0/24",
+			DHCP:    &keziov1alpha3.SubnetDHCP{Mode: keziov1alpha3.SubnetDHCPModeProxy},
+		},
+	}
+}
+
+// agentTestLeaseSubnet is a lease-mode counterpart to agentTestProxySubnet,
+// for tests exercising DHCP reservation allocation: a small range with
+// room for exactly one address before exhaustion.
+func agentTestLeaseSubnet() *keziov1alpha3.Subnet {
+	gateway := "192.0.2.1"
+	return &keziov1alpha3.Subnet{
+		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
+		Spec: keziov1alpha3.SubnetSpec{
+			SiteRef: keziov1alpha3.NameRef{Name: "site"},
+			CIDR:    "192.0.2.0/24",
+			DHCP: &keziov1alpha3.SubnetDHCP{
+				Mode:            keziov1alpha3.SubnetDHCPModeLease,
+				Gateway:         &gateway,
+				LeaseRangeStart: "192.0.2.10",
+				LeaseRangeEnd:   "192.0.2.10",
+			},
+		},
+	}
 }
 
 // agentTestBMCSecret builds the Secret agentTestBMCSecretName names, with
@@ -251,9 +298,20 @@ func newAgentTestClientMachineStatusConflictOnce(t *testing.T, objs ...client.Ob
 		},
 	}
 
+	hasSubnet := false
+	for _, o := range objs {
+		if _, ok := o.(*keziov1alpha3.Subnet); ok {
+			hasSubnet = true
+			break
+		}
+	}
+	if !hasSubnet {
+		objs = append(objs, agentTestProxySubnet())
+	}
+
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&keziov1alpha3.DeployRun{}, &keziov1alpha3.Machine{}).
+		WithStatusSubresource(&keziov1alpha3.DeployRun{}, &keziov1alpha3.Machine{}, &keziov1alpha3.Subnet{}).
 		WithObjects(objs...).
 		WithInterceptorFuncs(funcs).
 		Build()

@@ -28,6 +28,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -155,6 +156,12 @@ type AgentDeployer struct {
 	// minted. Zero (including a Deployer built with no explicit value)
 	// means bootserver.DefaultTokenTTL.
 	TokenTTL time.Duration
+	// Recorder emits the DHCPPoolExhausted Event on a Machine that could
+	// not get a DHCP reservation because its Subnet's lease-mode address
+	// pool is exhausted (see reserveAndAwaitDHCP). Nil skips emitting the
+	// Event; the Machine still reports Delayed and the Subnet condition
+	// is still set either way.
+	Recorder record.EventRecorder
 }
 
 var _ Deployer = (*AgentDeployer)(nil)
@@ -487,6 +494,11 @@ func (d *AgentDeployer) armPXEAndPowerOn(ctx context.Context, machine *keziov1al
 	if err := d.issueBootToken(ctx, machine); err != nil {
 		return Result{}, err
 	}
+	if result, proceed, err := d.reserveAndAwaitDHCP(ctx, machine); err != nil {
+		return Result{}, err
+	} else if !proceed {
+		return result, nil
+	}
 	if err := d.armPXE(ctx, machine); err != nil {
 		return Result{}, err
 	}
@@ -539,6 +551,9 @@ func (d *AgentDeployer) pollAgentRegistration(ctx context.Context, machine *kezi
 		switch err := d.Client.Get(ctx, key, &hw); {
 		case err == nil:
 			if err := d.disarmPXE(ctx, machine); err != nil {
+				return Result{}, err
+			}
+			if err := d.releaseDHCPReservation(ctx, machine); err != nil {
 				return Result{}, err
 			}
 			return Result{Outcome: Complete}, nil
@@ -617,7 +632,7 @@ func (d *AgentDeployer) Provision(ctx context.Context, machine *keziov1alpha3.Ma
 	if run.Status.Phase == "" {
 		return d.startProvision(ctx, machine, run, restartOnFailure)
 	}
-	return provisionResultFromPhase(run), nil
+	return d.provisionResultFromPhase(ctx, machine, run)
 }
 
 // resetProvisionAttempt clears run's in-progress attempt state so it reads
@@ -700,6 +715,11 @@ func (d *AgentDeployer) armProvisionBootAndPowerOn(ctx context.Context, machine 
 	if err := d.issueBootToken(ctx, machine); err != nil {
 		return Result{}, err
 	}
+	if result, proceed, err := d.reserveAndAwaitDHCP(ctx, machine); err != nil {
+		return Result{}, err
+	} else if !proceed {
+		return result, nil
+	}
 	if err := d.armProvisionBoot(ctx, machine); err != nil {
 		return Result{}, err
 	}
@@ -771,19 +791,23 @@ func planBuildErrorResult(err error) (result Result, ok bool) {
 }
 
 // provisionResultFromPhase is Provision's later-pass branch: see
-// Provision's doc comment.
-func provisionResultFromPhase(run *keziov1alpha3.DeployRun) Result {
+// Provision's doc comment. Succeeded also releases machine's DHCP
+// reservation, if any, the same way Inspect's own Complete does.
+func (d *AgentDeployer) provisionResultFromPhase(ctx context.Context, machine *keziov1alpha3.Machine, run *keziov1alpha3.DeployRun) (Result, error) {
 	switch run.Status.Phase {
 	case keziov1alpha3.DeployRunPhaseSucceeded:
-		return Result{Outcome: Complete}
+		if err := d.releaseDHCPReservation(ctx, machine); err != nil {
+			return Result{}, err
+		}
+		return Result{Outcome: Complete}, nil
 	case keziov1alpha3.DeployRunPhaseFailed:
 		return Result{
 			Outcome:      Failed,
 			ErrorType:    keziov1alpha3.MachineErrorTypeRestart,
 			ErrorMessage: deployRunFailureMessage(run),
-		}
+		}, nil
 	default:
-		return provisionStallResult(run)
+		return provisionStallResult(run), nil
 	}
 }
 
@@ -824,13 +848,14 @@ func deployRunFailureMessage(run *keziov1alpha3.DeployRun) string {
 	return fmt.Sprintf("DeployRun %q failed", run.Name)
 }
 
-// Deprovision implements Deployer. It reports Complete immediately and
-// touches neither the BMC nor the machine's disk: every piece of state
-// this deployer manages - agentDeployerPXEArmedAnnotation,
+// Deprovision implements Deployer. It touches neither the BMC nor the
+// machine's disk, only releasing machine's DHCP reservation (if any) on
+// its Subnet before reporting Complete: every other piece of state this
+// deployer manages - agentDeployerPXEArmedAnnotation,
 // agentDeployerProvisionBootAnnotation, and status.netBoot - lives on the
 // Machine object itself, so it is already gone the moment the object is
 // removed, satisfying the interface's Complete contract with nothing left
-// to do here.
+// to do for those.
 //
 // kezio deliberately does not erase the deployed system as part of
 // deleting a Machine. Deleting a Machine removes it from kezio's
@@ -844,6 +869,9 @@ func deployRunFailureMessage(run *keziov1alpha3.DeployRun) string {
 // a caller that wants the data actually destroyed must do that before,
 // or independently of, deleting the Machine.
 func (d *AgentDeployer) Deprovision(ctx context.Context, machine *keziov1alpha3.Machine, restartOnFailure bool) (Result, error) {
+	if err := d.releaseDHCPReservation(ctx, machine); err != nil {
+		return Result{}, err
+	}
 	return Result{Outcome: Complete}, nil
 }
 
