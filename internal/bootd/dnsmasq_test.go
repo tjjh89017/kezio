@@ -21,6 +21,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -227,6 +228,197 @@ while :; do sleep 0.05; done
 		defer mu.Unlock()
 		return len(applied) == 2 && applied[1] == "rev-2"
 	})
+
+	cancel()
+	<-done
+}
+
+// releaseCall records one ReleaseFunc invocation, for the recording
+// ReleaseFunc the release-trigger tests below use in place of a real
+// dhcp_release binary.
+type releaseCall struct{ iface, ip, mac string }
+
+// recordingRelease is a ReleaseFunc test double that appends every call
+// it receives, safe for concurrent use by hostsfileLoop's goroutine.
+type recordingRelease struct {
+	mu    sync.Mutex
+	calls []releaseCall
+}
+
+func (r *recordingRelease) release(iface, ip, mac string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, releaseCall{iface, ip, mac})
+	return nil
+}
+
+func (r *recordingRelease) snapshot() []releaseCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]releaseCall(nil), r.calls...)
+}
+
+// testLeaseLine is one dnsmasq lease file line shared by every
+// release-trigger test below: MAC aa:bb:cc:dd:ee:01 holding 192.0.2.50.
+const testLeaseLine = "1893456000 aa:bb:cc:dd:ee:01 192.0.2.50 host-1 *\n"
+
+// TestDnsmasq_ReleasesLeaseWhenMACLeavesAllowlist proves a MAC dropping
+// out of the allowlist while it holds a lease in the persisted lease file
+// gets an active DHCPRELEASE, so its address returns to the pool
+// immediately instead of waiting out the segment's lease time.
+func TestDnsmasq_ReleasesLeaseWhenMACLeavesAllowlist(t *testing.T) {
+	d, runDir := newTestDnsmasq(t, longRunningScript)
+	d.Config.LeaseMode = true
+	rel := &recordingRelease{}
+	d.Release = rel.release
+
+	leasePath := filepath.Join(runDir, leasefileName)
+	if err := os.WriteFile(leasePath, []byte(testLeaseLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(logf.IntoContext(context.Background(), logf.Log))
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+
+	// Initial sync: the MAC is enrolled, so the startup filter keeps its
+	// lease and nothing is released yet.
+	d.SetAllowedMACs([]string{"aa:bb:cc:dd:ee:01"})
+	waitFor(t, "hostsfile reflects the initial sync", func() bool {
+		got, err := os.ReadFile(HostsfilePath(runDir))
+		return err == nil && strings.Contains(string(got), "aa:bb:cc:dd:ee:01")
+	})
+	if got := rel.snapshot(); len(got) != 0 {
+		t.Fatalf("Release called %v before any MAC left the allowlist, want no calls", got)
+	}
+
+	// The Machine is deleted (or re-MACed): its MAC drops out.
+	d.SetAllowedMACs(nil)
+	waitFor(t, "DHCPRELEASE for the de-enrolled MAC", func() bool {
+		return len(rel.snapshot()) > 0
+	})
+
+	got := rel.snapshot()
+	want := []releaseCall{{iface: "net1", ip: "192.0.2.50", mac: "aa:bb:cc:dd:ee:01"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Release calls = %#v, want %#v", got, want)
+	}
+
+	cancel()
+	<-done
+}
+
+// TestDnsmasq_NoReleaseForStillEnrolledMAC proves a MAC that stays
+// enrolled across a SetAllowedMACs push - only the allowlist's other
+// members changing - triggers no release, matching the "not on an
+// ordinary Complete" requirement: nothing about finishing a deployment
+// removes a Machine's MAC from this set.
+func TestDnsmasq_NoReleaseForStillEnrolledMAC(t *testing.T) {
+	d, runDir := newTestDnsmasq(t, longRunningScript)
+	d.Config.LeaseMode = true
+	rel := &recordingRelease{}
+	d.Release = rel.release
+
+	leasePath := filepath.Join(runDir, leasefileName)
+	if err := os.WriteFile(leasePath, []byte(testLeaseLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(logf.IntoContext(context.Background(), logf.Log))
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+
+	d.SetAllowedMACs([]string{"aa:bb:cc:dd:ee:01"})
+	waitFor(t, "initial hostsfile", func() bool {
+		got, err := os.ReadFile(HostsfilePath(runDir))
+		return err == nil && strings.Contains(string(got), "aa:bb:cc:dd:ee:01")
+	})
+
+	// A second Machine enrolls; the first MAC stays present throughout.
+	d.SetAllowedMACs([]string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"})
+	waitFor(t, "hostsfile reflects the new enrollment", func() bool {
+		got, err := os.ReadFile(HostsfilePath(runDir))
+		return err == nil && strings.Contains(string(got), "aa:bb:cc:dd:ee:02")
+	})
+
+	if got := rel.snapshot(); len(got) != 0 {
+		t.Errorf("Release called %v for a MAC that never left the allowlist, want no calls", got)
+	}
+
+	cancel()
+	<-done
+}
+
+// TestDnsmasq_NoReleaseForMACWithoutALease proves a de-enrolled MAC
+// holding no current lease is skipped rather than erroring: there is
+// nothing for dhcp_release to release.
+func TestDnsmasq_NoReleaseForMACWithoutALease(t *testing.T) {
+	d, _ := newTestDnsmasq(t, longRunningScript)
+	d.Config.LeaseMode = true
+	rel := &recordingRelease{}
+	d.Release = rel.release
+
+	ctx, cancel := context.WithCancel(logf.IntoContext(context.Background(), logf.Log))
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+
+	d.SetAllowedMACs([]string{"aa:bb:cc:dd:ee:01"})
+	waitFor(t, "initial hostsfile", func() bool {
+		got, err := os.ReadFile(HostsfilePath(d.RunDir))
+		return err == nil && len(got) > 0
+	})
+
+	d.SetAllowedMACs(nil)
+	// No lease file entry exists for the MAC, so give the loop a chance
+	// to run and confirm it stays quiet rather than waiting for a call
+	// that will never come.
+	time.Sleep(50 * time.Millisecond)
+	if got := rel.snapshot(); len(got) != 0 {
+		t.Errorf("Release called %v for a MAC with no current lease, want no calls", got)
+	}
+
+	cancel()
+	<-done
+}
+
+// TestDnsmasq_StartupFilterDropsLeasesOutsideAllowlist proves Start
+// rewrites the persisted lease file against the current Machine
+// allowlist before dnsmasq ever launches: a lease surviving a bootd
+// restart on behalf of a since-deleted Machine must not be handed back
+// out.
+func TestDnsmasq_StartupFilterDropsLeasesOutsideAllowlist(t *testing.T) {
+	d, runDir := newTestDnsmasq(t, longRunningScript)
+	d.Config.LeaseMode = true
+
+	leasePath := filepath.Join(runDir, leasefileName)
+	content := testLeaseLine + "1893456000 aa:bb:cc:dd:ee:02 192.0.2.51 host-2 *\n"
+	if err := os.WriteFile(leasePath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(logf.IntoContext(context.Background(), logf.Log))
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+
+	// Start blocks on this push before ever launching dnsmasq (see
+	// Start's LeaseMode branch); only ee:01 is still enrolled.
+	d.SetAllowedMACs([]string{"aa:bb:cc:dd:ee:01"})
+
+	waitFor(t, "lease file filtered", func() bool {
+		got, err := os.ReadFile(leasePath)
+		return err == nil && !strings.Contains(string(got), "aa:bb:cc:dd:ee:02")
+	})
+	got, err := os.ReadFile(leasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "aa:bb:cc:dd:ee:01") {
+		t.Errorf("startup filter dropped an enrolled MAC's lease:\n%s", got)
+	}
 
 	cancel()
 	<-done

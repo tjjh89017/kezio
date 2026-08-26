@@ -33,10 +33,13 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o bo
 # dnsmasq binary and its runtime libraries. dnsmasq-base is the DHCP/
 # TFTP/DNS daemon alone, without the init scripts and resolvconf
 # integration of the full dnsmasq package. The binary lands at
-# /usr/sbin/dnsmasq (internal/bootd.DefaultDnsmasqPath).
+# /usr/sbin/dnsmasq (internal/bootd.DefaultDnsmasqPath). dnsmasq-utils
+# ships dhcp_release, the only supported way to make dnsmasq forget one
+# lease before it expires (internal/bootd.DefaultDHCPReleasePath) - lease
+# mode's active release on Machine deletion/MAC change needs it.
 FROM debian:stable-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends dnsmasq-base \
+    && apt-get install -y --no-install-recommends dnsmasq-base dnsmasq-utils \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /workspace/bootd /bootd
 # Root, unlike every other kezio image: Kubernetes grants a container's

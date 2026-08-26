@@ -60,10 +60,17 @@ type Dnsmasq struct {
 	// Config is the dnsmasq configuration to render. Required fields
 	// per RenderDnsmasqConf.
 	Config Config
-	// RunDir is the writable directory holding the rendered config,
-	// the dhcp-hostsfile, and dnsmasq's leasefile. Empty means
-	// DefaultRunDir.
+	// RunDir is the writable directory holding the rendered config and
+	// the dhcp-hostsfile. Also holds dnsmasq's leasefile unless LeaseDir
+	// is set. Empty means DefaultRunDir.
 	RunDir string
+	// LeaseDir optionally places dnsmasq's leasefile on a directory
+	// separate from RunDir - the persistent PVC mount a lease-mode Subnet
+	// gets (see internal/controller's buildBootdDeployment), so the
+	// leasefile survives a pod recreate that RunDir's emptyDir does not.
+	// Empty means the leasefile lives under RunDir, unchanged from before
+	// this field existed.
+	LeaseDir string
 	// BinaryPath is the dnsmasq executable to run. Empty means
 	// DefaultDnsmasqPath.
 	BinaryPath string
@@ -74,6 +81,14 @@ type Dnsmasq struct {
 	// SetReservations has never been called with a non-empty revision;
 	// never called concurrently with itself.
 	OnApplied func(ctx context.Context, revision string)
+	// DHCPReleasePath is the dhcp_release executable Start uses to build
+	// the default Release function. Empty means DefaultDHCPReleasePath.
+	// Ignored when Release is set directly.
+	DHCPReleasePath string
+	// Release sends a DHCPRELEASE for a lease a MAC no longer allowed to
+	// hold is found to still have (see releaseLeases). Nil means
+	// execDHCPRelease(resolved DHCPReleasePath) - a test seam otherwise.
+	Release ReleaseFunc
 
 	mu           sync.Mutex
 	macs         []string
@@ -81,9 +96,23 @@ type Dnsmasq struct {
 	revision     string
 	revSet       bool
 	child        *os.Process
+	// pendingReleases accumulates MACs SetAllowedMACs or SetReservations
+	// has seen drop out of enrollment since the last hostsfileLoop tick,
+	// so a burst of removals coalesced into one dirty signal still
+	// releases every one of them, not just the most recent.
+	pendingReleases []string
 
 	dirtyOnce sync.Once
 	dirty     chan struct{}
+
+	// firstMACsOnce/firstMACsSig close firstMACsCh() exactly once, the
+	// first time SetAllowedMACs is called - the same fail-secure signal
+	// MACCache.Start's first push already represents, reused here so
+	// Start's LeaseMode startup filter (filterLeaseFile) waits for it
+	// before ever launching dnsmasq.
+	firstMACsChOnce sync.Once
+	firstMACsSig    chan struct{}
+	firstMACsOnce   sync.Once
 
 	// Test seams, defaulted in Start: how long hostsfile rewrites are
 	// coalesced before writing+SIGHUPing, the first restart delay
@@ -118,15 +147,35 @@ func (d *Dnsmasq) dirtyCh() chan struct{} {
 	return d.dirty
 }
 
+// firstMACsChan lazily builds the channel Start's LeaseMode startup
+// filter waits on, closed the first time SetAllowedMACs is called.
+func (d *Dnsmasq) firstMACsChan() chan struct{} {
+	d.firstMACsChOnce.Do(func() { d.firstMACsSig = make(chan struct{}) })
+	return d.firstMACsSig
+}
+
 // SetAllowedMACs implements MACSink: it records the new allowlist and
 // nudges the hostsfile loop (see Start). Non-blocking - the channel
 // carries only a "something changed" bit, and the loop always renders
 // from the latest recorded list, so any number of pushes coalesce
 // into at most one pending rewrite.
+//
+// In LeaseMode, a MAC present in the old allowlist but absent from macs
+// is queued for an active DHCPRELEASE (see releaseLeases): it stopped
+// being an enrolled Machine's boot MAC (deleted, or its BootMACAddress
+// changed), and its lease - if it has one - must not linger for the
+// segment's own lease time. A Machine's normal Deployed-to-Complete
+// transition never removes its MAC from this set, so a completed
+// deployment's OS keeps renewing its lease undisturbed.
 func (d *Dnsmasq) SetAllowedMACs(macs []string) {
 	d.mu.Lock()
+	old := d.macs
 	d.macs = slices.Clone(macs)
+	if d.Config.LeaseMode {
+		d.pendingReleases = append(d.pendingReleases, macDiff(old, d.macs)...)
+	}
 	d.mu.Unlock()
+	d.firstMACsOnce.Do(func() { close(d.firstMACsChan()) })
 	select {
 	case d.dirtyCh() <- struct{}{}:
 	default:
@@ -176,6 +225,15 @@ func (d *Dnsmasq) Start(ctx context.Context) error {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		return fmt.Errorf("creating run directory %s: %w", runDir, err)
 	}
+	leaseFilePath := filepath.Join(runDir, leasefileName)
+	if d.LeaseDir != "" {
+		if err := os.MkdirAll(d.LeaseDir, 0o755); err != nil {
+			return fmt.Errorf("creating lease directory %s: %w", d.LeaseDir, err)
+		}
+		leaseFilePath = filepath.Join(d.LeaseDir, leasefileName)
+	}
+	d.Config.LeaseFilePath = leaseFilePath
+
 	conf, err := RenderDnsmasqConf(d.Config, runDir)
 	if err != nil {
 		return fmt.Errorf("rendering dnsmasq config: %w", err)
@@ -191,13 +249,35 @@ func (d *Dnsmasq) Start(ctx context.Context) error {
 		return fmt.Errorf("writing initial dhcp-hostsfile: %w", err)
 	}
 
+	if d.Config.LeaseMode {
+		// Wait for the Machine allowlist's first push (MACCache.Start's
+		// fail-secure sync gate) before dnsmasq ever reads the persisted
+		// lease file: a lease surviving a bootd restart on behalf of a
+		// Machine deleted or re-MACed while bootd was down must not be
+		// handed back out before the allowlist is known.
+		select {
+		case <-d.firstMACsChan():
+			d.mu.Lock()
+			allowed := slices.Clone(d.macs)
+			d.mu.Unlock()
+			dropped, err := filterLeaseFile(leaseFilePath, allowed)
+			if err != nil {
+				log.Error(err, "filtering persisted lease file at startup failed; stale leases may linger", "path", leaseFilePath)
+			} else {
+				log.Info("filtered persisted lease file against Machine allowlist", "path", leaseFilePath, "droppedLeases", dropped)
+			}
+		case <-ctx.Done():
+			return nil
+		}
+	}
+
 	// The dnsmasq child needs bootd's own capabilities (see caps.go).
 	// bootd runs as uid 0, so execve alone re-grants them from the
 	// bounding set; raiseAmbientCaps is best-effort belt-and-braces
 	// for non-root environments.
 	raiseAmbientCaps(log)
 
-	go d.hostsfileLoop(ctx, log, runDir, initial)
+	go d.hostsfileLoop(ctx, log, runDir, leaseFilePath, initial)
 
 	backoff := d.initialBackoff
 	fastExits := 0
@@ -291,10 +371,15 @@ func (d *Dnsmasq) runChild(ctx context.Context, log logr.Logger, binary, confPat
 }
 
 // hostsfileLoop debounces a burst of dirty signals into one atomic
-// hostsfile rewrite + SIGHUP. Byte-identical content skips the SIGHUP.
-// If no child is running at signal time (mid-restart), the rewrite still
-// happens and the next child reads the fresh file at startup.
-func (d *Dnsmasq) hostsfileLoop(ctx context.Context, log logr.Logger, runDir, lastWritten string) {
+// hostsfile rewrite + SIGHUP, and - in LeaseMode - one round of active
+// DHCPRELEASEs for MACs the debounced burst dropped from the allowlist
+// (see releaseLeases). Byte-identical hostsfile content skips the SIGHUP,
+// but pending releases are always processed regardless, since a MAC can
+// drop out and back in within one debounce window with no net hostsfile
+// change. If no child is running at signal time (mid-restart), the
+// rewrite still happens and the next child reads the fresh file at
+// startup.
+func (d *Dnsmasq) hostsfileLoop(ctx context.Context, log logr.Logger, runDir, leaseFilePath, lastWritten string) {
 	path := HostsfilePath(runDir)
 	var lastAppliedRev string
 	lastAppliedRevSet := false
@@ -320,7 +405,13 @@ func (d *Dnsmasq) hostsfileLoop(ctx context.Context, log logr.Logger, runDir, la
 		content := RenderHostsfile(d.macs, d.reservations)
 		child := d.child
 		revision, revSet := d.revision, d.revSet
+		toRelease := d.pendingReleases
+		d.pendingReleases = nil
 		d.mu.Unlock()
+
+		if len(toRelease) > 0 {
+			d.releaseLeases(log, leaseFilePath, toRelease)
+		}
 
 		if content != lastWritten {
 			if err := writeFileAtomic(path, content); err != nil {
@@ -346,6 +437,42 @@ func (d *Dnsmasq) hostsfileLoop(ctx context.Context, log logr.Logger, runDir, la
 				d.OnApplied(ctx, revision)
 			}
 		}
+	}
+}
+
+// releaseLeases sends a DHCPRELEASE for each of macs that currently holds
+// a lease in dnsmasq's lease file, so the address returns to the pool
+// immediately instead of waiting out the segment's lease time. A MAC
+// with no current lease is skipped silently - there is nothing to
+// release.
+func (d *Dnsmasq) releaseLeases(log logr.Logger, leaseFilePath string, macs []string) {
+	if d.Config.Interface == "" {
+		log.Error(fmt.Errorf("no interface configured"), "cannot send DHCPRELEASE with no interface; leases will linger until they expire", "macs", macs)
+		return
+	}
+	leases, err := readLeaseFileByMAC(leaseFilePath)
+	if err != nil {
+		log.Error(err, "reading lease file for DHCPRELEASE failed; releases skipped", "path", leaseFilePath)
+		return
+	}
+	release := d.Release
+	if release == nil {
+		releasePath := d.DHCPReleasePath
+		if releasePath == "" {
+			releasePath = DefaultDHCPReleasePath
+		}
+		release = execDHCPRelease(releasePath)
+	}
+	for _, mac := range macs {
+		ip, ok := leases[mac]
+		if !ok {
+			continue
+		}
+		if err := release(d.Config.Interface, ip, mac); err != nil {
+			log.Error(err, "dhcp_release failed; lease will linger until it expires", "mac", mac, "ip", ip)
+			continue
+		}
+		log.Info("released DHCP lease for a MAC no longer enrolled", "mac", mac, "ip", ip)
 	}
 }
 
