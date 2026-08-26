@@ -105,6 +105,9 @@ A `Subnet` is one broadcast domain.
 | `spec.dhcp` | The DHCP behavior of bootd on this Subnet. |
 | `spec.seederNetworkRef` | The `NetworkAttachmentDefinition` that seeder and tracker pods attach through, when this Subnet is the seeding Subnet of its Site. |
 | `spec.nodeSelector` | Holds bootd pods, and seeder pods, on nodes that are attached to this broadcast domain. Empty means no constraint. |
+| `status.dhcp.reservations` | The boot-scoped DHCP address reservation table: one entry per Machine currently net-booting or deployed through this Subnet, in lease mode. Each entry has `address`, `machine`, `mac`, and `since`. |
+| `status.dhcp.revision` | Changes whenever `reservations` changes. A digest of the sorted table, not a counter. |
+| `status.dhcp.appliedRevision` | The `revision` bootd's dnsmasq hostsfile last actually rendered and reloaded for. Written by bootd, never by the manager. |
 
 `bootdServerIP`, `bootdNetworkRef`, and `dhcp` are the **boot half**.
 They are optional as a group. Set all three, and the Subnet gets a
@@ -126,7 +129,45 @@ restart strands a TFTP fetch that is in progress.
 
 Conditions: `Valid` (schema checks, plus the checks of the Subnet
 reconciler against the referenced network attachments and the DHCP
-configuration) and `Ready` (the bootd Deployment is available).
+configuration), `Ready` (the bootd Deployment is available), and
+`DHCPPoolExhausted` (the lease-mode address pool has no free address
+left for a new reservation - always False in proxy mode).
+
+### Boot-scoped DHCP address reservations (lease mode)
+
+A lease-mode Subnet hands out a fixed, pre-decided address to each
+Machine it net-boots, instead of leaving dnsmasq's own dynamic lease pool
+to arbitrate between concurrently booting machines. This removes the
+race that produces a DHCPNAK "address in use" at fleet scale, and keeps
+the pool holding only machines that are actually booting or deployed -
+never every enrolled Machine, and never a Machine long since provisioned.
+
+The lifecycle:
+
+- **Allocated** at net-boot arm time - the same moment the deployer mints
+  that boot's registration token (Inspect's and Provision's arming
+  step) - by picking the lowest free address in the Subnet's lease
+  range that is not already in `status.dhcp.reservations` and is not
+  `spec.bootdServerIP` or a non-empty `spec.dhcp.gateway`. Calling this
+  again for a Machine that already has an entry reuses it: the address
+  a Machine boots with never changes mid-attempt. A pool with no free
+  address sets `DHCPPoolExhausted` and an Event on the Machine, and the
+  Machine is held (not powered on) until an address frees up.
+- **Applied** - bootd renders every reservation into its dnsmasq
+  hostsfile alongside the MAC allowlist, reloads dnsmasq, and only then
+  writes `status.dhcp.appliedRevision` to match `status.dhcp.revision`.
+  The deployer waits for that match before it powers the machine on: a
+  reservation persisted but not yet live at dnsmasq would otherwise
+  race the machine's own DHCPDISCOVER.
+- **Released** when the deploy step completes (Inspect reaching
+  `Available`, Provision reaching `Provisioned`), when the Machine is
+  deleted, and when its `spec.bootMACAddress` or `spec.subnetRef`
+  changes - the last two by the Subnet's own reconcile, which also
+  garbage-collects any entry whose Machine no longer exists or whose
+  current MAC/subnetRef no longer match, as a backstop.
+
+Proxy mode never has a reservation table at all: proxyDHCP never assigns
+addresses, so bootd renders only the MAC allowlist.
 
 ### The three states of `dhcp.gateway`
 
@@ -343,7 +384,7 @@ A `Machine` is one bare-metal machine.
 | `spec.bmc.address` | The BMC endpoint URL. The scheme selects the driver, for example `redfish://` or `ipmi://`. Required. |
 | `spec.bmc.credentialsSecretRef` | The Secret that holds the BMC user name and password. Required. |
 | `spec.subnetRef` | The `Subnet` this machine network boots through. Required. A Machine with no Subnet cannot network boot. |
-| `spec.bootMACAddress` | The MAC address of the NIC that network boots. Inspection usually discovers it. It is mandatory only when the inspect-disable annotation skips inspection. |
+| `spec.bootMACAddress` | The MAC address of the NIC that network boots. The MAC gate (bootd's dnsmasq hostsfile) answers only an enrolled MAC, so this field must normally already be set before a Machine can PXE-boot at all - inspection cannot discover a MAC it needs the MAC gate open to reach. The one exception is a Subnet whose bootd runs with the MAC gate disabled (`BOOTD_ANSWER_ALL`, an answer-all Subnet, for a deliberately inventory-only lab): there, any machine boots and inspection discovers the MAC from the agent's own registration. It is mandatory (schema-enforced) only when the inspect-disable annotation skips inspection outright. |
 | `spec.claimRef` | The `MachineClaim` bound to this machine. Written only by the claim controller. |
 | `spec.console` | Kernel `console=` values for the live environment, in order, for example `["ttyS0,115200n8", "tty0"]`. The last value is the primary console. A hardware attribute, like BMC - not deploy intent. Empty falls back to the boot server's default. Optional, up to 4 entries. |
 
@@ -652,6 +693,12 @@ default-network annotation for the same reason. See
   `Available`.
 - A `Subnet` must declare a boot half, or `seederNetworkRef`, or both.
 - A seeder is per (`Image`, `Site`). A tracker is per `Site`.
+- `spec.bootMACAddress` must normally be set before a Machine can
+  PXE-boot at all - inspection cannot discover it unless the Subnet
+  disables the MAC gate (`BOOTD_ANSWER_ALL`).
+- A lease-mode Subnet's `status.dhcp.reservations` only ever holds
+  Machines currently net-booting or deployed - never every enrolled
+  Machine.
 
 ## See also
 
