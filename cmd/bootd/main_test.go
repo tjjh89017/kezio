@@ -16,7 +16,10 @@ limitations under the License.
 
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // clearBootdEnv unsets every environment variable bootdConfigFromEnv
 // reads (plus the three explicitly-rejected legacy names), so each test
@@ -28,9 +31,10 @@ func clearBootdEnv(t *testing.T) {
 		"BOOTD_SERVER_IP", "BOOTD_PROVISIONING_CIDR", "BOOTD_DHCP_INTERFACE",
 		"BOOTD_NEXT_SERVER_IP", "BOOTD_TFTP_DIR",
 		"BOOTD_TFTP_ADDR", "BOOTD_BOOT_CONFIG_URL", "BOOTD_BOOT_FILENAME",
-		"BOOTD_RUN_DIR", "BOOTD_DNSMASQ_PATH", "BOOTD_ANSWER_ALL",
+		"BOOTD_RUN_DIR", "BOOTD_LEASE_DIR", "BOOTD_DNSMASQ_PATH", "BOOTD_ANSWER_ALL",
 		"BOOTD_AGENT_UPSTREAM_URL", "BOOTD_BOOT_UPSTREAM_URL", "BOOTD_PROXY_ADDR",
 		"BOOTD_HTTP_BOOT_URL", "BOOTD_DHCP_ADDR", "BOOTD_PXE_ADDR", "BOOTD_DHCP_RELAY_SERVER",
+		"BOOTD_LEASE_MODE", "BOOTD_LEASE_RANGE_START", "BOOTD_LEASE_RANGE_END", "BOOTD_GATEWAY", "BOOTD_LEASE_TIME",
 	} {
 		t.Setenv(key, "")
 	}
@@ -204,5 +208,88 @@ func TestBootdConfigFromEnv_HTTPBootURLFollowsBootFilename(t *testing.T) {
 	const want = "http://192.0.2.2/boot/http/other.efi"
 	if cfg.Server.HTTPBootURL != want {
 		t.Errorf("Server.HTTPBootURL = %q, want %q", cfg.Server.HTTPBootURL, want)
+	}
+}
+
+// TestBootdConfigFromEnv_LeaseTimeUnsetIsZero proves an unset
+// BOOTD_LEASE_TIME leaves Server.LeaseTime zero - RenderDnsmasqConf's own
+// withDefaults is what fills in bootd.DefaultLeaseTime, not this parse.
+func TestBootdConfigFromEnv_LeaseTimeUnsetIsZero(t *testing.T) {
+	clearBootdEnv(t)
+	requiredBootdEnv(t)
+
+	cfg, err := bootdConfigFromEnv()
+	if err != nil {
+		t.Fatalf("bootdConfigFromEnv: %v", err)
+	}
+	if cfg.Server.LeaseTime != 0 {
+		t.Errorf("Server.LeaseTime = %v, want zero when BOOTD_LEASE_TIME is unset", cfg.Server.LeaseTime)
+	}
+}
+
+// TestBootdConfigFromEnv_LeaseTimeParsed proves a valid BOOTD_LEASE_TIME
+// is parsed into Server.LeaseTime.
+func TestBootdConfigFromEnv_LeaseTimeParsed(t *testing.T) {
+	clearBootdEnv(t)
+	requiredBootdEnv(t)
+	t.Setenv("BOOTD_LEASE_TIME", "45m")
+
+	cfg, err := bootdConfigFromEnv()
+	if err != nil {
+		t.Fatalf("bootdConfigFromEnv: %v", err)
+	}
+	if cfg.Server.LeaseTime != 45*time.Minute {
+		t.Errorf("Server.LeaseTime = %v, want 45m", cfg.Server.LeaseTime)
+	}
+}
+
+// TestBootdConfigFromEnv_LeaseTimeRejectsTooShort proves a
+// BOOTD_LEASE_TIME under 2 minutes fails startup: a bootd outage longer
+// than the lease time strands every machine mid-deploy, and a shorter
+// lease only shrinks that safety margin further.
+func TestBootdConfigFromEnv_LeaseTimeRejectsTooShort(t *testing.T) {
+	clearBootdEnv(t)
+	requiredBootdEnv(t)
+	t.Setenv("BOOTD_LEASE_TIME", "90s")
+
+	if _, err := bootdConfigFromEnv(); err == nil {
+		t.Error("bootdConfigFromEnv accepted a BOOTD_LEASE_TIME under 2 minutes")
+	}
+}
+
+// TestBootdConfigFromEnv_LeaseTimeRejectsUnparsable proves a malformed
+// BOOTD_LEASE_TIME fails startup rather than silently falling back to
+// the default.
+func TestBootdConfigFromEnv_LeaseTimeRejectsUnparsable(t *testing.T) {
+	clearBootdEnv(t)
+	requiredBootdEnv(t)
+	t.Setenv("BOOTD_LEASE_TIME", "not-a-duration")
+
+	if _, err := bootdConfigFromEnv(); err == nil {
+		t.Error("bootdConfigFromEnv accepted an unparsable BOOTD_LEASE_TIME")
+	}
+}
+
+// TestBootdConfigFromEnv_LeaseDirPassthrough proves BOOTD_LEASE_DIR
+// reaches bootdConfig.LeaseDir unchanged, and stays empty when unset.
+func TestBootdConfigFromEnv_LeaseDirPassthrough(t *testing.T) {
+	clearBootdEnv(t)
+	requiredBootdEnv(t)
+
+	cfg, err := bootdConfigFromEnv()
+	if err != nil {
+		t.Fatalf("bootdConfigFromEnv: %v", err)
+	}
+	if cfg.LeaseDir != "" {
+		t.Errorf("LeaseDir = %q, want empty when BOOTD_LEASE_DIR is unset", cfg.LeaseDir)
+	}
+
+	t.Setenv("BOOTD_LEASE_DIR", "/var/lib/bootd-leases")
+	cfg, err = bootdConfigFromEnv()
+	if err != nil {
+		t.Fatalf("bootdConfigFromEnv: %v", err)
+	}
+	if cfg.LeaseDir != "/var/lib/bootd-leases" {
+		t.Errorf("LeaseDir = %q, want %q", cfg.LeaseDir, "/var/lib/bootd-leases")
 	}
 }

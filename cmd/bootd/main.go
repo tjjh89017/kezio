@@ -32,6 +32,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"time"
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
@@ -95,6 +96,7 @@ func main() {
 	dnsmasq := &bootd.Dnsmasq{
 		Config:     cfg.Server,
 		RunDir:     cfg.RunDir,
+		LeaseDir:   cfg.LeaseDir,
 		BinaryPath: cfg.DnsmasqPath,
 	}
 
@@ -206,6 +208,11 @@ type bootdConfig struct {
 	TFTPAddr string
 	// RunDir optionally overrides bootd.DefaultRunDir.
 	RunDir string
+	// LeaseDir optionally places dnsmasq's leasefile on a directory
+	// separate from RunDir - the persistent lease PVC mount a lease-mode
+	// Subnet's bootd Deployment carries (see bootd.Dnsmasq.LeaseDir).
+	// Empty means the leasefile lives under RunDir.
+	LeaseDir string
 	// DnsmasqPath optionally overrides bootd.DefaultDnsmasqPath.
 	DnsmasqPath string
 	// GrubConfig is the rendered GRUB bootstrap config the TFTP server
@@ -254,6 +261,17 @@ type bootdConfig struct {
 //     default) auto-derives the range from BOOTD_PROVISIONING_CIDR's
 //     first and last host addresses. Setting only one is an error.
 //     Ignored unless BOOTD_LEASE_MODE is set.
+//   - BOOTD_LEASE_TIME: optional DHCP lease duration for
+//     BOOTD_LEASE_MODE, parsed by time.ParseDuration (for example "30m" or
+//     "1h"), rendered into dnsmasq's dhcp-range. Unset means
+//     bootd.DefaultLeaseTime (30 minutes). Must be at least 2 minutes.
+//     Ignored unless BOOTD_LEASE_MODE is set.
+//   - BOOTD_LEASE_DIR: optional writable directory for dnsmasq's
+//     leasefile alone, separate from BOOTD_RUN_DIR - the persistent lease
+//     PVC mount a lease-mode Subnet's bootd Deployment carries, so leases
+//     survive a pod recreate that BOOTD_RUN_DIR's emptyDir does not.
+//     Unset means the leasefile lives under BOOTD_RUN_DIR, unchanged from
+//     before this variable existed.
 //   - BOOTD_GATEWAY: what machines are told about leaving this segment,
 //     as DHCP option 3. Required when BOOTD_LEASE_MODE is true, where an
 //     IPv4 address is the segment's router - set it whenever a machine
@@ -442,6 +460,17 @@ func bootdConfigFromEnv() (bootdConfig, error) {
 		return bootdConfig{}, err
 	}
 
+	var leaseTime time.Duration
+	if s := os.Getenv("BOOTD_LEASE_TIME"); s != "" {
+		leaseTime, err = time.ParseDuration(s)
+		if err != nil {
+			return bootdConfig{}, fmt.Errorf("BOOTD_LEASE_TIME %q is not a valid duration: %w", s, err)
+		}
+		if leaseTime < 2*time.Minute {
+			return bootdConfig{}, fmt.Errorf("BOOTD_LEASE_TIME %q must be at least 2m", s)
+		}
+	}
+
 	proxyCfg := bootd.ProxyConfig{
 		Addr:             os.Getenv("BOOTD_PROXY_ADDR"),
 		AgentUpstreamURL: os.Getenv("BOOTD_AGENT_UPSTREAM_URL"),
@@ -489,10 +518,12 @@ func bootdConfigFromEnv() (bootdConfig, error) {
 			Gateway:         gateway,
 			LeaseRangeStart: leaseRangeStart,
 			LeaseRangeEnd:   leaseRangeEnd,
+			LeaseTime:       leaseTime,
 		},
 		TFTPDir:         tftpDir,
 		TFTPAddr:        os.Getenv("BOOTD_TFTP_ADDR"),
 		RunDir:          os.Getenv("BOOTD_RUN_DIR"),
+		LeaseDir:        os.Getenv("BOOTD_LEASE_DIR"),
 		DnsmasqPath:     os.Getenv("BOOTD_DNSMASQ_PATH"),
 		GrubConfig:      grubConfig,
 		Proxy:           proxyCfg,
