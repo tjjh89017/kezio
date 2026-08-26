@@ -30,16 +30,20 @@ import (
 // token exactly once per boot it arms - a BMC power-on or power-cycle
 // intended to land the machine in the live environment) and this
 // package's GET /boot/grub.cfg-<mac> handler, which only ever reads: see
-// Issue and Lookup. A boot token's plaintext is never persisted (only its
-// hash, on Machine.status.netBoot - see mintToken's doc comment for why),
-// so the plaintext has nowhere to live between being minted and being
-// handed to whichever grub.cfg fetch happens to land next except memory
-// shared by both sides. That is safe only because both sides run in the
-// same manager process (see cmd/main.go) - a TokenStore is never meant to
-// cross a process boundary, and a manager restart losing an outstanding
-// entry is an accepted, self-healing gap: the next grub.cfg fetch simply
-// renders the net-boot config with no kezio.token=, and the agent that
-// boots into it idles instead of registering (see renderNetBootConfig).
+// Issue and Lookup. A boot token's plaintext is never persisted on the
+// Machine itself (only its hash, on Machine.status.netBoot - see
+// mintToken's doc comment for why), so in-process memory shared by both
+// sides is the primary place the plaintext lives between being minted and
+// being handed to whichever grub.cfg fetch happens to land next. A
+// manager restart losing an outstanding entry is no longer fatal to that
+// boot, though: internal/deployer.AgentDeployer also writes the plaintext
+// to a per-Machine Secret at the same moment it mints, and
+// Server.lookupToken falls back to reading that Secret (then calls
+// Restore to warm this store) on a Lookup miss - see BootTokenSecretName.
+// A restart that also loses the request in flight still degrades the same
+// way it always did: the next grub.cfg fetch renders with no
+// kezio.token=, and the agent that boots into it idles instead of
+// registering (see renderNetBootConfig).
 //
 // A single TokenStore is meant to be shared, one instance per manager
 // process, between the component that mints (internal/deployer.
@@ -86,6 +90,20 @@ func (s *TokenStore) Issue(mac string, now time.Time, ttl time.Duration) (token 
 		TokenHash: hash,
 		ExpiresAt: metav1.NewTime(now.Add(ttl)),
 	}, nil
+}
+
+// Restore installs an already-minted token into the store for mac,
+// exactly as Issue leaves it, without generating a fresh one. It exists
+// only for Server.lookupToken's Secret fallback: recovering a token from
+// its per-Machine boot token Secret after a manager restart lost the
+// in-memory entry Issue originally made, so the same request's Lookup
+// (and every later one for this boot) hits the fast path. Overwrites any
+// existing entry for mac, matching Issue's own "one live token per MAC"
+// semantics.
+func (s *TokenStore) Restore(mac, token, hash string) {
+	s.mu.Lock()
+	s.entries[mac] = tokenStoreEntry{token: token, hash: hash}
+	s.mu.Unlock()
 }
 
 // Lookup returns the plaintext token outstanding for mac, if its

@@ -379,8 +379,17 @@ Other status fields include `currentRunRef`, `lastSuccessfulRunRef`,
 not - the only reference that can name a failed run),
 `poweredOn`, `lastUpdated`, the observed BMC credentials, and the
 hashes of the net-boot token and the agent session token. kezio stores
-only the hash and the expiry of each token, and never the token
-itself.
+only the hash and the expiry of each token on the Machine itself, and
+never the token.
+
+The net-boot token's plaintext lives only in the manager's memory and in
+a `Secret` named `<machine>-boot-token`, in the Machine's own namespace.
+kezio writes this Secret at the same time it arms a net boot, and owns
+it with a controller reference, so Kubernetes removes it when the
+Machine is removed. The boot config server reads this Secret only when
+its own in-memory copy is missing - after a manager restart, for
+example - so a machine that starts its boot before the restart can still
+register afterward, instead of waiting out the full inspection timeout.
 
 Conditions: `Ready`, `Progressing`, `AgentCompatible`,
 `AgentRegistered`, and `StatusLossHold`.

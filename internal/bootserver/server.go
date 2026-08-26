@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -35,6 +36,7 @@ import (
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines,verbs=get;list;watch
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=subnets,verbs=get
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list
 
 // Server is the HTTP handler for the boot config service: GRUB's
 // unauthenticated grub.cfg fetch, and the live boot artifacts it points
@@ -52,7 +54,9 @@ import (
 type Server struct {
 	// Client reads Machines (through the manager's cache, via the
 	// MachineBootMACIndexField index - see SetupFieldIndexer) and writes
-	// the minted token hash to Machine status.
+	// the minted token hash to Machine status. It also reads the
+	// per-Machine boot token Secret (BootTokenSecretName) as a Tokens
+	// fallback - see lookupTokenFromSecret.
 	Client client.Client
 	// Config holds the server's listen address, artifact directory, and
 	// externally reachable URL.
@@ -240,7 +244,7 @@ func (s *Server) handleGrubConfig(w http.ResponseWriter, r *http.Request, rawMAC
 		return
 	}
 
-	token := s.lookupToken(mac, machine)
+	token := s.lookupToken(ctx, mac, machine)
 
 	renderCfg := s.Config
 	subnet, err := s.resolveSubnet(ctx, machine)
@@ -334,16 +338,67 @@ func needsNetBoot(machine *keziov1alpha3.Machine) bool {
 // Empty is the correct answer (not an error) for a Machine that needs to
 // net boot but has no live token right now: nothing has armed a boot for
 // it yet in this process, its token already expired, or a prior
-// registration already consumed it. renderNetBootConfig omits
+// registration already consumed it (which clears
+// machine.Status.NetBoot.TokenHash to "", the same value an unarmed
+// Machine carries - see ingestRegistration). renderNetBootConfig omits
 // kezio.token= entirely in that case, so the agent boots into the live
 // environment and simply idles instead of registering.
-func (s *Server) lookupToken(mac string, machine *keziov1alpha3.Machine) string {
-	if s.Tokens == nil || machine.Status.NetBoot == nil {
+//
+// A Tokens miss falls back to lookupTokenFromSecret rather than answering
+// empty outright: the in-memory store is what a manager restart loses
+// (see TokenStore's doc comment), and the Secret it falls back to is
+// exactly what recovers from that.
+func (s *Server) lookupToken(ctx context.Context, mac string, machine *keziov1alpha3.Machine) string {
+	if machine.Status.NetBoot == nil {
 		return ""
 	}
-	token, ok := s.Tokens.Lookup(mac, machine.Status.NetBoot.TokenHash)
-	if !ok {
+	wantHash := machine.Status.NetBoot.TokenHash
+	if wantHash == "" {
 		return ""
+	}
+
+	if s.Tokens != nil {
+		if token, ok := s.Tokens.Lookup(mac, wantHash); ok {
+			return token
+		}
+	}
+	return s.lookupTokenFromSecret(ctx, mac, machine, wantHash)
+}
+
+// lookupTokenFromSecret recovers mac's plaintext boot token from its
+// per-Machine boot token Secret (BootTokenSecretName) when Tokens has no
+// matching entry - the state a manager restart leaves TokenStore in. It
+// re-derives the Secret's token hash and rejects a mismatch against
+// wantHash (machine.Status.NetBoot.TokenHash, read from the same request
+// this answers) exactly as TokenStore.Lookup would, and separately
+// checks the Secret's own expiresAt so an overwritten-late Secret write
+// (or one this package fails to ever see get replaced) cannot outlive
+// its stated lifetime. A hit warms Tokens (TokenStore.Restore) so later
+// fetches for the same boot take the fast path; every failure mode here -
+// a missing Secret, an API error, a hash mismatch, an unparsable or
+// past expiresAt, or a mac field that does not match - returns "", never
+// an error, matching TokenStore.Lookup's own fail-quiet contract.
+func (s *Server) lookupTokenFromSecret(ctx context.Context, mac string, machine *keziov1alpha3.Machine, wantHash string) string {
+	var secret corev1.Secret
+	key := client.ObjectKey{Namespace: machine.Namespace, Name: BootTokenSecretName(machine.Name)}
+	if err := s.Client.Get(ctx, key, &secret); err != nil {
+		return ""
+	}
+
+	if string(secret.Data[BootTokenSecretKeyMAC]) != mac {
+		return ""
+	}
+	token := string(secret.Data[BootTokenSecretKeyToken])
+	if token == "" || hashToken(token) != wantHash {
+		return ""
+	}
+	expiresAt, err := time.Parse(time.RFC3339, string(secret.Data[BootTokenSecretKeyExpiresAt]))
+	if err != nil || !expiresAt.After(time.Now()) {
+		return ""
+	}
+
+	if s.Tokens != nil {
+		s.Tokens.Restore(mac, token, wantHash)
 	}
 	return token
 }

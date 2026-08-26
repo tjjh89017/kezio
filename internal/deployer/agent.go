@@ -30,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/bmc"
@@ -243,13 +244,55 @@ func (d *AgentDeployer) issueBootToken(ctx context.Context, machine *keziov1alph
 		return nil
 	}
 
-	_, status, err := d.Tokens.Issue(mac, time.Now(), d.tokenTTL())
+	token, status, err := d.Tokens.Issue(mac, time.Now(), d.tokenTTL())
 	if err != nil {
 		return fmt.Errorf("agent deployer: minting boot token: %w", err)
+	}
+	// The Secret is written, and must land, before status.netBoot: a
+	// Machine whose hash is persisted but whose Secret write failed would
+	// tell bootserver.Server's Secret fallback a token exists that it can
+	// never actually read back after a restart loses the in-memory entry
+	// this same call just made.
+	if err := d.writeBootTokenSecret(ctx, machine, mac, token, status.ExpiresAt.Time); err != nil {
+		return err
 	}
 	machine.Status.NetBoot = &status
 	if err := d.updateMachineStatusRetryOnConflict(ctx, machine); err != nil {
 		return fmt.Errorf("agent deployer: persisting boot token hash: %w", err)
+	}
+	return nil
+}
+
+// writeBootTokenSecret create-or-updates the per-Machine Secret that
+// mirrors the token issueBootToken just minted, so bootserver.Server's
+// grub.cfg handler can recover the plaintext from a Lookup miss after a
+// manager restart (see bootserver.TokenStore's doc comment and
+// bootserver.BootTokenSecretName). It always overwrites: exactly one
+// token is ever outstanding per Machine (TokenStore.Issue's own doc
+// comment), so the Secret carries that same replace-in-place semantics
+// rather than accumulating history. Owned by machine via a controller
+// reference (machineOwnerReference, shared with FakeDeployer's own use
+// on MachineHardware) so it is garbage-collected with it, the same way
+// internal/agentserver's MachineHardware write is.
+func (d *AgentDeployer) writeBootTokenSecret(ctx context.Context, machine *keziov1alpha3.Machine, mac, token string, expiresAt time.Time) error {
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      bootserver.BootTokenSecretName(machine.Name),
+			Namespace: machine.Namespace,
+		},
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, d.Client, secret, func() error {
+		secret.Type = corev1.SecretTypeOpaque
+		secret.OwnerReferences = []metav1.OwnerReference{machineOwnerReference(machine)}
+		secret.Data = map[string][]byte{
+			bootserver.BootTokenSecretKeyToken:     []byte(token),
+			bootserver.BootTokenSecretKeyMAC:       []byte(mac),
+			bootserver.BootTokenSecretKeyExpiresAt: []byte(expiresAt.UTC().Format(time.RFC3339)),
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("agent deployer: persisting boot token secret for %q: %w", machine.Name, err)
 	}
 	return nil
 }
