@@ -611,7 +611,15 @@ func leecherEzioConfigFromEnv() planbuild.LeecherEzioConfig {
 // left unset it falls back to BOOT_SERVER_URL, correct only when both
 // servers truly share one address. BOOT_KERNEL_PATH, BOOT_INITRD_PATH,
 // and BOOT_SQUASHFS_PATH each default to their bootserver.Default* name.
-// BOOT_EFI_DIR defaults to BOOT_ARTIFACTS_DIR.
+// BOOT_EFI_DIR defaults to BOOT_ARTIFACTS_DIR. BOOT_DEFAULT_CONSOLE is a
+// whitespace-separated list of kernel console= values, for example
+// "ttyS0,115200n8 tty0" - space, not comma, separates entries, since an
+// entry's own value already uses a comma (device,options, matching
+// keziov1alpha3.MachineSpec.Console's shape); a comma-separated list
+// would be ambiguous between "two entries" and "one entry's
+// device,options". Used for a Machine that sets no spec.console; left
+// unset (the default) no console= is added and the live environment's
+// console behavior is unchanged from before this setting existed.
 func bootServerConfigFromEnv() (*bootserver.Config, error) {
 	addr := os.Getenv("BOOT_SERVER_ADDR")
 	if addr == "" {
@@ -643,6 +651,9 @@ func bootServerConfigFromEnv() (*bootserver.Config, error) {
 			return nil, fmt.Errorf("invalid BOOT_TOKEN_TTL: %w", err)
 		}
 		cfg.TokenTTL = d
+	}
+	if console := os.Getenv("BOOT_DEFAULT_CONSOLE"); console != "" {
+		cfg.DefaultConsole = strings.Fields(console)
 	}
 	return cfg, nil
 }

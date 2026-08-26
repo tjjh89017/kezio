@@ -87,6 +87,13 @@ type Config struct {
 	// TokenTTL bounds how long a minted boot token is accepted. Zero
 	// means DefaultTokenTTL.
 	TokenTTL time.Duration
+	// DefaultConsole lists kernel console= values appended to the live
+	// environment's cmdline when a netbooting Machine sets no
+	// spec.console. Empty means none are added - kezio does not change
+	// the kernel's own default console behavior unless asked to. See
+	// keziov1alpha3.MachineSpec.Console for the value shape and ordering
+	// rule (the last entry is the kernel's primary console).
+	DefaultConsole []string
 }
 
 // withDefaults returns a copy of c with every zero-valued optional field

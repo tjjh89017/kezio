@@ -129,16 +129,46 @@ func subnetBootBaseURL(subnet *keziov1alpha3.Subnet) (baseURL string, ok bool) {
 	return fmt.Sprintf("http://%s:%d", subnet.Spec.BootdServerIP, bootd.DefaultProxyPort), true
 }
 
+// resolveConsole picks the console= list a netbooting machine's cmdline
+// carries: machineConsole (Machine.spec.console) if the machine set any,
+// otherwise defaultConsole (Config.DefaultConsole). A Machine always wins
+// over the operator-wide default when it names its own hardware console.
+func resolveConsole(machineConsole, defaultConsole []string) []string {
+	if len(machineConsole) > 0 {
+		return machineConsole
+	}
+	return defaultConsole
+}
+
+// consoleCmdlineArgs renders console as a run of "console=<value>" kernel
+// arguments, one per entry in order, each preceded by a space so it
+// concatenates directly onto an existing cmdline. Empty for an empty
+// console list - kezio adds nothing when no console is configured
+// anywhere. The kernel treats a repeated console= as additive, with the
+// last one becoming the primary console (what a bootloader's own output
+// and /dev/console default to); the order callers pass in is preserved
+// so that semantics stays under the caller's control.
+func consoleCmdlineArgs(console []string) string {
+	var b strings.Builder
+	for _, c := range console {
+		b.WriteString(" console=")
+		b.WriteString(c)
+	}
+	return b.String()
+}
+
 // renderNetBootConfig builds the GRUB config for a machine that needs the
 // live boot environment: GrubNetPath paths for kernel/initrd, plus a
 // cmdline carrying boot=live, fetch=<squashfs URL> (real URL - live-boot's
 // initrd is the consumer, not GRUB), kezio.server (Config.AgentServerURL,
 // not ServerURL - see that field's doc comment for why conflating them
-// misroutes every registration), and kezio.token. token is the only
-// per-request value in the output; everything else comes from
-// operator-controlled Config. Errors on a malformed Config.ServerURL,
-// surfaced per-request by the caller's fail-secure boot-local fallback.
-func renderNetBootConfig(cfg Config, token string) (string, error) {
+// misroutes every registration), kezio.token, and console= (see
+// resolveConsole/consoleCmdlineArgs). token is the only value here that
+// is not already resolved by the caller before this call; everything
+// else comes from operator-controlled Config plus the caller-resolved
+// console list. Errors on a malformed Config.ServerURL, surfaced
+// per-request by the caller's fail-secure boot-local fallback.
+func renderNetBootConfig(cfg Config, token string, console []string) (string, error) {
 	base := strings.TrimRight(cfg.ServerURL, "/")
 	kernelPath, err := GrubNetPath(base, "/boot/artifacts/"+cfg.KernelPath)
 	if err != nil {
@@ -152,8 +182,8 @@ func renderNetBootConfig(cfg Config, token string) (string, error) {
 	agentServerURL := strings.TrimRight(cfg.AgentServerURL, "/")
 
 	return fmt.Sprintf(`set timeout=5
-linux %s boot=live fetch=%s kezio.server=%s kezio.token=%s
+linux %s boot=live fetch=%s kezio.server=%s kezio.token=%s%s
 initrd %s
 boot
-`, kernelPath, squashfsURL, agentServerURL, token, initrdPath), nil
+`, kernelPath, squashfsURL, agentServerURL, token, consoleCmdlineArgs(console), initrdPath), nil
 }

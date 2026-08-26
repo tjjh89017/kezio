@@ -188,7 +188,7 @@ func TestRenderNetBootConfig_FetchParam(t *testing.T) {
 		ServerURL: "http://boot.example.test:8090",
 	}.withDefaults()
 
-	got, err := renderNetBootConfig(cfg, "deadbeef")
+	got, err := renderNetBootConfig(cfg, "deadbeef", nil)
 	if err != nil {
 		t.Fatalf("renderNetBootConfig: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestRenderNetBootConfig_KezioServerUsesAgentServerURL(t *testing.T) {
 		AgentServerURL: "http://agent.example.test:8091",
 	}.withDefaults()
 
-	got, err := renderNetBootConfig(cfg, "deadbeef")
+	got, err := renderNetBootConfig(cfg, "deadbeef", nil)
 	if err != nil {
 		t.Fatalf("renderNetBootConfig: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestRenderNetBootConfig_CustomSquashfsPath(t *testing.T) {
 		SquashfsPath: "rootfs.squashfs",
 	}.withDefaults()
 
-	got, err := renderNetBootConfig(cfg, "deadbeef")
+	got, err := renderNetBootConfig(cfg, "deadbeef", nil)
 	if err != nil {
 		t.Fatalf("renderNetBootConfig: %v", err)
 	}
@@ -259,7 +259,64 @@ func TestRenderNetBootConfig_MalformedServerURL(t *testing.T) {
 		ServerURL: "https://boot.example.test:8090",
 	}.withDefaults()
 
-	if got, err := renderNetBootConfig(cfg, "deadbeef"); err == nil {
+	if got, err := renderNetBootConfig(cfg, "deadbeef", nil); err == nil {
 		t.Fatalf("renderNetBootConfig with a non-http ServerURL = %q, want error", got)
+	}
+}
+
+// TestRenderNetBootConfig_Console pins that console arguments append to
+// the "linux" line, in order, after kezio.token=.
+func TestRenderNetBootConfig_Console(t *testing.T) {
+	cfg := Config{
+		ServerURL: "http://boot.example.test:8090",
+	}.withDefaults()
+
+	got, err := renderNetBootConfig(cfg, "deadbeef", []string{"ttyS0,115200n8", "tty0"})
+	if err != nil {
+		t.Fatalf("renderNetBootConfig: %v", err)
+	}
+
+	if !containsAll(got, "kezio.token=deadbeef console=ttyS0,115200n8 console=tty0\n") {
+		t.Fatalf("net-boot config missing expected console= arguments: %q", got)
+	}
+}
+
+// TestResolveConsole pins the precedence: a Machine's own spec.console
+// always wins over Config.DefaultConsole, which applies only when the
+// Machine sets none.
+func TestResolveConsole(t *testing.T) {
+	for name, tc := range map[string]struct {
+		machineConsole, defaultConsole, want []string
+	}{
+		"machine console wins":           {[]string{"ttyS0,115200n8"}, []string{"tty0"}, []string{"ttyS0,115200n8"}},
+		"falls back to default":          {nil, []string{"ttyS0,115200n8", "tty0"}, []string{"ttyS0,115200n8", "tty0"}},
+		"neither set yields none":        {nil, nil, nil},
+		"empty machine slice falls back": {[]string{}, []string{"tty0"}, []string{"tty0"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := resolveConsole(tc.machineConsole, tc.defaultConsole)
+			if len(got) != len(tc.want) {
+				t.Fatalf("resolveConsole(%v, %v) = %v, want %v", tc.machineConsole, tc.defaultConsole, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("resolveConsole(%v, %v) = %v, want %v", tc.machineConsole, tc.defaultConsole, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// TestConsoleCmdlineArgs pins the rendered shape: a leading space before
+// each console=, nothing at all for an empty list.
+func TestConsoleCmdlineArgs(t *testing.T) {
+	if got := consoleCmdlineArgs(nil); got != "" {
+		t.Fatalf("consoleCmdlineArgs(nil) = %q, want empty", got)
+	}
+	if got := consoleCmdlineArgs([]string{"ttyS0,115200n8"}); got != " console=ttyS0,115200n8" {
+		t.Fatalf("consoleCmdlineArgs = %q, want %q", got, " console=ttyS0,115200n8")
+	}
+	if got := consoleCmdlineArgs([]string{"ttyS0,115200n8", "tty0"}); got != " console=ttyS0,115200n8 console=tty0" {
+		t.Fatalf("consoleCmdlineArgs = %q, want %q", got, " console=ttyS0,115200n8 console=tty0")
 	}
 }

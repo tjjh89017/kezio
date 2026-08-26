@@ -265,7 +265,7 @@ func (s *Server) handleGrubConfig(w http.ResponseWriter, r *http.Request, rawMAC
 		renderCfg.AgentServerURL = base
 	}
 
-	config, err := renderNetBootConfig(renderCfg, token)
+	config, err := renderNetBootConfig(renderCfg, token, resolveConsole(machine.Spec.Console, renderCfg.DefaultConsole))
 	if err != nil {
 		// Fail secure: must not leak a half-rendered config with a live
 		// token.
