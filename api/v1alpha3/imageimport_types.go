@@ -18,6 +18,7 @@ package v1alpha3
 
 import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -82,6 +83,14 @@ type ImageImportSpec struct {
 	// +kubebuilder:validation:MaxItems=64
 	// +optional
 	PostHookRefs []NameRef `json:"postHookRefs,omitempty"`
+	// ScratchSize overrides the ingest scratch PVC's requested size. Left
+	// unset, the manager computes it from the source image's discovered
+	// size; set it when that computation is unavailable or wrong for this
+	// source (for example, a source URL the manager cannot size ahead of
+	// time).
+	// +kubebuilder:validation:XValidation:rule="quantity(self).isGreaterThan(quantity('0'))",message="scratchSize must be positive"
+	// +optional
+	ScratchSize *resource.Quantity `json:"scratchSize,omitempty"`
 }
 
 // ImageImport state enum values for ImageImportStatus.State.

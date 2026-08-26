@@ -125,6 +125,21 @@ spec:
                   type: object
                 maxItems: 64
                 type: array
+              scratchSize:
+                anyOf:
+                - type: integer
+                - type: string
+                description: |-
+                  ScratchSize overrides the ingest scratch PVC's requested size. Left
+                  unset, the manager computes it from the source image's discovered
+                  size; set it when that computation is unavailable or wrong for this
+                  source (for example, a source URL the manager cannot size ahead of
+                  time).
+                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                x-kubernetes-int-or-string: true
+                x-kubernetes-validations:
+                - message: scratchSize must be positive
+                  rule: quantity(self).isGreaterThan(quantity('0'))
               source:
                 description: Source is the disk image to import.
                 properties:
