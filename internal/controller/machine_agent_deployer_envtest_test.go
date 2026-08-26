@@ -66,6 +66,26 @@ func machineBMCTestDriverConnect(context.Context, *url.URL, bmc.Credentials, bmc
 var _ = Describe("Machine reconciliation with AgentDeployer", func() {
 	ctx := context.Background()
 
+	// Every Machine below names spec.subnetRef "default"/"default"; proxy
+	// mode keeps reserveAndAwaitDHCP a no-op, since this suite only
+	// exercises Inspect/delete, not DHCP reservations.
+	BeforeEach(func() {
+		subnet := &keziov1alpha3.Subnet{
+			ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
+			Spec: keziov1alpha3.SubnetSpec{
+				SiteRef:         keziov1alpha3.NameRef{Name: "site"},
+				CIDR:            "192.0.2.0/24",
+				BootdServerIP:   "192.0.2.2",
+				BootdNetworkRef: &keziov1alpha3.NameRef{Name: "boot-net"},
+				DHCP:            &keziov1alpha3.SubnetDHCP{Mode: keziov1alpha3.SubnetDHCPModeProxy},
+			},
+		}
+		err := k8sClient.Create(ctx, subnet)
+		if err != nil && !apierrors.IsAlreadyExists(err) {
+			Expect(err).NotTo(HaveOccurred())
+		}
+	})
+
 	It("walks Enrolling to Inspecting and stays Continuing until the live agent registers, then reaches Available", func() {
 		name := fmt.Sprintf("agent-deployer-%d", GinkgoRandomSeed())
 		secretName := name + "-bmc"

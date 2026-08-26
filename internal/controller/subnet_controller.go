@@ -38,8 +38,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
+	"github.com/tjjh89017/kezio/internal/bootserver"
 	"github.com/tjjh89017/kezio/internal/nadvalidate"
 	"github.com/tjjh89017/kezio/internal/sitederive"
+	"github.com/tjjh89017/kezio/internal/subnetdhcp"
 	"github.com/tjjh89017/kezio/internal/subnetvalidate"
 )
 
@@ -79,6 +81,7 @@ type SubnetReconciler struct {
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=subnets/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=subnets/finalizers,verbs=update
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=sites,verbs=get;list;watch
+// +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines,verbs=get;list;watch
 // +kubebuilder:rbac:groups=k8s.cni.cncf.io,resources=network-attachment-definitions,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
@@ -135,6 +138,10 @@ type subnetCheck struct {
 // exists, and Ready already carries that same "misconfigured but still
 // serving" meaning for every other non-blocking Violation.
 func (r *SubnetReconciler) onChange(ctx context.Context, subnet *keziov1alpha3.Subnet) (ctrl.Result, error) {
+	if err := r.gcDHCPReservations(ctx, subnet); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	checks, err := r.runNADChecks(ctx, subnet)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -276,6 +283,56 @@ func (r *SubnetReconciler) reconcileBootdDeployment(ctx context.Context, subnet 
 		}
 		return existing, false, nil
 	}
+}
+
+// gcDHCPReservations drops entries from subnet's in-memory
+// status.dhcp.reservations table whose Machine no longer exists, or
+// whose current spec.bootMACAddress/spec.subnetRef no longer match the
+// entry - the backstop for internal/deployer's own release calls (which
+// cover Machine deletion and deploy completion, but not a Machine
+// updated to a different MAC or a different Subnet) and the mechanism
+// that actually implements "release from the old Subnet" for a
+// spec.subnetRef change: the reservation only ever lived on the old
+// Subnet's own status, and only that Subnet's own reconcile can drop it.
+//
+// A no-op for a proxy-mode Subnet, or one with no reservations to check.
+// The result is left on subnet for onChange's own Status().Update to
+// persist alongside the conditions it computes - a second write here
+// would just race that one.
+func (r *SubnetReconciler) gcDHCPReservations(ctx context.Context, subnet *keziov1alpha3.Subnet) error {
+	if subnet.Spec.DHCP == nil || subnet.Spec.DHCP.Mode != keziov1alpha3.SubnetDHCPModeLease {
+		return nil
+	}
+	dhcp := subnet.Status.DHCP
+	if dhcp == nil || len(dhcp.Reservations) == 0 {
+		return nil
+	}
+
+	kept := make([]keziov1alpha3.DHCPReservation, 0, len(dhcp.Reservations))
+	for _, res := range dhcp.Reservations {
+		var machine keziov1alpha3.Machine
+		switch err := r.Get(ctx, client.ObjectKey{Namespace: subnet.Namespace, Name: res.Machine}, &machine); {
+		case kerrors.IsNotFound(err):
+			continue
+		case err != nil:
+			return fmt.Errorf("get machine %s/%s for DHCP reservation garbage collection: %w", subnet.Namespace, res.Machine, err)
+		}
+
+		mac, ok := bootserver.NormalizeMAC(machine.Spec.BootMACAddress)
+		if !ok || mac != res.MAC {
+			continue
+		}
+		if resolveNamespace(machine.Spec.SubnetRef, machine.Namespace) != subnet.Namespace || machine.Spec.SubnetRef.Name != subnet.Name {
+			continue
+		}
+		kept = append(kept, res)
+	}
+	if len(kept) == len(dhcp.Reservations) {
+		return nil
+	}
+	dhcp.Reservations = kept
+	dhcp.Revision = subnetdhcp.Revision(kept)
+	return nil
 }
 
 // checkBootdNamespacePrerequisites checks the two objects that must
@@ -661,6 +718,30 @@ func (r *SubnetReconciler) mapSiteToSubnets(ctx context.Context, obj client.Obje
 	return requests
 }
 
+// mapMachineToSubnets requeues every Subnet in the changed Machine's own
+// namespace, so gcDHCPReservations promptly drops a stale reservation
+// after the Machine that held it is deleted or its
+// bootMACAddress/subnetRef changes, rather than waiting for that
+// Subnet's own next spec change or the manager's default resync. Every
+// Subnet in the namespace is requeued, not just the one currently named
+// by spec.subnetRef, because the reservation being dropped may live on
+// the Subnet the Machine just moved away from.
+func (r *SubnetReconciler) mapMachineToSubnets(ctx context.Context, obj client.Object) []reconcile.Request {
+	machine, ok := obj.(*keziov1alpha3.Machine)
+	if !ok {
+		return nil
+	}
+	var subnets keziov1alpha3.SubnetList
+	if err := r.List(ctx, &subnets, client.InNamespace(machine.Namespace)); err != nil {
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(subnets.Items))
+	for i := range subnets.Items {
+		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&subnets.Items[i])})
+	}
+	return requests
+}
+
 // SetupWithManager sets up the controller with the Manager. Owns
 // requeues a Subnet whenever a bootd Deployment it controls changes -
 // for example rolling out to Available - so Ready reflects that without
@@ -673,6 +754,7 @@ func (r *SubnetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&keziov1alpha3.Subnet{}).
 		Owns(&appsv1.Deployment{}).
 		Watches(&keziov1alpha3.Site{}, handler.EnqueueRequestsFromMapFunc(r.mapSiteToSubnets)).
+		Watches(&keziov1alpha3.Machine{}, handler.EnqueueRequestsFromMapFunc(r.mapMachineToSubnets)).
 		Named("subnet").
 		Complete(r)
 }
