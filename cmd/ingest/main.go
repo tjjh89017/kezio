@@ -48,6 +48,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"github.com/tjjh89017/kezio/internal/imageservice"
 	"github.com/tjjh89017/kezio/internal/ingest"
@@ -153,15 +154,26 @@ func buildFromEnv() (ingest.Config, ingest.Dependencies, error) {
 		return ingest.Config{}, ingest.Dependencies{}, fmt.Errorf("create work dir %s: %w", workDir, err)
 	}
 
+	var bytesPerSec int64
+	if v := os.Getenv("IO_BANDWIDTH_BYTES_PER_SEC"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 {
+			log.Printf("kezio-ingest: invalid IO_BANDWIDTH_BYTES_PER_SEC %q, running unthrottled", v)
+		} else {
+			bytesPerSec = n
+		}
+	}
+
 	cfg := ingest.Config{
-		SourceURL:      sourceURL,
-		SourceFormat:   sourceFormat,
-		SourceChecksum: os.Getenv("SOURCE_CHECKSUM"),
-		WorkDir:        workDir,
+		SourceURL:              sourceURL,
+		SourceFormat:           sourceFormat,
+		SourceChecksum:         os.Getenv("SOURCE_CHECKSUM"),
+		WorkDir:                workDir,
+		IOBandwidthBytesPerSec: bytesPerSec,
 	}
 
 	deps := ingest.Dependencies{
-		Downloader: newHTTPDownloader(),
+		Downloader: newHTTPDownloader(bytesPerSec),
 		QemuImg:    execQemuImg{},
 		Sfdisk:     execSfdisk{},
 		Blkid:      execBlkid{},

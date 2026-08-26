@@ -729,6 +729,13 @@ What each group does, and where it is easy to make an error:
   so the default is correct here. Set it to `raw` if you import raw
   disk images instead. It is a manager-wide setting: an `ImageImport`
   has no format field of its own.
+- **`IMAGE_INGEST_IO_BANDWIDTH_BYTES_PER_SEC` is not set above.** It
+  defaults to 64Mi/s and caps the write rate of the ingest Job's own
+  file copies (the source download and each partition's slice), on top
+  of a best-effort low disk/CPU priority for `qemu-img` and `partclone`.
+  This keeps one ingest run from starving a node's disk of other work.
+  Raise it, or set it to a very large value, on a node whose disk can
+  take faster writes.
 - **There is no tracker URL variable.** `TRACKER_DEPLOYMENT_IMAGE` gives
   the Site reconciler the image for the tracker that it runs. The
   announce URL comes from `Site.spec.tracker.ip`, and kezio writes it

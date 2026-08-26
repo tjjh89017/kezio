@@ -22,6 +22,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+
+	"github.com/tjjh89017/kezio/internal/ingest"
 )
 
 // httpDownloader implements ingest.Downloader by streaming an http(s)
@@ -29,10 +31,13 @@ import (
 // in memory.
 type httpDownloader struct {
 	client *http.Client
+	// bytesPerSec caps the download's write rate (see
+	// ingest.NewThrottledWriter); 0 or negative leaves it unthrottled.
+	bytesPerSec int64
 }
 
-func newHTTPDownloader() *httpDownloader {
-	return &httpDownloader{client: http.DefaultClient}
+func newHTTPDownloader(bytesPerSec int64) *httpDownloader {
+	return &httpDownloader{client: http.DefaultClient, bytesPerSec: bytesPerSec}
 }
 
 func (d *httpDownloader) Download(ctx context.Context, url, destPath string) (err error) {
@@ -62,7 +67,7 @@ func (d *httpDownloader) Download(ctx context.Context, url, destPath string) (er
 		}
 	}()
 
-	if _, err := io.Copy(out, resp.Body); err != nil {
+	if _, err := io.Copy(ingest.NewThrottledWriter(out, d.bytesPerSec), resp.Body); err != nil {
 		return fmt.Errorf("write %s: %w", destPath, err)
 	}
 	return nil

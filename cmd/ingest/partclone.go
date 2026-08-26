@@ -72,8 +72,10 @@ func (execPartclone) Clone(ctx context.Context, fsType, source, targetDir string
 		args = append([]string{"-c"}, args...)
 	}
 
-	//nolint:gosec // binary is chosen from a fixed set below; source/targetDir/logPath are ingest-controlled scratch paths
-	cmd := exec.CommandContext(ctx, binary, args...)
+	// partclone can write a whole partition's worth of bytes; run it at
+	// low I/O/CPU priority (see throttledCommand) so it does not starve
+	// the node's disk for anything else sharing it.
+	cmd := throttledCommand(ctx, binary, args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%s %s: %w: %s", binary, strings.Join(args, " "), err, out)
 	}

@@ -500,6 +500,14 @@ func imageIngestConfigFromEnv() controller.ImageIngestConfig {
 			cfg.ScratchAccessModes = append(cfg.ScratchAccessModes, corev1.PersistentVolumeAccessMode(strings.TrimSpace(m)))
 		}
 	}
+	if v := os.Getenv("IMAGE_INGEST_IO_BANDWIDTH_BYTES_PER_SEC"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n <= 0 {
+			setupLog.Error(err, "invalid IMAGE_INGEST_IO_BANDWIDTH_BYTES_PER_SEC, using default", "value", v)
+		} else {
+			cfg.IOBandwidthBytesPerSec = n
+		}
+	}
 	return cfg
 }
 

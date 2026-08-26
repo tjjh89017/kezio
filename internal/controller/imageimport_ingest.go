@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -259,6 +260,7 @@ func (r *ImageImportReconciler) buildIngestJob(imp *keziov1alpha3.ImageImport, s
 		{Name: "SOURCE_CHECKSUM", Value: imp.Spec.Source.Checksum},
 		{Name: "SOURCE_FORMAT", Value: r.Ingest.sourceFormat()},
 		{Name: "WORK_DIR", Value: ingest.DefaultWorkDir},
+		{Name: "IO_BANDWIDTH_BYTES_PER_SEC", Value: strconv.FormatInt(r.Ingest.ioBandwidthBytesPerSec(), 10)},
 	}
 	volumes := []corev1.Volume{{
 		Name: ingestWorkVolumeName,

@@ -35,6 +35,13 @@ const defaultIngestScratchSizeBytes = 16 * 1024 * 1024 * 1024
 // default - see the field's doc comment for why ReadWriteMany.
 var defaultIngestScratchAccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}
 
+// defaultIngestIOBandwidthBytesPerSec is ImageIngestConfig.
+// IOBandwidthBytesPerSec's default (64Mi/s): a cap loose enough not to
+// meaningfully slow a routine import, but tight enough that one ingest
+// Job can no longer saturate a shared disk the way an unthrottled one
+// can.
+const defaultIngestIOBandwidthBytesPerSec = 64 * 1024 * 1024
+
 // ImageIngestConfig configures the ImageImport reconciler: the ingest
 // Job's image plus everything needed to run it against a source image.
 // The zero value (Image == "") is not ready() and holds every import at
@@ -91,6 +98,16 @@ type ImageIngestConfig struct {
 	// (imageservice.Authenticator's bearer token). Read from
 	// IMAGE_INGEST_IMAGE_SERVICE_TOKEN.
 	ImageServiceToken string
+	// IOBandwidthBytesPerSec caps the ingest Job's own write rate for the
+	// steps it performs directly - the source download and each
+	// partition's slice extraction (see internal/ingest.Config's doc
+	// comment) - on top of the best-effort ionice/nice priority every
+	// heavy step runs under regardless. Read from
+	// IMAGE_INGEST_IO_BANDWIDTH_BYTES_PER_SEC; defaults to
+	// defaultIngestIOBandwidthBytesPerSec when unset or non-positive. A
+	// deliberately very large value is how an operator opts back out to
+	// unthrottled.
+	IOBandwidthBytesPerSec int64
 }
 
 // ready reports whether cfg carries enough configuration to dispatch an
@@ -124,4 +141,13 @@ func (cfg ImageIngestConfig) scratchAccessModes() []corev1.PersistentVolumeAcces
 		return cfg.ScratchAccessModes
 	}
 	return defaultIngestScratchAccessModes
+}
+
+// ioBandwidthBytesPerSec returns cfg.IOBandwidthBytesPerSec, or
+// defaultIngestIOBandwidthBytesPerSec when unset or non-positive.
+func (cfg ImageIngestConfig) ioBandwidthBytesPerSec() int64 {
+	if cfg.IOBandwidthBytesPerSec > 0 {
+		return cfg.IOBandwidthBytesPerSec
+	}
+	return defaultIngestIOBandwidthBytesPerSec
 }

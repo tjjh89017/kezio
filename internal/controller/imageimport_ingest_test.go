@@ -197,6 +197,7 @@ var _ = Describe("ImageImport Controller", func() {
 		Expect(envByName["SOURCE_URL"]).To(Equal(imp.Spec.Source.URL))
 		Expect(envByName["SOURCE_CHECKSUM"]).To(Equal(imp.Spec.Source.Checksum))
 		Expect(envByName["WORK_DIR"]).To(Equal(ingest.DefaultWorkDir))
+		Expect(envByName["IO_BANDWIDTH_BYTES_PER_SEC"]).To(Equal(fmt.Sprintf("%d", defaultIngestIOBandwidthBytesPerSec)))
 		Expect(envByName).NotTo(HaveKey("STAGING_ROOT"))
 
 		Expect(container.VolumeMounts).To(ContainElement(corev1.VolumeMount{Name: "work", MountPath: ingest.DefaultWorkDir}))
@@ -207,6 +208,23 @@ var _ = Describe("ImageImport Controller", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ingestScratchPVCName(imp.Name), Namespace: "default"}, &pvc)).To(Succeed())
 		Expect(pvc.OwnerReferences).To(HaveLen(1))
 		Expect(pvc.OwnerReferences[0].Name).To(Equal(imp.Name))
+	})
+
+	It("passes a configured IO bandwidth cap through to the ingest job", func() {
+		imp := newTestImageImport("import-io-bandwidth", "https://example.test/disk.img", 30)
+		nn := createImport(imp)
+
+		r.Ingest.IOBandwidthBytesPerSec = 1024 * 1024
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		var job batchv1.Job
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ingestJobName(imp), Namespace: "default"}, &job)).To(Succeed())
+		envByName := map[string]string{}
+		for _, e := range job.Spec.Template.Spec.Containers[0].Env {
+			envByName[e.Name] = e.Value
+		}
+		Expect(envByName["IO_BANDWIDTH_BYTES_PER_SEC"]).To(Equal("1048576"))
 	})
 
 	It("mounts the staging PVC and sets STAGING_ROOT for a kezio-staged:// source, once configured", func() {

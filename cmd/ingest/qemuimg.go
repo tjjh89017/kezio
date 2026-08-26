@@ -51,8 +51,10 @@ func (execQemuImg) Info(ctx context.Context, path string) (ingest.QemuImgInfo, e
 }
 
 func (execQemuImg) ConvertToRaw(ctx context.Context, src, srcFormat, dst string) error {
-	//nolint:gosec // src/dst are ingest-controlled scratch paths, not user input
-	cmd := exec.CommandContext(ctx, "qemu-img", "convert", "-f", srcFormat, "-O", "raw", src, dst)
+	// Converting a whole disk can write gigabytes; run it at low I/O/CPU
+	// priority (see throttledCommand) so it does not starve the node's
+	// disk for anything else sharing it.
+	cmd := throttledCommand(ctx, "qemu-img", "convert", "-f", srcFormat, "-O", "raw", src, dst)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("qemu-img convert %s -> %s: %w: %s", src, dst, err, out)
 	}
