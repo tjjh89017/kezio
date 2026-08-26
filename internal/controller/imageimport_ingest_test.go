@@ -26,12 +26,15 @@ import (
 	. "github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
@@ -280,6 +283,7 @@ var _ = Describe("ImageImport Controller", func() {
 		Expect(pc1.Spec.FSType).To(Equal("vfat"))
 		Expect(pc1.Spec.Source.ImportName).To(Equal(imp.Name))
 		Expect(pc1.Spec.Source.PartitionNumber).To(Equal(int32(1)))
+		Expect(pc1.OwnerReferences).To(BeEmpty(), "content must not be owner-referenced to the import, or deleting the import would delete it too")
 
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: store.ContentName(imp.Spec.ContentPrefix, 2), Namespace: "default"}, &pc2)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, &pc2) })
@@ -302,12 +306,68 @@ var _ = Describe("ImageImport Controller", func() {
 		Expect(img.Spec.Layout.Slots[2].Role).To(Equal(keziov1alpha3.PartitionRoleSwap))
 		Expect(img.Spec.Layout.Slots[2].ContentRef).To(BeNil())
 		Expect(img.Spec.Layout.Slots[2].UUID).To(Equal("11111111-1111-1111-1111-111111111111"))
+		Expect(img.OwnerReferences).To(BeEmpty(), "the Image must not be owner-referenced to the import, or deleting the import would delete it too")
 
 		var got keziov1alpha3.ImageImport
 		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
-		Expect(got.Status.State).To(Equal(keziov1alpha3.ImageImportStateReady))
+		Expect(got.Status.State).To(Equal(keziov1alpha3.ImageImportStateSucceeded))
 		Expect(got.Status.ImageRef.Name).To(Equal(imp.Spec.ImageName))
 		Expect(got.Status.ContentRefs).To(HaveLen(2))
+	})
+
+	// The CRD's status.state Enum no longer lists "Ready" - only an object
+	// that reached it before the rename could ever carry it, and the real
+	// envtest apiserver validates the whole object against today's Enum on
+	// every write. To seed one the way an upgrade would actually find it -
+	// already sitting at "Ready" in etcd - this spec briefly widens the
+	// installed CRD's Enum back to what it allowed before the rename, only
+	// long enough to write that value, then restores it.
+	It("rewrites a pre-rename Ready state to Succeeded without re-running ingest", func() {
+		crdScheme := runtime.NewScheme()
+		Expect(apiextensionsv1.AddToScheme(crdScheme)).To(Succeed())
+		crdClient, err := client.New(cfg, client.Options{Scheme: crdScheme})
+		Expect(err).NotTo(HaveOccurred())
+
+		crdKey := types.NamespacedName{Name: "imageimports.kezio.kojuro.date"}
+		var crd apiextensionsv1.CustomResourceDefinition
+		Expect(crdClient.Get(ctx, crdKey, &crd)).To(Succeed())
+		originalSpec := *crd.Spec.DeepCopy()
+		DeferCleanup(func() {
+			var latest apiextensionsv1.CustomResourceDefinition
+			Expect(crdClient.Get(ctx, crdKey, &latest)).To(Succeed())
+			latest.Spec = originalSpec
+			Expect(crdClient.Update(ctx, &latest)).To(Succeed())
+		})
+
+		for i := range crd.Spec.Versions {
+			status := crd.Spec.Versions[i].Schema.OpenAPIV3Schema.Properties["status"]
+			state := status.Properties["state"]
+			state.Enum = append(state.Enum, apiextensionsv1.JSON{Raw: []byte(`"Ready"`)})
+			status.Properties["state"] = state
+			crd.Spec.Versions[i].Schema.OpenAPIV3Schema.Properties["status"] = status
+		}
+		Expect(crdClient.Update(ctx, &crd)).To(Succeed())
+
+		imp := newTestImageImport("import-legacy-ready", "https://example.test/disk.img", 40)
+		nn := createImport(imp)
+		Expect(k8sClient.Get(ctx, nn, imp)).To(Succeed())
+		imp.Status.State = "Ready"
+		imp.Status.ImageRef = &keziov1alpha3.NameRef{Name: imp.Spec.ImageName}
+		Expect(k8sClient.Status().Update(ctx, imp)).To(Succeed())
+
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		var got keziov1alpha3.ImageImport
+		Expect(k8sClient.Get(ctx, nn, &got)).To(Succeed())
+		Expect(got.Status.State).To(Equal(keziov1alpha3.ImageImportStateSucceeded))
+		Expect(got.Status.ImageRef.Name).To(Equal(imp.Spec.ImageName))
+
+		// No ingest Job was ever created for this import - if the rewrite
+		// had routed back through reconcileIngesting, one would exist now.
+		var job batchv1.Job
+		err = k8sClient.Get(ctx, types.NamespacedName{Name: ingestJobName(imp), Namespace: "default"}, &job)
+		Expect(apierrors.IsNotFound(err)).To(BeTrue())
 	})
 
 	It("fails the import rather than writing over a PartitionContent name another import holds", func() {

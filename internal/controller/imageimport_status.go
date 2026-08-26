@@ -106,17 +106,17 @@ func (r *ImageImportReconciler) recordIngesting(ctx context.Context, imp *keziov
 	return ctrl.Result{RequeueAfter: imageIngestPollInterval}, nil
 }
 
-// recordImportReady records Ready: every PartitionContent this import
-// captured, and the Image binding them, now exist. Their own controllers
-// take it from here - this import has nothing left to do.
-func (r *ImageImportReconciler) recordImportReady(ctx context.Context, imp *keziov1alpha3.ImageImport, contentRefs []keziov1alpha3.NameRef) (ctrl.Result, error) {
-	imp.Status.State = keziov1alpha3.ImageImportStateReady
+// recordImportSucceeded records Succeeded: every PartitionContent this
+// import captured, and the Image binding them, now exist. Their own
+// controllers take it from here - this import has nothing left to do.
+func (r *ImageImportReconciler) recordImportSucceeded(ctx context.Context, imp *keziov1alpha3.ImageImport, contentRefs []keziov1alpha3.NameRef) (ctrl.Result, error) {
+	imp.Status.State = keziov1alpha3.ImageImportStateSucceeded
 	imp.Status.ImageRef = &keziov1alpha3.NameRef{Name: imp.Spec.ImageName}
 	imp.Status.ContentRefs = contentRefs
 	setImageImportReadyCondition(imp, metav1.ConditionTrue, "ImportComplete",
 		fmt.Sprintf("captured %d partition content object(s) and created Image %q", len(contentRefs), imp.Spec.ImageName))
 	if err := r.applyImageImportStatus(ctx, imp); err != nil {
-		return ctrl.Result{}, fmt.Errorf("imageimport %q: recording Ready: %w", imp.Name, err)
+		return ctrl.Result{}, fmt.Errorf("imageimport %q: recording Succeeded: %w", imp.Name, err)
 	}
 	return ctrl.Result{}, nil
 }
@@ -130,6 +130,18 @@ func (r *ImageImportReconciler) recordImportFailed(ctx context.Context, imp *kez
 	setImageImportReadyCondition(imp, metav1.ConditionFalse, "ImportFailed", message)
 	if err := r.applyImageImportStatus(ctx, imp); err != nil {
 		return ctrl.Result{}, fmt.Errorf("imageimport %q: recording Failed: %w", imp.Name, err)
+	}
+	return ctrl.Result{}, nil
+}
+
+// migrateLegacyReadyState rewrites a pre-rename Ready import to
+// Succeeded, once, without touching ingest - see legacyReadyState's doc
+// comment. The content refs and Image ref it already recorded are left
+// as they are; only status.state changes.
+func (r *ImageImportReconciler) migrateLegacyReadyState(ctx context.Context, imp *keziov1alpha3.ImageImport) (ctrl.Result, error) {
+	imp.Status.State = keziov1alpha3.ImageImportStateSucceeded
+	if err := r.applyImageImportStatus(ctx, imp); err != nil {
+		return ctrl.Result{}, fmt.Errorf("imageimport %q: rewriting legacy Ready state to Succeeded: %w", imp.Name, err)
 	}
 	return ctrl.Result{}, nil
 }

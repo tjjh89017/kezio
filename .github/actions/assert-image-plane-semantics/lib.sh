@@ -55,8 +55,8 @@ wait_for_image_ready() {
 }
 
 # wait_for_import_failed polls name's status.state until Failed, failing
-# if it reaches Ready instead or if timeout_seconds elapses. Ready is a
-# terminal wrong answer here, not something to keep waiting through.
+# if it reaches Succeeded instead or if timeout_seconds elapses. Succeeded
+# is a terminal wrong answer here, not something to keep waiting through.
 wait_for_import_failed() {
   local ns="$1" name="$2" timeout_seconds="$3"
   local deadline state
@@ -67,8 +67,8 @@ wait_for_import_failed() {
     if [ "${state}" = "Failed" ]; then
       return 0
     fi
-    if [ "${state}" = "Ready" ]; then
-      echo "::error::ImageImport ${name} reached Ready, but it had to be refused" >&2
+    if [ "${state}" = "Succeeded" ]; then
+      echo "::error::ImageImport ${name} reached Succeeded, but it had to be refused" >&2
       dump_import_diagnostics "${ns}" "${name}"
       return 1
     fi

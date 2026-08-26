@@ -94,13 +94,26 @@ func (r *ImageImportReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	return r.onChange(ctx, &imp)
 }
 
+// legacyReadyState is the pre-rename value of status.state a completed
+// ImageImport carried before ImageImportStateSucceeded replaced "Ready" -
+// see that constant's doc comment. It no longer appears in the CRD's
+// Enum, so no new object can be written with it, but an object that
+// reached it before the rename keeps carrying it in etcd until onChange
+// rewrites it. Ingest already ran and produced the Image and
+// PartitionContent objects it was going to produce, so this rewrite must
+// never route back through reconcileIngesting.
+const legacyReadyState = "Ready"
+
 // onChange drives one step of the import walk: Pending -> Ingesting ->
-// Ready|Failed. A finished import never re-enters it - the Image and the
-// content it created are immutable, so there is nothing left to converge.
+// Succeeded|Failed. A finished import never re-enters it - the Image and
+// the content it created are immutable, so there is nothing left to
+// converge.
 func (r *ImageImportReconciler) onChange(ctx context.Context, imp *keziov1alpha3.ImageImport) (ctrl.Result, error) {
 	switch imp.Status.State {
-	case keziov1alpha3.ImageImportStateReady, keziov1alpha3.ImageImportStateFailed:
+	case keziov1alpha3.ImageImportStateSucceeded, keziov1alpha3.ImageImportStateFailed:
 		return ctrl.Result{}, nil
+	case legacyReadyState:
+		return r.migrateLegacyReadyState(ctx, imp)
 	}
 
 	if !r.Ingest.ready() {
@@ -163,7 +176,7 @@ func (r *ImageImportReconciler) completeIngest(ctx context.Context, imp *keziov1
 		return ctrl.Result{}, err
 	}
 
-	return r.recordImportReady(ctx, imp, contentRefs)
+	return r.recordImportSucceeded(ctx, imp, contentRefs)
 }
 
 // importNameConflictError reports a name this import had to create but

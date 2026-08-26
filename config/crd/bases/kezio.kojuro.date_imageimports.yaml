@@ -284,7 +284,7 @@ spec:
                 enum:
                 - Pending
                 - Ingesting
-                - Ready
+                - Succeeded
                 - Failed
                 type: string
             type: object

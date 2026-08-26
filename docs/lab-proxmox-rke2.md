@@ -1091,8 +1091,8 @@ kubectl -n kezio-system get image lab-ubuntu -w
 kubectl -n kezio-system get partitioncontent
 ```
 
-Wait until the `ImageImport` reports `Ready`, and then until the `Image`
-does. Watch the import beside the Image: an import that fails never
+Wait until the `ImageImport` reports `Succeeded`, and then until the
+`Image` reports `Ready`. Watch the import beside the Image: an import that fails never
 creates the Image at all, so the Image alone would show only the
 time-out.
 

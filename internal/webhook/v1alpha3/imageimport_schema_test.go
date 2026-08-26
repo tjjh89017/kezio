@@ -98,7 +98,7 @@ var _ = Describe("ImageImport CRD schema", func() {
 		imp := newImageImport()
 		Expect(k8sClient.Create(ctx, imp)).To(Succeed())
 
-		imp.Status.State = keziov1alpha3.ImageImportStateReady
+		imp.Status.State = keziov1alpha3.ImageImportStateSucceeded
 		imp.Status.ImageRef = &keziov1alpha3.NameRef{Name: imp.Spec.ImageName}
 		Expect(k8sClient.Status().Update(ctx, imp)).To(Succeed())
 	})

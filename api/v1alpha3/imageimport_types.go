@@ -101,9 +101,12 @@ const (
 	// ImageImportStateIngesting means the ingest Job is fetching,
 	// converting, or slicing the source image.
 	ImageImportStateIngesting = "Ingesting"
-	// ImageImportStateReady means ingest finished and both the
-	// PartitionContent objects and the Image exist.
-	ImageImportStateReady = "Ready"
+	// ImageImportStateSucceeded means ingest finished and both the
+	// PartitionContent objects and the Image exist. Named Succeeded, not
+	// Ready, because an import is a one-shot request rather than a
+	// standing resource - "Ready" describes the Image it created, not the
+	// import itself - mirroring DeployRunPhaseSucceeded.
+	ImageImportStateSucceeded = "Succeeded"
 	// ImageImportStateFailed means ingest failed, or a name this import
 	// had to create was already taken.
 	ImageImportStateFailed = "Failed"
@@ -118,7 +121,7 @@ const (
 // ImageImportStatus defines the observed state of ImageImport.
 type ImageImportStatus struct {
 	// State is the object's position in the import workflow.
-	// +kubebuilder:validation:Enum=Pending;Ingesting;Ready;Failed
+	// +kubebuilder:validation:Enum=Pending;Ingesting;Succeeded;Failed
 	// +optional
 	State string `json:"state,omitempty"`
 	// ImageRef names the Image this import created, once it exists.

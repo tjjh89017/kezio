@@ -186,7 +186,7 @@ the spec describes them.
 | `spec.params` | Copied onto `Image.spec.params`. |
 | `spec.postHookRefs` | Copied onto `Image.spec.postHookRefs`. |
 | `spec.scratchSize` | Overrides the size of the ingest scratch volume. Left unset, the manager sizes it from the source image (about twice its size for a raw source, three times for one that ingest must convert first), with a floor for a source it cannot size. |
-| `status.state` | `Pending`, `Ingesting`, `Ready`, or `Failed`. |
+| `status.state` | `Pending`, `Ingesting`, `Succeeded`, or `Failed`. |
 | `status.imageRef` | The `Image` this import created. |
 | `status.contentRefs` | Every `PartitionContent` this import created, in partition order. |
 
