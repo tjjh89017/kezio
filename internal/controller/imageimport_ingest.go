@@ -353,13 +353,12 @@ const ingestUnprivilegedRunAsUser = 65532
 // The nbd-attach path needs CAP_SYS_ADMIN - qemu-nbd's NBD_SET_SOCK and
 // NBD_DO_IT ioctls, and blockdev --rereadpt's BLKRRPART, both require it
 // - plus read-write access to the node's /dev/nbd* device nodes (see
-// ingestDevVolumeName), which are root:disk-owned. Root is simplest way
-// to guarantee that access without depending on the node's "disk" group
-// id, and RunAsNonRoot cannot be true for uid 0. This is deliberately
-// capabilities.add: [SYS_ADMIN], not securityContext.privileged: true:
-// full privileged grants far more than ingest needs (every other
-// capability, seccomp/AppArmor bypass, device cgroup bypass), none of
-// which qemu-nbd or partclone use.
+// ingestDevVolumeName), which are root:disk-owned. That access needs
+// securityContext.privileged: true, not just capabilities.add
+// [SYS_ADMIN]: the container's device cgroup only admits the runtime's
+// default device list, so opening /dev/nbd0 through a hostPath /dev
+// mount fails with EPERM even as root with CAP_SYS_ADMIN. Privileged is
+// the one setting that lifts the device cgroup.
 func ingestPodSecurityContext(unprivileged bool) (*corev1.PodSecurityContext, *corev1.SecurityContext) {
 	falseVal := false
 	if unprivileged {
@@ -379,18 +378,12 @@ func ingestPodSecurityContext(unprivileged bool) (*corev1.PodSecurityContext, *c
 	}
 
 	rootUser := int64(0)
+	privileged := true
 	return &corev1.PodSecurityContext{
 			RunAsUser:  &rootUser,
 			RunAsGroup: &rootUser,
-			SeccompProfile: &corev1.SeccompProfile{
-				Type: corev1.SeccompProfileTypeRuntimeDefault,
-			},
 		}, &corev1.SecurityContext{
-			AllowPrivilegeEscalation: &falseVal,
-			Capabilities: &corev1.Capabilities{
-				Drop: []corev1.Capability{"ALL"},
-				Add:  []corev1.Capability{"SYS_ADMIN"},
-			},
+			Privileged: &privileged,
 		}
 }
 

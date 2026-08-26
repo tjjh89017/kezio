@@ -557,8 +557,10 @@ import until every content it created is Ready.
 
 **The ingest Job is privileged by default.** It attaches its source
 image to a kernel `nbd` device with `qemu-nbd` and reads partitions
-straight off that device, so it needs `CAP_SYS_ADMIN`, a hostPath mount
-of the node's `/dev`, and runs as root - and every node the ingest Job
+straight off that device, so it runs as root with
+`securityContext.privileged: true` (the container's device cgroup admits
+`/dev/nbd*` only for a privileged pod) and a hostPath mount of the
+node's `/dev` - and every node the ingest Job
 can land on must have the `nbd` kernel module loaded with partition
 support, e.g. `modprobe nbd max_part=16`. Without that module loaded,
 the ingest Job fails fast with a clear error rather than hanging. Set

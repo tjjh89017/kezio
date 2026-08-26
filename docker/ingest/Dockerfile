@@ -7,9 +7,9 @@ ARG TARGETARCH
 # partclone/qemu-img/qemu-nbd/sfdisk/blkid on PATH - unlike
 # manager/image-service. By default (IMAGE_INGEST_ATTACH=nbd, see
 # internal/controller's Job builder) it attaches its source image with
-# qemu-nbd and needs the privilege that comes with - CAP_SYS_ADMIN plus
-# /dev access, granted by the Job's securityContext, not by anything in
-# this image. IMAGE_INGEST_ATTACH=copy (internal/ingest's doc comment)
+# qemu-nbd and needs the privilege that comes with - a privileged pod
+# with the node's /dev, granted by the Job's securityContext, not by
+# anything in this image. IMAGE_INGEST_ATTACH=copy (internal/ingest's doc comment)
 # only reads/writes plain files, never a block device, and needs none of
 # that.
 FROM --platform=$BUILDPLATFORM golang:1.26 AS builder

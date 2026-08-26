@@ -222,7 +222,8 @@ var _ = Describe("ImageImport Controller", func() {
 		podSC := job.Spec.Template.Spec.SecurityContext
 		Expect(podSC.RunAsUser).NotTo(BeNil())
 		Expect(*podSC.RunAsUser).To(Equal(int64(0)), "the default nbd-attach path runs as root")
-		Expect(container.SecurityContext.Capabilities.Add).To(ContainElement(corev1.Capability("SYS_ADMIN")))
+		Expect(container.SecurityContext.Privileged).NotTo(BeNil())
+		Expect(*container.SecurityContext.Privileged).To(BeTrue(), "the default nbd-attach path needs a privileged pod to open /dev/nbd*")
 
 		var pvc corev1.PersistentVolumeClaim
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ingestScratchPVCName(imp.Name), Namespace: "default"}, &pvc)).To(Succeed())
