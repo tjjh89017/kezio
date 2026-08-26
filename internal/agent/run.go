@@ -77,12 +77,24 @@ func (c Config) log(format string, args ...any) {
 // Run drives the agent's whole lifecycle: collect hardware inventory,
 // register with the controller (retrying until it succeeds or ctx is
 // cancelled), then poll /agent/next until ctx is cancelled, honouring
-// the poll interval each response carries. It returns only when ctx is
-// cancelled (nil) or a step fails in a way that retrying cannot fix (a
-// malformed cmdline: there is nothing to register with).
+// the poll interval each response carries. It returns nil once ctx is
+// cancelled, whether that happens before registration (an absent
+// kezio.server=/kezio.token=, or a wait for SIGTERM while idle - see
+// below) or during polling.
+//
+// A cmdline with no server/token is not an error: bootserver hands out
+// exactly that (see renderNetBootConfig) whenever a Machine net boots
+// with no live token to embed - nothing has armed a boot for it yet in
+// this process, its token already expired, or a prior registration
+// already consumed it. Treating it as fatal would exit(1) into a
+// systemd restart loop with nothing for a later attempt to do
+// differently, so Run logs once and idles until ctx is cancelled
+// instead.
 func Run(ctx context.Context, cfg Config) error {
 	if cfg.Cmdline.Server == "" || cfg.Cmdline.Token == "" {
-		return fmt.Errorf("kernel cmdline is missing kezio.server= or kezio.token=; nothing to register with")
+		cfg.log("kernel cmdline carries no kezio.server=/kezio.token=; idling until shut down")
+		<-ctx.Done()
+		return nil
 	}
 
 	hardware, err := Collect(cfg.InventoryRoot)

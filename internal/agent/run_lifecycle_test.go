@@ -101,19 +101,35 @@ func TestRun_CollectRegisterPollWiredTogether(t *testing.T) {
 	}
 }
 
-// TestRun_InvalidCmdlineReturnsValidationError covers the negative case:
-// Run must fail fast on a malformed cmdline rather than attempting to
-// collect inventory or register with nothing to register with.
-func TestRun_InvalidCmdlineReturnsValidationError(t *testing.T) {
-	cfg, _ := collectLogs()
+// TestRun_MissingCmdlineIdlesInsteadOfExiting covers the negative case
+// observed in the field: a Machine can legitimately net boot with no
+// live token (see Run's doc comment). Run must log once and idle until
+// ctx is cancelled rather than returning an error - a non-nil error
+// here is what drove cmd/agent/main.go's log.Fatalf into a systemd
+// restart loop.
+func TestRun_MissingCmdlineIdlesInsteadOfExiting(t *testing.T) {
+	cfg, lines := collectLogs()
 	cfg.InventoryRoot = "testdata/host1"
 
-	err := Run(context.Background(), cfg)
-	if err == nil {
-		t.Fatal("Run: want an error for an empty Cmdline.Server/Token, got nil")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	if err := Run(ctx, cfg); err != nil {
+		t.Fatalf("Run returned %v, want nil (idle until ctx is cancelled)", err)
 	}
-	if !strings.Contains(err.Error(), "kezio.server=") || !strings.Contains(err.Error(), "kezio.token=") {
-		t.Errorf("Run error = %q, want it to mention the missing kezio.server=/kezio.token= cmdline values", err.Error())
+	if elapsed := time.Since(start); elapsed < 20*time.Millisecond {
+		t.Fatalf("Run returned after %s, want it to have blocked until ctx expired", elapsed)
+	}
+
+	found := false
+	for _, l := range *lines {
+		if strings.Contains(l, "kezio.server=") && strings.Contains(l, "kezio.token=") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("logs = %v, want one line mentioning the missing kezio.server=/kezio.token= cmdline values", *lines)
 	}
 }
 
