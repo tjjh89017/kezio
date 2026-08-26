@@ -89,8 +89,17 @@ func main() {
 // redactToken returns a short, non-reversible summary of a boot token
 // for log lines: the token is a live, single-use credential and must
 // never appear in full in a log that a bystander or unrelated tooling
-// might read (e.g. a serial console capture).
+// might read (e.g. a serial console capture). An empty token is
+// reported as such rather than folded into the same "<redacted>" a
+// present-but-short token gets: the booted-line log is the only signal
+// an operator reading a serial console capture has for telling "this
+// boot has no token to register with" apart from "it has one, just not
+// shown" - collapsing that distinction was what made the crash-loop
+// this only symptom look like kezio-agent itself was broken.
 func redactToken(token string) string {
+	if token == "" {
+		return "<empty>"
+	}
 	if len(token) <= 8 {
 		return "<redacted>"
 	}

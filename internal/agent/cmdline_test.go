@@ -59,6 +59,27 @@ func TestParseCmdline(t *testing.T) {
 			raw:  "kezio.server=http://x/path?a=b",
 			want: Cmdline{Server: "http://x/path?a=b"},
 		},
+		{
+			// The real shape bootserver's renderNetBootConfig emits: a
+			// token followed by console= args on the same line. Reproduces
+			// the DUT 206 field report, where kezio.token= was suspected of
+			// swallowing the trailing console argument - it does not:
+			// strings.Fields splits on whitespace before Cut ever sees the
+			// token, so a trailing "console=ttyS0,115200n8" is its own
+			// token and never bleeds into kezio.token='s value.
+			name: "server and token followed by a console arg on the real boot cmdline",
+			raw:  "boot=live fetch=http://10.0.0.5:8090/boot/artifacts/squashfs kezio.server=http://10.0.0.5:8090 kezio.token=abc123def456 console=ttyS0,115200n8",
+			want: Cmdline{Server: "http://10.0.0.5:8090", Token: "abc123def456"},
+		},
+		{
+			// The other real shape: renderNetBootConfig omits kezio.token=
+			// entirely when no token was minted (Server.lookupToken), so
+			// Server ends up empty and Token ends up empty - the case Run
+			// must idle on rather than treat as a parse failure.
+			name: "server present but no token minted for this boot",
+			raw:  "boot=live fetch=http://10.0.0.5:8090/boot/artifacts/squashfs kezio.server=http://10.0.0.5:8090 console=ttyS0,115200n8",
+			want: Cmdline{Server: "http://10.0.0.5:8090"},
+		},
 	}
 
 	for _, tt := range tests {
