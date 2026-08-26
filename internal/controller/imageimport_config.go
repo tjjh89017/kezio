@@ -18,6 +18,8 @@ package controller
 
 import (
 	corev1 "k8s.io/api/core/v1"
+
+	"github.com/tjjh89017/kezio/internal/ingest"
 )
 
 // defaultIngestSourceFormat is ImageIngestConfig.SourceFormat's default.
@@ -108,6 +110,16 @@ type ImageIngestConfig struct {
 	// deliberately very large value is how an operator opts back out to
 	// unthrottled.
 	IOBandwidthBytesPerSec int64
+	// Unprivileged opts an import out of the default nbd-attach ingest
+	// pipeline (internal/ingest.AttachModeNBD) back to the original
+	// unprivileged file-copy one (internal/ingest.AttachModeCopy): the
+	// ingest Job runs with no elevated privilege at all, at the cost of
+	// writing a full raw conversion copy and per-partition slices to
+	// scratch again (see buildIngestJob and ingestScratchSizeBytes). Read
+	// from IMAGE_INGEST_UNPRIVILEGED ("true" opts out); false (the
+	// default) is the nbd-attach path, which needs the node's "nbd"
+	// kernel module loaded with max_part>0 (see docs/crd-reference.md).
+	Unprivileged bool
 }
 
 // ready reports whether cfg carries enough configuration to dispatch an
@@ -150,4 +162,14 @@ func (cfg ImageIngestConfig) ioBandwidthBytesPerSec() int64 {
 		return cfg.IOBandwidthBytesPerSec
 	}
 	return defaultIngestIOBandwidthBytesPerSec
+}
+
+// attachMode returns the ingest.Config.AttachMode value buildIngestJob
+// passes to the ingest Job via IMAGE_INGEST_ATTACH: ingest.AttachModeNBD
+// by default, or ingest.AttachModeCopy when cfg.Unprivileged opts out.
+func (cfg ImageIngestConfig) attachMode() string {
+	if cfg.Unprivileged {
+		return ingest.AttachModeCopy
+	}
+	return ingest.AttachModeNBD
 }

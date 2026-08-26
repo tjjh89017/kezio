@@ -203,15 +203,56 @@ var _ = Describe("ImageImport Controller", func() {
 		Expect(envByName["WORK_DIR"]).To(Equal(ingest.DefaultWorkDir))
 		Expect(envByName["IO_BANDWIDTH_BYTES_PER_SEC"]).To(Equal(fmt.Sprintf("%d", defaultIngestIOBandwidthBytesPerSec)))
 		Expect(envByName).NotTo(HaveKey("STAGING_ROOT"))
+		Expect(envByName["IMAGE_INGEST_ATTACH"]).To(Equal(ingest.AttachModeNBD), "the nbd-attach path is the default")
 
 		Expect(container.VolumeMounts).To(ContainElement(corev1.VolumeMount{Name: "work", MountPath: ingest.DefaultWorkDir}))
-		Expect(job.Spec.Template.Spec.Volumes).To(HaveLen(1))
-		Expect(job.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim.ClaimName).To(Equal(ingestScratchPVCName(imp.Name)))
+		// The default nbd-attach path also mounts the node's /dev as a
+		// hostPath volume (see ingestDevVolumeName) alongside the scratch
+		// work volume.
+		Expect(job.Spec.Template.Spec.Volumes).To(HaveLen(2))
+		var workVolume *corev1.Volume
+		for i := range job.Spec.Template.Spec.Volumes {
+			if job.Spec.Template.Spec.Volumes[i].Name == ingestWorkVolumeName {
+				workVolume = &job.Spec.Template.Spec.Volumes[i]
+			}
+		}
+		Expect(workVolume).NotTo(BeNil())
+		Expect(workVolume.PersistentVolumeClaim.ClaimName).To(Equal(ingestScratchPVCName(imp.Name)))
+
+		podSC := job.Spec.Template.Spec.SecurityContext
+		Expect(podSC.RunAsUser).NotTo(BeNil())
+		Expect(*podSC.RunAsUser).To(Equal(int64(0)), "the default nbd-attach path runs as root")
+		Expect(container.SecurityContext.Capabilities.Add).To(ContainElement(corev1.Capability("SYS_ADMIN")))
 
 		var pvc corev1.PersistentVolumeClaim
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ingestScratchPVCName(imp.Name), Namespace: "default"}, &pvc)).To(Succeed())
 		Expect(pvc.OwnerReferences).To(HaveLen(1))
 		Expect(pvc.OwnerReferences[0].Name).To(Equal(imp.Name))
+	})
+
+	It("dispatches an unprivileged copy-path ingest Job when IMAGE_INGEST_UNPRIVILEGED opts out", func() {
+		imp := newTestImageImport("import-unprivileged", "https://example.test/disk.img", 31)
+		nn := createImport(imp)
+
+		r.Ingest.Unprivileged = true
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		var job batchv1.Job
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ingestJobName(imp), Namespace: "default"}, &job)).To(Succeed())
+		container := job.Spec.Template.Spec.Containers[0]
+		envByName := map[string]string{}
+		for _, e := range container.Env {
+			envByName[e.Name] = e.Value
+		}
+		Expect(envByName["IMAGE_INGEST_ATTACH"]).To(Equal(ingest.AttachModeCopy))
+		Expect(job.Spec.Template.Spec.Volumes).To(HaveLen(1), "no /dev hostPath volume for the unprivileged copy path")
+
+		podSC := job.Spec.Template.Spec.SecurityContext
+		Expect(podSC.RunAsNonRoot).NotTo(BeNil())
+		Expect(*podSC.RunAsNonRoot).To(BeTrue())
+		Expect(*podSC.RunAsUser).To(Equal(int64(65532)))
+		Expect(container.SecurityContext.Capabilities.Add).To(BeEmpty())
 	})
 
 	It("passes a configured IO bandwidth cap through to the ingest job", func() {
@@ -246,7 +287,8 @@ var _ = Describe("ImageImport Controller", func() {
 			envByName[e.Name] = e.Value
 		}
 		Expect(envByName["STAGING_ROOT"]).To(Equal("/staging"))
-		Expect(job.Spec.Template.Spec.Volumes).To(HaveLen(2))
+		// work + staging + the default nbd-attach path's /dev hostPath.
+		Expect(job.Spec.Template.Spec.Volumes).To(HaveLen(3))
 	})
 
 	It("holds a kezio-staged:// source at Pending with StagingUnconfigured when no staging PVC is configured", func() {
@@ -630,7 +672,7 @@ var _ = Describe("ImageImport Controller", func() {
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 
-			want := computeIngestScratchSizeBytes(defaultIngestScratchSizeBytes, 20*gibiByte, true, scratchSizeSourceFactor)
+			want := computeIngestScratchSizeBytes(defaultIngestScratchSizeBytes, 20*gibiByte, true, scratchSizeAttachFactor)
 			Expect(scratchPVCSizeBytes(imp)).To(Equal(want))
 			Expect(want).To(BeNumerically(">", int64(defaultIngestScratchSizeBytes)), "20Gi source should scale the scratch PVC past the 16Gi floor")
 		})
@@ -654,7 +696,7 @@ var _ = Describe("ImageImport Controller", func() {
 			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 
-			want := computeIngestScratchSizeBytes(defaultIngestScratchSizeBytes, 20*gibiByte, true, scratchSizeSourceFactor)
+			want := computeIngestScratchSizeBytes(defaultIngestScratchSizeBytes, 20*gibiByte, true, scratchSizeAttachFactor)
 			Expect(scratchPVCSizeBytes(imp)).To(Equal(want))
 		})
 

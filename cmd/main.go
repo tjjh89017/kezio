@@ -532,6 +532,7 @@ func imageIngestConfigFromEnv() controller.ImageIngestConfig {
 			cfg.IOBandwidthBytesPerSec = n
 		}
 	}
+	cfg.Unprivileged = os.Getenv("IMAGE_INGEST_UNPRIVILEGED") == "true"
 	return cfg
 }
 

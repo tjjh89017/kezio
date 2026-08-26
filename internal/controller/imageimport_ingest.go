@@ -81,6 +81,13 @@ const (
 	ingestWorkVolumeName    = "work"
 	ingestStagingVolumeName = "staging"
 	ingestStagingMountPath  = "/staging"
+
+	// ingestDevVolumeName is the hostPath volume mounted into a
+	// privileged (nbd-attach) ingest Job's container so it can see the
+	// node's dynamically-created /dev/nbd*p* partition device nodes -
+	// see buildIngestJob.
+	ingestDevVolumeName = "dev"
+	ingestDevHostPath   = "/dev"
 )
 
 // ingestJobName returns the deterministic ingest Job name for imp.
@@ -151,9 +158,13 @@ func (r *ImageImportReconciler) ingestScratchSizeBytes(ctx context.Context, imp 
 	if !known && r.Recorder != nil {
 		r.Recorder.Event(imp, corev1.EventTypeWarning, scratchSizeUnknownEventReason, scratchSizeUnknownEventMessage(imp.Spec.Source.URL))
 	}
-	factor := int64(scratchSizeSourceFactor)
-	if strings.EqualFold(r.Ingest.sourceFormat(), "raw") {
-		factor = scratchSizeSourceFactorRaw
+
+	factor := scratchSizeAttachFactor
+	if r.Ingest.Unprivileged {
+		factor = scratchSizeSourceFactor
+		if strings.EqualFold(r.Ingest.sourceFormat(), "raw") {
+			factor = scratchSizeSourceFactorRaw
+		}
 	}
 	return computeIngestScratchSizeBytes(floor, sourceSize, known, factor)
 }
@@ -239,6 +250,12 @@ func (r *ImageImportReconciler) createIngestJob(ctx context.Context, imp *keziov
 //     (ingest.StagedURLScheme) - reconcileIngesting holds the import at
 //     Pending instead of building this Job at all when that scheme is
 //     used but no staging PVC is configured.
+//   - IMAGE_INGEST_ATTACH carries ImageIngestConfig.attachMode():
+//     ingest.AttachModeNBD by default, meaning the container runs
+//     privileged (see below) and attaches the source with qemu-nbd
+//     instead of copying it into scratch, or ingest.AttachModeCopy when
+//     ImageIngestConfig.Unprivileged opts out, in which case the pod
+//     keeps the original unprivileged securityContext.
 //   - On exit the container writes an ingest.Result (see
 //     internal/ingest/result.go) as compact JSON to its termination
 //     message (bounded at ingest.TerminationMessageLimit by Kubernetes),
@@ -250,9 +267,6 @@ func (r *ImageImportReconciler) buildIngestJob(imp *keziov1alpha3.ImageImport, s
 		imageAppNameLabel:      imageAppNameValue,
 		imageAppComponentLabel: imageIngestJobComponentValue,
 	}
-	runAsUser := int64(65532)
-	trueVal := true
-	falseVal := false
 
 	env := []corev1.EnvVar{
 		{Name: "INGEST_MODE", Value: "ingest"},
@@ -261,6 +275,7 @@ func (r *ImageImportReconciler) buildIngestJob(imp *keziov1alpha3.ImageImport, s
 		{Name: "SOURCE_FORMAT", Value: r.Ingest.sourceFormat()},
 		{Name: "WORK_DIR", Value: ingest.DefaultWorkDir},
 		{Name: "IO_BANDWIDTH_BYTES_PER_SEC", Value: strconv.FormatInt(r.Ingest.ioBandwidthBytesPerSec(), 10)},
+		{Name: "IMAGE_INGEST_ATTACH", Value: r.Ingest.attachMode()},
 	}
 	volumes := []corev1.Volume{{
 		Name: ingestWorkVolumeName,
@@ -281,6 +296,20 @@ func (r *ImageImportReconciler) buildIngestJob(imp *keziov1alpha3.ImageImport, s
 		mounts = append(mounts, corev1.VolumeMount{Name: ingestStagingVolumeName, MountPath: ingestStagingMountPath, ReadOnly: true})
 	}
 
+	podSecurityContext, containerSecurityContext := ingestPodSecurityContext(r.Ingest.Unprivileged)
+	if !r.Ingest.Unprivileged {
+		// PartitionDevice needs to see the node's dynamically-created
+		// /dev/nbd*p* nodes, which a container's own isolated /dev does
+		// not have - see the ingestDevVolumeName doc comment.
+		volumes = append(volumes, corev1.Volume{
+			Name: ingestDevVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{Path: ingestDevHostPath},
+			},
+		})
+		mounts = append(mounts, corev1.VolumeMount{Name: ingestDevVolumeName, MountPath: ingestDevHostPath})
+	}
+
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      ingestJobName(imp),
@@ -294,14 +323,7 @@ func (r *ImageImportReconciler) buildIngestJob(imp *keziov1alpha3.ImageImport, s
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
 					ServiceAccountName: r.Ingest.ServiceAccountName,
-					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot: &trueVal,
-						RunAsUser:    &runAsUser,
-						RunAsGroup:   &runAsUser,
-						SeccompProfile: &corev1.SeccompProfile{
-							Type: corev1.SeccompProfileTypeRuntimeDefault,
-						},
-					},
+					SecurityContext:    podSecurityContext,
 					Containers: []corev1.Container{{
 						Name:                     "ingest",
 						Image:                    r.Ingest.Image,
@@ -309,10 +331,7 @@ func (r *ImageImportReconciler) buildIngestJob(imp *keziov1alpha3.ImageImport, s
 						VolumeMounts:             mounts,
 						TerminationMessagePath:   "/dev/termination-log",
 						TerminationMessagePolicy: corev1.TerminationMessageReadFile,
-						SecurityContext: &corev1.SecurityContext{
-							AllowPrivilegeEscalation: &falseVal,
-							Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
-						},
+						SecurityContext:          containerSecurityContext,
 					}},
 					Volumes: volumes,
 				},
@@ -320,6 +339,59 @@ func (r *ImageImportReconciler) buildIngestJob(imp *keziov1alpha3.ImageImport, s
 		},
 	}
 	return job
+}
+
+// ingestUnprivilegedRunAsUser is the ingest Job's non-root uid/gid for
+// the unprivileged (AttachModeCopy) path - the same 65532 the container
+// image's own USER directive uses (see docker/ingest/Dockerfile).
+const ingestUnprivilegedRunAsUser = 65532
+
+// ingestPodSecurityContext returns the ingest Job's pod- and
+// container-level SecurityContext for unprivileged (true, the
+// AttachModeCopy opt-out) or the default nbd-attach mode (false).
+//
+// The nbd-attach path needs CAP_SYS_ADMIN - qemu-nbd's NBD_SET_SOCK and
+// NBD_DO_IT ioctls, and blockdev --rereadpt's BLKRRPART, both require it
+// - plus read-write access to the node's /dev/nbd* device nodes (see
+// ingestDevVolumeName), which are root:disk-owned. Root is simplest way
+// to guarantee that access without depending on the node's "disk" group
+// id, and RunAsNonRoot cannot be true for uid 0. This is deliberately
+// capabilities.add: [SYS_ADMIN], not securityContext.privileged: true:
+// full privileged grants far more than ingest needs (every other
+// capability, seccomp/AppArmor bypass, device cgroup bypass), none of
+// which qemu-nbd or partclone use.
+func ingestPodSecurityContext(unprivileged bool) (*corev1.PodSecurityContext, *corev1.SecurityContext) {
+	falseVal := false
+	if unprivileged {
+		trueVal := true
+		runAsUser := int64(ingestUnprivilegedRunAsUser)
+		return &corev1.PodSecurityContext{
+				RunAsNonRoot: &trueVal,
+				RunAsUser:    &runAsUser,
+				RunAsGroup:   &runAsUser,
+				SeccompProfile: &corev1.SeccompProfile{
+					Type: corev1.SeccompProfileTypeRuntimeDefault,
+				},
+			}, &corev1.SecurityContext{
+				AllowPrivilegeEscalation: &falseVal,
+				Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+			}
+	}
+
+	rootUser := int64(0)
+	return &corev1.PodSecurityContext{
+			RunAsUser:  &rootUser,
+			RunAsGroup: &rootUser,
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: corev1.SeccompProfileTypeRuntimeDefault,
+			},
+		}, &corev1.SecurityContext{
+			AllowPrivilegeEscalation: &falseVal,
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+				Add:  []corev1.Capability{"SYS_ADMIN"},
+			},
+		}
 }
 
 // jobOutcome is what a reconciler needs to know about a Job it dispatched.

@@ -37,23 +37,36 @@ const gibiByte = 1024 * 1024 * 1024
 // applies to a discovered source size when the source is not already raw
 // (see scratchSizeSourceFactorRaw for that case). It covers the ingest
 // scratch PVC's peak usage as internal/ingest/orchestrator.go's run() lays
-// it out for a source that needs converting: source.img and its raw
-// conversion disk.raw briefly sit on the volume together (source.img is
-// deleted the moment disk.raw exists), after which disk.raw, at most one
-// partition's part-N.raw slice, and that slice's cloned content-N output
-// share it. Sizing from the (possibly compressed) source rather than the
-// inflated raw disk is an approximation - 3x keeps enough headroom for
-// source.img plus disk.raw's own inflation without trying to model a
-// specific partition layout.
+// it out for the copy path (AttachModeCopy - see scratchSizeAttachFactor
+// for the default nbd-attach path's own, much smaller, factor) when the
+// source needs converting: source.img and its raw conversion disk.raw
+// briefly sit on the volume together (source.img is deleted the moment
+// disk.raw exists), after which disk.raw, at most one partition's
+// part-N.raw slice, and that slice's cloned content-N output share it.
+// Sizing from the (possibly compressed) source rather than the inflated
+// raw disk is an approximation - 3x keeps enough headroom for source.img
+// plus disk.raw's own inflation without trying to model a specific
+// partition layout.
 const scratchSizeSourceFactor = 3
 
 // scratchSizeSourceFactorRaw is scratchSizeSourceFactor's counterpart for
 // a source already declared raw (ImageIngestConfig.SourceFormat ==
-// "raw"): run() skips the conversion copy entirely and slices partitions
-// straight out of the downloaded source, so the volume's peak usage is
-// only the source itself plus one partition's slice and its cloned
-// content - roughly 2x the source size, not 3x.
+// "raw") on the copy path: run() skips the conversion copy entirely and
+// slices partitions straight out of the downloaded source, so the
+// volume's peak usage is only the source itself plus one partition's
+// slice and its cloned content - roughly 2x the source size, not 3x.
 const scratchSizeSourceFactorRaw = 2
+
+// scratchSizeAttachFactor is the multiplier computeIngestScratchSizeBytes
+// applies for the default nbd-attach path (AttachModeNBD): run() never
+// writes the source, a raw conversion, or a partition slice into the
+// scratch volume at all - it reads straight off the attached nbd device
+// - so the volume's peak usage is only each partition's own cloned
+// content-N output, one at a time. 1.2x the source size is headroom for
+// that content (used bytes are normally smaller than the source's
+// partitions, but never guaranteed to be) without the copy path's own
+// multiples of the source size sitting in scratch unused.
+const scratchSizeAttachFactor = 1.2
 
 // scratchSizeHTTPTimeout bounds one size-discovery HTTP call (image-service
 // or an http(s):// source), so a reconcile never blocks indefinitely on an
@@ -62,16 +75,18 @@ const scratchSizeHTTPTimeout = 15 * time.Second
 
 // computeIngestScratchSizeBytes returns the ingest scratch PVC size to
 // request: floorBytes, or factor*sourceSizeBytes rounded up to the next
-// GiB if that is larger. factor is scratchSizeSourceFactor for a
-// converted source or scratchSizeSourceFactorRaw for one already raw -
-// the caller picks based on the configured source format. sourceSizeKnown
-// false (size could not be discovered) or a non-positive sourceSizeBytes
-// both fall back to floorBytes untouched.
-func computeIngestScratchSizeBytes(floorBytes, sourceSizeBytes int64, sourceSizeKnown bool, factor int64) int64 {
+// GiB if that is larger. factor is scratchSizeAttachFactor for the
+// default nbd-attach path, or scratchSizeSourceFactor /
+// scratchSizeSourceFactorRaw for the copy path (converted or already-raw
+// source respectively) - the caller picks based on the configured attach
+// mode and source format. sourceSizeKnown false (size could not be
+// discovered) or a non-positive sourceSizeBytes both fall back to
+// floorBytes untouched.
+func computeIngestScratchSizeBytes(floorBytes, sourceSizeBytes int64, sourceSizeKnown bool, factor float64) int64 {
 	if !sourceSizeKnown || sourceSizeBytes <= 0 {
 		return floorBytes
 	}
-	computed := roundUpGiB(sourceSizeBytes * factor)
+	computed := roundUpGiB(int64(float64(sourceSizeBytes) * factor))
 	if computed > floorBytes {
 		return computed
 	}

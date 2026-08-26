@@ -88,6 +88,15 @@ spec:
                 name: kezio-image-service-token
                 key: token
                 optional: true
+          # The ingest Job attaches its source image with qemu-nbd by
+          # default (IMAGE_INGEST_ATTACH=nbd), which needs a privileged
+          # pod and the node's "nbd" kernel module loaded with
+          # max_part>0 (see docs/crd-reference.md). Set to "true" on a
+          # cluster that cannot run a privileged ingest Job; the ingest
+          # Job then falls back to the original unprivileged file-copy
+          # pipeline, at the cost of a larger scratch PVC.
+          # - name: IMAGE_INGEST_UNPRIVILEGED
+          #   value: "false"
         ports: []
         securityContext:
           allowPrivilegeEscalation: false
