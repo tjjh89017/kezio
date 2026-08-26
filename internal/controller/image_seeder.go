@@ -233,25 +233,34 @@ func (r *ImageReconciler) createImageSeederDeployment(ctx context.Context, image
 }
 
 // ensureImageSeederPlacement patches dep's placement (the Multus
-// annotation, nodeSelector, and labels) in place when it differs from the
-// freshly-built desired shape, and leaves dep untouched otherwise - so a
-// reconcile with no placement drift never issues a write. Volumes/mounts
-// are never patched: image only reaches this once Ready, at which point
-// its referenced content set is fixed (PartitionContentSpec/ImageSpec are
-// both immutable), so the mounted set can never legitimately change after
-// creation. Selector is never touched either - it is immutable on an
-// existing Deployment, and this Deployment's own name already makes it
-// exact per (Image, Site).
+// annotation, nodeSelector, and labels) and its containers (image, env,
+// ports - everything buildImageSeederDeployment puts on the pod spec
+// besides volumes) in place when either differs from the freshly-built
+// desired shape, and leaves dep untouched otherwise - so a reconcile with
+// no drift never issues a write. Converging the containers here is what
+// lets an already-running seeder Deployment pick up a manager restarted
+// with a new PARTITIONCONTENT_SEEDER_IMAGE (or changed
+// MaxUploads/MaxConnections/GracePeriod-derived env), the same way
+// reconcileBootdDeployment converges the bootd Deployment's own Spec.
+// Volumes/mounts travel with the containers since
+// buildImageSeederDeployment builds both from the same contents, but the
+// content set itself can never legitimately change after creation: image
+// only reaches this once Ready, at which point its referenced content set
+// is fixed (PartitionContentSpec/ImageSpec are both immutable). Selector
+// is never touched either - it is immutable on an existing Deployment, and
+// this Deployment's own name already makes it exact per (Image, Site).
 func (r *ImageReconciler) ensureImageSeederPlacement(ctx context.Context, image *keziov1alpha3.Image, site string, dep *appsv1.Deployment, contents []seededContent, res sitederive.Resolution) (*appsv1.Deployment, error) {
 	desired := r.buildImageSeederDeployment(image, site, contents, res)
 
 	wantAnnotations := desired.Spec.Template.Annotations
 	wantNodeSelector := desired.Spec.Template.Spec.NodeSelector
 	wantLabels := desired.Labels
+	wantContainers := desired.Spec.Template.Spec.Containers
 
 	if equality.Semantic.DeepEqual(dep.Spec.Template.Annotations, wantAnnotations) &&
 		equality.Semantic.DeepEqual(dep.Spec.Template.Spec.NodeSelector, wantNodeSelector) &&
-		equality.Semantic.DeepEqual(dep.Labels, wantLabels) {
+		equality.Semantic.DeepEqual(dep.Labels, wantLabels) &&
+		equality.Semantic.DeepEqual(dep.Spec.Template.Spec.Containers, wantContainers) {
 		return dep, nil
 	}
 
@@ -259,6 +268,7 @@ func (r *ImageReconciler) ensureImageSeederPlacement(ctx context.Context, image 
 	dep.Spec.Template.Annotations = wantAnnotations
 	dep.Spec.Template.Spec.NodeSelector = wantNodeSelector
 	dep.Labels = wantLabels
+	dep.Spec.Template.Spec.Containers = wantContainers
 	if err := r.Patch(ctx, dep, patch); err != nil {
 		return nil, fmt.Errorf("image %q: updating seeder deployment placement %q: %w", image.Name, dep.Name, err)
 	}
