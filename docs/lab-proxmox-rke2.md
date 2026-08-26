@@ -737,6 +737,13 @@ What each group does, and where it is easy to make an error:
   This keeps one ingest run from starving a node's disk of other work.
   Raise it, or set it to a very large value, on a node whose disk can
   take faster writes.
+- **`IMAGE_INGEST_UNPRIVILEGED` is not set above**, so the ingest Job
+  runs privileged and attaches the source with `qemu-nbd` by default.
+  The node needs the `nbd` kernel module loaded with partition support
+  before the first import: `sudo modprobe nbd max_part=16`. Without it,
+  the ingest Job fails fast naming the missing `/dev/nbd0`. Set
+  `IMAGE_INGEST_UNPRIVILEGED=true` instead if the node cannot load that
+  module or the cluster cannot run privileged pods.
 - **There is no tracker URL variable.** `TRACKER_DEPLOYMENT_IMAGE` gives
   the Site reconciler the image for the tracker that it runs. The
   announce URL comes from `Site.spec.tracker.ip`, and kezio writes it
@@ -1335,6 +1342,7 @@ have content needs a `seederSubnetRef`, or its Machines wait for ever.
 | The Machine stays in Inspecting | `BOOT_AGENT_SERVER_URL` and `DEPLOYER=agent` (section 5.4). |
 | The ImageImport stays at Pending | `IMAGE_INGEST_IMAGE` and `IMAGE_INGEST_STAGING_PVC`. The conditions of the import name which one is unset. |
 | The ingest Job fails on the format | `IMAGE_INGEST_SOURCE_FORMAT` must match the real format of the source. It defaults to `qcow2`. |
+| The ingest Job fails naming `/dev/nbd0` or a missing partition device | The node's `nbd` kernel module is not loaded (or lacks partition support): `sudo modprobe nbd max_part=16`. Or set `IMAGE_INGEST_UNPRIVILEGED=true` to fall back to the unprivileged copy path. |
 | A PartitionContent stays at Pending | `PARTITIONCONTENT_PUBLISH_IMAGE`. |
 | A PVC stays Pending | The `nfs` StorageClass from section 3.3. Each PVC that kezio creates asks for ReadWriteMany. |
 | The agent waits for ever for a plan | The Site has no tracker, or no seeder. `kubectl get site lab -o jsonpath='{.status.trackerURL}'` must be non-empty, and `status.seederReady` must be true. |

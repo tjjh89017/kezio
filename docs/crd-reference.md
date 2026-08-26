@@ -185,7 +185,7 @@ the spec describes them.
 | `spec.bootable` | Copied onto `Image.spec.bootable`. Default true. |
 | `spec.params` | Copied onto `Image.spec.params`. |
 | `spec.postHookRefs` | Copied onto `Image.spec.postHookRefs`. |
-| `spec.scratchSize` | Overrides the size of the ingest scratch volume. Left unset, the manager sizes it from the source image (about twice its size for a raw source, three times for one that ingest must convert first), with a floor for a source it cannot size. |
+| `spec.scratchSize` | Overrides the size of the ingest scratch volume. Left unset, the manager sizes it from the source image: by default the ingest Job attaches the source with `qemu-nbd` and writes only each partition's cloned content to scratch, so about 1.2 times the source size is enough; `IMAGE_INGEST_UNPRIVILEGED=true` falls back to the original copy pipeline (about twice the source size for a raw source, three times for one that ingest must convert first). Either way, a source ingest cannot size falls back to a floor. |
 | `spec.ttlSecondsAfterFinished` | How long a `Succeeded` or `Failed` import stays around after `status.completionTime`, before the controller deletes it. Left unset, a finished import is kept forever. Set only at creation - the spec is immutable. |
 | `status.state` | `Pending`, `Ingesting`, `Succeeded`, or `Failed`. |
 | `status.imageRef` | The `Image` this import created. |
@@ -554,6 +554,18 @@ The ingest scratch PVC outlives the ingest Job. The publish Job of a
 PVC of the `ImageImport` that `spec.source.importName` names. Only the
 deletion of the `ImageImport` reclaims that PVC, so do not delete an
 import until every content it created is Ready.
+
+**The ingest Job is privileged by default.** It attaches its source
+image to a kernel `nbd` device with `qemu-nbd` and reads partitions
+straight off that device, so it needs `CAP_SYS_ADMIN`, a hostPath mount
+of the node's `/dev`, and runs as root - and every node the ingest Job
+can land on must have the `nbd` kernel module loaded with partition
+support, e.g. `modprobe nbd max_part=16`. Without that module loaded,
+the ingest Job fails fast with a clear error rather than hanging. Set
+`IMAGE_INGEST_UNPRIVILEGED=true` on the manager to opt out: the ingest
+Job then runs with no elevated privilege at all (the original
+raw-conversion-and-file-copy pipeline), at the cost of a larger scratch
+PVC (see `spec.scratchSize` above).
 
 A seeder Deployment is per (`Image`, `Site`), and not per Site. A Site
 that deploys several Images at the same time therefore needs that many

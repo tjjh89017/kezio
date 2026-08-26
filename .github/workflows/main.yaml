@@ -362,6 +362,13 @@ jobs:
           min-mem-mb: "7000"
           context-label: "the kezio image-path e2e lane"
 
+      # The default ingest Job is privileged and attaches its source
+      # image with qemu-nbd (IMAGE_INGEST_ATTACH=nbd) - see
+      # internal/controller's Job builder. The runner's kernel needs the
+      # nbd module loaded with partition support before that Job runs.
+      - name: Load the nbd kernel module for the privileged ingest Job
+        run: sudo modprobe nbd max_part=16
+
       - name: Download the manager image tarball
         uses: actions/download-artifact@v8
         with:
@@ -656,6 +663,13 @@ jobs:
           min-mem-mb: "15800"
           min-disk-gb: "30"
           context-label: "the deploy e2e lane"
+
+      # The default ingest Job is privileged and attaches its source
+      # image with qemu-nbd (IMAGE_INGEST_ATTACH=nbd) - see
+      # internal/controller's Job builder. The runner's kernel needs the
+      # nbd module loaded with partition support before that Job runs.
+      - name: Load the nbd kernel module for the privileged ingest Job
+        run: sudo modprobe nbd max_part=16
 
       - name: Create the provisioning bridge
         uses: ./.github/actions/create-provisioning-bridge
@@ -1309,6 +1323,13 @@ jobs:
           min-mem-mb: "15800"
           min-disk-gb: "35"
           context-label: "the routed multi-segment e2e lane"
+
+      # The default ingest Job is privileged and attaches its source
+      # image with qemu-nbd (IMAGE_INGEST_ATTACH=nbd) - see
+      # internal/controller's Job builder. The runner's kernel needs the
+      # nbd module loaded with partition support before that Job runs.
+      - name: Load the nbd kernel module for the privileged ingest Job
+        run: sudo modprobe nbd max_part=16
 
       # Host-level bridges before RKE2/canal starts, the same ordering
       # create-provisioning-bridge uses in the single-segment deploy lane.
@@ -2036,6 +2057,13 @@ jobs:
           min-mem-mb: "15800"
           min-disk-gb: "35"
           context-label: "the two-site concurrent e2e lane"
+
+      # The default ingest Job is privileged and attaches its source
+      # image with qemu-nbd (IMAGE_INGEST_ATTACH=nbd) - see
+      # internal/controller's Job builder. The runner's kernel needs the
+      # nbd module loaded with partition support before that Job runs.
+      - name: Load the nbd kernel module for the privileged ingest Job
+        run: sudo modprobe nbd max_part=16
 
       # Two groups, one segment each: create-routed-segments' own
       # intra-group ACCEPT pass is a no-op here (a group of one has no
@@ -3149,6 +3177,13 @@ jobs:
           min-mem-mb: "15800"
           min-disk-gb: "35"
           context-label: "the three-machine concurrent e2e lane"
+
+      # The default ingest Job is privileged and attaches its source
+      # image with qemu-nbd (IMAGE_INGEST_ATTACH=nbd) - see
+      # internal/controller's Job builder. The runner's kernel needs the
+      # nbd module loaded with partition support before that Job runs.
+      - name: Load the nbd kernel module for the privileged ingest Job
+        run: sudo modprobe nbd max_part=16
 
       # Host-level bridges before RKE2/canal starts, the same ordering
       # every other multi-segment lane uses. ONE group: both segments
