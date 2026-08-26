@@ -206,6 +206,17 @@ that captured them.
 A swap partition gets no content. The import gives it a blank slot
 that carries only its file-system UUID. The agent runs `mkswap` on it.
 
+When `spec.source.url` is a `kezio-staged://<name>` reference (a
+`kezioctl image upload`), the ingest Job removes that staged upload
+from the staging volume once every partition's content has been
+safely captured to the ingest scratch PVC - the last step of a
+successful ingest run. A failed ingest leaves the staged upload in
+place: the source may still be needed to retry, and cleanup only ever
+runs after the content it was there to produce is durably stored.
+Cleanup is best-effort - a failure to remove it does not fail an
+otherwise-successful import - but the staging volume mount itself
+must be read-write for it to ever succeed at all.
+
 ### PartitionContent
 
 A `PartitionContent` is the immutable record of the data of one
@@ -230,13 +241,32 @@ nothing about the bytes. An `Image` slot that references the name must
 be able to trust that the bytes behind it never change. Immutability
 is what gives that trust.
 
-Each content owns its own PVC. The PVC has an owner reference back to
-the content, so Kubernetes removes the PVC when the content goes away.
+Each content owns its own PVC and its own publish Job. Both carry an
+owner reference back to the content, so Kubernetes removes them when
+the content goes away.
+
+Every `Image` whose layout references a `PartitionContent` adds its
+own (non-controller) owner reference to that content, alongside the
+same reference any other `Image` sharing it already holds. This is
+what lets an orphaned content actually get cleaned up: once every
+`Image` that ever named it is deleted, Kubernetes garbage collection
+marks the content itself for deletion (and, transitively, its PVC and
+publish Job) - in place of nothing ever removing it. A content named
+by more than one `Image` survives any one of them being deleted; only
+the last reference clears it. This ownership is additive only - an
+`Image`'s layout is immutable, so a slot's `contentRef`, once set,
+never needs to be un-referenced later.
 
 `PartitionContentFinalizer` (`kezio.kojuro.date/partitioncontent`)
-holds the actual removal of a content while an `Image` slot or an
-active `DeployRun` still references it. The
-`DeletionBlocked` condition reports this hold.
+still holds the actual removal of a content while an `Image` slot or
+an active `DeployRun` references it - unchanged by the owner
+reference above, which only gets the content marked for deletion in
+the first place. The `DeletionBlocked` condition reports this hold.
+Once unblocked, the finalizer also deletes the content's own publish
+Job outright (rather than waiting on the Job's
+`ttlSecondsAfterFinished`, below) before it clears, so a content's
+deletion never waits on that TTL to free the ingest scratch PVC the
+Job's pod still mounts.
 
 Conditions: `Ready` (the `.torrent` exists and the content is
 seedable), `Valid` (spec-level validity only; it makes no claim about
@@ -554,6 +584,19 @@ The ingest scratch PVC outlives the ingest Job. The publish Job of a
 PVC of the `ImageImport` that `spec.source.importName` names. Only the
 deletion of the `ImageImport` reclaims that PVC, so do not delete an
 import until every content it created is Ready.
+
+Both the ingest Job and every content's publish Job set
+`ttlSecondsAfterFinished` (an hour by default; `IMAGE_INGEST_JOB_TTL`
+and `PARTITIONCONTENT_PUBLISH_JOB_TTL` on the manager override it), so
+a completed Job's pod does not linger forever. A `Succeeded`
+publish-Job pod still mounts the ingest scratch PVC (read-only) it
+read content from, and `pvc-protection` refuses to finish deleting
+that PVC while any pod still references it - deleting the
+`PartitionContent` itself does not wait on this TTL (see the
+`PartitionContent` section above), but deleting the `ImageImport`
+before every content it produced has published, or before those
+contents' own publish Jobs have aged out, can still leave the scratch
+PVC `Terminating` until they do.
 
 **The ingest Job is privileged by default.** It attaches its source
 image to a kernel `nbd` device with `qemu-nbd` and reads partitions

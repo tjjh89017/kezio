@@ -5,10 +5,11 @@ description: >-
   walked through, the controller behaviors that are otherwise only
   envtested: an import that refuses to write over an existing content
   name, a hand-written Image over content that already exists, the
-  PartitionContent deletion finalizer, and seeder grace-period shutdown.
-  Runs as four ordered step groups against the one PartitionContent
-  ingest-test-image produced (content-name); see each step's own comment
-  for why the order is load-bearing.
+  PartitionContent deletion finalizer, seeder grace-period shutdown, and
+  the full teardown of an ImageImport's own ingest scratch PVC and the
+  staged upload that fed it. Runs as five ordered step groups against the
+  one PartitionContent ingest-test-image produced (content-name); see
+  each step's own comment for why the order is load-bearing.
 
 inputs:
   namespace:
@@ -391,3 +392,71 @@ runs:
         echo "Asserting its content PVC (${pvc_name}) was garbage-collected"
         wait_for_gone "pvc" "${pvc_name}" "${NAMESPACE}" "${DELETION_WAIT_TIMEOUT_SECONDS}"
         echo "deletion-semantics assertions passed"
+
+    # --- Step group 5: ingest cleanup ---------------------------------------
+    #
+    # Runs last, after both Images (and, transitively, content-name) are
+    # gone: the ingest scratch PVC and the ingest Job are owned by the
+    # ImageImport, not the Image (docs/crd-reference.md), so nothing above
+    # ever exercises their teardown - only deleting the ImageImport itself
+    # does. ingest-test-image's own import name equals first-image-name
+    # (one name for the import, the Image, and the upload - see its own
+    # doc comment). Deleting an already-Succeeded import is safe by
+    # design: it never takes the Image or content it produced with it,
+    # and both are already gone by this point anyway.
+    #
+    # This is also where fix for the pvc-protection deadlock (a
+    # long-Succeeded pc-publish-* pod still mounting the scratch PVC)
+    # actually gets exercised: content-name's publish Job was deleted
+    # outright when its PartitionContent cleared in step group 4 above,
+    # not left for its own ttlSecondsAfterFinished, so nothing should be
+    # left holding the scratch PVC's pvc-protection finalizer open here.
+    - name: "Ingest cleanup: deleting the ImageImport reclaims its scratch PVC and the staged upload"
+      id: ingest-cleanup
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        IMPORT_NAME: ${{ inputs.first-image-name }}
+        DELETION_WAIT_TIMEOUT_SECONDS: ${{ inputs.deletion-wait-timeout-seconds }}
+      run: |
+        set -euo pipefail
+        source "${GITHUB_ACTION_PATH}/lib.sh"
+
+        trap 'dump_import_diagnostics "${NAMESPACE}" "${IMPORT_NAME}"' ERR
+
+        scratch_pvc="image-ingest-scratch-${IMPORT_NAME}"
+
+        # RKE2 in this lane runs directly on this runner (single node),
+        # and install-nfs-storage backs every ReadWriteMany PVC - the
+        # staging PVC included - with a hostPath directory here
+        # (/nfs-vol), so the staged upload's actual bytes on disk can be
+        # checked directly, not just the Kubernetes objects that front
+        # them. Resolved before the delete below so a failure to find it
+        # at all (a naming/layout assumption gone stale) is reported
+        # distinctly from it correctly disappearing afterward.
+        staged_dir="$(sudo find /nfs-vol -maxdepth 6 -type d -path "*/uploads/${IMPORT_NAME}" 2>/dev/null | head -n1 || true)"
+        if [ -z "${staged_dir}" ]; then
+          echo "::warning::could not resolve the staged upload's NFS-backed directory for ${IMPORT_NAME} under /nfs-vol; skipping the on-disk assertion (the scratch-PVC and ImageImport assertions below still run)"
+        else
+          echo "staged upload backing directory: ${staged_dir}"
+        fi
+
+        echo "Deleting ImageImport ${IMPORT_NAME}"
+        kubectl delete imageimports.kezio.kojuro.date "${IMPORT_NAME}" -n "${NAMESPACE}" --wait=false
+        wait_for_gone "imageimports.kezio.kojuro.date" "${IMPORT_NAME}" "${NAMESPACE}" "${DELETION_WAIT_TIMEOUT_SECONDS}"
+
+        echo "Asserting the ingest scratch PVC (${scratch_pvc}) was garbage-collected"
+        wait_for_gone "pvc" "${scratch_pvc}" "${NAMESPACE}" "${DELETION_WAIT_TIMEOUT_SECONDS}"
+
+        if [ -n "${staged_dir}" ]; then
+          echo "Asserting the staged upload's directory no longer exists on disk"
+          deadline=$(( $(date +%s) + DELETION_WAIT_TIMEOUT_SECONDS ))
+          while sudo test -d "${staged_dir}"; do
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::staged upload directory ${staged_dir} still exists ${DELETION_WAIT_TIMEOUT_SECONDS}s after a successful ingest" >&2
+              exit 1
+            fi
+            sleep 3
+          done
+        fi
+        echo "ingest-cleanup assertions passed"
