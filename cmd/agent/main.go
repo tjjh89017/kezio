@@ -58,7 +58,7 @@ func main() {
 	reporter := &agent.HTTPReporter{Client: agent.NewClient(cmdline.Server), Logf: log.Printf}
 	executor := &deploy.Executor{
 		Runner:   agent.ExecRunner{},
-		Ezio:     agent.ExecEzioLauncher{},
+		Ezio:     agent.ExecEzioLauncher{Logf: log.Printf},
 		Fetcher:  agent.HTTPTorrentFetcher{},
 		Progress: reporter,
 		Logf:     log.Printf,

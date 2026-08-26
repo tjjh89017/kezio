@@ -17,9 +17,12 @@ limitations under the License.
 package agent
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
+	"sync"
 	"time"
 
 	"github.com/tjjh89017/kezio/internal/agent/deploy"
@@ -52,6 +55,10 @@ type ExecEzioLauncher struct {
 	// ReadyTimeout bounds the wait for the daemon to answer its health
 	// check. Zero means DefaultEzioReadyTimeout.
 	ReadyTimeout time.Duration
+	// Logf receives ezio's own stdout and stderr, one call per line, in
+	// fmt.Printf style, so `journalctl -u kezio-agent` shows ezio's
+	// output alongside the agent's own. Nil discards it.
+	Logf func(format string, args ...any)
 }
 
 var _ deploy.EzioLauncher = ExecEzioLauncher{}
@@ -71,15 +78,15 @@ func (l ExecEzioLauncher) Launch(ctx context.Context) (deploy.EzioHandle, error)
 		readyTimeout = DefaultEzioReadyTimeout
 	}
 
-	cmd := exec.CommandContext(ctx, binary, "--listen", addr)
-	if err := cmd.Start(); err != nil {
-		return deploy.EzioHandle{}, fmt.Errorf("starting %s: %w", binary, err)
+	logf := l.Logf
+	if logf == nil {
+		logf = func(string, ...any) {}
 	}
-	stop := func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		return cmd.Process.Kill()
+
+	cmd := exec.CommandContext(ctx, binary, "--listen", addr)
+	stop, err := startWithLoggedOutput(cmd, logf)
+	if err != nil {
+		return deploy.EzioHandle{}, fmt.Errorf("starting %s: %w", binary, err)
 	}
 
 	client, err := seeder.Dial(addr)
@@ -94,6 +101,62 @@ func (l ExecEzioLauncher) Launch(ctx context.Context) (deploy.EzioHandle, error)
 	}
 
 	return deploy.EzioHandle{Client: client, Stop: stop}, nil
+}
+
+// startWithLoggedOutput starts cmd with its stdout and stderr streamed
+// line by line into logf, prefixed with "ezio: " so they are
+// attributable in the agent's own log (see ExecEzioLauncher.Logf). It
+// returns a stop function that kills the process and blocks until it has
+// actually exited and both pipes are fully drained - cmd.Wait must not
+// run before every read from its pipes is done, and the caller must not
+// treat the process as gone (nor risk leaving a zombie) until Wait has
+// run, so stop only returns once that has happened and the exit result
+// is logged.
+func startWithLoggedOutput(cmd *exec.Cmd, logf func(format string, args ...any)) (stop func() error, err error) {
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("piping stdout: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("piping stderr: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	var copiers sync.WaitGroup
+	copiers.Add(2)
+	go copyLines(stdout, logf, &copiers)
+	go copyLines(stderr, logf, &copiers)
+
+	reaped := make(chan struct{})
+	go func() {
+		copiers.Wait()
+		logf("ezio: exited: %v", cmd.Wait())
+		close(reaped)
+	}()
+
+	return func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		err := cmd.Process.Kill()
+		<-reaped
+		return err
+	}, nil
+}
+
+// copyLines reads r line by line and logs each one prefixed with
+// "ezio: ". It returns once r hits EOF (the process exited and closed
+// the pipe) and signals wg, letting the caller wait out both the stdout
+// and stderr copiers before reaping the process with cmd.Wait.
+func copyLines(r io.Reader, logf func(format string, args ...any), wg *sync.WaitGroup) {
+	defer wg.Done()
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		logf("ezio: %s", scanner.Text())
+	}
 }
 
 // waitHealthy polls client.Healthy until it succeeds or timeout elapses.
