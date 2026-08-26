@@ -57,8 +57,8 @@ func TestImageSeederConfigMaxUploadsAndMaxConnections(t *testing.T) {
 	if got := (ImageSeederConfig{}).maxUploads(); got != seeder.DefaultMaxUploads {
 		t.Errorf("maxUploads() = %d, want built-in default %d", got, seeder.DefaultMaxUploads)
 	}
-	if got := (ImageSeederConfig{}).maxConnections(); got != seeder.DefaultMaxConnections {
-		t.Errorf("maxConnections() = %d, want built-in default %d", got, seeder.DefaultMaxConnections)
+	if got := (ImageSeederConfig{}).maxConnections(); got != seeder.DefaultSeederMaxConnections {
+		t.Errorf("maxConnections() = %d, want built-in default %d", got, seeder.DefaultSeederMaxConnections)
 	}
 
 	cfg := ImageSeederConfig{MaxUploads: 12, MaxConnections: 40}

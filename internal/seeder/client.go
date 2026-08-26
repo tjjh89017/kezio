@@ -47,6 +47,12 @@ const DefaultMaxUploads = 3
 // find more peers.
 const DefaultMaxConnections = 10
 
+// DefaultSeederMaxConnections is the seeder side's own default for
+// AddTorrent max_connections: a seeder is one high-bandwidth persistent
+// source, so more connection slots only fragment its egress rather than
+// reaching more peers.
+const DefaultSeederMaxConnections = 5
+
 // Torrent is one torrent's status, trimmed from ezioapi.Torrent to the
 // fields callers need. Hash is lowercase hex, matching both ezio's wire
 // format and store.InfoHash.String().

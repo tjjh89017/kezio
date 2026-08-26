@@ -337,8 +337,8 @@ func TestConfigFromEnv_Defaults(t *testing.T) {
 	if cfg.MaxUploads != seeder.DefaultMaxUploads {
 		t.Errorf("MaxUploads = %d, want %d", cfg.MaxUploads, seeder.DefaultMaxUploads)
 	}
-	if cfg.MaxConnections != seeder.DefaultMaxConnections {
-		t.Errorf("MaxConnections = %d, want %d", cfg.MaxConnections, seeder.DefaultMaxConnections)
+	if cfg.MaxConnections != seeder.DefaultSeederMaxConnections {
+		t.Errorf("MaxConnections = %d, want %d", cfg.MaxConnections, seeder.DefaultSeederMaxConnections)
 	}
 }
 

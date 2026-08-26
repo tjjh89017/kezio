@@ -95,8 +95,14 @@ func (cfg ImageSeederConfig) maxUploads() int32 {
 	return seeder.ResolveMaxUploads(cfg.MaxUploads, nil)
 }
 
-// maxConnections resolves cfg's effective ezio max_connections value, the
-// same way maxUploads does.
+// maxConnections resolves cfg's effective ezio max_connections value:
+// cfg's own cluster-wide default when set, falling back to
+// seeder.DefaultSeederMaxConnections otherwise (not
+// seeder.ResolveMaxConnections's built-in default, which is sized for the
+// leecher side - see that constant's doc comment).
 func (cfg ImageSeederConfig) maxConnections() int32 {
-	return seeder.ResolveMaxConnections(cfg.MaxConnections, nil)
+	if cfg.MaxConnections > 0 {
+		return cfg.MaxConnections
+	}
+	return seeder.DefaultSeederMaxConnections
 }

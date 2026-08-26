@@ -129,7 +129,7 @@ func configFromEnv() (config, error) {
 		TrackerURL:     os.Getenv("TRACKER_URL"),
 		Interval:       defaultInterval,
 		MaxUploads:     seeder.DefaultMaxUploads,
-		MaxConnections: seeder.DefaultMaxConnections,
+		MaxConnections: seeder.DefaultSeederMaxConnections,
 	}
 	if cfg.TrackerURL == "" {
 		// image_seeder_placement.go's seederRegisterEnv only sets this
