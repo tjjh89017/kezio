@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -51,6 +52,7 @@ func newTestDnsmasq(t *testing.T, script string) (*Dnsmasq, string) {
 		Config:         testConfig(),
 		RunDir:         runDir,
 		BinaryPath:     writeFakeDnsmasq(t, runDir, script),
+		ReloadTimeout:  50 * time.Millisecond,
 		hupDebounce:    10 * time.Millisecond,
 		initialBackoff: 10 * time.Millisecond,
 		fastExitWindow: 200 * time.Millisecond,
@@ -176,12 +178,13 @@ while :; do sleep 0.05; done
 
 func TestDnsmasq_SetReservationsRendersAddressesAndReportsApplied(t *testing.T) {
 	d, runDir := newTestDnsmasq(t, `marker="$MARKER_FILE"
-trap 'echo hup >> "$marker"' HUP
+trap 'echo hup >> "$marker"; echo "dnsmasq-dhcp: read $HOSTS_PATH"' HUP
 trap 'exit 0' TERM INT
 while :; do sleep 0.05; done
 `)
 	marker := filepath.Join(runDir, "hup-marker")
 	t.Setenv("MARKER_FILE", marker)
+	t.Setenv("HOSTS_PATH", HostsfilePath(runDir))
 
 	var mu sync.Mutex
 	var applied []string
@@ -228,6 +231,189 @@ while :; do sleep 0.05; done
 		defer mu.Unlock()
 		return len(applied) == 2 && applied[1] == "rev-2"
 	})
+
+	cancel()
+	<-done
+}
+
+// TestDnsmasq_OnAppliedWaitsForDnsmasqReloadConfirmation proves OnApplied
+// is not called merely because a SIGHUP was sent: the fake dnsmasq here
+// delays its confirming "read" line well past the SIGHUP, standing in
+// for the real dnsmasq's reload lagging under load (the bug this whole
+// mechanism exists to close).
+func TestDnsmasq_OnAppliedWaitsForDnsmasqReloadConfirmation(t *testing.T) {
+	d, runDir := newTestDnsmasq(t, `trap 'sleep 0.2; echo "dnsmasq-dhcp: read $HOSTS_PATH"' HUP
+trap 'exit 0' TERM INT
+while :; do sleep 0.05; done
+`)
+	t.Setenv("HOSTS_PATH", HostsfilePath(runDir))
+	d.ReloadTimeout = 2 * time.Second
+
+	var mu sync.Mutex
+	var applied []string
+	d.OnApplied = func(_ context.Context, revision string) {
+		mu.Lock()
+		defer mu.Unlock()
+		applied = append(applied, revision)
+	}
+
+	ctx, cancel := context.WithCancel(logf.IntoContext(context.Background(), logf.Log))
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+
+	waitFor(t, "hostsfile", func() bool {
+		_, err := os.Stat(HostsfilePath(runDir))
+		return err == nil
+	})
+
+	d.SetAllowedMACs([]string{"aa:bb:cc:dd:ee:01"})
+	d.SetReservations(testDHCPRevision1, map[string]string{"aa:bb:cc:dd:ee:01": "192.0.2.10"})
+
+	waitFor(t, "hostsfile with the reservation", func() bool {
+		got, err := os.ReadFile(HostsfilePath(runDir))
+		return err == nil && strings.Contains(string(got), "192.0.2.10")
+	})
+
+	// The write (and therefore the SIGHUP) has already happened, but the
+	// fake dnsmasq's confirming read line is still 200ms away.
+	time.Sleep(80 * time.Millisecond)
+	mu.Lock()
+	early := len(applied)
+	mu.Unlock()
+	if early != 0 {
+		t.Fatalf("OnApplied called %d times before dnsmasq confirmed the reload, want 0", early)
+	}
+
+	waitFor(t, "OnApplied called once dnsmasq confirms the reload", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(applied) == 1 && applied[0] == testDHCPRevision1
+	})
+
+	cancel()
+	<-done
+}
+
+// TestDnsmasq_StaleReadDoesNotSatisfyANewerRevision proves a read line
+// already spent confirming one revision cannot also confirm a later one:
+// the fake dnsmasq here only ever emits its confirming line on the first
+// SIGHUP it receives, so a second revision's SIGHUP must time out rather
+// than being satisfied by that leftover line.
+func TestDnsmasq_StaleReadDoesNotSatisfyANewerRevision(t *testing.T) {
+	d, runDir := newTestDnsmasq(t, `count_file="$COUNT_FILE"
+trap '
+n=$(( $(cat "$count_file" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$count_file"
+if [ "$n" -eq 1 ]; then echo "dnsmasq-dhcp: read $HOSTS_PATH"; fi
+' HUP
+trap 'exit 0' TERM INT
+while :; do sleep 0.05; done
+`)
+	countFile := filepath.Join(runDir, "hup-count")
+	t.Setenv("COUNT_FILE", countFile)
+	t.Setenv("HOSTS_PATH", HostsfilePath(runDir))
+
+	var mu sync.Mutex
+	var applied []string
+	d.OnApplied = func(_ context.Context, revision string) {
+		mu.Lock()
+		defer mu.Unlock()
+		applied = append(applied, revision)
+	}
+
+	ctx, cancel := context.WithCancel(logf.IntoContext(context.Background(), logf.Log))
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+
+	waitFor(t, "hostsfile", func() bool {
+		_, err := os.Stat(HostsfilePath(runDir))
+		return err == nil
+	})
+
+	d.SetAllowedMACs([]string{"aa:bb:cc:dd:ee:01"})
+	d.SetReservations(testDHCPRevision1, map[string]string{"aa:bb:cc:dd:ee:01": "192.0.2.10"})
+	waitFor(t, "OnApplied called with rev-1", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(applied) == 1 && applied[0] == testDHCPRevision1
+	})
+
+	d.SetReservations("rev-2", map[string]string{"aa:bb:cc:dd:ee:01": "192.0.2.11"})
+	waitFor(t, "hostsfile reflects rev-2", func() bool {
+		got, err := os.ReadFile(HostsfilePath(runDir))
+		return err == nil && strings.Contains(string(got), "192.0.2.11")
+	})
+
+	// Give the (short, test-seam) ReloadTimeout several chances to expire
+	// and retry - the fake dnsmasq stays silent on every SIGHUP past the
+	// first, so none of those retries can confirm rev-2 either.
+	time.Sleep(300 * time.Millisecond)
+	mu.Lock()
+	got := append([]string(nil), applied...)
+	mu.Unlock()
+	if len(got) != 1 || got[0] != testDHCPRevision1 {
+		t.Fatalf("applied = %v, want only rev-1 - rev-2 must not be satisfied by rev-1's stale read", got)
+	}
+
+	cancel()
+	<-done
+}
+
+// TestDnsmasq_ReloadTimeoutRetriesSighupWithoutApplying proves that when
+// dnsmasq never confirms a reload at all, hostsfileLoop never calls
+// OnApplied, logs the failure, and keeps resending the SIGHUP rather
+// than giving up.
+func TestDnsmasq_ReloadTimeoutRetriesSighupWithoutApplying(t *testing.T) {
+	d, runDir := newTestDnsmasq(t, `count_file="$COUNT_FILE"
+trap 'n=$(( $(cat "$count_file" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$count_file"' HUP
+trap 'exit 0' TERM INT
+while :; do sleep 0.05; done
+`)
+	countFile := filepath.Join(runDir, "hup-count")
+	t.Setenv("COUNT_FILE", countFile)
+
+	sink := &recordingSink{}
+	var mu sync.Mutex
+	var applied []string
+	d.OnApplied = func(_ context.Context, revision string) {
+		mu.Lock()
+		defer mu.Unlock()
+		applied = append(applied, revision)
+	}
+
+	ctx, cancel := context.WithCancel(logf.IntoContext(context.Background(), newRecordingLogger(sink)))
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+
+	waitFor(t, "hostsfile", func() bool {
+		_, err := os.Stat(HostsfilePath(runDir))
+		return err == nil
+	})
+
+	d.SetAllowedMACs([]string{"aa:bb:cc:dd:ee:01"})
+	d.SetReservations(testDHCPRevision1, map[string]string{"aa:bb:cc:dd:ee:01": "192.0.2.10"})
+
+	waitFor(t, "the timeout is logged", func() bool {
+		return containsSubstring(sink.messages(), "did not confirm the dhcp-hostsfile reload")
+	})
+	waitFor(t, "the SIGHUP is retried", func() bool {
+		got, err := os.ReadFile(countFile)
+		if err != nil {
+			return false
+		}
+		n, _ := strconv.Atoi(strings.TrimSpace(string(got)))
+		return n >= 2
+	})
+
+	mu.Lock()
+	got := len(applied)
+	mu.Unlock()
+	if got != 0 {
+		t.Errorf("OnApplied called %d times though dnsmasq never confirmed the reload, want 0", got)
+	}
 
 	cancel()
 	<-done
@@ -646,7 +832,7 @@ func TestForwardLines_LogsScannerErrorAfterReadFailure(t *testing.T) {
 	log := newRecordingLogger(sink)
 	boom := errors.New("boom")
 
-	forwardLines(log, &erroringReader{lines: []string{"hello\n"}, err: boom})
+	forwardLines(log, &erroringReader{lines: []string{"hello\n"}, err: boom}, nil)
 
 	msgs := sink.messages()
 	if !containsSubstring(msgs, "hello") {

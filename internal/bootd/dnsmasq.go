@@ -99,6 +99,14 @@ type Dnsmasq struct {
 	// bootd cannot tell the two apart, so a reservation disappearing
 	// alone never triggers a release.
 	SubnetMember func(mac string) bool
+	// ReloadTimeout bounds how long hostsfileLoop waits for dnsmasq to
+	// confirm (via its own log line, see hostsfileReadMarker) that it
+	// has actually re-read the dhcp-hostsfile after a SIGHUP - a SIGHUP
+	// only requests a reload dnsmasq performs whenever its event loop
+	// next runs, which is not immediate under load, so appliedRevision
+	// must wait for the confirmation rather than the signal send. Zero
+	// means DefaultReloadTimeout.
+	ReloadTimeout time.Duration
 
 	mu           sync.Mutex
 	macs         []string
@@ -114,6 +122,16 @@ type Dnsmasq struct {
 
 	dirtyOnce sync.Once
 	dirty     chan struct{}
+
+	// readMu/readSeq/readSig implement the hostsfile-reload-confirmation
+	// signal: noteHostsfileRead (fed by runChild's stdout/stderr
+	// forwarders matching hostsfileReadMarker) bumps readSeq and wakes
+	// any waiter every time dnsmasq logs that it re-read the hostsfile,
+	// whether that read followed a SIGHUP or was dnsmasq's own startup
+	// read.
+	readMu  sync.Mutex
+	readSeq uint64
+	readSig chan struct{}
 
 	// firstMACsOnce/firstMACsSig close firstMACsCh() exactly once, the
 	// first time SetAllowedMACs is called - the same fail-secure signal
@@ -147,6 +165,83 @@ const maxBackoff = 30 * time.Second
 // config, and endless silent restarting would hide that from the
 // operator; a crashing pod is the honest signal.
 const maxFastExits = 3
+
+// DefaultReloadTimeout is how long hostsfileLoop waits for dnsmasq to
+// confirm a hostsfile reload when Dnsmasq.ReloadTimeout is left zero.
+const DefaultReloadTimeout = 30 * time.Second
+
+// hostsfileReadMarker returns the substring dnsmasq's own log line
+// carries when it (re-)reads path, the dhcp-hostsfile - on a
+// SIGHUP-triggered reload and on its own startup read alike.
+// Lab-confirmed wording: "dnsmasq-dhcp: read /run/bootd/dhcp-hosts.conf".
+func hostsfileReadMarker(path string) string {
+	return "read " + path
+}
+
+// noteHostsfileRead records that dnsmasq has just re-read the
+// hostsfile, bumping readSeq and waking every waiter blocked in
+// waitForHostsfileReadAfter.
+func (d *Dnsmasq) noteHostsfileRead() {
+	d.readMu.Lock()
+	d.readSeq++
+	ch := d.readSig
+	d.readSig = nil
+	d.readMu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
+}
+
+// currentReadSeq returns the number of hostsfile reads observed so far,
+// for a caller to snapshot as the baseline waitForHostsfileReadAfter
+// should wait past.
+func (d *Dnsmasq) currentReadSeq() uint64 {
+	d.readMu.Lock()
+	defer d.readMu.Unlock()
+	return d.readSeq
+}
+
+// waitForHostsfileReadAfter blocks until a hostsfile read has been
+// observed with sequence number greater than after (true), ctx is
+// cancelled, or timeout elapses (false) - whichever comes first. A read
+// that happened at or before after (an earlier reload, or one left over
+// from a previous dnsmasq child) never satisfies the wait.
+func (d *Dnsmasq) waitForHostsfileReadAfter(ctx context.Context, after uint64, timeout time.Duration) bool {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		d.readMu.Lock()
+		if d.readSeq > after {
+			d.readMu.Unlock()
+			return true
+		}
+		if d.readSig == nil {
+			d.readSig = make(chan struct{})
+		}
+		ch := d.readSig
+		d.readMu.Unlock()
+
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			return false
+		}
+	}
+}
+
+// requeueDirty nudges hostsfileLoop to run another iteration after the
+// next debounce window, the same non-blocking signal SetAllowedMACs and
+// SetReservations use - so a SIGHUP that failed to send, or was never
+// confirmed, gets retried without waiting for something external to
+// change.
+func (d *Dnsmasq) requeueDirty() {
+	select {
+	case d.dirtyCh() <- struct{}{}:
+	default:
+	}
+}
 
 // dirtyCh lazily builds the coalescing channel so SetAllowedMACs is
 // safe to call before Start - the manager starts its Runnables
@@ -259,6 +354,9 @@ func (d *Dnsmasq) Start(ctx context.Context) error {
 	if d.fastExitWindow == 0 {
 		d.fastExitWindow = 10 * time.Second
 	}
+	if d.ReloadTimeout == 0 {
+		d.ReloadTimeout = DefaultReloadTimeout
+	}
 
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		return fmt.Errorf("creating run directory %s: %w", runDir, err)
@@ -315,13 +413,14 @@ func (d *Dnsmasq) Start(ctx context.Context) error {
 	// for non-root environments.
 	raiseAmbientCaps(log)
 
+	hostsfilePath := HostsfilePath(runDir)
 	go d.hostsfileLoop(ctx, log, runDir, leaseFilePath, initial)
 
 	backoff := d.initialBackoff
 	fastExits := 0
 	for {
 		started := time.Now()
-		exitErr, runErr := d.runChild(ctx, log, binary, confPath)
+		exitErr, runErr := d.runChild(ctx, log, binary, confPath, hostsfilePath)
 		if runErr != nil {
 			return runErr
 		}
@@ -356,7 +455,7 @@ func (d *Dnsmasq) Start(ctx context.Context) error {
 // missing, pipes unavailable) and is returned fatally by Start. On
 // ctx cancellation the child is SIGTERMed and awaited before
 // returning.
-func (d *Dnsmasq) runChild(ctx context.Context, log logr.Logger, binary, confPath string) (exitErr error, fatal error) {
+func (d *Dnsmasq) runChild(ctx context.Context, log logr.Logger, binary, confPath, hostsfilePath string) (exitErr error, fatal error) {
 	// --no-daemon: stay a direct child (supervision/SIGHUP need the
 	// pid), log to stderr, skip the pidfile.
 	//
@@ -384,10 +483,17 @@ func (d *Dnsmasq) runChild(ctx context.Context, log logr.Logger, binary, confPat
 	d.child = cmd.Process
 	d.mu.Unlock()
 
+	marker := hostsfileReadMarker(hostsfilePath)
+	onLine := func(line string) {
+		if strings.Contains(line, marker) {
+			d.noteHostsfileRead()
+		}
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); forwardLines(log, stdout) }()
-	go func() { defer wg.Done(); forwardLines(log, stderr) }()
+	go func() { defer wg.Done(); forwardLines(log, stdout, onLine) }()
+	go func() { defer wg.Done(); forwardLines(log, stderr, onLine) }()
 
 	waitCh := make(chan error, 1)
 	go func() {
@@ -411,16 +517,30 @@ func (d *Dnsmasq) runChild(ctx context.Context, log logr.Logger, binary, confPat
 // hostsfileLoop debounces a burst of dirty signals into one atomic
 // hostsfile rewrite + SIGHUP, and - in LeaseMode - one round of active
 // DHCPRELEASEs for MACs the debounced burst dropped from the allowlist
-// (see releaseLeases). Byte-identical hostsfile content skips the SIGHUP,
-// but pending releases are always processed regardless, since a MAC can
-// drop out and back in within one debounce window with no net hostsfile
-// change. If no child is running at signal time (mid-restart), the
-// rewrite still happens and the next child reads the fresh file at
-// startup.
+// (see releaseLeases). Byte-identical hostsfile content skips the
+// rewrite, but pending releases are always processed regardless, since a
+// MAC can drop out and back in within one debounce window with no net
+// hostsfile change.
+//
+// OnApplied is called only once dnsmasq has actually confirmed (via its
+// own log line, see hostsfileReadMarker) that it re-read the hostsfile -
+// a SIGHUP only requests that reload, which dnsmasq performs whenever
+// its event loop next runs, not immediately, so acking on the signal
+// send alone can report a revision applied before dnsmasq has actually
+// served it. Whenever the last write is not yet confirmed (a fresh
+// write, a SIGHUP that failed to send, or a previous wait that timed
+// out), this resends the SIGHUP and waits again - a redundant SIGHUP
+// for content dnsmasq already has is harmless. If ReloadTimeout elapses
+// with no confirming read, the tick ends without calling OnApplied and
+// requeues itself for another attempt; the deployer's own requeue loop
+// is the fail-safe in the meantime.
 func (d *Dnsmasq) hostsfileLoop(ctx context.Context, log logr.Logger, runDir, leaseFilePath, lastWritten string) {
 	path := HostsfilePath(runDir)
 	var lastAppliedRev string
 	lastAppliedRevSet := false
+	// confirmed is whether dnsmasq has been observed to have actually
+	// read lastWritten's exact content since it was written.
+	confirmed := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -457,18 +577,38 @@ func (d *Dnsmasq) hostsfileLoop(ctx context.Context, log logr.Logger, runDir, le
 				continue
 			}
 			lastWritten = content
-			if child != nil {
-				if err := child.Signal(sighup); err != nil {
-					log.Error(err, "SIGHUP to dnsmasq failed; allowlist applies at next restart", "pid", child.Pid)
-					continue
-				}
-			}
-			log.Info("dhcp-hostsfile updated", "path", path, "entries", countLines(content))
+			confirmed = false
 		}
 
-		// The hostsfile now reflects revision (whether or not this pass
-		// actually rewrote it - an unchanged file already reflects it):
-		// tell OnApplied, unless this exact revision was already reported.
+		if !confirmed {
+			if child == nil {
+				// No child to SIGHUP (mid-restart, or still gated in
+				// Start's LeaseMode startup filter) - nothing to confirm
+				// yet; retry once something runs.
+				d.requeueDirty()
+				continue
+			}
+			baseline := d.currentReadSeq()
+			if err := child.Signal(sighup); err != nil {
+				log.Error(err, "SIGHUP to dnsmasq failed; allowlist applies at next restart", "pid", child.Pid)
+				d.requeueDirty()
+				continue
+			}
+			if !d.waitForHostsfileReadAfter(ctx, baseline, d.ReloadTimeout) {
+				if ctx.Err() != nil {
+					return
+				}
+				log.Error(fmt.Errorf("no confirming read of %s within %v", path, d.ReloadTimeout), "dnsmasq did not confirm the dhcp-hostsfile reload; revision not marked applied, will retry", "revision", revision)
+				d.requeueDirty()
+				continue
+			}
+			confirmed = true
+			log.Info("dnsmasq confirmed dhcp-hostsfile reload", "path", path, "entries", countLines(content))
+		}
+
+		// The hostsfile now reflects revision, confirmed read by dnsmasq
+		// itself: tell OnApplied, unless this exact revision was already
+		// reported.
 		if revSet && (!lastAppliedRevSet || revision != lastAppliedRev) {
 			lastAppliedRev, lastAppliedRevSet = revision, true
 			if d.OnApplied != nil {
@@ -514,13 +654,20 @@ func (d *Dnsmasq) releaseLeases(log logr.Logger, leaseFilePath string, macs []st
 	}
 }
 
-// forwardLines copies each line of r into log. A read error other than
-// EOF ends forwarding early and is itself logged - that pipe is the
-// only channel dnsmasq's diagnostics reach the operator through.
-func forwardLines(log logr.Logger, r io.Reader) {
+// forwardLines copies each line of r into log, calling onLine (if
+// non-nil) with the same line - runChild uses that to notice dnsmasq's
+// hostsfile-reread confirmation without a second scan of the stream. A
+// read error other than EOF ends forwarding early and is itself logged -
+// that pipe is the only channel dnsmasq's diagnostics reach the operator
+// through.
+func forwardLines(log logr.Logger, r io.Reader, onLine func(string)) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
-		log.Info(scanner.Text())
+		line := scanner.Text()
+		log.Info(line)
+		if onLine != nil {
+			onLine(line)
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		log.Error(err, "reading dnsmasq output failed; log forwarding stopped early")

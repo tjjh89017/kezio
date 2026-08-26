@@ -107,7 +107,7 @@ A `Subnet` is one broadcast domain.
 | `spec.nodeSelector` | Holds bootd pods, and seeder pods, on nodes that are attached to this broadcast domain. Empty means no constraint. |
 | `status.dhcp.reservations` | The boot-scoped DHCP address reservation table: one entry per Machine currently net-booting or deployed through this Subnet, in lease mode. Each entry has `address`, `machine`, `mac`, and `since`. |
 | `status.dhcp.revision` | Changes whenever `reservations` changes. A digest of the sorted table, not a counter. |
-| `status.dhcp.appliedRevision` | The `revision` bootd's dnsmasq hostsfile last actually rendered and reloaded for. Written by bootd, never by the manager. |
+| `status.dhcp.appliedRevision` | The `revision` bootd's dnsmasq hostsfile last actually rendered and reloaded for. Written only after dnsmasq has confirmed - by its own log line - that it re-read the hostsfile, not merely after the reload was requested. Written by bootd, never by the manager. |
 
 `bootdServerIP`, `bootdNetworkRef`, and `dhcp` are the **boot half**.
 They are optional as a group. Set all three, and the Subnet gets a
@@ -154,11 +154,12 @@ The lifecycle:
   address sets `DHCPPoolExhausted` and an Event on the Machine, and the
   Machine is held (not powered on) until an address frees up.
 - **Applied** - bootd renders every reservation into its dnsmasq
-  hostsfile alongside the MAC allowlist, reloads dnsmasq, and only then
-  writes `status.dhcp.appliedRevision` to match `status.dhcp.revision`.
-  The deployer waits for that match before it powers the machine on: a
-  reservation persisted but not yet live at dnsmasq would otherwise
-  race the machine's own DHCPDISCOVER.
+  hostsfile alongside the MAC allowlist, signals dnsmasq to reload, and
+  only once dnsmasq's own log confirms it has actually re-read that
+  hostsfile writes `status.dhcp.appliedRevision` to match
+  `status.dhcp.revision`. The deployer waits for that match before it
+  powers the machine on: a reservation persisted but not yet live at
+  dnsmasq would otherwise race the machine's own DHCPDISCOVER.
 - **Released** when the deploy step completes (Inspect reaching
   `Available`, Provision reaching `Provisioned`), when the Machine is
   deleted, and when its `spec.bootMACAddress` or `spec.subnetRef`
