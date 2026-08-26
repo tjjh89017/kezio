@@ -343,8 +343,11 @@ func (r *ImageImportReconciler) buildIngestJob(imp *keziov1alpha3.ImageImport, s
 
 // ingestUnprivilegedRunAsUser is the ingest Job's non-root uid/gid for
 // the unprivileged (AttachModeCopy) path - the same 65532 the container
-// image's own USER directive uses (see docker/ingest/Dockerfile).
-const ingestUnprivilegedRunAsUser = 65532
+// image's own USER directive uses (see docker/ingest/Dockerfile) and the
+// PartitionContent publish Job's own runAsUser (partitioncontent_job.go),
+// which is what lets a copy-mode content directory be readable by the
+// publish Job with no ownership fixup (see ingest.ContentOwnerUID).
+const ingestUnprivilegedRunAsUser = ingest.ContentOwnerUID
 
 // ingestPodSecurityContext returns the ingest Job's pod- and
 // container-level SecurityContext for unprivileged (true, the

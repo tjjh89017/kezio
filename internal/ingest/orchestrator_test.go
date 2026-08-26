@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/tjjh89017/kezio/internal/store"
@@ -501,5 +502,108 @@ func TestFinalizeContent_MissingTorrentInfoFails(t *testing.T) {
 	contentDir := t.TempDir()
 	if _, _, err := finalizeContent(contentDir); err == nil {
 		t.Fatal("expected an error for a content dir with no torrent.info")
+	}
+}
+
+// withGeteuid temporarily replaces the package's geteuid seam, restoring
+// it on test cleanup.
+func withGeteuid(t *testing.T, uid int) {
+	t.Helper()
+	orig := geteuid
+	geteuid = func() int { return uid }
+	t.Cleanup(func() { geteuid = orig })
+}
+
+// TestFixContentOwnership_NonRootIsNoOp checks that an unprivileged
+// (AttachModeCopy) ingest process - already running as the identity the
+// publish Job expects - never calls chown at all.
+func TestFixContentOwnership_NonRootIsNoOp(t *testing.T) {
+	withGeteuid(t, ContentOwnerUID)
+
+	called := false
+	chown := func(string, int, int) error {
+		called = true
+		return nil
+	}
+
+	if err := fixContentOwnership(chown, "/some/content-1"); err != nil {
+		t.Fatalf("fixContentOwnership: %v", err)
+	}
+	if called {
+		t.Error("expected no chown call for a non-root process")
+	}
+}
+
+// TestFixContentOwnership_RootHandsOwnershipToContentOwner checks that
+// the nbd-attach path (running as root) hands its content directory back
+// to ContentOwnerUID/GID.
+func TestFixContentOwnership_RootHandsOwnershipToContentOwner(t *testing.T) {
+	withGeteuid(t, 0)
+
+	var gotDir string
+	var gotUID, gotGID int
+	chown := func(dir string, uid, gid int) error {
+		gotDir, gotUID, gotGID = dir, uid, gid
+		return nil
+	}
+
+	if err := fixContentOwnership(chown, "/work/content-1"); err != nil {
+		t.Fatalf("fixContentOwnership: %v", err)
+	}
+	if gotDir != "/work/content-1" || gotUID != ContentOwnerUID || gotGID != ContentOwnerGID {
+		t.Errorf("chown called with (%q, %d, %d), want (%q, %d, %d)",
+			gotDir, gotUID, gotGID, "/work/content-1", ContentOwnerUID, ContentOwnerGID)
+	}
+}
+
+// TestFixContentOwnership_ChownFailurePropagates checks that a chown
+// failure surfaces as an error rather than being swallowed.
+func TestFixContentOwnership_ChownFailurePropagates(t *testing.T) {
+	withGeteuid(t, 0)
+
+	err := fixContentOwnership(func(string, int, int) error {
+		return fmt.Errorf("boom")
+	}, "/work/content-1")
+	if err == nil {
+		t.Fatal("expected an error when chown fails")
+	}
+}
+
+// TestFixContentOwnership_NilChownUsesRealChownTree checks that a nil
+// chownFunc falls back to walking and lchowning the real directory tree
+// - this is the only test that actually needs to run as root to observe
+// a changed owner, so it self-skips otherwise.
+func TestFixContentOwnership_NilChownUsesRealChownTree(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to chown to an arbitrary uid/gid")
+	}
+	withGeteuid(t, 0)
+
+	dir := t.TempDir()
+	nested := filepath.Join(dir, "content")
+	if err := os.MkdirAll(nested, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(nested, "extent")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fixContentOwnership(nil, dir); err != nil {
+		t.Fatalf("fixContentOwnership: %v", err)
+	}
+
+	for _, p := range []string{dir, nested, file} {
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("stat %s: %v", p, err)
+		}
+		st, ok := fi.Sys().(*syscall.Stat_t)
+		if !ok {
+			t.Fatalf("stat_t not available for %s", p)
+		}
+		if int(st.Uid) != ContentOwnerUID || int(st.Gid) != ContentOwnerGID {
+			t.Errorf("%s owner = %d:%d, want %d:%d", p, st.Uid, st.Gid, ContentOwnerUID, ContentOwnerGID)
+		}
 	}
 }

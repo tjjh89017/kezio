@@ -106,7 +106,7 @@ func (r *PartitionContentReconciler) buildPublishJob(pc *keziov1alpha3.Partition
 
 	const contentVolumeName = "content"
 	const scratchVolumeName = "scratch"
-	runAsUser := int64(65532)
+	runAsUser := int64(ingest.ContentOwnerUID)
 	trueVal := true
 	falseVal := false
 

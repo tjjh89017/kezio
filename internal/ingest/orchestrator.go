@@ -120,6 +120,12 @@ type Dependencies struct {
 	// cloned. nil means the real syscall.Statfs-backed implementation;
 	// tests set it to simulate an arbitrary reported free-space figure.
 	Statfs statfsFunc
+	// Chown backs fixContentOwnership, handing a partition's content
+	// directory back to ContentOwnerUID/GID once the nbd-attach path
+	// (running as root) is done writing it. nil means the real
+	// os.Lchown-backed implementation; tests set it to observe what
+	// would have been chowned without needing to run as root.
+	Chown chownFunc
 }
 
 // Attacher attaches a source disk image to a kernel block device with
@@ -425,6 +431,9 @@ func finishPartition(ctx context.Context, cfg Config, deps Dependencies, source 
 	if err != nil {
 		return ResultPartition{}, fmt.Errorf("finalize partition content: %w", err)
 	}
+	if err := fixContentOwnership(deps.Chown, contentDir); err != nil {
+		return ResultPartition{}, err
+	}
 	resultPart.UsedBytes = usedBytes
 	resultPart.LastExtentEnd = lastExtentEnd
 	resultPart.PieceLength = store.PieceSize
@@ -509,4 +518,67 @@ func fileSize(path string) (int64, error) {
 		return 0, err
 	}
 	return fi.Size(), nil
+}
+
+// ContentOwnerUID and ContentOwnerGID are the uid/gid every content
+// directory in an ingest scratch PVC must end up owned by: the identity
+// a PartitionContent's publish Job always runs as (see
+// internal/controller partitioncontent_job.go), and the same identity
+// the ingest Job's own unprivileged (AttachModeCopy) path already runs
+// as, so its content directories need no correction. The nbd-attach
+// path runs its container as root instead (see internal/controller's
+// ingestPodSecurityContext) - see fixContentOwnership for how it hands
+// each content directory back to this identity before exiting.
+const (
+	ContentOwnerUID = 65532
+	ContentOwnerGID = 65532
+)
+
+// chownFunc recursively hands ownership of a content directory (and
+// everything inside it) to uid:gid. It exists as an injectable seam:
+// tests observe what fixContentOwnership would have done without
+// needing to run as root against a real filesystem.
+type chownFunc func(dir string, uid, gid int) error
+
+// geteuid is os.Geteuid, injected so tests can exercise
+// fixContentOwnership's root branch without actually running as root.
+var geteuid = os.Geteuid
+
+// realChownTree is the production chownFunc: it walks dir and
+// lchown(2)s every entry - Lchown rather than Chown so a symlink's own
+// ownership changes rather than the file it points to.
+func realChownTree(dir string, uid, gid int) error {
+	return filepath.WalkDir(dir, func(path string, _ os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Lchown(path, uid, gid)
+	})
+}
+
+// fixContentOwnership hands contentDir back to ContentOwnerUID/GID when
+// the calling process is root, and is a no-op otherwise.
+//
+// finishPartition creates contentDir with mode 0750 (see
+// processPartition's caller): a directory only its owner and group can
+// read into. That is exactly the identity the publish Job runs as
+// (ContentOwnerUID/GID) in the unprivileged (AttachModeCopy) ingest
+// path, since both Jobs' containers run as that same uid/gid - but the
+// nbd-attach path runs its container as root (see
+// ingestPodSecurityContext) to reach /dev/nbd*, so every content
+// directory it writes comes out root:root-owned instead, unreadable by
+// the publish Job that later mounts the same scratch PVC read-only.
+// This is that gap closed, right after a partition's content directory
+// is complete and validated.
+func fixContentOwnership(chown chownFunc, contentDir string) error {
+	if geteuid() != 0 {
+		return nil
+	}
+	if chown == nil {
+		chown = realChownTree
+	}
+	if err := chown(contentDir, ContentOwnerUID, ContentOwnerGID); err != nil {
+		return fmt.Errorf("fix content dir %s ownership: %w", contentDir, err)
+	}
+	return nil
 }
