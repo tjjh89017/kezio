@@ -25,7 +25,6 @@ import (
 	"strings"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -58,9 +57,14 @@ type Server struct {
 	// Config holds the server's listen address, artifact directory, and
 	// externally reachable URL.
 	Config Config
-	// Now returns the current time; overridden in tests. Nil means
-	// time.Now.
-	Now func() time.Time
+	// Tokens is the in-process store this server reads the plaintext
+	// boot token from - see TokenStore's doc comment. It is never this
+	// server's own to mint into: whoever arms a Machine's net boot
+	// (internal/deployer.AgentDeployer) mints through the same
+	// TokenStore instance, shared via cmd/main.go. Nil means grub.cfg
+	// requests always render with no kezio.token=, the same as a boot
+	// this store never saw an Issue for.
+	Tokens *TokenStore
 }
 
 var (
@@ -73,7 +77,7 @@ var (
 // SetupFieldIndexer(ctx, mgr) before the manager starts, or every lookup
 // below fails.
 func New(c client.Client, cfg Config) *Server {
-	return &Server{Client: c, Config: cfg.withDefaults(), Now: time.Now}
+	return &Server{Client: c, Config: cfg.withDefaults()}
 }
 
 // NeedLeaderElection implements manager.LeaderElectionRunnable: this
@@ -87,13 +91,6 @@ func New(c client.Client, cfg Config) *Server {
 // to anyway.
 func (s *Server) NeedLeaderElection() bool {
 	return false
-}
-
-func (s *Server) now() time.Time {
-	if s.Now != nil {
-		return s.Now()
-	}
-	return time.Now()
 }
 
 // Start implements manager.Runnable: it serves Handler on Config.Addr
@@ -243,12 +240,7 @@ func (s *Server) handleGrubConfig(w http.ResponseWriter, r *http.Request, rawMAC
 		return
 	}
 
-	token, err := s.rotateToken(ctx, machine)
-	if err != nil {
-		log.Error(err, "minting boot token failed; boot local disk", "machine", machine.Name)
-		writeBootLocal(w)
-		return
-	}
+	token := s.lookupToken(mac, machine)
 
 	renderCfg := s.Config
 	subnet, err := s.resolveSubnet(ctx, machine)
@@ -335,25 +327,25 @@ func needsNetBoot(machine *keziov1alpha3.Machine) bool {
 	}
 }
 
-// rotateToken mints a fresh boot token for machine, persists its hash and
-// expiry to status (overwriting whatever token was there before - see
-// MachineNetBootStatus's doc comment for why that is the intended
-// behavior, not a race to avoid), and returns the token itself for
-// embedding in the GRUB config's cmdline.
-func (s *Server) rotateToken(ctx context.Context, machine *keziov1alpha3.Machine) (string, error) {
-	token, hash, err := mintToken()
-	if err != nil {
-		return "", err
+// lookupToken returns the plaintext boot token this grub.cfg fetch should
+// embed, or "" when there is none to hand out: this handler never mints -
+// see TokenStore's doc comment for why minting belongs to whoever arms
+// the boot, not to every grub.cfg fetch that boot happens to produce.
+// Empty is the correct answer (not an error) for a Machine that needs to
+// net boot but has no live token right now: nothing has armed a boot for
+// it yet in this process, its token already expired, or a prior
+// registration already consumed it. renderNetBootConfig omits
+// kezio.token= entirely in that case, so the agent boots into the live
+// environment and simply idles instead of registering.
+func (s *Server) lookupToken(mac string, machine *keziov1alpha3.Machine) string {
+	if s.Tokens == nil || machine.Status.NetBoot == nil {
+		return ""
 	}
-
-	machine.Status.NetBoot = &keziov1alpha3.MachineNetBootStatus{
-		TokenHash: hash,
-		ExpiresAt: metav1.NewTime(s.now().Add(s.Config.TokenTTL)),
+	token, ok := s.Tokens.Lookup(mac, machine.Status.NetBoot.TokenHash)
+	if !ok {
+		return ""
 	}
-	if err := s.Client.Status().Update(ctx, machine); err != nil {
-		return "", fmt.Errorf("persisting boot token hash: %w", err)
-	}
-	return token, nil
+	return token
 }
 
 // writeBootLocal writes the fixed "boot local disk" GRUB config.

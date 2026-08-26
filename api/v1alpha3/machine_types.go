@@ -418,13 +418,19 @@ type MachineCredentialsStatus struct {
 	ResourceVersion string `json:"resourceVersion,omitempty"`
 }
 
-// MachineNetBootStatus records the live-boot token most recently minted
-// for this machine by the boot config server (GET /boot/grub.cfg-<mac>).
-// The token itself is never stored, only its SHA-256 hash and expiry, so
-// a leaked status object cannot be replayed to impersonate the machine at
-// registration. Each grub.cfg fetch for a machine that currently needs to
-// net boot mints a fresh token and overwrites this field, invalidating
-// whatever token was here before.
+// MachineNetBootStatus records the live-boot token minted for the net
+// boot this machine is currently armed for - by whoever decided to boot
+// it into the live environment (the Machine/deploy controller, when it
+// sets one-time PXE and powers the machine on for inspection or
+// provisioning), not by the boot config server's GET
+// /boot/grub.cfg-<mac> handler, which only ever reads this field back
+// (see internal/bootserver.TokenStore's doc comment). The token itself is
+// never stored, only its SHA-256 hash and expiry, so a leaked status
+// object cannot be replayed to impersonate the machine at registration.
+// Exactly one token is ever live per machine: registration consumes it
+// (clearing TokenHash), and arming the next boot overwrites this field
+// with a fresh one - however many times grub.cfg happens to be fetched
+// in between never does.
 type MachineNetBootStatus struct {
 	// TokenHash is the SHA-256 hex digest of the current boot token.
 	// +optional

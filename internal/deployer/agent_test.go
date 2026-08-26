@@ -34,6 +34,7 @@ import (
 
 	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/bmc"
+	"github.com/tjjh89017/kezio/internal/bootserver"
 	"github.com/tjjh89017/kezio/internal/planbuild"
 	"github.com/tjjh89017/kezio/internal/posthookdefaults"
 )
@@ -71,7 +72,11 @@ func newAgentTestClient(t *testing.T, objs ...client.Object) client.Client {
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme(corev1) error = %v", err)
 	}
-	return fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&keziov1alpha3.DeployRun{}).WithObjects(objs...).Build()
+	return fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&keziov1alpha3.DeployRun{}, &keziov1alpha3.Machine{}).
+		WithObjects(objs...).
+		Build()
 }
 
 // agentTestBMCSecret builds the Secret agentTestBMCSecretName names, with
@@ -154,6 +159,63 @@ func TestAgentDeployerInspectFirstPassArmsPXEAndPowersOn(t *testing.T) {
 	}
 	if f.gotCreds.Username != "admin" || f.gotCreds.Password != "s3cr3t" {
 		t.Errorf("gotCreds = %+v, want the resolved secret credentials", f.gotCreds)
+	}
+}
+
+// TestAgentDeployerInspectFirstPassIssuesBootToken pins that arming a
+// net boot mints its registration token right there, through Tokens -
+// not on some later grub.cfg fetch (see bootserver.TokenStore's doc
+// comment): the persisted hash must already resolve, via the same
+// TokenStore, to a plaintext token by the time armPXEAndPowerOn returns.
+func TestAgentDeployerInspectFirstPassIssuesBootToken(t *testing.T) {
+	machine := agentTestMachine(t)
+	c := newAgentTestClient(t, machine, agentTestBMCSecret())
+	tokens := bootserver.NewTokenStore()
+	d := &AgentDeployer{Client: c, Tokens: tokens}
+
+	if _, err := d.Inspect(context.Background(), machine, false); err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+
+	if machine.Status.NetBoot == nil || machine.Status.NetBoot.TokenHash == "" {
+		t.Fatalf("machine.Status.NetBoot was not set by arming the boot: %+v", machine.Status.NetBoot)
+	}
+	mac, ok := bootserver.NormalizeMAC(machine.Spec.BootMACAddress)
+	if !ok {
+		t.Fatalf("test machine's boot MAC does not normalize: %q", machine.Spec.BootMACAddress)
+	}
+	if token, ok := tokens.Lookup(mac, machine.Status.NetBoot.TokenHash); !ok || token == "" {
+		t.Fatalf("TokenStore has no plaintext token matching the persisted hash")
+	}
+
+	var stored keziov1alpha3.Machine
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(machine), &stored); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if stored.Status.NetBoot == nil || stored.Status.NetBoot.TokenHash != machine.Status.NetBoot.TokenHash {
+		t.Fatalf("boot token hash was not persisted to the API server: %+v", stored.Status.NetBoot)
+	}
+}
+
+// TestAgentDeployerInspectSkipsMintingWithNoTokenStore pins that a nil
+// Tokens field (this package's own tests that do not care about the boot
+// token, and any Deployer not wired to a live bootserver) never blocks
+// arming: the machine still gets PXE-armed and powered on with no
+// status.netBoot written at all.
+func TestAgentDeployerInspectSkipsMintingWithNoTokenStore(t *testing.T) {
+	machine := agentTestMachine(t)
+	c := newAgentTestClient(t, machine, agentTestBMCSecret())
+	d := &AgentDeployer{Client: c}
+
+	result, err := d.Inspect(context.Background(), machine, false)
+	if err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+	if result.Outcome != Continuing {
+		t.Fatalf("Inspect() outcome = %v, want Continuing", result.Outcome)
+	}
+	if machine.Status.NetBoot != nil {
+		t.Fatalf("machine.Status.NetBoot = %+v, want nil with no TokenStore wired", machine.Status.NetBoot)
 	}
 }
 
@@ -470,6 +532,56 @@ func TestAgentDeployerProvisionFirstPassArmsPXEAndPowersOn(t *testing.T) {
 
 	if _, armed := provisionBootMarker(machine); !armed {
 		t.Fatal("machine has no provision-boot marker after the first Provision pass")
+	}
+}
+
+// TestAgentDeployerProvisionFirstPassIssuesFreshBootToken covers "a new
+// DeployRun boot mints a new token": a Provision boot armed after an
+// earlier Inspect boot already had one outstanding must mint its own,
+// distinct token, and TokenStore's single-outstanding-token-per-MAC
+// invariant (see its doc comment) means the earlier one stops resolving
+// at all once the new one is armed - superseded, not merely shadowed.
+func TestAgentDeployerProvisionFirstPassIssuesFreshBootToken(t *testing.T) {
+	machine := agentTestMachine(t)
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	c := newAgentTestClient(t, machine, agentTestBMCSecret())
+	tokens := bootserver.NewTokenStore()
+	d := &AgentDeployer{
+		Client:      c,
+		PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace},
+		Tokens:      tokens,
+	}
+
+	mac, ok := bootserver.NormalizeMAC(machine.Spec.BootMACAddress)
+	if !ok {
+		t.Fatalf("test machine's boot MAC does not normalize: %q", machine.Spec.BootMACAddress)
+	}
+
+	if _, err := d.Inspect(context.Background(), machine, false); err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+	firstHash := machine.Status.NetBoot.TokenHash
+	firstToken, ok := tokens.Lookup(mac, firstHash)
+	if !ok {
+		t.Fatalf("first (Inspect) token not found in the TokenStore")
+	}
+
+	if _, err := d.Provision(context.Background(), machine, run, false); err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	secondHash := machine.Status.NetBoot.TokenHash
+	if secondHash == firstHash {
+		t.Fatalf("Provision's boot did not mint a fresh token hash: still %q", secondHash)
+	}
+	secondToken, ok := tokens.Lookup(mac, secondHash)
+	if !ok {
+		t.Fatalf("second (Provision) token not found in the TokenStore")
+	}
+	if secondToken == firstToken {
+		t.Fatalf("Provision's boot token equals Inspect's earlier one, want a fresh token")
+	}
+	if _, ok := tokens.Lookup(mac, firstHash); ok {
+		t.Fatalf("Inspect's superseded token hash still resolves after Provision armed a new one")
 	}
 }
 

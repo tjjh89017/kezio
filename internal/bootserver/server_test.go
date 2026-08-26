@@ -41,12 +41,33 @@ import (
 // machines, indexed the same way SetupFieldIndexer configures a real
 // manager cache. artifactsDir may be "" for tests that never touch the
 // artifacts endpoint.
+//
+// Every machine with a normalizable spec.bootMACAddress is pre-armed with
+// a live token (see armTestToken) before it is seeded, matching what
+// internal/deployer.AgentDeployer's armPXEAndPowerOn/
+// armProvisionBootAndPowerOn would have done before this Server ever saw
+// a grub.cfg fetch for it - this Server itself never mints (see
+// TokenStore's doc comment), so tests that only care about a net-boot
+// config's other content (Subnet override, kernel/initrd/squashfs URLs)
+// need not arm one by hand. Tests exercising the token hand-off itself
+// (no pending boot, repeat fetches, consumption) arm explicitly instead.
 func newTestServer(t *testing.T, artifactsDir string, machines ...*keziov1alpha3.Machine) (*Server, client.Client) {
 	t.Helper()
 
 	scheme := runtime.NewScheme()
 	if err := keziov1alpha3.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
+	}
+
+	tokens := NewTokenStore()
+	for _, m := range machines {
+		if mac, ok := NormalizeMAC(m.Spec.BootMACAddress); ok {
+			_, status, err := tokens.Issue(mac, time.Now(), time.Hour)
+			if err != nil {
+				t.Fatalf("Issue: %v", err)
+			}
+			m.Status.NetBoot = &status
+		}
 	}
 
 	builder := fake.NewClientBuilder().
@@ -62,6 +83,7 @@ func newTestServer(t *testing.T, artifactsDir string, machines ...*keziov1alpha3
 		ArtifactsDir: artifactsDir,
 		ServerURL:    "http://boot.example.test:8090",
 	})
+	s.Tokens = tokens
 	return s, c
 }
 
@@ -212,62 +234,135 @@ func TestHandleHTTPBootGrubSearch(t *testing.T) {
 	}
 }
 
-func TestHandleGrubConfig_NetBootNeededMintsAndRotatesToken(t *testing.T) {
+// TestHandleGrubConfig_RepeatedFetchesReturnTheSameArmedToken pins the
+// fix for the boot-token race: this handler never mints (see TokenStore's
+// doc comment), so however many times GRUB or firmware fetches grub.cfg
+// during one boot attempt, every fetch reads back the same token armed
+// for it - none of them can invalidate the token the kernel actually
+// boots with.
+func TestHandleGrubConfig_RepeatedFetchesReturnTheSameArmedToken(t *testing.T) {
 	machine := newTestMachine(keziov1alpha3.MachineStateInspecting)
 	s, c := newTestServer(t, t.TempDir(), machine)
 	handler := s.Handler()
 
-	// First fetch: gets a net-boot config with kernel/initrd HTTP URLs
-	// and a cmdline carrying kezio.server + a freshly minted kezio.token.
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/boot/grub.cfg-AA:BB:CC:DD:EE:01", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
+	var firstToken string
+	for i, path := range []string{
+		"/boot/grub.cfg-AA:BB:CC:DD:EE:01",
+		"/boot/grub.cfg-aa:bb:cc:dd:ee:01",
+		"/boot/grub.cfg-aa:bb:cc:dd:ee:01",
+	} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("fetch %d: status = %d, want 200", i, rec.Code)
+		}
+		body := rec.Body.String()
+		if !containsAll(body, "linux (http,boot.example.test:8090)/boot/artifacts/vmlinuz",
+			"boot=live fetch=http://boot.example.test:8090/boot/artifacts/filesystem.squashfs",
+			"initrd (http,boot.example.test:8090)/boot/artifacts/initrd.img",
+			"kezio.server=http://boot.example.test:8090") {
+			t.Fatalf("fetch %d: net-boot config missing expected content: %q", i, body)
+		}
+		token := extractToken(t, body)
+		if i == 0 {
+			firstToken = token
+			continue
+		}
+		if token != firstToken {
+			t.Fatalf("fetch %d: token = %q, want the same token as the first fetch (%q)", i, token, firstToken)
+		}
 	}
-	body := rec.Body.String()
-	if !containsAll(body, "linux (http,boot.example.test:8090)/boot/artifacts/vmlinuz",
-		"boot=live fetch=http://boot.example.test:8090/boot/artifacts/filesystem.squashfs",
-		"initrd (http,boot.example.test:8090)/boot/artifacts/initrd.img",
-		"kezio.server=http://boot.example.test:8090") {
-		t.Fatalf("net-boot config missing expected content: %q", body)
-	}
-	firstToken := extractToken(t, body)
 
 	var stored keziov1alpha3.Machine
 	if err := c.Get(context.Background(), types.NamespacedName{Name: machine.Name}, &stored); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if stored.Status.NetBoot == nil || stored.Status.NetBoot.TokenHash == "" {
-		t.Fatalf("status.netBoot.tokenHash was not persisted: %+v", stored.Status.NetBoot)
-	}
-	if stored.Status.NetBoot.TokenHash != hashToken(firstToken) {
-		t.Fatalf("stored token hash does not match the minted token")
+	if stored.Status.NetBoot == nil || stored.Status.NetBoot.TokenHash != hashToken(firstToken) {
+		t.Fatalf("status.netBoot.tokenHash changed across repeated fetches: %+v", stored.Status.NetBoot)
 	}
 	if stored.Status.NetBoot.TokenHash == firstToken {
 		t.Fatalf("status.netBoot.tokenHash stored the plaintext token instead of its hash")
 	}
-	if !stored.Status.NetBoot.ExpiresAt.After(time.Now()) {
-		t.Fatalf("stored token expiry is not in the future: %v", stored.Status.NetBoot.ExpiresAt)
+}
+
+// newTestServerUnarmed builds a Server exactly like newTestServer, except
+// it never pre-arms a token for any seeded machine - for tests exercising
+// the "nothing has minted for this MAC" half of Server.lookupToken, which
+// newTestServer's default auto-arm would otherwise mask.
+func newTestServerUnarmed(t *testing.T, artifactsDir string, machines ...*keziov1alpha3.Machine) (*Server, client.Client) {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	if err := keziov1alpha3.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
 	}
 
-	// Second fetch (a PXE retry, or the firmware simply asking again):
-	// rotates to a fresh token, invalidating the first.
-	rec2 := httptest.NewRecorder()
-	handler.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/boot/grub.cfg-aa:bb:cc:dd:ee:01", nil))
-	secondToken := extractToken(t, rec2.Body.String())
-	if secondToken == firstToken {
-		t.Fatalf("token did not rotate across fetches")
+	builder := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&keziov1alpha3.Machine{}, MachineBootMACIndexField, IndexMachineBootMAC).
+		WithStatusSubresource(&keziov1alpha3.Machine{})
+	for _, m := range machines {
+		builder = builder.WithObjects(m)
+	}
+	c := builder.Build()
+
+	s := New(c, Config{
+		ArtifactsDir: artifactsDir,
+		ServerURL:    "http://boot.example.test:8090",
+	})
+	s.Tokens = NewTokenStore()
+	return s, c
+}
+
+// TestHandleGrubConfig_NoPendingBootOmitsToken covers a Machine that
+// needs to net boot (State Inspecting/Provisioning) but has no token
+// armed yet - nothing has called TokenStore.Issue for its MAC in this
+// process, or a prior registration already consumed the one that was
+// there (see ingestRegistration). The net-boot config still renders (the
+// agent must still boot into the live environment), just without
+// kezio.token=, so the agent idles instead of registering with nothing.
+func TestHandleGrubConfig_NoPendingBootOmitsToken(t *testing.T) {
+	machine := newTestMachine(keziov1alpha3.MachineStateInspecting)
+	s, _ := newTestServerUnarmed(t, t.TempDir(), machine)
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/boot/grub.cfg-"+testMAC, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "kezio.token") {
+		t.Fatalf("net-boot config carries a token with no boot armed: %q", body)
+	}
+	if !containsAll(body, "boot=live") {
+		t.Fatalf("machine still needing net boot did not get a net-boot config: %q", body)
+	}
+}
+
+// TestHandleGrubConfig_ConsumedTokenOmitted covers the other "no token"
+// case: registration already consumed the armed token
+// (ingestRegistration clears status.netBoot.tokenHash to ""), but the
+// Machine is still net booting (a retry, or the agent's own later
+// fetches). A grub.cfg fetch after that point must not resurrect the
+// consumed token from the TokenStore.
+func TestHandleGrubConfig_ConsumedTokenOmitted(t *testing.T) {
+	machine := newTestMachine(keziov1alpha3.MachineStateInspecting)
+	s, c := newTestServer(t, t.TempDir(), machine)
+
+	// Simulate internal/agentserver's ingestRegistration consuming the
+	// token: clear the hash, leave ExpiresAt as it was.
+	machine.Status.NetBoot.TokenHash = ""
+	if err := c.Status().Update(context.Background(), machine); err != nil {
+		t.Fatalf("Status().Update: %v", err)
 	}
 
-	var stored2 keziov1alpha3.Machine
-	if err := c.Get(context.Background(), types.NamespacedName{Name: machine.Name}, &stored2); err != nil {
-		t.Fatalf("Get: %v", err)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/boot/grub.cfg-"+testMAC, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if stored2.Status.NetBoot.TokenHash != hashToken(secondToken) {
-		t.Fatalf("stored token hash was not rotated to the second token")
-	}
-	if stored2.Status.NetBoot.TokenHash == stored.Status.NetBoot.TokenHash {
-		t.Fatalf("stored token hash did not change across fetches")
+	if body := rec.Body.String(); strings.Contains(body, "kezio.token") {
+		t.Fatalf("net-boot config carries a token consumed by registration: %q", body)
 	}
 }
 
@@ -413,6 +508,7 @@ func TestHandleGrubConfig_BootLocalCases(t *testing.T) {
 func TestHandleGrubConfig_UnknownMACYieldsLocalBoot(t *testing.T) {
 	machine := newTestMachine(keziov1alpha3.MachineStateInspecting)
 	s, c := newTestServer(t, "", machine)
+	armedHash := machine.Status.NetBoot.TokenHash
 
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/boot/grub.cfg-11:22:33:44:55:66", nil))
@@ -423,12 +519,15 @@ func TestHandleGrubConfig_UnknownMACYieldsLocalBoot(t *testing.T) {
 		t.Fatalf("body = %q, want the fixed bootLocalConfig with no token", body)
 	}
 
+	// This handler never mints or writes status (see TokenStore's doc
+	// comment) - the unrelated, already-armed Machine's token must be
+	// completely undisturbed by a request for a different MAC.
 	var stored keziov1alpha3.Machine
 	if err := c.Get(context.Background(), types.NamespacedName{Name: machine.Name}, &stored); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if stored.Status.NetBoot != nil {
-		t.Fatalf("an unrelated Machine's status.netBoot was written by an unknown-MAC request: %+v", stored.Status.NetBoot)
+	if stored.Status.NetBoot == nil || stored.Status.NetBoot.TokenHash != armedHash {
+		t.Fatalf("an unrelated Machine's status.netBoot changed from an unknown-MAC request: %+v", stored.Status.NetBoot)
 	}
 }
 

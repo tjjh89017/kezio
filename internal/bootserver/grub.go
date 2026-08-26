@@ -162,12 +162,20 @@ func consoleCmdlineArgs(console []string) string {
 // cmdline carrying boot=live, fetch=<squashfs URL> (real URL - live-boot's
 // initrd is the consumer, not GRUB), kezio.server (Config.AgentServerURL,
 // not ServerURL - see that field's doc comment for why conflating them
-// misroutes every registration), kezio.token, and console= (see
+// misroutes every registration), kezio.token (only when the caller
+// resolved one - see below), and console= (see
 // resolveConsole/consoleCmdlineArgs). token is the only value here that
 // is not already resolved by the caller before this call; everything
 // else comes from operator-controlled Config plus the caller-resolved
 // console list. Errors on a malformed Config.ServerURL, surfaced
 // per-request by the caller's fail-secure boot-local fallback.
+//
+// An empty token omits kezio.token= from the cmdline entirely, rather
+// than embedding an empty value: this is the correct rendering for a
+// Machine that needs to net boot but has no live token right now (see
+// Server.lookupToken) - the agent still boots into the live environment,
+// it just has nothing to register with and idles, instead of the boot
+// server minting a token nobody asked it to.
 func renderNetBootConfig(cfg Config, token string, console []string) (string, error) {
 	base := strings.TrimRight(cfg.ServerURL, "/")
 	kernelPath, err := GrubNetPath(base, "/boot/artifacts/"+cfg.KernelPath)
@@ -181,9 +189,14 @@ func renderNetBootConfig(cfg Config, token string, console []string) (string, er
 	squashfsURL := fmt.Sprintf("%s/boot/artifacts/%s", base, cfg.SquashfsPath)
 	agentServerURL := strings.TrimRight(cfg.AgentServerURL, "/")
 
+	tokenArg := ""
+	if token != "" {
+		tokenArg = " kezio.token=" + token
+	}
+
 	return fmt.Sprintf(`set timeout=5
-linux %s boot=live fetch=%s kezio.server=%s kezio.token=%s%s
+linux %s boot=live fetch=%s kezio.server=%s%s%s
 initrd %s
 boot
-`, kernelPath, squashfsURL, agentServerURL, token, consoleCmdlineArgs(console), initrdPath), nil
+`, kernelPath, squashfsURL, agentServerURL, tokenArg, consoleCmdlineArgs(console), initrdPath), nil
 }

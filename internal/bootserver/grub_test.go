@@ -281,6 +281,29 @@ func TestRenderNetBootConfig_Console(t *testing.T) {
 	}
 }
 
+// TestRenderNetBootConfig_EmptyTokenOmitsKezioToken pins the rendering
+// for a Machine that needs to net boot but has no live token right now
+// (see Server.lookupToken): the cmdline must carry no kezio.token= at
+// all, not an empty value, so the agent that boots into it has no
+// ambiguity about whether it holds a credential.
+func TestRenderNetBootConfig_EmptyTokenOmitsKezioToken(t *testing.T) {
+	cfg := Config{
+		ServerURL: "http://boot.example.test:8090",
+	}.withDefaults()
+
+	got, err := renderNetBootConfig(cfg, "", nil)
+	if err != nil {
+		t.Fatalf("renderNetBootConfig: %v", err)
+	}
+
+	if strings.Contains(got, "kezio.token") {
+		t.Fatalf("net-boot config carries kezio.token= with no token issued: %q", got)
+	}
+	if !containsAll(got, "kezio.server=http://boot.example.test:8090\n") {
+		t.Fatalf("net-boot config linux line malformed with no token: %q", got)
+	}
+}
+
 // TestResolveConsole pins the precedence: a Machine's own spec.console
 // always wins over Config.DefaultConsole, which applies only when the
 // Machine sets none.

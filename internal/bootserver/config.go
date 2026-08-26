@@ -31,11 +31,16 @@ const (
 	DefaultSquashfsPath = "filesystem.squashfs"
 )
 
-// DefaultTokenTTL bounds how long a minted boot token is accepted. It
-// must comfortably cover one PXE cycle - GRUB's config fetch, the
-// kernel/initrd HTTP download, and the live OS booting far enough to run
-// the agent's registration - without staying valid so long that an
-// unused token sits as a live credential.
+// DefaultTokenTTL bounds how long a minted boot token is accepted, from
+// the moment whoever arms the boot (internal/deployer.AgentDeployer)
+// mints it through TokenStore.Issue - not from any later grub.cfg fetch,
+// which only ever reads. It must comfortably cover one PXE cycle: the BMC
+// power-on/power-cycle actually landing, GRUB's config fetch (however
+// many times firmware or GRUB itself repeats it - see TokenStore's doc
+// comment for why that no longer matters), the kernel/initrd HTTP
+// download, and the live OS booting far enough to run the agent's
+// registration - without staying valid so long that an unused token sits
+// as a live credential.
 const DefaultTokenTTL = 30 * time.Minute
 
 // Config configures a Server.
@@ -84,9 +89,6 @@ type Config struct {
 	// to serve them. Set it only if the EFI binaries live somewhere
 	// else.
 	EFIDir string
-	// TokenTTL bounds how long a minted boot token is accepted. Zero
-	// means DefaultTokenTTL.
-	TokenTTL time.Duration
 	// DefaultConsole lists kernel console= values appended to the live
 	// environment's cmdline when a netbooting Machine sets no
 	// spec.console. Empty means none are added - kezio does not change
@@ -107,9 +109,6 @@ func (c Config) withDefaults() Config {
 	}
 	if c.SquashfsPath == "" {
 		c.SquashfsPath = DefaultSquashfsPath
-	}
-	if c.TokenTTL <= 0 {
-		c.TokenTTL = DefaultTokenTTL
 	}
 	if c.EFIDir == "" {
 		c.EFIDir = c.ArtifactsDir

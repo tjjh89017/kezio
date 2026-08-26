@@ -111,8 +111,24 @@ func TestSetupFieldIndexer_EnvtestLookup(t *testing.T) {
 	}
 
 	s := New(mgr.GetClient(), Config{ServerURL: "http://boot.example.test:8090"})
+	s.Tokens = NewTokenStore()
+	mac, ok := NormalizeMAC(machine.Spec.BootMACAddress)
+	if !ok {
+		t.Fatalf("test machine's boot MAC does not normalize: %q", machine.Spec.BootMACAddress)
+	}
+	// Mirrors what AgentDeployer.issueBootToken does when it arms a net
+	// boot: Issue puts the plaintext in the same TokenStore instance s
+	// reads from, and its returned status is what gets persisted.
+	if _, status, err := s.Tokens.Issue(mac, time.Now(), time.Hour); err != nil {
+		t.Fatalf("Issue: %v", err)
+	} else {
+		machine.Status.NetBoot = &status
+		if err := rawClient.Status().Update(ctx, machine); err != nil {
+			t.Fatalf("Status().Update: %v", err)
+		}
+	}
 
-	waitForServe(t, s, "aa:bb:cc:dd:ee:01")
+	waitForServe(t, s, mac)
 }
 
 // waitForServe polls the grub.cfg handler until the cache observes the

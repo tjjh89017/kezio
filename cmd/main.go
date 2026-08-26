@@ -222,7 +222,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	machineDeployer, err := deployerFromEnv(mgr.GetClient())
+	// bootTokens is the in-process hand-off between whichever component
+	// mints a Machine's boot token (deployerFromEnv's AgentDeployer, once
+	// it arms a net boot) and the boot config server that reads it back
+	// for GET /boot/grub.cfg-<mac> (see bootserver.TokenStore's doc
+	// comment). One instance is shared for the whole process regardless
+	// of whether either side is actually wired up below.
+	bootTokens := bootserver.NewTokenStore()
+	bootTokenTTL, err := bootTokenTTLFromEnv()
+	if err != nil {
+		setupLog.Error(err, "invalid boot token configuration")
+		os.Exit(1)
+	}
+
+	machineDeployer, err := deployerFromEnv(mgr.GetClient(), bootTokens, bootTokenTTL)
 	if err != nil {
 		setupLog.Error(err, "invalid DEPLOYER configuration")
 		os.Exit(1)
@@ -351,7 +364,9 @@ func main() {
 			setupLog.Error(err, "unable to set up boot MAC field indexer")
 			os.Exit(1)
 		}
-		if err := mgr.Add(bootserver.New(mgr.GetClient(), *bootConfig)); err != nil {
+		bootSrv := bootserver.New(mgr.GetClient(), *bootConfig)
+		bootSrv.Tokens = bootTokens
+		if err := mgr.Add(bootSrv); err != nil {
 			setupLog.Error(err, "unable to add boot config server")
 			os.Exit(1)
 		}
@@ -448,12 +463,21 @@ func main() {
 // DEPLOYER=agent builds deployer.AgentDeployer, which drives real BMCs and
 // waits for kezio-agent registration. Any other value fails startup rather
 // than silently falling back to the fake.
-func deployerFromEnv(c client.Client) (deployer.Deployer, error) {
+//
+// tokens and tokenTTL are AgentDeployer's own boot-token fields (see its
+// doc comment): tokens is the same TokenStore instance wired into
+// bootserver.Server so both sides of one boot token agree on it, and may
+// be nil when BOOT_SERVER_ADDR is unset - an AgentDeployer with no
+// bootserver in this process still arms and powers machines on exactly
+// the same, it just mints no token anyone would read.
+func deployerFromEnv(
+	c client.Client, tokens *bootserver.TokenStore, tokenTTL time.Duration,
+) (deployer.Deployer, error) {
 	switch v := os.Getenv("DEPLOYER"); v {
 	case "", "fake":
 		return &deployer.FakeDeployer{Client: c}, nil
 	case "agent":
-		return &deployer.AgentDeployer{Client: c, PlanBuilder: planBuilder(c)}, nil
+		return &deployer.AgentDeployer{Client: c, PlanBuilder: planBuilder(c), Tokens: tokens, TokenTTL: tokenTTL}, nil
 	default:
 		return nil, fmt.Errorf("unknown DEPLOYER %q (want \"fake\" or \"agent\")", v)
 	}
@@ -645,17 +669,29 @@ func bootServerConfigFromEnv() (*bootserver.Config, error) {
 		SquashfsPath:   os.Getenv("BOOT_SQUASHFS_PATH"),
 		EFIDir:         os.Getenv("BOOT_EFI_DIR"),
 	}
-	if ttl := os.Getenv("BOOT_TOKEN_TTL"); ttl != "" {
-		d, err := time.ParseDuration(ttl)
-		if err != nil {
-			return nil, fmt.Errorf("invalid BOOT_TOKEN_TTL: %w", err)
-		}
-		cfg.TokenTTL = d
-	}
 	if console := os.Getenv("BOOT_DEFAULT_CONSOLE"); console != "" {
 		cfg.DefaultConsole = strings.Fields(console)
 	}
 	return cfg, nil
+}
+
+// bootTokenTTLFromEnv parses BOOT_TOKEN_TTL for whichever component ends
+// up minting boot tokens (internal/deployer.AgentDeployer, once armed
+// through the TokenStore shared with the boot config server - see
+// deployerFromEnv). Unset returns zero, meaning bootserver.DefaultTokenTTL.
+// Read independently of bootServerConfigFromEnv: minting can be wired up
+// (DEPLOYER=agent) even when this process runs no boot config server of
+// its own.
+func bootTokenTTLFromEnv() (time.Duration, error) {
+	ttl := os.Getenv("BOOT_TOKEN_TTL")
+	if ttl == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(ttl)
+	if err != nil {
+		return 0, fmt.Errorf("invalid BOOT_TOKEN_TTL: %w", err)
+	}
+	return d, nil
 }
 
 // agentServerConfigFromEnv builds the agent registration server's

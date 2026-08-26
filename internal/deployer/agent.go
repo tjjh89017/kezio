@@ -32,6 +32,7 @@ import (
 
 	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/bmc"
+	"github.com/tjjh89017/kezio/internal/bootserver"
 	"github.com/tjjh89017/kezio/internal/planbuild"
 )
 
@@ -117,10 +118,16 @@ const agentDeployerProvisionStallDeadline = 30 * time.Minute
 // must survive a manager restart (the Deployer interface promises no
 // in-memory state between calls), so they are recorded on the Machine as
 // agentDeployerPXEArmedAnnotation and agentDeployerProvisionBootAnnotation
-// respectively, rather than kept in this struct. status.netBoot is not
-// used for this: it is written by the boot config server when the machine
-// actually fetches its grub config, a different event than "arm PXE
-// boot", and owned by a different component.
+// respectively, rather than kept in this struct.
+//
+// armPXEAndPowerOn and armProvisionBootAndPowerOn also mint that boot's
+// registration token, through Tokens, at the same moment they set one-time
+// PXE and power the machine on: a token belongs to the boot the arm call
+// just triggered, not to however many times internal/bootserver's
+// grub.cfg handler ends up being fetched before the machine's kernel
+// actually boots (see bootserver.TokenStore's doc comment) - that handler
+// only ever reads back what was minted here, off the same status.netBoot
+// this struct writes.
 type AgentDeployer struct {
 	// Client reads and writes Machine, MachineHardware, DeployRun, and the
 	// BMC credentials Secret. Required.
@@ -133,6 +140,19 @@ type AgentDeployer struct {
 	// identical one (Build is deterministic in its inputs) for the
 	// agent's own GET /agent/next. Required.
 	PlanBuilder *planbuild.Builder
+	// Tokens is the in-process store shared with internal/bootserver.
+	// Server (see its own Tokens field and bootserver.TokenStore's doc
+	// comment), both wired to the same instance in cmd/main.go. Nil (this
+	// package's own unit tests, and any Deployer not wired to a live
+	// bootserver) skips minting entirely: the machine is still armed and
+	// powered on exactly the same, it just boots with no token for
+	// bootserver to hand it.
+	Tokens *bootserver.TokenStore
+	// TokenTTL bounds how long a token armPXEAndPowerOn/
+	// armProvisionBootAndPowerOn mints is accepted, from the moment it is
+	// minted. Zero (including a Deployer built with no explicit value)
+	// means bootserver.DefaultTokenTTL.
+	TokenTTL time.Duration
 }
 
 var _ Deployer = (*AgentDeployer)(nil)
@@ -192,6 +212,45 @@ func classifyBMCError(err error) Result {
 func isNetworkUnreachable(err error) bool {
 	var netErr net.Error
 	return errors.As(err, &netErr)
+}
+
+// tokenTTL returns d.TokenTTL, or bootserver.DefaultTokenTTL when it is
+// unset.
+func (d *AgentDeployer) tokenTTL() time.Duration {
+	if d.TokenTTL > 0 {
+		return d.TokenTTL
+	}
+	return bootserver.DefaultTokenTTL
+}
+
+// issueBootToken mints and persists the registration token for the net
+// boot armPXEAndPowerOn/armProvisionBootAndPowerOn is about to trigger,
+// through d.Tokens - see AgentDeployer's own doc comment for why minting
+// belongs here rather than to internal/bootserver's grub.cfg handler. A
+// nil d.Tokens, or a Machine whose spec.bootMACAddress does not parse,
+// skips minting entirely rather than failing the boot attempt: net boot
+// itself does not depend on a token existing, only registration does, and
+// a Machine deployer wiring or MAC validation problem is diagnosable from
+// the resulting "agent never registered" deadline failure without also
+// blocking the machine from powering on at all.
+func (d *AgentDeployer) issueBootToken(ctx context.Context, machine *keziov1alpha3.Machine) error {
+	if d.Tokens == nil {
+		return nil
+	}
+	mac, ok := bootserver.NormalizeMAC(machine.Spec.BootMACAddress)
+	if !ok {
+		return nil
+	}
+
+	_, status, err := d.Tokens.Issue(mac, time.Now(), d.tokenTTL())
+	if err != nil {
+		return fmt.Errorf("agent deployer: minting boot token: %w", err)
+	}
+	machine.Status.NetBoot = &status
+	if err := d.Client.Status().Update(ctx, machine); err != nil {
+		return fmt.Errorf("agent deployer: persisting boot token hash: %w", err)
+	}
+	return nil
 }
 
 // pxeArmedAt reads agentDeployerPXEArmedAnnotation off machine. The second
@@ -352,6 +411,9 @@ func (d *AgentDeployer) armPXEAndPowerOn(ctx context.Context, machine *keziov1al
 		return classifyBMCError(fmt.Errorf("agent deployer: powering on machine for net boot: %w", err)), nil
 	}
 
+	if err := d.issueBootToken(ctx, machine); err != nil {
+		return Result{}, err
+	}
 	if err := d.armPXE(ctx, machine); err != nil {
 		return Result{}, err
 	}
@@ -539,6 +601,9 @@ func (d *AgentDeployer) armProvisionBootAndPowerOn(ctx context.Context, machine 
 		return classifyBMCError(fmt.Errorf("agent deployer: powering on machine for net boot: %w", err)), nil
 	}
 
+	if err := d.issueBootToken(ctx, machine); err != nil {
+		return Result{}, err
+	}
 	if err := d.armProvisionBoot(ctx, machine); err != nil {
 		return Result{}, err
 	}
