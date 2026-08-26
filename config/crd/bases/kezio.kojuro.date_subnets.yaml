@@ -309,6 +309,72 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              dhcp:
+                description: |-
+                  DHCP reports the boot-scoped DHCP address reservations bootd
+                  renders for this Subnet. Absent for a Subnet that has never held a
+                  reservation (every proxy-mode Subnet, and a lease-mode Subnet with
+                  none allocated yet).
+                properties:
+                  appliedRevision:
+                    description: |-
+                      AppliedRevision is the Revision bootd's dnsmasq hostsfile last
+                      actually rendered and SIGHUPed dnsmasq for - written by bootd
+                      itself, never by the manager. A Machine's deployer waits for
+                      AppliedRevision to catch up to Revision before it powers the
+                      machine on for net boot, so it never races dnsmasq's own reload.
+                    type: string
+                  reservations:
+                    description: |-
+                      Reservations is the current address reservation table. The manager
+                      (internal/deployer, internal/subnetdhcp) is its only writer;
+                      bootd only ever reads it.
+                    items:
+                      description: |-
+                        DHCPReservation is one boot-scoped DHCP address reservation: a fixed
+                        address handed to exactly one Machine's boot MAC for as long as that
+                        Machine is net-booting or deployed, in a lease-mode Subnet. Allocated
+                        by the deployer at net-boot arm time (the same moment it mints that
+                        boot's registration token) and released once the deploy step
+                        completes, the Machine is deleted, or its bootMACAddress/subnetRef
+                        changes - see internal/subnetdhcp.
+                      properties:
+                        address:
+                          description: |-
+                            Address is the reserved IPv4 address, inside the Subnet's lease
+                            range.
+                          type: string
+                        mac:
+                          description: |-
+                            MAC is the Machine's normalized boot MAC address at the moment
+                            this reservation was allocated.
+                          type: string
+                        machine:
+                          description: |-
+                            Machine names the Machine this reservation was allocated for, in
+                            the Subnet's own namespace.
+                          type: string
+                        since:
+                          description: Since is when this reservation was allocated.
+                          format: date-time
+                          type: string
+                      required:
+                      - address
+                      - mac
+                      - machine
+                      - since
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  revision:
+                    description: |-
+                      Revision changes whenever Reservations changes - a digest of the
+                      sorted table (internal/subnetdhcp.Revision), not a counter, so two
+                      managers computing it from the same table always agree. bootd
+                      compares its own AppliedRevision against this field to decide
+                      whether its rendered hostsfile is stale.
+                    type: string
+                type: object
             type: object
         type: object
     served: true

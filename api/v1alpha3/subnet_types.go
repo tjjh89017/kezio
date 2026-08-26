@@ -165,7 +165,65 @@ const (
 	// (internal/nadvalidate, internal/subnetvalidate). False names the
 	// first failing check as Reason.
 	SubnetConditionValid = "Valid"
+	// SubnetConditionDHCPPoolExhausted is True while this Subnet's
+	// lease-mode DHCP address pool has no free address left for a new
+	// reservation (internal/subnetdhcp.Reserve returning
+	// ErrPoolExhausted). Always False for a proxy-mode Subnet, or a
+	// lease-mode Subnet with a free address. A Machine that hit
+	// exhaustion is held at deployer.Delayed until an address frees up -
+	// through a completed deploy, a deleted Machine, or a widened lease
+	// range - and this condition is what an operator reads to tell that
+	// apart from an ordinary transient delay.
+	SubnetConditionDHCPPoolExhausted = "DHCPPoolExhausted"
 )
+
+// DHCPReservation is one boot-scoped DHCP address reservation: a fixed
+// address handed to exactly one Machine's boot MAC for as long as that
+// Machine is net-booting or deployed, in a lease-mode Subnet. Allocated
+// by the deployer at net-boot arm time (the same moment it mints that
+// boot's registration token) and released once the deploy step
+// completes, the Machine is deleted, or its bootMACAddress/subnetRef
+// changes - see internal/subnetdhcp.
+type DHCPReservation struct {
+	// Address is the reserved IPv4 address, inside the Subnet's lease
+	// range.
+	Address string `json:"address"`
+	// Machine names the Machine this reservation was allocated for, in
+	// the Subnet's own namespace.
+	Machine string `json:"machine"`
+	// MAC is the Machine's normalized boot MAC address at the moment
+	// this reservation was allocated.
+	MAC string `json:"mac"`
+	// Since is when this reservation was allocated.
+	Since metav1.Time `json:"since"`
+}
+
+// SubnetDHCPStatus reports the boot-scoped DHCP address reservations
+// bootd's dnsmasq hostsfile renders for this Subnet, in lease mode.
+// Always empty for a proxy-mode Subnet: proxyDHCP never assigns
+// addresses, so there is nothing to reserve.
+type SubnetDHCPStatus struct {
+	// Reservations is the current address reservation table. The manager
+	// (internal/deployer, internal/subnetdhcp) is its only writer;
+	// bootd only ever reads it.
+	// +optional
+	// +listType=atomic
+	Reservations []DHCPReservation `json:"reservations,omitempty"`
+	// Revision changes whenever Reservations changes - a digest of the
+	// sorted table (internal/subnetdhcp.Revision), not a counter, so two
+	// managers computing it from the same table always agree. bootd
+	// compares its own AppliedRevision against this field to decide
+	// whether its rendered hostsfile is stale.
+	// +optional
+	Revision string `json:"revision,omitempty"`
+	// AppliedRevision is the Revision bootd's dnsmasq hostsfile last
+	// actually rendered and SIGHUPed dnsmasq for - written by bootd
+	// itself, never by the manager. A Machine's deployer waits for
+	// AppliedRevision to catch up to Revision before it powers the
+	// machine on for net boot, so it never races dnsmasq's own reload.
+	// +optional
+	AppliedRevision string `json:"appliedRevision,omitempty"`
+}
 
 // SubnetStatus defines the observed state of Subnet.
 type SubnetStatus struct {
@@ -179,6 +237,12 @@ type SubnetStatus struct {
 	// +patchMergeKey=type
 	// +patchStrategy=merge
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
+	// DHCP reports the boot-scoped DHCP address reservations bootd
+	// renders for this Subnet. Absent for a Subnet that has never held a
+	// reservation (every proxy-mode Subnet, and a lease-mode Subnet with
+	// none allocated yet).
+	// +optional
+	DHCP *SubnetDHCPStatus `json:"dhcp,omitempty"`
 }
 
 // +kubebuilder:object:root=true
