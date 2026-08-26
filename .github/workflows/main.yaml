@@ -865,6 +865,18 @@ jobs:
           vm-mac: ${{ env.TARGET_VM_MAC }}
           disk-serial: "${{ env.TARGET_DISK_SERIAL }}"
 
+      # Started before anything below powers the VM on (provision-
+      # target-vm-via-bmc, further down): the live environment's boot
+      # output scrolls by in seconds, so a capture attach that starts
+      # after power-on - as this used to, right before wait-agent-
+      # registered - misses it entirely and only ever sees the login
+      # prompt the boot leaves behind.
+      - name: Start continuous VM console capture
+        uses: ./.github/actions/capture-vm-console
+        with:
+          vm-name: ${{ env.TARGET_VM_NAME }}
+          logfile: ${{ runner.temp }}/console-${{ matrix.dhcp-scenario }}.log
+
       # Must precede provisioning through the BMC: it creates the
       # basic-auth Secret VirtualMachineBMC.spec.authSecretRef reads,
       # which create-bmc-machine also points Machine.spec.bmc at.
@@ -889,12 +901,6 @@ jobs:
           vm-name: ${{ env.TARGET_VM_NAME }}
           bmc-creds-secret-name: "${{ env.TARGET_VM_NAME }}-bmc-creds"
 
-      - name: Start continuous VM console capture
-        uses: ./.github/actions/capture-vm-console
-        with:
-          vm-name: ${{ env.TARGET_VM_NAME }}
-          logfile: ${{ runner.temp }}/console-${{ matrix.dhcp-scenario }}.log
-
       - name: Wait for the agent to register and the Machine to become Available
         uses: ./.github/actions/wait-agent-registered
         with:
@@ -913,18 +919,30 @@ jobs:
       # the kernel cmdline (internal/bootserver's grub.go) plus the live
       # image's journald->console forwarding (hack/live-image's
       # 50-kezio-console.conf) - a break in either would leave the
-      # banner in the journal but never on this log.
+      # banner in the journal but never on this log. The banner can log
+      # after wait-agent-registered above already returned (registration
+      # is a Machine status condition, not this console line), so poll
+      # for up to 120s instead of checking once.
       - name: Assert kezio-agent's boot banner reached the captured serial console
         shell: bash
         env:
           LOGFILE: ${{ runner.temp }}/console-${{ matrix.dhcp-scenario }}.log
         run: |
           set -euo pipefail
-          if ! grep -q "kezio-agent: booted" "${LOGFILE}"; then
-            echo "::error::kezio-agent's startup banner ('kezio-agent: booted') is not in ${LOGFILE} - Machine.spec.console is not reaching the live environment's console." >&2
-            cat "${LOGFILE}" >&2 || true
-            exit 1
-          fi
+          deadline=$((SECONDS + 120))
+          while ! grep -q "kezio-agent: booted" "${LOGFILE}" 2>/dev/null; do
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              echo "::error::kezio-agent's startup banner ('kezio-agent: booted') did not reach ${LOGFILE} within 120s - Machine.spec.console is not reaching the live environment's console." >&2
+              if [ ! -s "${LOGFILE}" ]; then
+                echo "${LOGFILE} is empty - the VMI was likely recreated after the capture loop's last attach and the loop has not reattached yet." >&2
+              else
+                echo "----- last 40 lines of ${LOGFILE} (kezio.token= redacted) -----" >&2
+                tail -n 40 "${LOGFILE}" | sed -E 's/kezio\.token=[^&[:space:]]*/kezio.token=<redacted>/g' >&2
+              fi
+              exit 1
+            fi
+            sleep 5
+          done
           echo "kezio-agent's startup banner is present in the captured console log."
 
       - name: Create the unenrolled-MAC VM
@@ -1117,6 +1135,11 @@ jobs:
           target-vm-name: ${{ env.TARGET_VM_NAME }}
           provisioning-bridge: ${{ env.PROVISIONING_BRIDGE }}
           bootd-label-selector: "app.kubernetes.io/component=bootd,kezio.kojuro.date/bootd-subnet=${{ env.SUBNET_NAME }}"
+          # Read from capture-vm-console's own logfile instead of a fresh
+          # `virtctl console` attach: that loop is still running here (it
+          # only stops when the job ends), and virtctl console is
+          # exclusive - a second live attach would knock it off the VM.
+          console-logfile: ${{ runner.temp }}/console-${{ matrix.dhcp-scenario }}.log
 
       # The ingest/publish Jobs have no other log channel in this lane:
       # dump-e2e-diagnostics's extra-deployment-logs/extra-job-label-

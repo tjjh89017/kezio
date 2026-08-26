@@ -55,11 +55,23 @@ runs:
         vm_name="$1"
         namespace="$2"
         logfile="$3"
+        last_status=""
         while true; do
-        echo "===== console-capture: (re)attaching to ${vm_name} at $(date -Is) =====" >>"${logfile}"
+        start_line="$(wc -l <"${logfile}" 2>/dev/null || echo 0)"
         script -qefc "virtctl console '${vm_name}' -n '${namespace}'" -a "${logfile}"
-        echo "===== console-capture: disconnected from ${vm_name} at $(date -Is); reattaching in 2s (a VMI recreation or a transient drop, not necessarily a failure) =====" >>"${logfile}"
-        sleep 2
+        end_line="$(wc -l <"${logfile}" 2>/dev/null || echo 0)"
+        # Classify what this attempt's own output says happened (e.g.
+        # "VMI is in failed status" while KubeVirt is still recreating the
+        # VMI after a BMC power cycle), so a run of identical failures
+        # collapses into one marker line instead of one per retry - a VMI
+        # stuck failed for a while would otherwise flood the log every
+        # 5s with the same message and bury the real boot output.
+        status="$(sed -n "$((start_line + 1)),${end_line}p" "${logfile}" | grep -Eo 'VMI is in [a-zA-Z]+ status' | tail -n1)"
+        if [ "${status}" != "${last_status}" ]; then
+        echo "===== console-capture: reattaching to ${vm_name} at $(date -Is)${status:+ (${status})} =====" >>"${logfile}"
+        last_status="${status}"
+        fi
+        sleep 5
         done
         CONSOLE_CAPTURE_LOOP
         chmod +x "${loop_script}"

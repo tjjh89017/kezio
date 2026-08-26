@@ -54,6 +54,15 @@ inputs:
     description: Namespace KubeVirtBMC's own controller-manager runs in.
     required: false
     default: "kubevirtbmc-system"
+  console-logfile:
+    description: >-
+      Path capture-vm-console is already appending this VM's serial
+      console to. Read instead of a fresh `virtctl console` attach:
+      virtctl console is exclusive, so a second live attach here would
+      knock the still-running capture loop off the VM. Left blank to
+      skip this section entirely if no capture loop is running.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -72,6 +81,7 @@ runs:
         EXTRA_DEPLOYMENT_LOGS: ${{ inputs.extra-deployment-logs }}
         EXTRA_JOB_LABEL_SELECTORS: ${{ inputs.extra-job-label-selectors }}
         EXTRA_RESOURCE_REFS: ${{ inputs.extra-resource-refs }}
+        CONSOLE_LOGFILE: ${{ inputs.console-logfile }}
       run: |
         set +e
         # Teed into a file too: a later "Upload E2E diagnostics artifacts"
@@ -166,8 +176,16 @@ runs:
         kubectl get vm,vmi -n "${NAMESPACE}" -o yaml
         echo "===== virt-launcher pod describe ====="
         kubectl describe pod -n "${NAMESPACE}" -l "kubevirt.io/vm=${TARGET_VM_NAME}"
-        echo "===== VM console (last 20s, live attach only - see the uploaded console.log artifact for the full history from VM start) ====="
-        timeout 20 virtctl console "${TARGET_VM_NAME}" -n "${NAMESPACE}" || true
+        echo "===== VM console (tail of the running capture-vm-console log, not a fresh attach) ====="
+        # virtctl console is exclusive: attaching here would disconnect
+        # capture-vm-console's own still-running loop, which is the log
+        # the "Assert kezio-agent's boot banner..." step depends on. Read
+        # what that loop already captured instead of attaching again.
+        if [ -n "${CONSOLE_LOGFILE}" ] && [ -f "${CONSOLE_LOGFILE}" ]; then
+          tail -n 40 "${CONSOLE_LOGFILE}"
+        else
+          echo "(no console-logfile given, or nothing captured yet)"
+        fi
         echo "===== extra kezio CRs ====="
         while IFS= read -r ref; do
           [ -z "${ref}" ] && continue
