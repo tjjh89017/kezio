@@ -350,6 +350,33 @@ var _ = Describe("PartitionContent Controller deletion-blocking finalizer", func
 		Expect(got.Finalizers).To(ContainElement(keziov1alpha3.PartitionContentFinalizer))
 	})
 
+	It("deletes its own publish Job outright rather than waiting on the Job's TTL", func() {
+		name := partitionContentTestName(207)
+		nn := types.NamespacedName{Name: name, Namespace: "default"}
+		pc := newTestPartitionContent(name)
+		Expect(k8sClient.Create(ctx, pc)).To(Succeed())
+
+		publish := PartitionContentPublishConfig{Image: "example.test/kezio-ingest:test"}
+		r, cancel := newIndexedReconciler(ctx, publish)
+		DeferCleanup(cancel)
+		reconcileAddsFinalizer(ctx, r, nn)
+
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+		var job batchv1.Job
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: publishJobName(name), Namespace: "default"}, &job)).To(Succeed())
+
+		Expect(k8sClient.Delete(ctx, pc)).To(Succeed())
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+		Expect(err).NotTo(HaveOccurred())
+
+		err = k8sClient.Get(ctx, nn, &keziov1alpha3.PartitionContent{})
+		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the content itself must be gone once nothing blocks it")
+
+		err = k8sClient.Get(ctx, types.NamespacedName{Name: publishJobName(name), Namespace: "default"}, &batchv1.Job{})
+		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the publish Job must be deleted immediately, not left for its TTLSecondsAfterFinished")
+	})
+
 	It("removes the finalizer and the content disappears promptly when nothing references it", func() {
 		hashHex := partitionContentTestHash(206)
 		name := "pc-" + hashHex

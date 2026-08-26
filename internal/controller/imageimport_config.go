@@ -17,10 +17,17 @@ limitations under the License.
 package controller
 
 import (
+	"time"
+
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/tjjh89017/kezio/internal/ingest"
 )
+
+// defaultIngestJobTTL is ImageIngestConfig.JobTTL's default - see
+// defaultPublishJobTTL's doc comment for the same reasoning, applied to
+// the ingest Job instead of the publish Job.
+const defaultIngestJobTTL = time.Hour
 
 // defaultIngestSourceFormat is ImageIngestConfig.SourceFormat's default.
 // ImageImportSpec carries no format field of its own, so a manager-wide
@@ -81,8 +88,10 @@ type ImageIngestConfig struct {
 	// IMAGE_INGEST_SCRATCH_ACCESS_MODES (comma-separated).
 	ScratchAccessModes []corev1.PersistentVolumeAccessMode
 	// StagingPVCName names the PVC holding imageservice's staged uploads
-	// (see internal/imageservice.Staging), mounted read-only into the
-	// ingest Job when spec.source.url uses the kezio-staged:// scheme.
+	// (see internal/imageservice.Staging), mounted read-write into the
+	// ingest Job when spec.source.url uses the kezio-staged:// scheme -
+	// read-write so a successful ingest can remove the upload it consumed
+	// (see buildIngestJob's staging volume mount).
 	// Empty holds such an import at Pending with a condition naming that
 	// staging is unconfigured - unlike Image, this only blocks imports
 	// that actually reference a staged upload; one with an http(s)://
@@ -120,6 +129,9 @@ type ImageIngestConfig struct {
 	// default) is the nbd-attach path, which needs the node's "nbd"
 	// kernel module loaded with max_part>0 (see docs/crd-reference.md).
 	Unprivileged bool
+	// JobTTL overrides defaultIngestJobTTL when positive. Read from
+	// IMAGE_INGEST_JOB_TTL (a time.ParseDuration string).
+	JobTTL time.Duration
 }
 
 // ready reports whether cfg carries enough configuration to dispatch an
@@ -172,4 +184,14 @@ func (cfg ImageIngestConfig) attachMode() string {
 		return ingest.AttachModeCopy
 	}
 	return ingest.AttachModeNBD
+}
+
+// jobTTLSeconds returns cfg.JobTTL in whole seconds, or
+// defaultIngestJobTTL when JobTTL is unset or non-positive.
+func (cfg ImageIngestConfig) jobTTLSeconds() int32 {
+	ttl := cfg.JobTTL
+	if ttl <= 0 {
+		ttl = defaultIngestJobTTL
+	}
+	return int32(ttl.Seconds()) //nolint:gosec // bounded by a manager-configured duration, never user input
 }

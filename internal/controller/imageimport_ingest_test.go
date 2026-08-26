@@ -225,6 +225,9 @@ var _ = Describe("ImageImport Controller", func() {
 		Expect(container.SecurityContext.Privileged).NotTo(BeNil())
 		Expect(*container.SecurityContext.Privileged).To(BeTrue(), "the default nbd-attach path needs a privileged pod to open /dev/nbd*")
 
+		Expect(job.Spec.TTLSecondsAfterFinished).NotTo(BeNil(), "a completed ingest Job's pod must not linger forever, blocking the scratch PVC it mounts")
+		Expect(*job.Spec.TTLSecondsAfterFinished).To(Equal(int32(defaultIngestJobTTL.Seconds())))
+
 		var pvc corev1.PersistentVolumeClaim
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ingestScratchPVCName(imp.Name), Namespace: "default"}, &pvc)).To(Succeed())
 		Expect(pvc.OwnerReferences).To(HaveLen(1))
@@ -290,6 +293,24 @@ var _ = Describe("ImageImport Controller", func() {
 		Expect(envByName["STAGING_ROOT"]).To(Equal("/staging"))
 		// work + staging + the default nbd-attach path's /dev hostPath.
 		Expect(job.Spec.Template.Spec.Volumes).To(HaveLen(3))
+
+		var stagingMount *corev1.VolumeMount
+		for i := range job.Spec.Template.Spec.Containers[0].VolumeMounts {
+			if job.Spec.Template.Spec.Containers[0].VolumeMounts[i].Name == ingestStagingVolumeName {
+				stagingMount = &job.Spec.Template.Spec.Containers[0].VolumeMounts[i]
+			}
+		}
+		Expect(stagingMount).NotTo(BeNil())
+		Expect(stagingMount.ReadOnly).To(BeFalse(), "a read-only mount makes RemoveUpload's cleanup of a successfully ingested staged source fail silently (EROFS)")
+
+		var stagingVolume *corev1.Volume
+		for i := range job.Spec.Template.Spec.Volumes {
+			if job.Spec.Template.Spec.Volumes[i].Name == ingestStagingVolumeName {
+				stagingVolume = &job.Spec.Template.Spec.Volumes[i]
+			}
+		}
+		Expect(stagingVolume).NotTo(BeNil())
+		Expect(stagingVolume.PersistentVolumeClaim.ReadOnly).To(BeFalse())
 	})
 
 	It("holds a kezio-staged:// source at Pending with StagingUnconfigured when no staging PVC is configured", func() {

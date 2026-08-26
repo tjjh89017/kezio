@@ -226,6 +226,8 @@ var _ = Describe("PartitionContent Controller", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: publishJobName(name), Namespace: "default"}, &job)).To(Succeed())
 		Expect(job.OwnerReferences).To(HaveLen(1))
 		Expect(job.OwnerReferences[0].Name).To(Equal(name))
+		Expect(job.Spec.TTLSecondsAfterFinished).NotTo(BeNil(), "a completed publish Job's pod must not linger forever, blocking the ingest scratch PVC it mounts")
+		Expect(*job.Spec.TTLSecondsAfterFinished).To(Equal(int32(defaultPublishJobTTL.Seconds())))
 
 		container := job.Spec.Template.Spec.Containers[0]
 		Expect(container.Image).To(Equal(publish.Image))

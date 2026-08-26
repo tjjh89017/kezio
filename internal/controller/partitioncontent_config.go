@@ -16,7 +16,21 @@ limitations under the License.
 
 package controller
 
-import corev1 "k8s.io/api/core/v1"
+import (
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+)
+
+// defaultPublishJobTTL is PartitionContentPublishConfig.JobTTL's default:
+// long enough that a completed publish Job's pod stays around for a
+// while for debugging, short enough that it does not indefinitely block
+// the ingest scratch PVC its pod still mounts read-only from going
+// Terminating (pvc-protection) once nothing else references it - see
+// PartitionContentReconciler.onDelete, which deletes the Job outright
+// rather than wait on this TTL when the PartitionContent itself is
+// deleted.
+const defaultPublishJobTTL = time.Hour
 
 // PartitionContentPublishConfig configures the PartitionContent
 // reconciler's publish half: the container image the publish Job runs.
@@ -50,6 +64,9 @@ type PartitionContentPublishConfig struct {
 	// multi-node case. Read from PARTITIONCONTENT_ACCESS_MODES
 	// (comma-separated).
 	AccessModes []corev1.PersistentVolumeAccessMode
+	// JobTTL overrides defaultPublishJobTTL when positive. Read from
+	// PARTITIONCONTENT_PUBLISH_JOB_TTL (a time.ParseDuration string).
+	JobTTL time.Duration
 }
 
 // defaultPartitionContentAccessModes is PartitionContentPublishConfig's
@@ -70,4 +87,14 @@ func (cfg PartitionContentPublishConfig) accessModes() []corev1.PersistentVolume
 // type doc comment).
 func (cfg PartitionContentPublishConfig) ready() bool {
 	return cfg.Image != ""
+}
+
+// jobTTLSeconds returns cfg.JobTTL in whole seconds, or
+// defaultPublishJobTTL when JobTTL is unset or non-positive.
+func (cfg PartitionContentPublishConfig) jobTTLSeconds() int32 {
+	ttl := cfg.JobTTL
+	if ttl <= 0 {
+		ttl = defaultPublishJobTTL
+	}
+	return int32(ttl.Seconds()) //nolint:gosec // bounded by a manager-configured duration, never user input
 }

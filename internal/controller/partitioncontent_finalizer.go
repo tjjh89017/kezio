@@ -25,6 +25,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -67,11 +68,39 @@ func (r *PartitionContentReconciler) onDelete(ctx context.Context, pc *keziov1al
 		return r.recordDeletionBlocked(ctx, pc, blockers)
 	}
 
+	if err := r.deletePublishJob(ctx, pc); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	controllerutil.RemoveFinalizer(pc, keziov1alpha3.PartitionContentFinalizer)
 	if err := r.Update(ctx, pc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("partitioncontent %q: removing finalizer: %w", pc.Name, err)
 	}
 	return ctrl.Result{}, nil
+}
+
+// deletePublishJob deletes pc's publish Job outright, if one exists,
+// rather than leave it for TTLSecondsAfterFinished (buildPublishJob) or
+// ordinary owner-reference garbage collection to eventually reclaim: a
+// completed publish Job's pod keeps mounting the ingest scratch PVC
+// (read-only) it read content from until the pod itself is gone, which
+// otherwise leaves that PVC's own deletion (pvc-protection) waiting on
+// the same TTL. Background propagation deletes the Job object at once
+// and lets the pods it owns be reclaimed right behind it, rather than
+// waiting on Foreground's ordered teardown.
+func (r *PartitionContentReconciler) deletePublishJob(ctx context.Context, pc *keziov1alpha3.PartitionContent) error {
+	job, err := r.publishJobFor(ctx, pc)
+	if err != nil {
+		return err
+	}
+	if job == nil {
+		return nil
+	}
+	background := metav1.DeletePropagationBackground
+	if err := r.Delete(ctx, job, &client.DeleteOptions{PropagationPolicy: &background}); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("partitioncontent %q: deleting publish job %q: %w", pc.Name, job.Name, err)
+	}
+	return nil
 }
 
 // blockingReferences returns "kind/name" for every Image and active

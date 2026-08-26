@@ -533,6 +533,14 @@ func imageIngestConfigFromEnv() controller.ImageIngestConfig {
 		}
 	}
 	cfg.Unprivileged = os.Getenv("IMAGE_INGEST_UNPRIVILEGED") == "true"
+	if v := os.Getenv("IMAGE_INGEST_JOB_TTL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			setupLog.Error(err, "invalid IMAGE_INGEST_JOB_TTL, using default", "value", v)
+		} else {
+			cfg.JobTTL = d
+		}
+	}
 	return cfg
 }
 
@@ -552,6 +560,14 @@ func partitionContentPublishConfigFromEnv() controller.PartitionContentPublishCo
 	if modes := os.Getenv("PARTITIONCONTENT_ACCESS_MODES"); modes != "" {
 		for _, m := range strings.Split(modes, ",") {
 			cfg.AccessModes = append(cfg.AccessModes, corev1.PersistentVolumeAccessMode(strings.TrimSpace(m)))
+		}
+	}
+	if v := os.Getenv("PARTITIONCONTENT_PUBLISH_JOB_TTL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			setupLog.Error(err, "invalid PARTITIONCONTENT_PUBLISH_JOB_TTL, using default", "value", v)
+		} else {
+			cfg.JobTTL = d
 		}
 	}
 	return cfg

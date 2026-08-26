@@ -99,6 +99,7 @@ func (r *PartitionContentReconciler) createPublishJob(ctx context.Context, pc *k
 // Source is always populated by the time a publish Job is built.
 func (r *PartitionContentReconciler) buildPublishJob(pc *keziov1alpha3.PartitionContent, pvcName string) *batchv1.Job {
 	backoffLimit := int32(publishJobBackoffLimit)
+	ttlSecondsAfterFinished := r.Publish.jobTTLSeconds()
 	labels := map[string]string{
 		partitionContentAppNameLabel:      partitionContentAppNameValue,
 		partitionContentAppComponentLabel: partitionContentJobComponentValue,
@@ -120,7 +121,8 @@ func (r *PartitionContentReconciler) buildPublishJob(pc *keziov1alpha3.Partition
 			Labels:    labels,
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit: &backoffLimit,
+			BackoffLimit:            &backoffLimit,
+			TTLSecondsAfterFinished: &ttlSecondsAfterFinished,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: corev1.PodSpec{

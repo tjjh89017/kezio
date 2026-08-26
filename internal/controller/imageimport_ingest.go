@@ -245,11 +245,13 @@ func (r *ImageImportReconciler) createIngestJob(ctx context.Context, imp *keziov
 //     downloaded source, the raw conversion) sitting on that PVC as well
 //     as the content directories that matter.
 //   - STAGING_ROOT=/staging is set, and the staging PVC
-//     (ImageIngestConfig.StagingPVCName) mounted read-only there, only
+//     (ImageIngestConfig.StagingPVCName) mounted read-write there, only
 //     when spec.source.url uses the kezio-staged:// scheme
 //     (ingest.StagedURLScheme) - reconcileIngesting holds the import at
 //     Pending instead of building this Job at all when that scheme is
-//     used but no staging PVC is configured.
+//     used but no staging PVC is configured. Read-write, not read-only:
+//     Run removes the consumed upload from staging on success (see the
+//     volume mount's own doc comment below).
 //   - IMAGE_INGEST_ATTACH carries ImageIngestConfig.attachMode():
 //     ingest.AttachModeNBD by default, meaning the container runs
 //     privileged (see below) and attaches the source with qemu-nbd
@@ -263,6 +265,7 @@ func (r *ImageImportReconciler) createIngestJob(ctx context.Context, imp *keziov
 //     from (see readIngestResult).
 func (r *ImageImportReconciler) buildIngestJob(imp *keziov1alpha3.ImageImport, scratchPVCName string) *batchv1.Job {
 	backoffLimit := int32(0)
+	ttlSecondsAfterFinished := r.Ingest.jobTTLSeconds()
 	labels := map[string]string{
 		imageAppNameLabel:      imageAppNameValue,
 		imageAppComponentLabel: imageIngestJobComponentValue,
@@ -287,13 +290,22 @@ func (r *ImageImportReconciler) buildIngestJob(imp *keziov1alpha3.ImageImport, s
 
 	if strings.HasPrefix(imp.Spec.Source.URL, ingest.StagedURLScheme+"://") {
 		env = append(env, corev1.EnvVar{Name: "STAGING_ROOT", Value: ingestStagingMountPath})
+		// Mounted read-write, not read-only: on a successful ingest, Run
+		// removes the consumed upload from staging itself
+		// (CleanupStagedSource, internal/ingest/orchestrator.go) once
+		// every partition has been read and its content safely stored -
+		// the only write this Job ever makes to the staging volume, and
+		// only after it no longer needs to read the upload. A read-only
+		// mount made that os.RemoveAll fail (EROFS) on every run, silently
+		// (the caller treats staging cleanup as best-effort), leaving
+		// every staged upload on the volume forever.
 		volumes = append(volumes, corev1.Volume{
 			Name: ingestStagingVolumeName,
 			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: r.Ingest.StagingPVCName, ReadOnly: true},
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: r.Ingest.StagingPVCName},
 			},
 		})
-		mounts = append(mounts, corev1.VolumeMount{Name: ingestStagingVolumeName, MountPath: ingestStagingMountPath, ReadOnly: true})
+		mounts = append(mounts, corev1.VolumeMount{Name: ingestStagingVolumeName, MountPath: ingestStagingMountPath})
 	}
 
 	podSecurityContext, containerSecurityContext := ingestPodSecurityContext(r.Ingest.Unprivileged)
@@ -317,7 +329,8 @@ func (r *ImageImportReconciler) buildIngestJob(imp *keziov1alpha3.ImageImport, s
 			Labels:    labels,
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit: &backoffLimit,
+			BackoffLimit:            &backoffLimit,
+			TTLSecondsAfterFinished: &ttlSecondsAfterFinished,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: corev1.PodSpec{
