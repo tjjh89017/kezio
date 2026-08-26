@@ -72,7 +72,8 @@ func (execAttacher) Attach(ctx context.Context, image, format string) (string, f
 	}
 
 	detach := func() {
-		out, err := exec.Command("qemu-nbd", "--disconnect", dev).CombinedOutput() //nolint:gosec // dev is our own chosen path
+		//nolint:gosec // dev is our own chosen path
+		out, err := exec.Command("qemu-nbd", "--disconnect", dev).CombinedOutput()
 		if err != nil {
 			log.Printf("kezio-ingest: qemu-nbd --disconnect %s: %v: %s", dev, err, out)
 		}
@@ -82,7 +83,9 @@ func (execAttacher) Attach(ctx context.Context, image, format string) (string, f
 	// registering the device, but nudge it explicitly: cheap, idempotent,
 	// and covers a kernel that raced the scan against qemu-nbd's own
 	// connect completing.
-	if out, err := exec.CommandContext(ctx, "blockdev", "--rereadpt", dev).CombinedOutput(); err != nil { //nolint:gosec // dev is our own chosen path
+	//nolint:gosec // dev is our own chosen path
+	rereadpt := exec.CommandContext(ctx, "blockdev", "--rereadpt", dev)
+	if out, err := rereadpt.CombinedOutput(); err != nil {
 		log.Printf("kezio-ingest: blockdev --rereadpt %s: %v: %s", dev, err, out)
 	}
 
