@@ -21,8 +21,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -60,10 +63,62 @@ func (h apiWarningHandler) HandleWarningHeaderWithContext(_ context.Context, cod
 // Machines) only, never core workload objects.
 var Scheme = runtime.NewScheme()
 
+// restMapper is a static meta.RESTMapper covering every Kind Scheme
+// knows about, derived from Scheme itself instead of from cluster
+// discovery.
+//
+// controller-runtime's client.New defaults to a discovery-backed
+// RESTMapper that, on first use, asks the API server for every version
+// the kezio.kojuro.date group has ever advertised - including one this
+// CLI no longer uses - and fails the whole lookup if any of them errors
+// out (see sigs.k8s.io/controller-runtime/pkg/client/apiutil.mapper.
+// addKnownGroupAndReload's aggregated-discovery branch). A CRD that
+// still lists a deprecated, unserved version turns that into an
+// "image upload --wait" failure over an API version this command was
+// never asking for. Since every Kind this client can be asked to
+// resolve is already compiled into Scheme, there is nothing to
+// discover: read the mapping off Scheme instead, so a Kind added to
+// api/v1alpha3 is picked up without also having to update this file.
+//
+// Built in init(), after AddToScheme, rather than in this var's own
+// initializer: package-level var initializers all run before any
+// init() func, so building it from Scheme at var-init time would read
+// Scheme before AddToScheme has registered anything into it.
+var restMapper meta.RESTMapper
+
 func init() {
 	if err := keziov1alpha3.AddToScheme(Scheme); err != nil {
 		panic(fmt.Sprintf("register kezio API types: %v", err))
 	}
+	restMapper = newRESTMapperFromScheme(Scheme)
+}
+
+// newRESTMapperFromScheme builds a RESTMapper entry for every "real"
+// Kind scheme registers under keziov1alpha3.GroupVersion: every
+// registered Kind other than a List (its base Kind already covers
+// lookups - see client_rest_resources.go stripping the "List" suffix
+// before mapping) and the handful of meta.k8s.io machinery types
+// (WatchEvent, *Options) that metav1.AddToGroupVersion registers into
+// every GroupVersion a scheme.Builder is used for and that are never
+// looked up through a RESTMapper.
+//
+// Every kezio.kojuro.date CRD is namespace-scoped today (see `scope:
+// Namespaced` in every config/crd/bases/*.yaml); nothing on the Go type
+// or in Scheme records that, so it is asserted here rather than
+// guessed. A cluster-scoped kezio Kind would need this function to
+// consult something more than Scheme.
+func newRESTMapperFromScheme(scheme *runtime.Scheme) meta.RESTMapper {
+	m := meta.NewDefaultRESTMapper([]schema.GroupVersion{keziov1alpha3.GroupVersion})
+	for gvk := range scheme.AllKnownTypes() {
+		if gvk.GroupVersion() != keziov1alpha3.GroupVersion {
+			continue
+		}
+		if gvk.Kind == "WatchEvent" || strings.HasSuffix(gvk.Kind, "List") || strings.HasSuffix(gvk.Kind, "Options") {
+			continue
+		}
+		m.Add(gvk, meta.RESTScopeNamespace)
+	}
+	return m
 }
 
 // LoadRESTConfig resolves a *rest.Config and a default namespace the same
@@ -104,7 +159,7 @@ func NewClient(kubeconfigPath string) (client.Client, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	c, err := client.New(restConfig, client.Options{Scheme: Scheme})
+	c, err := client.New(restConfig, client.Options{Scheme: Scheme, Mapper: restMapper})
 	if err != nil {
 		return nil, "", fmt.Errorf("build Kubernetes client: %w", err)
 	}

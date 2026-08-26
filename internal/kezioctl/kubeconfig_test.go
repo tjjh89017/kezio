@@ -22,7 +22,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/api/meta"
+
+	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
 
 // writeKubeconfig writes a minimal valid kubeconfig file naming a single
@@ -96,6 +101,52 @@ func TestLoadRESTConfig_InstallsAWarningHandler(t *testing.T) {
 	// logger-backed handler, which drops the warning and dumps a stack.
 	if cfg.WarningHandlerWithContext == nil {
 		t.Fatal("LoadRESTConfig() left WarningHandlerWithContext nil")
+	}
+}
+
+// TestRESTMapperResolvesEveryKnownKindWithoutDiscovery guards the fix for
+// kezioctl depending on cluster API discovery at all: restMapper must
+// resolve every real Kind Scheme registers, with no server to talk to
+// (there is none in this test) and regardless of what API versions -
+// v1alpha2, stale or otherwise - a real cluster happens to still
+// advertise for the kezio.kojuro.date group. It reads the Kind list off
+// Scheme itself (the same source restMapper is built from, and the same
+// filter newRESTMapperFromScheme applies) so a Kind added to
+// api/v1alpha3 is covered automatically, with no test to update.
+func TestRESTMapperResolvesEveryKnownKindWithoutDiscovery(t *testing.T) {
+	tested := 0
+	for gvk := range Scheme.AllKnownTypes() {
+		if gvk.GroupVersion() != keziov1alpha3.GroupVersion {
+			continue
+		}
+		if gvk.Kind == "WatchEvent" || strings.HasSuffix(gvk.Kind, "List") || strings.HasSuffix(gvk.Kind, "Options") {
+			continue
+		}
+		tested++
+		t.Run(gvk.Kind, func(t *testing.T) {
+			mapping, err := restMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+			if err != nil {
+				t.Fatalf("RESTMapping(%s) error = %v", gvk.Kind, err)
+			}
+			if mapping.Scope.Name() != meta.RESTScopeNameNamespace {
+				t.Errorf("RESTMapping(%s).Scope = %v, want namespace-scoped", gvk.Kind, mapping.Scope.Name())
+			}
+		})
+	}
+	if tested == 0 {
+		t.Fatal("found no Kind under keziov1alpha3.GroupVersion in Scheme - the filter is too strict")
+	}
+}
+
+// TestRESTMapperIgnoresUnrelatedGroupVersions confirms the mapper never
+// contacts a server: asking for a Kind or version it does not know about
+// returns a plain NoMatch error rather than reaching for discovery (and
+// so can never surface an unrelated group's discovery failure).
+func TestRESTMapperIgnoresUnrelatedGroupVersions(t *testing.T) {
+	_, err := restMapper.RESTMapping(
+		keziov1alpha3.GroupVersion.WithKind("Image").GroupKind(), "v1alpha2")
+	if !meta.IsNoMatchError(err) {
+		t.Fatalf("RESTMapping(Image, v1alpha2) error = %v, want a NoMatchError", err)
 	}
 }
 
