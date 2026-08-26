@@ -67,6 +67,7 @@ side with kezioctl.`,
 	root.AddCommand(newMachineCmd(flags))
 	root.AddCommand(newDeployCmd(flags))
 	root.AddCommand(newStatusCmd(flags))
+	root.AddCommand(newVersionCmd())
 	return root
 }
 
@@ -82,12 +83,15 @@ func (f *globalFlags) resolveNamespace(kubeconfigNamespace string) string {
 
 // Execute runs kezioctl's root command against os.Args, writing errors to
 // os.Stderr. cmd/kezioctl's main calls this and exits non-zero on
-// failure.
+// failure. buildVersion is cmd/kezioctl's own "main.version" build-time
+// variable; Execute forwards it into this package's `version` command.
 //
 // The command tree runs under a context that is canceled on SIGINT/SIGTERM,
 // so a Ctrl-C during a long-running command (e.g. `image delete --wait`)
 // cancels gracefully instead of killing the process outright.
-func Execute() {
+func Execute(buildVersion string) {
+	version = buildVersion
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

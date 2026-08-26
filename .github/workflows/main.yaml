@@ -44,6 +44,19 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
       - run: make test
 
+      # Cheap cross-compile check for every platform release.yaml's own
+      # kezioctl matrix builds, so a GOOS/GOARCH-specific break is caught
+      # here on every push/PR instead of first surfacing on a tag. No
+      # artifact upload - this only proves `go build` succeeds.
+      - name: Cross-compile kezioctl for every release platform
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          for platform in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            GOOS="${platform%/*}" GOARCH="${platform#*/}" \
+              go build -o /dev/null ./cmd/kezioctl
+          done
+
   # Image <-> Dockerfile mapping grows one row per component as later
   # stages add it.
   #

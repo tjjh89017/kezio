@@ -25,6 +25,10 @@ package main
 
 import "github.com/tjjh89017/kezio/internal/kezioctl"
 
+// version is stamped by release.yaml's build via -ldflags
+// "-X main.version=<tag>"; a plain `go build`/`go run` leaves it at "dev".
+var version = "dev"
+
 func main() {
-	kezioctl.Execute()
+	kezioctl.Execute(version)
 }

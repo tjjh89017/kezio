@@ -107,6 +107,13 @@ make lint       # run golangci-lint
 
 See `make help` for the full list of targets.
 
+`kezioctl`, the command-line client, can also be built on its own with
+`make build-kezioctl` into `bin/kezioctl`. Each [GitHub
+Release](https://github.com/tjjh89017/kezio/releases) also ships prebuilt
+`kezioctl` binaries for Linux, macOS, and Windows (amd64/arm64, Windows
+amd64 only) as `kezioctl-<os>-<arch>` archives; verify a download against
+the release's `kezioctl-SHA256SUMS` file before running it.
+
 ## Documentation
 
 - [`docs/crd-reference.md`](docs/crd-reference.md): every custom
