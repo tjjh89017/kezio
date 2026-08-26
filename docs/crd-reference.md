@@ -315,6 +315,7 @@ A `Machine` is one bare-metal machine.
 | `spec.subnetRef` | The `Subnet` this machine network boots through. Required. A Machine with no Subnet cannot network boot. |
 | `spec.bootMACAddress` | The MAC address of the NIC that network boots. Inspection usually discovers it. It is mandatory only when the inspect-disable annotation skips inspection. |
 | `spec.claimRef` | The `MachineClaim` bound to this machine. Written only by the claim controller. |
+| `spec.console` | Kernel `console=` values for the live environment, in order, for example `["ttyS0,115200n8", "tty0"]`. The last value is the primary console. A hardware attribute, like BMC - not deploy intent. Empty falls back to the boot server's default. Optional, up to 4 entries. |
 
 A `Machine` carries no deploy intent: no image, no disk hint, no
 hooks. That intent lives on a `MachineClaim` bound to it - see

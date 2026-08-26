@@ -173,6 +173,19 @@ type MachineSpec struct {
 	// controller is its only writer.
 	// +optional
 	ClaimRef *MachineClaimReference `json:"claimRef,omitempty"`
+	// Console lists kernel console= values appended, in order, to the
+	// live environment's kernel command line - for example
+	// ["ttyS0,115200n8", "tty0"]. The last entry is the kernel's primary
+	// console. This is a hardware attribute of the machine, like BMC, not
+	// part of its identity or deploy intent: it says where this
+	// particular machine's serial/BMC console is wired, so kezio-agent's
+	// boot log and journal reach it without a screenshot. Empty falls
+	// back to the boot server's BOOT_DEFAULT_CONSOLE.
+	// +kubebuilder:validation:MaxItems=4
+	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z0-9]+(,[0-9]+[a-zA-Z0-9]*)?$`
+	// +listType=atomic
+	// +optional
+	Console []string `json:"console,omitempty"`
 }
 
 // MachineClaimReference binds a Machine to the MachineClaim that holds

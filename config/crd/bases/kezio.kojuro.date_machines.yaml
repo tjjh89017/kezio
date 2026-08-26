@@ -102,6 +102,22 @@ spec:
                 - namespace
                 - uid
                 type: object
+              console:
+                description: |-
+                  Console lists kernel console= values appended, in order, to the
+                  live environment's kernel command line - for example
+                  ["ttyS0,115200n8", "tty0"]. The last entry is the kernel's primary
+                  console. This is a hardware attribute of the machine, like BMC, not
+                  part of its identity or deploy intent: it says where this
+                  particular machine's serial/BMC console is wired, so kezio-agent's
+                  boot log and journal reach it without a screenshot. Empty falls
+                  back to the boot server's BOOT_DEFAULT_CONSOLE.
+                items:
+                  pattern: ^[a-zA-Z0-9]+(,[0-9]+[a-zA-Z0-9]*)?$
+                  type: string
+                maxItems: 4
+                type: array
+                x-kubernetes-list-type: atomic
               subnetRef:
                 description: |-
                   SubnetRef names the Subnet this machine network boots through -
