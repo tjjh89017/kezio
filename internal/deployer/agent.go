@@ -28,6 +28,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
@@ -247,10 +248,43 @@ func (d *AgentDeployer) issueBootToken(ctx context.Context, machine *keziov1alph
 		return fmt.Errorf("agent deployer: minting boot token: %w", err)
 	}
 	machine.Status.NetBoot = &status
-	if err := d.Client.Status().Update(ctx, machine); err != nil {
+	if err := d.updateMachineStatusRetryOnConflict(ctx, machine); err != nil {
 		return fmt.Errorf("agent deployer: persisting boot token hash: %w", err)
 	}
 	return nil
+}
+
+// updateMachineStatusRetryOnConflict persists machine's in-memory status
+// to the API server, retrying past an apiserver conflict (observed in
+// production: internal/agentserver concurrently writing
+// status.agentSession to the same Machine) by re-Getting the current
+// object and reapplying the same desired status onto it before retrying
+// the update - the fields being persisted are not themselves wrong on a
+// conflict, only the resourceVersion they were computed against is
+// stale. Tokens.Issue already happened by the time this is called and is
+// safe to leave un-repeated across retries: it always replaces whatever
+// entry the boot's MAC already held, so retrying only the write here
+// never leaves a stale token outstanding.
+//
+// On return, machine reflects whatever object version was actually
+// persisted (or the latest Get, on a failing final attempt), so a caller
+// that keeps mutating machine afterward - armPXE's annotation patch, for
+// example - computes its diff against a resourceVersion the API server
+// still recognizes.
+func (d *AgentDeployer) updateMachineStatusRetryOnConflict(ctx context.Context, machine *keziov1alpha3.Machine) error {
+	desired := machine.Status.DeepCopy()
+	key := client.ObjectKeyFromObject(machine)
+	first := true
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		if !first {
+			if err := d.Client.Get(ctx, key, machine); err != nil {
+				return err
+			}
+			machine.Status = *desired.DeepCopy()
+		}
+		first = false
+		return d.Client.Status().Update(ctx, machine)
+	})
 }
 
 // pxeArmedAt reads agentDeployerPXEArmedAnnotation off machine. The second
@@ -388,27 +422,23 @@ func (d *AgentDeployer) Inspect(ctx context.Context, machine *keziov1alpha3.Mach
 
 // armPXEAndPowerOn is Inspect's first-pass branch: see Inspect's doc
 // comment.
+//
+// Persistence (the boot token and the PXE-armed marker) is committed
+// before either BMC call: a BMC action cannot be retried safely (a
+// second PowerCycle is a second, physically observable reboot), while a
+// failed status/annotation write is - retried here on a conflict
+// (updateMachineStatusRetryOnConflict), or simply by this same function
+// running again on the next reconcile, since nothing irreversible
+// happened yet. If SetOneTimePXEBoot or the power call itself then
+// fails, the marker is cleared again (disarmPXE) rather than left
+// "armed" for a boot that never actually got a power command: leaving it
+// set would make pollAgentRegistration wait out
+// agentDeployerInspectDeadline believing a boot is already under way,
+// instead of retrying immediately on the next reconcile.
 func (d *AgentDeployer) armPXEAndPowerOn(ctx context.Context, machine *keziov1alpha3.Machine) (Result, error) {
 	bmcClient, err := d.connectBMC(ctx, machine)
 	if err != nil {
 		return classifyBMCError(err), nil
-	}
-
-	if err := bmcClient.SetOneTimePXEBoot(ctx); err != nil {
-		return classifyBMCError(fmt.Errorf("agent deployer: setting one-time PXE boot: %w", err)), nil
-	}
-
-	state, err := bmcClient.GetPowerState(ctx)
-	if err != nil {
-		return classifyBMCError(fmt.Errorf("agent deployer: reading BMC power state: %w", err)), nil
-	}
-	if state == bmc.PowerStateOn {
-		err = bmcClient.PowerCycle(ctx)
-	} else {
-		err = bmcClient.PowerOn(ctx)
-	}
-	if err != nil {
-		return classifyBMCError(fmt.Errorf("agent deployer: powering on machine for net boot: %w", err)), nil
 	}
 
 	if err := d.issueBootToken(ctx, machine); err != nil {
@@ -417,7 +447,43 @@ func (d *AgentDeployer) armPXEAndPowerOn(ctx context.Context, machine *keziov1al
 	if err := d.armPXE(ctx, machine); err != nil {
 		return Result{}, err
 	}
+
+	if result, ok := d.powerOnForNetBoot(ctx, bmcClient); !ok {
+		if err := d.disarmPXE(ctx, machine); err != nil {
+			return Result{}, err
+		}
+		return result, nil
+	}
 	return Result{Outcome: Continuing}, nil
+}
+
+// powerOnForNetBoot issues the BMC actions that actually land a machine
+// in the live environment for a one-time PXE boot: SetOneTimePXEBoot,
+// then PowerCycle (already on) or PowerOn (off) - PowerCycle is used
+// when already on so a machine stuck in an old OS is forced to actually
+// reboot into the PXE override. ok is false when any call failed; result
+// is then the Result the caller should return, and the caller must treat
+// the boot as never armed (undo whatever marker it persisted before
+// calling this), since a persisted "armed" marker must never outlive
+// whether power was actually requested.
+func (d *AgentDeployer) powerOnForNetBoot(ctx context.Context, bmcClient bmc.BMC) (result Result, ok bool) {
+	if err := bmcClient.SetOneTimePXEBoot(ctx); err != nil {
+		return classifyBMCError(fmt.Errorf("agent deployer: setting one-time PXE boot: %w", err)), false
+	}
+
+	state, err := bmcClient.GetPowerState(ctx)
+	if err != nil {
+		return classifyBMCError(fmt.Errorf("agent deployer: reading BMC power state: %w", err)), false
+	}
+	if state == bmc.PowerStateOn {
+		err = bmcClient.PowerCycle(ctx)
+	} else {
+		err = bmcClient.PowerOn(ctx)
+	}
+	if err != nil {
+		return classifyBMCError(fmt.Errorf("agent deployer: powering on machine for net boot: %w", err)), false
+	}
+	return Result{}, true
 }
 
 // pollAgentRegistration is Inspect's later-pass branch: see Inspect's doc
@@ -578,27 +644,14 @@ func (d *AgentDeployer) pollAgentBoot(ctx context.Context, machine *keziov1alpha
 // armPXEAndPowerOn's reasoning: a machine stuck in an old OS (or the OS
 // this same deploy just wrote on a prior attempt) must actually reboot
 // into the PXE override, not merely be told it is already running.
+//
+// Persistence and BMC-failure handling mirror armPXEAndPowerOn's own doc
+// comment exactly, substituting the provision-boot marker
+// (armProvisionBoot/disarmProvisionBoot) for the PXE-armed annotation.
 func (d *AgentDeployer) armProvisionBootAndPowerOn(ctx context.Context, machine *keziov1alpha3.Machine) (Result, error) {
 	bmcClient, err := d.connectBMC(ctx, machine)
 	if err != nil {
 		return classifyBMCError(err), nil
-	}
-
-	if err := bmcClient.SetOneTimePXEBoot(ctx); err != nil {
-		return classifyBMCError(fmt.Errorf("agent deployer: setting one-time PXE boot: %w", err)), nil
-	}
-
-	state, err := bmcClient.GetPowerState(ctx)
-	if err != nil {
-		return classifyBMCError(fmt.Errorf("agent deployer: reading BMC power state: %w", err)), nil
-	}
-	if state == bmc.PowerStateOn {
-		err = bmcClient.PowerCycle(ctx)
-	} else {
-		err = bmcClient.PowerOn(ctx)
-	}
-	if err != nil {
-		return classifyBMCError(fmt.Errorf("agent deployer: powering on machine for net boot: %w", err)), nil
 	}
 
 	if err := d.issueBootToken(ctx, machine); err != nil {
@@ -606,6 +659,13 @@ func (d *AgentDeployer) armProvisionBootAndPowerOn(ctx context.Context, machine 
 	}
 	if err := d.armProvisionBoot(ctx, machine); err != nil {
 		return Result{}, err
+	}
+
+	if result, ok := d.powerOnForNetBoot(ctx, bmcClient); !ok {
+		if err := d.disarmProvisionBoot(ctx, machine); err != nil {
+			return Result{}, err
+		}
+		return result, nil
 	}
 	return Result{Outcome: Continuing}, nil
 }

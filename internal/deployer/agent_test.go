@@ -25,12 +25,15 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apimachineryruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 	"github.com/tjjh89017/kezio/internal/bmc"
@@ -216,6 +219,130 @@ func TestAgentDeployerInspectSkipsMintingWithNoTokenStore(t *testing.T) {
 	}
 	if machine.Status.NetBoot != nil {
 		t.Fatalf("machine.Status.NetBoot = %+v, want nil with no TokenStore wired", machine.Status.NetBoot)
+	}
+}
+
+// newAgentTestClientMachineStatusConflictOnce builds a fake client exactly
+// like newAgentTestClient, except the first Machine status subresource
+// Update call fails with an apiserver conflict - reproducing the observed
+// production race (internal/agentserver writing status.agentSession to
+// the same Machine at the exact moment issueBootToken persists the boot
+// token). Every call after the first goes through unintercepted.
+func newAgentTestClientMachineStatusConflictOnce(t *testing.T, objs ...client.Object) client.Client {
+	t.Helper()
+	scheme := apimachineryruntime.NewScheme()
+	if err := keziov1alpha3.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme(corev1) error = %v", err)
+	}
+
+	conflicted := false
+	funcs := interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if !conflicted && subResourceName == "status" {
+				if _, ok := obj.(*keziov1alpha3.Machine); ok {
+					conflicted = true
+					return apierrors.NewConflict(schema.GroupResource{Group: keziov1alpha3.GroupVersion.Group, Resource: "machines"}, obj.GetName(), errors.New("the object has been modified"))
+				}
+			}
+			return c.SubResource(subResourceName).Update(ctx, obj, opts...)
+		},
+	}
+
+	return fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&keziov1alpha3.DeployRun{}, &keziov1alpha3.Machine{}).
+		WithObjects(objs...).
+		WithInterceptorFuncs(funcs).
+		Build()
+}
+
+// TestAgentDeployerInspectFirstPassSurvivesStatusConflictAndPowersOnOnce
+// pins the fix for the confirmed lab bug: an apiserver conflict on the
+// boot token's status write (issueBootToken's Status().Update, racing
+// internal/agentserver's own status.agentSession write) must not leave
+// armPXEAndPowerOn returning an error after it already power-cycled the
+// machine - persistence is retried to success, recorded, and the BMC is
+// powered on exactly once.
+func TestAgentDeployerInspectFirstPassSurvivesStatusConflictAndPowersOnOnce(t *testing.T) {
+	machine := agentTestMachine(t)
+	c := newAgentTestClientMachineStatusConflictOnce(t, machine, agentTestBMCSecret())
+	tokens := bootserver.NewTokenStore()
+	d := &AgentDeployer{Client: c, Tokens: tokens}
+
+	result, err := d.Inspect(context.Background(), machine, false)
+	if err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+	if result.Outcome != Continuing {
+		t.Fatalf("Inspect() outcome = %v, want Continuing", result.Outcome)
+	}
+
+	f := fakeBMCForAddress(machine.Spec.BMC.Address)
+	setPXE, powerOn, _, _, powerCycle, _ := f.calls()
+	if setPXE != 1 {
+		t.Errorf("SetOneTimePXEBoot calls = %d, want 1", setPXE)
+	}
+	if powerOn != 1 || powerCycle != 0 {
+		t.Errorf("PowerOn/PowerCycle calls = %d/%d, want 1/0 (must power on exactly once despite the retried conflict)", powerOn, powerCycle)
+	}
+
+	if _, armed := pxeArmedAt(machine); !armed {
+		t.Error("machine has no PXE-armed annotation after a retried status conflict")
+	}
+	if machine.Status.NetBoot == nil || machine.Status.NetBoot.TokenHash == "" {
+		t.Fatalf("machine.Status.NetBoot was not persisted after the retried conflict: %+v", machine.Status.NetBoot)
+	}
+
+	var stored keziov1alpha3.Machine
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(machine), &stored); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if stored.Status.NetBoot == nil || stored.Status.NetBoot.TokenHash != machine.Status.NetBoot.TokenHash {
+		t.Fatalf("boot token hash was not actually persisted to the API server: %+v", stored.Status.NetBoot)
+	}
+}
+
+// TestAgentDeployerProvisionFirstPassSurvivesStatusConflictAndPowersOnOnce
+// is TestAgentDeployerInspectFirstPassSurvivesStatusConflictAndPowersOnOnce
+// for Provision's own boot-into-agent step (armProvisionBootAndPowerOn),
+// which mints and persists its boot token/marker through the identical
+// issueBootToken path.
+func TestAgentDeployerProvisionFirstPassSurvivesStatusConflictAndPowersOnOnce(t *testing.T) {
+	machine := agentTestMachine(t)
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	c := newAgentTestClientMachineStatusConflictOnce(t, machine, agentTestBMCSecret())
+	tokens := bootserver.NewTokenStore()
+	d := &AgentDeployer{
+		Client:      c,
+		PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace},
+		Tokens:      tokens,
+	}
+
+	result, err := d.Provision(context.Background(), machine, run, false)
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	if result.Outcome != Continuing {
+		t.Fatalf("Provision() outcome = %v, want Continuing", result.Outcome)
+	}
+
+	f := fakeBMCForAddress(machine.Spec.BMC.Address)
+	setPXE, powerOn, _, _, powerCycle, _ := f.calls()
+	if setPXE != 1 {
+		t.Errorf("SetOneTimePXEBoot calls = %d, want 1", setPXE)
+	}
+	if powerOn != 1 || powerCycle != 0 {
+		t.Errorf("PowerOn/PowerCycle calls = %d/%d, want 1/0 (must power on exactly once despite the retried conflict)", powerOn, powerCycle)
+	}
+
+	if _, armed := provisionBootMarker(machine); !armed {
+		t.Error("machine has no provision-boot marker after a retried status conflict")
+	}
+	if machine.Status.NetBoot == nil || machine.Status.NetBoot.TokenHash == "" {
+		t.Fatalf("machine.Status.NetBoot was not persisted after the retried conflict: %+v", machine.Status.NetBoot)
 	}
 }
 
