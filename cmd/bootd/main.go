@@ -108,6 +108,23 @@ func main() {
 		os.Exit(1)
 	}
 
+	if cfg.SubnetName != "" {
+		subnetCache, err := bootd.NewSubnetDHCPCache(
+			ctx, mgr.GetCache(), mgr.GetClient(), cfg.SubnetNamespace, cfg.SubnetName, dnsmasq)
+		if err != nil {
+			setupLog.Error(err, "unable to set up Subnet DHCP reservation cache")
+			os.Exit(1)
+		}
+		dnsmasq.OnApplied = subnetCache.MarkApplied
+		if err := mgr.Add(subnetCache); err != nil {
+			setupLog.Error(err, "unable to add Subnet DHCP reservation cache")
+			os.Exit(1)
+		}
+	} else {
+		setupLog.Info("BOOTD_SUBNET_NAME is not set; lease-mode DHCP reservations " +
+			"from a Subnet's status are never rendered or acknowledged")
+	}
+
 	if err := mgr.Add(dnsmasq); err != nil {
 		setupLog.Error(err, "unable to add dnsmasq supervisor")
 		os.Exit(1)
@@ -200,6 +217,14 @@ type bootdConfig struct {
 	// Proxy.Enabled() is false - the zero value - unless
 	// BOOTD_AGENT_UPSTREAM_URL or BOOTD_BOOT_UPSTREAM_URL is set.
 	Proxy bootd.ProxyConfig
+	// SubnetName and SubnetNamespace name this bootd instance's own
+	// Subnet object, from BOOTD_SUBNET_NAME/BOOTD_SUBNET_NAMESPACE.
+	// SubnetName empty (both unset) disables SubnetDHCPCache entirely:
+	// lease-mode reservations are never rendered into the hostsfile and
+	// status.dhcp.appliedRevision is never written, exactly the behavior
+	// before this field existed.
+	SubnetName      string
+	SubnetNamespace string
 }
 
 // bootdConfigFromEnv builds bootdConfig from the process environment.
@@ -305,6 +330,15 @@ type bootdConfig struct {
 //     interface's own address, not every interface the pod happens to
 //     have (see bootd.DefaultProxyAddr). Ignored, along with both
 //     upstream URLs, when neither upstream URL is set.
+//   - BOOTD_SUBNET_NAME, BOOTD_SUBNET_NAMESPACE: this bootd instance's
+//     own Subnet object. Set, bootd watches it and renders lease-mode
+//     DHCP address reservations from its status.dhcp.reservations into
+//     the hostsfile alongside the MAC allowlist, and writes
+//     status.dhcp.appliedRevision back once dnsmasq has actually picked
+//     up a revision (see bootd.SubnetDHCPCache). Unset (BOOTD_SUBNET_NAME
+//     empty), reservations are never rendered or acknowledged - the
+//     behavior before this pair of variables existed. BOOTD_SUBNET_NAMESPACE
+//     empty with BOOTD_SUBNET_NAME set defaults to bootd's own namespace.
 //
 // BOOTD_DHCP_ADDR, BOOTD_PXE_ADDR, and BOOTD_DHCP_RELAY_SERVER are not
 // supported (dnsmasq's DHCP ports are the well-known 67/4011 only, and
@@ -435,6 +469,12 @@ func bootdConfigFromEnv() (bootdConfig, error) {
 		}
 	}
 
+	subnetName := os.Getenv("BOOTD_SUBNET_NAME")
+	subnetNamespace := os.Getenv("BOOTD_SUBNET_NAMESPACE")
+	if subnetName != "" && subnetNamespace == "" {
+		subnetNamespace = os.Getenv("POD_NAMESPACE")
+	}
+
 	return bootdConfig{
 		Server: bootd.Config{
 			Interface:       os.Getenv("BOOTD_DHCP_INTERFACE"),
@@ -450,11 +490,13 @@ func bootdConfigFromEnv() (bootdConfig, error) {
 			LeaseRangeStart: leaseRangeStart,
 			LeaseRangeEnd:   leaseRangeEnd,
 		},
-		TFTPDir:     tftpDir,
-		TFTPAddr:    os.Getenv("BOOTD_TFTP_ADDR"),
-		RunDir:      os.Getenv("BOOTD_RUN_DIR"),
-		DnsmasqPath: os.Getenv("BOOTD_DNSMASQ_PATH"),
-		GrubConfig:  grubConfig,
-		Proxy:       proxyCfg,
+		TFTPDir:         tftpDir,
+		TFTPAddr:        os.Getenv("BOOTD_TFTP_ADDR"),
+		RunDir:          os.Getenv("BOOTD_RUN_DIR"),
+		DnsmasqPath:     os.Getenv("BOOTD_DNSMASQ_PATH"),
+		GrubConfig:      grubConfig,
+		Proxy:           proxyCfg,
+		SubnetName:      subnetName,
+		SubnetNamespace: subnetNamespace,
 	}, nil
 }

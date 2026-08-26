@@ -34,6 +34,26 @@ rules:
       - get
       - list
       - watch
+  # Every Subnet, for the same reason as machines above: bootd narrows to
+  # its own Subnet (BOOTD_SUBNET_NAME/BOOTD_SUBNET_NAMESPACE) at runtime,
+  # not via RBAC scoping. subnets/status is patched to record
+  # status.dhcp.appliedRevision once a reservation revision reaches
+  # dnsmasq's hostsfile (internal/bootd.SubnetDHCPCache).
+  - apiGroups:
+      - kezio.kojuro.date
+    resources:
+      - subnets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - kezio.kojuro.date
+    resources:
+      - subnets/status
+    verbs:
+      - get
+      - patch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

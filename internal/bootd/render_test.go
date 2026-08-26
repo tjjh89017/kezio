@@ -457,22 +457,36 @@ func TestRenderDnsmasqConf_Validation(t *testing.T) {
 
 func TestRenderHostsfile(t *testing.T) {
 	tests := []struct {
-		name string
-		macs []string
-		want string
+		name         string
+		macs         []string
+		reservations map[string]string
+		want         string
 	}{
-		{"empty means nothing boots", nil, ""},
-		{"one MAC", []string{"aa:bb:cc:dd:ee:01"}, "aa:bb:cc:dd:ee:01,set:kezio\n"},
+		{"empty means nothing boots", nil, nil, ""},
+		{"one MAC", []string{"aa:bb:cc:dd:ee:01"}, nil, "aa:bb:cc:dd:ee:01,set:kezio\n"},
 		{
 			"sorted and deduplicated",
 			[]string{"aa:bb:cc:dd:ee:02", "aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"},
+			nil,
 			"aa:bb:cc:dd:ee:01,set:kezio\naa:bb:cc:dd:ee:02,set:kezio\n",
+		},
+		{
+			"a reservation adds the pinned address",
+			[]string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"},
+			map[string]string{"aa:bb:cc:dd:ee:01": "192.0.2.10"},
+			"aa:bb:cc:dd:ee:01,set:kezio,192.0.2.10\naa:bb:cc:dd:ee:02,set:kezio\n",
+		},
+		{
+			"a reservation for a MAC not in the allowlist is dropped",
+			[]string{"aa:bb:cc:dd:ee:01"},
+			map[string]string{"aa:bb:cc:dd:ee:99": "192.0.2.10"},
+			"aa:bb:cc:dd:ee:01,set:kezio\n",
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := RenderHostsfile(tc.macs); got != tc.want {
-				t.Errorf("RenderHostsfile(%v) = %q, want %q", tc.macs, got, tc.want)
+			if got := RenderHostsfile(tc.macs, tc.reservations); got != tc.want {
+				t.Errorf("RenderHostsfile(%v, %v) = %q, want %q", tc.macs, tc.reservations, got, tc.want)
 			}
 		})
 	}

@@ -132,6 +132,12 @@ func bootdEnv(subnet *keziov1alpha3.Subnet, cfg BootdDeploymentConfig) []corev1.
 		{Name: "BOOTD_DHCP_INTERFACE", Value: bootdDHCPInterface},
 		{Name: "BOOTD_TFTP_DIR", Value: bootdTFTPDir},
 		{Name: "BOOTD_LEASE_MODE", Value: strconv.FormatBool(leaseMode)},
+		// Always set, so bootd can watch its own Subnet and render
+		// status.dhcp.reservations into the hostsfile (lease mode only -
+		// see bootd.SubnetDHCPCache) and write status.dhcp.appliedRevision
+		// back once it does.
+		{Name: "BOOTD_SUBNET_NAME", Value: subnet.Name},
+		{Name: "BOOTD_SUBNET_NAMESPACE", Value: subnet.Namespace},
 	}
 	if leaseMode {
 		// The CRD requires Gateway in lease mode, so the nil branch is

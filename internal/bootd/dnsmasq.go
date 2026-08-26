@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -66,10 +67,20 @@ type Dnsmasq struct {
 	// BinaryPath is the dnsmasq executable to run. Empty means
 	// DefaultDnsmasqPath.
 	BinaryPath string
+	// OnApplied, if set, is called after the hostsfile loop successfully
+	// writes and SIGHUPs dnsmasq for a revision (see SetReservations) -
+	// SubnetDHCPCache wires this to write status.dhcp.appliedRevision
+	// back onto the Subnet. Called with the empty string when
+	// SetReservations has never been called with a non-empty revision;
+	// never called concurrently with itself.
+	OnApplied func(ctx context.Context, revision string)
 
-	mu    sync.Mutex
-	macs  []string
-	child *os.Process
+	mu           sync.Mutex
+	macs         []string
+	reservations map[string]string
+	revision     string
+	revSet       bool
+	child        *os.Process
 
 	dirtyOnce sync.Once
 	dirty     chan struct{}
@@ -85,6 +96,7 @@ type Dnsmasq struct {
 
 var _ manager.Runnable = (*Dnsmasq)(nil)
 var _ MACSink = (*Dnsmasq)(nil)
+var _ ReservationSink = (*Dnsmasq)(nil)
 
 // maxBackoff caps the crash-restart delay.
 const maxBackoff = 30 * time.Second
@@ -114,6 +126,23 @@ func (d *Dnsmasq) dirtyCh() chan struct{} {
 func (d *Dnsmasq) SetAllowedMACs(macs []string) {
 	d.mu.Lock()
 	d.macs = slices.Clone(macs)
+	d.mu.Unlock()
+	select {
+	case d.dirtyCh() <- struct{}{}:
+	default:
+	}
+}
+
+// SetReservations implements ReservationSink: it records the current
+// lease-mode DHCP reservation table (normalized MAC -> IPv4 address) and
+// the revision it was computed from, then nudges the hostsfile loop the
+// same way SetAllowedMACs does. Once the loop writes+SIGHUPs dnsmasq for
+// this exact revision, OnApplied (if set) is called with it.
+func (d *Dnsmasq) SetReservations(revision string, reservations map[string]string) {
+	d.mu.Lock()
+	d.reservations = maps.Clone(reservations)
+	d.revision = revision
+	d.revSet = true
 	d.mu.Unlock()
 	select {
 	case d.dirtyCh() <- struct{}{}:
@@ -156,7 +185,7 @@ func (d *Dnsmasq) Start(ctx context.Context) error {
 		return fmt.Errorf("writing dnsmasq config: %w", err)
 	}
 	d.mu.Lock()
-	initial := RenderHostsfile(d.macs)
+	initial := RenderHostsfile(d.macs, d.reservations)
 	d.mu.Unlock()
 	if err := writeFileAtomic(HostsfilePath(runDir), initial); err != nil {
 		return fmt.Errorf("writing initial dhcp-hostsfile: %w", err)
@@ -267,6 +296,8 @@ func (d *Dnsmasq) runChild(ctx context.Context, log logr.Logger, binary, confPat
 // happens and the next child reads the fresh file at startup.
 func (d *Dnsmasq) hostsfileLoop(ctx context.Context, log logr.Logger, runDir, lastWritten string) {
 	path := HostsfilePath(runDir)
+	var lastAppliedRev string
+	lastAppliedRevSet := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -286,25 +317,35 @@ func (d *Dnsmasq) hostsfileLoop(ctx context.Context, log logr.Logger, runDir, la
 		}
 
 		d.mu.Lock()
-		content := RenderHostsfile(d.macs)
+		content := RenderHostsfile(d.macs, d.reservations)
 		child := d.child
+		revision, revSet := d.revision, d.revSet
 		d.mu.Unlock()
 
-		if content == lastWritten {
-			continue
-		}
-		if err := writeFileAtomic(path, content); err != nil {
-			log.Error(err, "rewriting dhcp-hostsfile failed; MAC allowlist is stale until the next change", "path", path)
-			continue
-		}
-		lastWritten = content
-		if child != nil {
-			if err := child.Signal(sighup); err != nil {
-				log.Error(err, "SIGHUP to dnsmasq failed; allowlist applies at next restart", "pid", child.Pid)
+		if content != lastWritten {
+			if err := writeFileAtomic(path, content); err != nil {
+				log.Error(err, "rewriting dhcp-hostsfile failed; MAC allowlist is stale until the next change", "path", path)
 				continue
 			}
+			lastWritten = content
+			if child != nil {
+				if err := child.Signal(sighup); err != nil {
+					log.Error(err, "SIGHUP to dnsmasq failed; allowlist applies at next restart", "pid", child.Pid)
+					continue
+				}
+			}
+			log.Info("dhcp-hostsfile updated", "path", path, "entries", countLines(content))
 		}
-		log.Info("dhcp-hostsfile updated", "path", path, "entries", countLines(content))
+
+		// The hostsfile now reflects revision (whether or not this pass
+		// actually rewrote it - an unchanged file already reflects it):
+		// tell OnApplied, unless this exact revision was already reported.
+		if revSet && (!lastAppliedRevSet || revision != lastAppliedRev) {
+			lastAppliedRev, lastAppliedRevSet = revision, true
+			if d.OnApplied != nil {
+				d.OnApplied(ctx, revision)
+			}
+		}
 	}
 }
 

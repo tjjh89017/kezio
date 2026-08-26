@@ -350,6 +350,8 @@ func TestBuildBootdDeploymentEnvFullSet(t *testing.T) {
 		{Name: "BOOTD_DHCP_INTERFACE", Value: "net1"},
 		{Name: "BOOTD_TFTP_DIR", Value: "/tftp"},
 		{Name: "BOOTD_LEASE_MODE", Value: "true"},
+		{Name: "BOOTD_SUBNET_NAME", Value: subnet.Name},
+		{Name: "BOOTD_SUBNET_NAMESPACE", Value: subnet.Namespace},
 		{Name: "BOOTD_LEASE_RANGE_START", Value: testLeaseRangeStart},
 		{Name: "BOOTD_LEASE_RANGE_END", Value: testLeaseRangeEnd},
 		{Name: "BOOTD_AGENT_UPSTREAM_URL", Value: cfg.AgentUpstreamURL},

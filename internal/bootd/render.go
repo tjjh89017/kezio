@@ -352,7 +352,16 @@ configfile %s
 // (letting the supervisor skip a rewrite-plus-SIGHUP when nothing
 // changed). An empty or nil macs renders an empty file - the
 // fail-secure state in which no machine receives boot info.
-func RenderHostsfile(macs []string) string {
+//
+// reservations optionally maps a normalized MAC to the fixed IPv4
+// address a lease-mode Subnet's DHCP reservation table holds for it
+// (SubnetDHCPCache derives it from Subnet status.dhcp.reservations): a
+// MAC found there renders "<mac>,set:kezio,<address>" instead, which
+// dnsmasq's dhcp-hostsfile syntax reads as a pinned lease for that host.
+// A reservation naming a MAC absent from macs is silently dropped - the
+// MAC gate is macs alone, so a reservation can never be a second way to
+// admit a MAC that is not enrolled.
+func RenderHostsfile(macs []string, reservations map[string]string) string {
 	if len(macs) == 0 {
 		return ""
 	}
@@ -361,7 +370,11 @@ func RenderHostsfile(macs []string) string {
 	sorted = slices.Compact(sorted)
 	var b strings.Builder
 	for _, mac := range sorted {
-		fmt.Fprintf(&b, "%s,set:%s\n", mac, kezioTag)
+		if addr, ok := reservations[mac]; ok && addr != "" {
+			fmt.Fprintf(&b, "%s,set:%s,%s\n", mac, kezioTag, addr)
+		} else {
+			fmt.Fprintf(&b, "%s,set:%s\n", mac, kezioTag)
+		}
 	}
 	return b.String()
 }

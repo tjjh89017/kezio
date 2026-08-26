@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -68,6 +69,8 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	}
 	t.Fatalf("timed out waiting for %s", what)
 }
+
+const testDHCPRevision1 = "rev-1"
 
 const longRunningScript = `trap 'exit 0' TERM INT
 echo fake-dnsmasq-started
@@ -164,6 +167,65 @@ while :; do sleep 0.05; done
 	waitFor(t, "hostsfile revocation", func() bool {
 		got, err := os.ReadFile(HostsfilePath(runDir))
 		return err == nil && len(got) == 0
+	})
+
+	cancel()
+	<-done
+}
+
+func TestDnsmasq_SetReservationsRendersAddressesAndReportsApplied(t *testing.T) {
+	d, runDir := newTestDnsmasq(t, `marker="$MARKER_FILE"
+trap 'echo hup >> "$marker"' HUP
+trap 'exit 0' TERM INT
+while :; do sleep 0.05; done
+`)
+	marker := filepath.Join(runDir, "hup-marker")
+	t.Setenv("MARKER_FILE", marker)
+
+	var mu sync.Mutex
+	var applied []string
+	d.OnApplied = func(_ context.Context, revision string) {
+		mu.Lock()
+		defer mu.Unlock()
+		applied = append(applied, revision)
+	}
+
+	ctx, cancel := context.WithCancel(logf.IntoContext(context.Background(), logf.Log))
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- d.Start(ctx) }()
+
+	waitFor(t, "hostsfile", func() bool {
+		_, err := os.Stat(HostsfilePath(runDir))
+		return err == nil
+	})
+
+	d.SetAllowedMACs([]string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"})
+	d.SetReservations(testDHCPRevision1, map[string]string{"aa:bb:cc:dd:ee:01": "192.0.2.10"})
+
+	waitFor(t, "hostsfile with a reservation", func() bool {
+		got, err := os.ReadFile(HostsfilePath(runDir))
+		return err == nil && string(got) == "aa:bb:cc:dd:ee:01,set:kezio,192.0.2.10\naa:bb:cc:dd:ee:02,set:kezio\n"
+	})
+	waitFor(t, "OnApplied called with rev-1", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(applied) == 1 && applied[0] == testDHCPRevision1
+	})
+
+	// A later revision with the exact same rendered content (a
+	// reservation added for a MAC not in the allowlist) still must be
+	// separately reported applied - the hostsfile reflects it, so a
+	// waiting Machine must not be kept blocked on a revision that in
+	// fact took effect trivially.
+	d.SetReservations("rev-2", map[string]string{
+		"aa:bb:cc:dd:ee:01": "192.0.2.10",
+		"aa:bb:cc:dd:ee:99": "192.0.2.11",
+	})
+	waitFor(t, "OnApplied called with rev-2", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(applied) == 2 && applied[1] == "rev-2"
 	})
 
 	cancel()
