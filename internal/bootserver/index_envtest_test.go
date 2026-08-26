@@ -131,22 +131,25 @@ func TestSetupFieldIndexer_EnvtestLookup(t *testing.T) {
 	waitForServe(t, s, mac)
 }
 
-// waitForServe polls the grub.cfg handler until the cache observes the
-// Create above and it resolves to a net-boot config.
+// waitForServe polls the grub.cfg handler until the cache observes both
+// status writes above (state and netBoot.tokenHash) and resolves to a
+// net-boot config carrying a token. The two status updates land in the
+// cache independently, so an intermediate poll can see the machine
+// resolved and needing a net boot before its token is visible yet - that
+// renders a net-boot config with no kezio.token=, same as a Machine that
+// legitimately has no armed boot right now, and is not distinguishable
+// from this test's own race without waiting it out.
 func waitForServe(t *testing.T, s *Server, mac string) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		rec := httptest.NewRecorder()
 		s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/boot/grub.cfg-"+mac, nil))
-		if rec.Body.String() != bootLocalConfig {
-			if !containsAll(rec.Body.String(), "kezio.token=") {
-				t.Fatalf("resolved machine but response carries no token: %q", rec.Body.String())
-			}
+		if containsAll(rec.Body.String(), "kezio.token=") {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("machine never resolved via the field-indexed lookup before the deadline")
+			t.Fatalf("machine never resolved to a net-boot config carrying a token before the deadline; last response: %q", rec.Body.String())
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
