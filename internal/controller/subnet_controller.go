@@ -84,6 +84,7 @@ type SubnetReconciler struct {
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=machines,verbs=get;list;watch
 // +kubebuilder:rbac:groups=k8s.cni.cncf.io,resources=network-attachment-definitions,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch
 
@@ -219,6 +220,12 @@ func (r *SubnetReconciler) onChange(ctx context.Context, subnet *keziov1alpha3.S
 			}
 		}
 
+		if subnet.Spec.DHCP.Mode == keziov1alpha3.SubnetDHCPModeLease {
+			if err := r.reconcileBootdLeasePVC(ctx, subnet); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+
 		dep, unowned, err := r.reconcileBootdDeployment(ctx, subnet)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -333,6 +340,41 @@ func (r *SubnetReconciler) gcDHCPReservations(ctx context.Context, subnet *kezio
 	dhcp.Reservations = kept
 	dhcp.Revision = subnetdhcp.Revision(kept)
 	return nil
+}
+
+// reconcileBootdLeasePVC creates subnet's bootd lease PVC if absent and
+// otherwise leaves it untouched - a PersistentVolumeClaim's spec is
+// mostly immutable after creation, unlike the Deployment this reconciler
+// updates in place, so there is nothing to reconcile once it exists.
+// Deleting the Subnet removes it through the owner reference set here,
+// taking every persisted lease with it. Only called in
+// SubnetDHCPModeLease.
+//
+// An existing PVC not controlled by subnet is left alone and reported
+// through the returned error, mirroring reconcileBootdDeployment's own
+// unowned-name-collision handling - adopting or overwriting a foreign
+// PVC could destroy another workload's data.
+func (r *SubnetReconciler) reconcileBootdLeasePVC(ctx context.Context, subnet *keziov1alpha3.Subnet) error {
+	desired := buildBootdLeasePVC(subnet, r.BootdDeployment)
+	if err := ctrl.SetControllerReference(subnet, desired, r.Scheme); err != nil {
+		return fmt.Errorf("set owner reference on bootd lease PVC: %w", err)
+	}
+
+	existing := &corev1.PersistentVolumeClaim{}
+	err := r.Get(ctx, client.ObjectKeyFromObject(desired), existing)
+	switch {
+	case kerrors.IsNotFound(err):
+		if err := r.Create(ctx, desired); err != nil && !kerrors.IsAlreadyExists(err) {
+			return fmt.Errorf("create bootd lease PVC: %w", err)
+		}
+		return nil
+	case err != nil:
+		return fmt.Errorf("get bootd lease PVC: %w", err)
+	case !metav1.IsControlledBy(existing, subnet):
+		return fmt.Errorf("a PersistentVolumeClaim named %s/%s already exists and is not controlled by this Subnet - refusing to adopt or overwrite it", existing.Namespace, existing.Name)
+	default:
+		return nil
+	}
 }
 
 // checkBootdNamespacePrerequisites checks the two objects that must
@@ -753,6 +795,7 @@ func (r *SubnetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&keziov1alpha3.Subnet{}).
 		Owns(&appsv1.Deployment{}).
+		Owns(&corev1.PersistentVolumeClaim{}).
 		Watches(&keziov1alpha3.Site{}, handler.EnqueueRequestsFromMapFunc(r.mapSiteToSubnets)).
 		Watches(&keziov1alpha3.Machine{}, handler.EnqueueRequestsFromMapFunc(r.mapMachineToSubnets)).
 		Named("subnet").

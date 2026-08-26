@@ -45,6 +45,11 @@ type BootdDeploymentConfig struct {
 	// replacing the URL bootd derives itself. Empty keeps bootd's own
 	// derivation.
 	HTTPBootURL string
+	// LeaseStorageClassName optionally sets the StorageClass of every
+	// lease-mode Subnet's bootd lease PVC (buildBootdLeasePVC). Empty
+	// leaves storageClassName unset, so the cluster's own default
+	// StorageClass applies.
+	LeaseStorageClassName string
 }
 
 // enabled reports whether bootd Deployments are configured: both Image

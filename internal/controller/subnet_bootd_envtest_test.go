@@ -274,6 +274,62 @@ var _ = Describe("Subnet bootd Deployment reconciliation", func() {
 		Entry("the empty string, a segment with no exit", ""),
 	)
 
+	It("creates a bootd lease PVC, owned by the Subnet, only in lease mode", func() {
+		ns := createSubnetTestNamespace(ctx)
+		createTestNAD(ctx, ns, "boot-nad", bootdStaticNADConfig("192.0.2.2"))
+
+		proxySubnet := testSubnet(ns)
+		Expect(k8sClient.Create(ctx, proxySubnet)).To(Succeed())
+
+		r := newSubnetTestReconciler()
+		proxyKey := types.NamespacedName{Name: proxySubnet.Name, Namespace: ns}
+		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: proxyKey})
+		Expect(err).NotTo(HaveOccurred())
+
+		var pvcs corev1.PersistentVolumeClaimList
+		Expect(k8sClient.List(ctx, &pvcs, client.InNamespace(ns))).To(Succeed())
+		Expect(pvcs.Items).To(BeEmpty(), "a proxy-mode Subnet must not get a bootd lease PVC")
+
+		leaseSubnet := testSubnet(ns, func(s *keziov1alpha3.Subnet) {
+			s.Name = rack2SubnetName
+			s.Spec.CIDR = rack2CIDR
+			s.Spec.BootdServerIP = rack2BootdServerIP
+			s.Spec.DHCP = &keziov1alpha3.SubnetDHCP{Mode: keziov1alpha3.SubnetDHCPModeLease, Gateway: ptr.To(testGateway)}
+		})
+		createTestNAD(ctx, ns, rack2SubnetName+"-nad", bootdStaticNADConfig(rack2BootdServerIP))
+		leaseSubnet.Spec.BootdNetworkRef = &keziov1alpha3.NameRef{Name: rack2SubnetName + "-nad"}
+		Expect(k8sClient.Create(ctx, leaseSubnet)).To(Succeed())
+
+		leaseKey := types.NamespacedName{Name: leaseSubnet.Name, Namespace: ns}
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: leaseKey})
+		Expect(err).NotTo(HaveOccurred())
+
+		var pvc corev1.PersistentVolumeClaim
+		pvcKey := types.NamespacedName{Name: bootdLeasePVCName(leaseSubnet.Name), Namespace: ns}
+		Expect(k8sClient.Get(ctx, pvcKey, &pvc)).To(Succeed())
+		Expect(metav1.IsControlledBy(&pvc, leaseSubnet)).To(BeTrue(), "the lease PVC must be owned by its Subnet")
+
+		var dep appsv1.Deployment
+		depKey := types.NamespacedName{Name: bootdDeploymentName(leaseSubnet.Name), Namespace: ns}
+		Expect(k8sClient.Get(ctx, depKey, &dep)).To(Succeed())
+		Expect(dep.Spec.Strategy.Type).To(Equal(appsv1.RecreateDeploymentStrategyType))
+
+		var mounted bool
+		for _, v := range dep.Spec.Template.Spec.Volumes {
+			if v.Name == bootdLeaseVolumeName && v.PersistentVolumeClaim != nil &&
+				v.PersistentVolumeClaim.ClaimName == pvc.Name {
+				mounted = true
+			}
+		}
+		Expect(mounted).To(BeTrue(), "the bootd Deployment must mount the lease PVC")
+
+		By("re-reconciling does not create a second PVC")
+		_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: leaseKey})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.List(ctx, &pvcs, client.InNamespace(ns))).To(Succeed())
+		Expect(pvcs.Items).To(HaveLen(1))
+	})
+
 	It("refuses both Subnets' bootd Deployments when two Subnets share the same bootdNetworkRef", func() {
 		ns := createSubnetTestNamespace(ctx)
 		createTestNAD(ctx, ns, "boot-nad", bootdStaticNADConfig("192.0.2.2"))

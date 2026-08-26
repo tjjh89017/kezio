@@ -755,12 +755,13 @@ func agentServerConfigFromEnv() (*agentserver.Config, error) {
 // created.
 func bootdDeploymentConfigFromEnv() controller.BootdDeploymentConfig {
 	return controller.BootdDeploymentConfig{
-		Image:              os.Getenv("BOOTD_DEPLOYMENT_IMAGE"),
-		BootArtifactsImage: os.Getenv("BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE"),
-		ServiceAccountName: os.Getenv("BOOTD_DEPLOYMENT_SERVICE_ACCOUNT"),
-		AgentUpstreamURL:   os.Getenv("BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL"),
-		BootUpstreamURL:    os.Getenv("BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL"),
-		HTTPBootURL:        os.Getenv("BOOTD_DEPLOYMENT_HTTP_BOOT_URL"),
+		Image:                 os.Getenv("BOOTD_DEPLOYMENT_IMAGE"),
+		BootArtifactsImage:    os.Getenv("BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE"),
+		ServiceAccountName:    os.Getenv("BOOTD_DEPLOYMENT_SERVICE_ACCOUNT"),
+		AgentUpstreamURL:      os.Getenv("BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL"),
+		BootUpstreamURL:       os.Getenv("BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL"),
+		HTTPBootURL:           os.Getenv("BOOTD_DEPLOYMENT_HTTP_BOOT_URL"),
+		LeaseStorageClassName: os.Getenv("BOOTD_DEPLOYMENT_LEASE_STORAGE_CLASS"),
 	}
 }
 

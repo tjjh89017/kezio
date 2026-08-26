@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -354,6 +355,7 @@ func TestBuildBootdDeploymentEnvFullSet(t *testing.T) {
 		{Name: "BOOTD_SUBNET_NAMESPACE", Value: subnet.Namespace},
 		{Name: "BOOTD_LEASE_RANGE_START", Value: testLeaseRangeStart},
 		{Name: "BOOTD_LEASE_RANGE_END", Value: testLeaseRangeEnd},
+		{Name: "BOOTD_LEASE_DIR", Value: "/var/lib/bootd-leases"},
 		{Name: "BOOTD_AGENT_UPSTREAM_URL", Value: cfg.AgentUpstreamURL},
 		{Name: "BOOTD_BOOT_UPSTREAM_URL", Value: cfg.BootUpstreamURL},
 		{Name: "BOOTD_BOOT_CONFIG_URL", Value: fmt.Sprintf("http://192.0.2.2:%d", bootd.DefaultProxyPort)},
@@ -662,6 +664,178 @@ func TestBuildBootdDeploymentVolumesAndMounts(t *testing.T) {
 	}
 	if got := bootdContainer(t, dep).VolumeMounts; !reflect.DeepEqual(got, wantMounts) {
 		t.Errorf("bootd container VolumeMounts =\n%#v\nwant\n%#v", got, wantMounts)
+	}
+}
+
+// leaseModeSubnet returns a lease-mode testSubnet fixture with a valid
+// gateway, for the lease-mode volume/strategy/PVC tests below.
+func leaseModeSubnet() *keziov1alpha3.Subnet {
+	return testSubnet("site-hq", func(s *keziov1alpha3.Subnet) {
+		s.Spec.DHCP = &keziov1alpha3.SubnetDHCP{Mode: keziov1alpha3.SubnetDHCPModeLease, Gateway: ptr.To(testGateway)}
+	})
+}
+
+// TestBuildBootdDeploymentLeaseModeVolumesAndStrategy checks that a
+// lease-mode Subnet's Deployment mounts the lease PVC, alongside the two
+// emptyDirs every mode carries, and sets a Recreate strategy - a proxy
+// mode Deployment gets neither, since it has no PVC to serialize pods
+// around.
+func TestBuildBootdDeploymentLeaseModeVolumesAndStrategy(t *testing.T) {
+	cfg := BootdDeploymentConfig{Image: "bootd:test", BootArtifactsImage: "boot-artifacts:test"}
+
+	t.Run("lease mode", func(t *testing.T) {
+		dep := buildBootdDeployment(leaseModeSubnet(), cfg)
+
+		if dep.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
+			t.Errorf("Strategy.Type = %q, want %q", dep.Spec.Strategy.Type, appsv1.RecreateDeploymentStrategyType)
+		}
+
+		wantVolume := corev1.Volume{
+			Name: "leases",
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: bootdLeasePVCName(testSubnetName)},
+			},
+		}
+		if !slicesContainsVolume(dep.Spec.Template.Spec.Volumes, wantVolume) {
+			t.Errorf("pod Volumes = %#v, want it to contain %#v", dep.Spec.Template.Spec.Volumes, wantVolume)
+		}
+		wantMount := corev1.VolumeMount{Name: "leases", MountPath: "/var/lib/bootd-leases"}
+		if !slicesContainsMount(bootdContainer(t, dep).VolumeMounts, wantMount) {
+			t.Errorf("bootd container VolumeMounts = %#v, want it to contain %#v", bootdContainer(t, dep).VolumeMounts, wantMount)
+		}
+
+		env := bootdContainer(t, dep).Env
+		if got, _ := envValue(env, "BOOTD_LEASE_DIR"); got != "/var/lib/bootd-leases" {
+			t.Errorf("BOOTD_LEASE_DIR = %q, want %q", got, "/var/lib/bootd-leases")
+		}
+	})
+
+	t.Run("proxy mode carries no lease volume, mount, or Recreate strategy", func(t *testing.T) {
+		dep := buildBootdDeployment(testSubnet("site-hq"), cfg)
+
+		if dep.Spec.Strategy.Type == appsv1.RecreateDeploymentStrategyType {
+			t.Errorf("proxy-mode Deployment sets Recreate strategy, want the zero value (RollingUpdate)")
+		}
+		for _, v := range dep.Spec.Template.Spec.Volumes {
+			if v.Name == bootdLeaseVolumeName {
+				t.Errorf("proxy-mode Deployment carries a %q volume, want none", bootdLeaseVolumeName)
+			}
+		}
+		for _, m := range bootdContainer(t, dep).VolumeMounts {
+			if m.Name == bootdLeaseVolumeName {
+				t.Errorf("proxy-mode bootd container carries a %q mount, want none", bootdLeaseVolumeName)
+			}
+		}
+		if _, ok := envValue(bootdContainer(t, dep).Env, "BOOTD_LEASE_DIR"); ok {
+			t.Errorf("BOOTD_LEASE_DIR is set in proxy mode, want unset")
+		}
+	})
+}
+
+// TestBuildBootdDeploymentEnvLeaseTime checks BOOTD_LEASE_TIME only
+// appears when the Subnet sets spec.dhcp.leaseTime.
+func TestBuildBootdDeploymentEnvLeaseTime(t *testing.T) {
+	cfg := BootdDeploymentConfig{Image: "bootd:test", BootArtifactsImage: "boot-artifacts:test"}
+
+	t.Run("unset leaves the env absent", func(t *testing.T) {
+		env := bootdContainer(t, buildBootdDeployment(leaseModeSubnet(), cfg)).Env
+		if _, ok := envValue(env, "BOOTD_LEASE_TIME"); ok {
+			t.Errorf("BOOTD_LEASE_TIME is set, want unset when spec.dhcp.leaseTime is nil")
+		}
+	})
+
+	t.Run("set carries the Go duration string", func(t *testing.T) {
+		subnet := leaseModeSubnet()
+		subnet.Spec.DHCP.LeaseTime = &metav1.Duration{Duration: 45 * time.Minute}
+		env := bootdContainer(t, buildBootdDeployment(subnet, cfg)).Env
+		if got, _ := envValue(env, "BOOTD_LEASE_TIME"); got != "45m0s" {
+			t.Errorf("BOOTD_LEASE_TIME = %q, want %q", got, "45m0s")
+		}
+	})
+}
+
+// slicesContainsVolume and slicesContainsMount check membership by
+// value, so the lease-mode tests above don't need to pin the two
+// emptyDir entries that come before the lease volume in the slice.
+func slicesContainsVolume(vs []corev1.Volume, want corev1.Volume) bool {
+	for _, v := range vs {
+		if reflect.DeepEqual(v, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func slicesContainsMount(ms []corev1.VolumeMount, want corev1.VolumeMount) bool {
+	for _, m := range ms {
+		if reflect.DeepEqual(m, want) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestBuildBootdLeasePVC checks the lease PVC's name, namespace, labels,
+// access mode, storage size, and the optional StorageClass override.
+func TestBuildBootdLeasePVC(t *testing.T) {
+	subnet := leaseModeSubnet()
+
+	t.Run("no storage class configured", func(t *testing.T) {
+		pvc := buildBootdLeasePVC(subnet, BootdDeploymentConfig{Image: "bootd:test", BootArtifactsImage: "boot-artifacts:test"})
+
+		if pvc.Name != bootdLeasePVCName(testSubnetName) {
+			t.Errorf("PVC name = %q, want %q", pvc.Name, bootdLeasePVCName(testSubnetName))
+		}
+		if pvc.Namespace != "site-hq" {
+			t.Errorf("PVC namespace = %q, want %q", pvc.Namespace, "site-hq")
+		}
+		if !reflect.DeepEqual(pvc.Spec.AccessModes, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}) {
+			t.Errorf("PVC AccessModes = %v, want [ReadWriteOnce]", pvc.Spec.AccessModes)
+		}
+		wantSize := resource.MustParse("64Mi")
+		if got := pvc.Spec.Resources.Requests[corev1.ResourceStorage]; got.Cmp(wantSize) != 0 {
+			t.Errorf("PVC storage request = %v, want %v", got, wantSize)
+		}
+		if pvc.Spec.StorageClassName != nil {
+			t.Errorf("PVC StorageClassName = %v, want nil when unconfigured", pvc.Spec.StorageClassName)
+		}
+		wantLabels := map[string]string{
+			bootdAppNameLabel:          bootdAppNameValue,
+			bootdAppComponentLabel:     bootdComponentValue,
+			bootdDeploymentSubnetLabel: testSubnetName,
+		}
+		if !reflect.DeepEqual(pvc.Labels, wantLabels) {
+			t.Errorf("PVC Labels = %#v, want %#v", pvc.Labels, wantLabels)
+		}
+	})
+
+	t.Run("storage class configured", func(t *testing.T) {
+		pvc := buildBootdLeasePVC(subnet, BootdDeploymentConfig{
+			Image: "bootd:test", BootArtifactsImage: "boot-artifacts:test", LeaseStorageClassName: "fast-local",
+		})
+		if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != "fast-local" {
+			t.Errorf("PVC StorageClassName = %v, want %q", pvc.Spec.StorageClassName, "fast-local")
+		}
+	})
+}
+
+// TestBootdLeasePVCNameTruncatesLongSubnetNames mirrors
+// TestBootdDeploymentNameTruncatesLongSubnetNames for the lease PVC's own
+// name derivation.
+func TestBootdLeasePVCNameTruncatesLongSubnetNames(t *testing.T) {
+	longName := strings.Repeat("a", 80)
+	name := bootdLeasePVCName(longName)
+
+	if len(name) > 63 {
+		t.Fatalf("bootdLeasePVCName(%d chars) = %d chars, want <= 63", len(longName), len(name))
+	}
+	if !strings.HasPrefix(name, bootdDeploymentNamePrefix) {
+		t.Errorf("bootdLeasePVCName(%q) = %q, want prefix %q", longName, name, bootdDeploymentNamePrefix)
+	}
+
+	other := strings.Repeat("a", 80) + "-different-suffix-not-fitting"
+	if bootdLeasePVCName(other) == name {
+		t.Errorf("two distinct over-length subnet names produced the same lease PVC name %q", name)
 	}
 }
 

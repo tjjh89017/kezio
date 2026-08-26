@@ -64,16 +64,33 @@ const bootdDHCPInterface = "net1"
 const bootdTFTPDir = "/tftp"
 
 // bootdRunDirMount is the writable directory for bootd's rendered
-// dnsmasq config, dhcp-hostsfile, and leasefile; required since the
-// container's root filesystem is read-only.
+// dnsmasq config and dhcp-hostsfile; required since the container's root
+// filesystem is read-only.
 const bootdRunDirMount = "/run/bootd"
 
-// bootdTFTPVolumeName and bootdRunVolumeName name the two emptyDir
-// volumes every bootd pod mounts.
+// bootdLeaseDirMount is the writable directory holding dnsmasq's
+// leasefile alone, in SubnetDHCPModeLease. Backed by a PVC (see
+// buildBootdLeasePVC), not the emptyDir bootdRunDirMount uses, so leases
+// survive a pod recreate (upgrade, eviction, a lease/proxy mode switch).
+const bootdLeaseDirMount = "/var/lib/bootd-leases"
+
+// bootdTFTPVolumeName, bootdRunVolumeName and bootdLeaseVolumeName name
+// the volumes a bootd pod mounts: the first two are always emptyDir, the
+// third exists (backed by a PVC) only in SubnetDHCPModeLease.
 const (
-	bootdTFTPVolumeName = "tftp"
-	bootdRunVolumeName  = "run"
+	bootdTFTPVolumeName  = "tftp"
+	bootdRunVolumeName   = "run"
+	bootdLeaseVolumeName = "leases"
 )
+
+// bootdLeasePVCNameSuffix marks a PVC as a Subnet's bootd lease volume,
+// at a glance in `kubectl get pvc`.
+const bootdLeasePVCNameSuffix = "-leases"
+
+// bootdLeasePVCStorageSize is the lease PVC's fixed capacity: a dnsmasq
+// lease file is one line per active lease, a few hundred bytes each,
+// nowhere near large enough to warrant a configurable size.
+const bootdLeasePVCStorageSize = "64Mi"
 
 // multusNetworksAnnotation is the Multus CNI pod annotation that adds a
 // secondary network attachment alongside the pod's default network -
@@ -102,6 +119,21 @@ func bootdDeploymentName(subnetName string) string {
 
 	sum := sha256.Sum256([]byte(subnetName))
 	suffix := "-" + hex.EncodeToString(sum[:])[:8]
+	maxBaseLen := bootdMaxNameLength - len(bootdDeploymentNamePrefix) - len(suffix)
+	return bootdDeploymentNamePrefix + subnetName[:maxBaseLen] + suffix
+}
+
+// bootdLeasePVCName returns the deterministic PersistentVolumeClaim name
+// for subnetName's bootd lease volume, mirroring bootdDeploymentName's
+// truncation so an over-length Subnet name still produces a valid name.
+func bootdLeasePVCName(subnetName string) string {
+	name := bootdDeploymentNamePrefix + subnetName + bootdLeasePVCNameSuffix
+	if len(name) <= bootdMaxNameLength {
+		return name
+	}
+
+	sum := sha256.Sum256([]byte(subnetName))
+	suffix := "-" + hex.EncodeToString(sum[:])[:8] + bootdLeasePVCNameSuffix
 	maxBaseLen := bootdMaxNameLength - len(bootdDeploymentNamePrefix) - len(suffix)
 	return bootdDeploymentNamePrefix + subnetName[:maxBaseLen] + suffix
 }
@@ -155,6 +187,14 @@ func bootdEnv(subnet *keziov1alpha3.Subnet, cfg BootdDeploymentConfig) []corev1.
 		if subnet.Spec.DHCP.LeaseRangeEnd != "" {
 			env = append(env, corev1.EnvVar{Name: "BOOTD_LEASE_RANGE_END", Value: subnet.Spec.DHCP.LeaseRangeEnd})
 		}
+		if subnet.Spec.DHCP.LeaseTime != nil {
+			env = append(env, corev1.EnvVar{Name: "BOOTD_LEASE_TIME", Value: subnet.Spec.DHCP.LeaseTime.Duration.String()})
+		}
+		// The lease PVC (buildBootdLeasePVC) is mounted at
+		// bootdLeaseDirMount only in lease mode; this points dnsmasq's
+		// leasefile there instead of the ephemeral run directory, so a
+		// pod recreate does not forget every lease.
+		env = append(env, corev1.EnvVar{Name: "BOOTD_LEASE_DIR", Value: bootdLeaseDirMount})
 	}
 	if cfg.AgentUpstreamURL != "" {
 		env = append(env, corev1.EnvVar{Name: "BOOTD_AGENT_UPSTREAM_URL", Value: cfg.AgentUpstreamURL})
@@ -188,6 +228,33 @@ func buildBootdDeployment(subnet *keziov1alpha3.Subnet, cfg BootdDeploymentConfi
 	}
 	trueVal := true
 	falseVal := false
+	leaseMode := subnet.Spec.DHCP.Mode == keziov1alpha3.SubnetDHCPModeLease
+
+	volumes := []corev1.Volume{
+		{Name: bootdTFTPVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		{Name: bootdRunVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+	}
+	mounts := []corev1.VolumeMount{
+		{Name: bootdTFTPVolumeName, MountPath: bootdTFTPDir, ReadOnly: true},
+		{Name: bootdRunVolumeName, MountPath: bootdRunDirMount},
+	}
+	var strategy appsv1.DeploymentStrategy
+	if leaseMode {
+		// The lease PVC is RWO (buildBootdLeasePVC), and dnsmasq is the
+		// segment's sole DHCP authority in lease mode: two pods holding
+		// the same lease file open, or briefly both up during a rolling
+		// update, would either fail to mount or both answer every
+		// DHCPDISCOVER. Recreate tears the old pod down before the new
+		// one starts, so there is never more than one.
+		strategy = appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}
+		volumes = append(volumes, corev1.Volume{
+			Name: bootdLeaseVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: bootdLeasePVCName(subnet.Name)},
+			},
+		})
+		mounts = append(mounts, corev1.VolumeMount{Name: bootdLeaseVolumeName, MountPath: bootdLeaseDirMount})
+	}
 
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -200,6 +267,7 @@ func buildBootdDeployment(subnet *keziov1alpha3.Subnet, cfg BootdDeploymentConfi
 			// segment would both answer every DHCPDISCOVER with no way for
 			// firmware to prefer one.
 			Replicas: &replicas,
+			Strategy: strategy,
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: bootdPodAnnotations(subnet)},
@@ -259,10 +327,7 @@ func buildBootdDeployment(subnet *keziov1alpha3.Subnet, cfg BootdDeploymentConfi
 								Add:  bootdCapabilities(),
 							},
 						},
-						VolumeMounts: []corev1.VolumeMount{
-							{Name: bootdTFTPVolumeName, MountPath: bootdTFTPDir, ReadOnly: true},
-							{Name: bootdRunVolumeName, MountPath: bootdRunDirMount},
-						},
+						VolumeMounts: mounts,
 						Resources: corev1.ResourceRequirements{
 							Limits: corev1.ResourceList{
 								corev1.ResourceCPU:    resource.MustParse("1"),
@@ -283,14 +348,45 @@ func buildBootdDeployment(subnet *keziov1alpha3.Subnet, cfg BootdDeploymentConfi
 							PeriodSeconds:       5,
 						},
 					}},
-					Volumes: []corev1.Volume{
-						{Name: bootdTFTPVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-						{Name: bootdRunVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-					},
+					Volumes: volumes,
 				},
 			},
 		},
 	}
+}
+
+// buildBootdLeasePVC constructs the (not yet created) PersistentVolumeClaim
+// backing subnet's bootd lease volume, for SubnetDHCPModeLease. The
+// caller (reconcileBootdLeasePVC) sets the owner reference, so deleting
+// the Subnet deletes the PVC (and, through it, every persisted lease)
+// along with the rest of its bootd instance.
+//
+// RWO: exactly one bootd pod ever mounts it (buildBootdDeployment's
+// Recreate strategy is what makes that true across a rollout, not the
+// access mode alone). 64Mi is far more than a lease file - a few hundred
+// bytes per active lease - ever needs.
+func buildBootdLeasePVC(subnet *keziov1alpha3.Subnet, cfg BootdDeploymentConfig) *corev1.PersistentVolumeClaim {
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      bootdLeasePVCName(subnet.Name),
+			Namespace: subnet.Namespace,
+			Labels: map[string]string{
+				bootdAppNameLabel:          bootdAppNameValue,
+				bootdAppComponentLabel:     bootdComponentValue,
+				bootdDeploymentSubnetLabel: subnet.Name,
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse(bootdLeasePVCStorageSize)},
+			},
+		},
+	}
+	if cfg.LeaseStorageClassName != "" {
+		pvc.Spec.StorageClassName = &cfg.LeaseStorageClassName
+	}
+	return pvc
 }
 
 // bootdCapabilities converts bootd.DnsmasqCapabilities into the bootd
