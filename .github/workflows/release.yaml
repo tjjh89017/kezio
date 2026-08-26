@@ -1,10 +1,16 @@
 name: Release
 
-# Publishes every kezio image and the boot artifacts on a "v*" tag. Never
-# touches main.yaml's ":main" ghcr tag. A tag is cut from a commit on main,
-# which lint/test/e2e already gated before it merged - re-running the full
-# suite here would double the cost for no new signal, so this workflow goes
-# straight to publishing.
+# Publishes every kezio image and the boot artifacts on a "v*" tag, and the
+# GitHub Release that ships alongside them. Never touches main.yaml's
+# ":main" ghcr tag. A tag is cut from a commit on main, which lint/test/e2e
+# already gated before it merged - re-running the full suite here would
+# double the cost for no new signal, so this workflow goes straight to
+# publishing.
+#
+# The GitHub Release is created as a draft before any image builds, and
+# only flipped to published once every image/artifact job below has
+# succeeded - so a failed build leaves a draft behind instead of a
+# published Release with missing images.
 on:
   push:
     tags:
@@ -14,16 +20,40 @@ permissions:
   contents: read
 
 env:
+  GO_VERSION: "1.26.5"
   REGISTRY: ghcr.io
   IMAGE_NAMESPACE: tjjh89017
 
 jobs:
+  # Runs first so every other job can depend on it. Idempotent on re-run:
+  # a re-pushed tag (or a re-run of this workflow) must not fail just
+  # because the draft it made last time is still there.
+  create-release:
+    name: Create draft release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Create the draft release if it does not already exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists, leaving it as-is."
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --draft --generate-notes --title "kezio $GITHUB_REF_NAME"
+          fi
+
   # Matrix and steps mirror main.yaml's images job: same composite action
   # (push-image-to-ghcr), same Dockerfile/platform per component - only the
   # tag spec and the unconditional push differ, both of which stay on the
   # calling workflow by push-image-to-ghcr's own design.
   images:
     name: ${{ matrix.name }}
+    needs: create-release
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -66,9 +96,11 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}
+          # The tag pushed to ghcr.io is the git tag verbatim (with its
+          # leading "v"), not a semver-derived rewrite - v0.3.2 stays
+          # v0.3.2 on ghcr.io.
           tags-spec: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ github.ref_name }}
           dockerfile: ${{ matrix.dockerfile }}
           platforms: ${{ matrix.platforms }}
           cache-scope: ${{ matrix.name }}
@@ -83,6 +115,7 @@ jobs:
   # consumer anywhere in the deploy path.
   boot-artifacts:
     name: Boot artifacts
+    needs: create-release
     runs-on: ubuntu-latest
     # `lb build` compiles ezio from source and assembles a full Debian sid
     # chroot into a squashfs - budget generously.
@@ -107,9 +140,44 @@ jobs:
           registry: ${{ env.REGISTRY }}
           image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/kezio-boot-artifacts
           tags-spec: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ github.ref_name }}
           dockerfile: docker/boot-artifacts/Dockerfile
           platforms: linux/amd64
           cache-scope: boot-artifacts
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Runs only once every image has actually published, then flips the
+  # draft from create-release to a published Release - so a build failure
+  # anywhere above leaves the draft in place instead of a Release that
+  # claims images it never pushed.
+  publish-release:
+    name: Publish release
+    needs: [create-release, images, boot-artifacts]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Point the installer manifest at this tag's manager image and build it
+        run: |
+          make kustomize
+          (cd config/manager && ../../bin/kustomize edit set image "controller=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/kezio:${{ github.ref_name }}")
+          make build-installer
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" dist/install.yaml --clobber
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "$GITHUB_REF_NAME" --draft=false

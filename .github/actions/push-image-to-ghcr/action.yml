@@ -4,7 +4,7 @@ description: >-
   Logs in to a container registry, derives tags/labels from a
   docker/metadata-action tag spec, and runs a multi-platform build-push.
   Shared by main.yaml (pushes the ":main" branch tag, gated on the caller's
-  own main-push `if:`) and release.yaml (pushes two semver tags,
+  own main-push `if:`) and release.yaml (pushes the git tag verbatim,
   unconditionally) - only the tag spec and that `if:` differ between them,
   so both stay on the calling workflow rather than moving in here.
 
