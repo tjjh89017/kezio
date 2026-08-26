@@ -120,7 +120,6 @@ func (sc *SubnetDHCPCache) Start(ctx context.Context) error {
 		<-ctx.Done()
 		return nil
 	}
-	sc.synced.Store(true)
 
 	var subnet keziov1alpha3.Subnet
 	key := client.ObjectKey{Namespace: sc.SubnetNamespace, Name: sc.SubnetName}
@@ -133,6 +132,12 @@ func (sc *SubnetDHCPCache) Start(ctx context.Context) error {
 	default:
 		log.Error(err, "getting Subnet for initial DHCP reservation snapshot")
 	}
+
+	// Flip synced only after the initial snapshot push above, so that by
+	// the time an observer sees synced true, the initial push (if any) has
+	// already reached the sink - the informer's own onEvent stays gated on
+	// synced until this point, matching the fail-secure doc comment.
+	sc.synced.Store(true)
 
 	log.Info("Subnet DHCP cache ready")
 	<-ctx.Done()
