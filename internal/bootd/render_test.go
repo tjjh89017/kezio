@@ -20,6 +20,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testConfig() Config {
@@ -137,7 +138,7 @@ func TestRenderDnsmasqConf_LeaseModeAutoDerivesRange(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"dhcp-range=192.0.2.1,192.0.2.254\n",
+		"dhcp-range=192.0.2.1,192.0.2.254,30m\n",
 		"dhcp-boot=shimx64.efi,,192.0.2.2\n",
 		"dhcp-match=set:efi-x86_64,option:client-arch,7\n",
 		"dhcp-boot=tag:efi-x86_64,shimx64.efi,,192.0.2.2\n",
@@ -165,8 +166,56 @@ func TestRenderDnsmasqConf_LeaseModeExplicitRange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderDnsmasqConf: %v", err)
 	}
-	if !strings.Contains(conf, "dhcp-range=192.0.2.50,192.0.2.60\n") {
+	if !strings.Contains(conf, "dhcp-range=192.0.2.50,192.0.2.60,30m\n") {
 		t.Errorf("lease-mode config does not honor the explicit range:\n%s", conf)
+	}
+}
+
+// TestRenderDnsmasqConf_LeaseTime pins the lease time rendered into
+// dhcp-range: unset defaults to 30 minutes, and dnsmasq's accepted
+// forms (hours, minutes, seconds) each render correctly.
+func TestRenderDnsmasqConf_LeaseTime(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		d    time.Duration
+		want string
+	}{
+		{"unset defaults to 30m", 0, "30m"},
+		{"whole hours", 2 * time.Hour, "2h"},
+		{"whole minutes", 45 * time.Minute, "45m"},
+		{"seconds fallback", 90 * time.Second, "90"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.LeaseMode = true
+			cfg.LeaseTime = tc.d
+			conf, err := RenderDnsmasqConf(cfg, "/run/bootd")
+			if err != nil {
+				t.Fatalf("RenderDnsmasqConf: %v", err)
+			}
+			want := "dhcp-range=192.0.2.1,192.0.2.254," + tc.want + "\n"
+			if !strings.Contains(conf, want) {
+				t.Errorf("rendered config missing %q:\n%s", want, conf)
+			}
+		})
+	}
+}
+
+// TestRenderDnsmasqConf_LeaseFilePathOverride proves Config.LeaseFilePath
+// replaces the default runDir/dnsmasq.leases path - the persistent lease
+// PVC mount lease mode uses.
+func TestRenderDnsmasqConf_LeaseFilePathOverride(t *testing.T) {
+	cfg := testConfig()
+	cfg.LeaseFilePath = "/var/lib/bootd-leases/dnsmasq.leases"
+	conf, err := RenderDnsmasqConf(cfg, "/run/bootd")
+	if err != nil {
+		t.Fatalf("RenderDnsmasqConf: %v", err)
+	}
+	if !strings.Contains(conf, "dhcp-leasefile=/var/lib/bootd-leases/dnsmasq.leases\n") {
+		t.Errorf("rendered config does not honor LeaseFilePath:\n%s", conf)
+	}
+	if strings.Contains(conf, "dhcp-leasefile=/run/bootd/dnsmasq.leases\n") {
+		t.Errorf("rendered config still points at the default leasefile path:\n%s", conf)
 	}
 }
 

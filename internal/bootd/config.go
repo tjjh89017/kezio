@@ -16,7 +16,10 @@ limitations under the License.
 
 package bootd
 
-import "net"
+import (
+	"net"
+	"time"
+)
 
 // httpScheme is the URL scheme checked against wherever this package
 // validates a firmware- or GRUB-facing URL (render.go, grubpath.go,
@@ -122,13 +125,32 @@ type Config struct {
 	// only one of the two is an error. Ignored unless LeaseMode is set.
 	LeaseRangeStart net.IP
 	LeaseRangeEnd   net.IP
+
+	// LeaseTime is the DHCP lease duration rendered into LeaseMode's
+	// dhcp-range. Zero means DefaultLeaseTime. Ignored unless LeaseMode is
+	// set.
+	LeaseTime time.Duration
+
+	// LeaseFilePath overrides where dnsmasq's dhcp-leasefile lives. Empty
+	// means runDir/dnsmasq.leases, the argument RenderDnsmasqConf already
+	// takes - set this to point the leasefile at a separate, persistent
+	// mount (see Dnsmasq.LeaseDir) while the rest of bootd's writable
+	// state (config, dhcp-hostsfile) stays on the ephemeral run directory.
+	LeaseFilePath string
 }
+
+// DefaultLeaseTime is the DHCP lease duration LeaseMode renders when
+// Config.LeaseTime is left zero.
+const DefaultLeaseTime = 30 * time.Minute
 
 // withDefaults returns a copy of c with every zero-valued optional
 // field filled in.
 func (c Config) withDefaults() Config {
 	if c.BootFilename == "" {
 		c.BootFilename = DefaultBootFilename
+	}
+	if c.LeaseTime == 0 {
+		c.LeaseTime = DefaultLeaseTime
 	}
 	// NextServerIP deliberately has no default here: RenderDnsmasqConf
 	// falls back to ServerIP, keeping "explicitly overridden" and

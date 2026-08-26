@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 )
 
 // kezioTag is the dnsmasq tag the MAC gate pivots on: the hostsfile
@@ -167,9 +168,13 @@ func RenderDnsmasqConf(cfg Config, runDir string) (string, error) {
 		b.WriteString("bind-interfaces\n")
 		fmt.Fprintf(&b, "interface=%s\n", cfg.Interface)
 	}
-	fmt.Fprintf(&b, "dhcp-leasefile=%s\n", filepath.Join(runDir, leasefileName))
+	leaseFilePath := cfg.LeaseFilePath
+	if leaseFilePath == "" {
+		leaseFilePath = filepath.Join(runDir, leasefileName)
+	}
+	fmt.Fprintf(&b, "dhcp-leasefile=%s\n", leaseFilePath)
 	if cfg.LeaseMode {
-		fmt.Fprintf(&b, "dhcp-range=%s,%s\n", leaseStart, leaseEnd)
+		fmt.Fprintf(&b, "dhcp-range=%s,%s,%s\n", leaseStart, leaseEnd, formatDNSMasqDuration(cfg.LeaseTime))
 	} else {
 		fmt.Fprintf(&b, "dhcp-range=%s,proxy,%s\n", network, mask)
 	}
@@ -309,6 +314,22 @@ func leaseRange(cfg Config, network, mask net.IP) (start, end net.IP, err error)
 	start = intToIPv4(n + 1)
 	end = intToIPv4((n | ^m) - 1)
 	return start, end, nil
+}
+
+// formatDNSMasqDuration renders d in one of the forms dnsmasq's
+// dhcp-range lease time accepts: whole hours as "Nh", else whole minutes
+// as "Nm", else plain seconds - dnsmasq has no sub-second lease
+// resolution, so a duration with any remaining fraction still renders
+// exactly via seconds.
+func formatDNSMasqDuration(d time.Duration) string {
+	switch {
+	case d%time.Hour == 0:
+		return fmt.Sprintf("%dh", d/time.Hour)
+	case d%time.Minute == 0:
+		return fmt.Sprintf("%dm", d/time.Minute)
+	default:
+		return fmt.Sprintf("%d", int64(d.Seconds()))
+	}
 }
 
 // intToIPv4 renders a big-endian uint32 host address as a 4-byte
