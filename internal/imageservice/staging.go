@@ -70,6 +70,11 @@ var ErrChecksumMismatch = errors.New("checksum mismatch")
 // retry.
 var ErrNameConflict = errors.New("upload name already in use with different content")
 
+// ErrUploadNotComplete reports that name has no completed upload: either
+// no upload directory exists for it, or one exists but is still in
+// progress (no completion marker yet).
+var ErrUploadNotComplete = errors.New("upload has not completed")
+
 // Staging manages the on-disk layout of the staging area:
 //
 //	<root>/
@@ -157,6 +162,27 @@ func (s *Staging) uploadDir(name string) (string, error) {
 // named name. This is the value an Image's spec.source.url is set to.
 func UploadedRef(name string) string {
 	return StagedURLScheme + "://" + name
+}
+
+// StatUpload returns the size of a completed upload named name, after
+// validating name and confirming the upload actually completed (its meta
+// file is present). This is what backs the HEAD /uploads/{name} endpoint
+// a caller that does not mount the staging volume (the ImageImport
+// controller, sizing the ingest scratch PVC) uses to learn a staged
+// source's size without downloading it.
+func (s *Staging) StatUpload(name string) (sizeBytes int64, err error) {
+	dir, err := s.uploadDir(name)
+	if err != nil {
+		return 0, err
+	}
+	meta, err := readMeta(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, fmt.Errorf("%w: %q", ErrUploadNotComplete, name)
+		}
+		return 0, fmt.Errorf("check upload %q: %w", name, err)
+	}
+	return meta.SizeBytes, nil
 }
 
 // ResolveUpload returns the local path of a completed upload named name,

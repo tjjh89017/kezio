@@ -357,3 +357,56 @@ func TestHandleHealthz_Unauthenticated(t *testing.T) {
 		t.Fatalf("got status %d, want %d", rec.Code, http.StatusOK)
 	}
 }
+
+// HEAD /uploads/{name} reports a completed upload's size as Content-Length
+// with no body - what the ImageImport controller uses to size the ingest
+// scratch PVC from a staged source without downloading it.
+func TestHandleUploadStat(t *testing.T) {
+	srv, _ := newTestServer(t, 1<<20)
+	h := srv.Handler()
+
+	body := []byte("payload-of-some-length")
+	putRec := putUpload(t, h, "golden", body, authHeader())
+	if putRec.Code != http.StatusCreated {
+		t.Fatalf("upload: got status %d, want %d, body %s", putRec.Code, http.StatusCreated, putRec.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodHead, "/uploads/golden", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got status %d, want %d", rec.Code, http.StatusOK)
+	}
+	if got := rec.Header().Get("Content-Length"); got != "22" {
+		t.Errorf("Content-Length = %q, want %q", got, "22")
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("body length = %d, want 0", rec.Body.Len())
+	}
+}
+
+func TestHandleUploadStat_NotFound(t *testing.T) {
+	srv, _ := newTestServer(t, 1<<20)
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodHead, "/uploads/missing", nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("got status %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandleUploadStat_AuthReject(t *testing.T) {
+	srv, _ := newTestServer(t, 1<<20)
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodHead, "/uploads/golden", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("got status %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}

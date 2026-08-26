@@ -103,6 +103,14 @@ func ingestScratchPVCName(importName string) string {
 // collection reclaims it once the ImageImport itself is deleted - nothing
 // else cleans it up once ingest finishes (see buildIngestJob's doc
 // comment for why it must outlive the ingest Job's own pod).
+//
+// The PVC's size is decided exactly once, when it is created. An existing
+// PVC is returned untouched, whatever size it already carries: resizing a
+// PVC that ingest may already be writing to is out of scope here, and a
+// storage request can only grow anyway, so a reconcile that runs after a
+// spec change (spec is immutable, so the only real cause is the manager's
+// own IMAGE_INGEST_SCRATCH_SIZE_BYTES default changing) must not attempt
+// it either.
 func (r *ImageImportReconciler) ensureIngestScratchPVC(ctx context.Context, imp *keziov1alpha3.ImageImport) (*corev1.PersistentVolumeClaim, error) {
 	name := ingestScratchPVCName(imp.Name)
 	key := client.ObjectKey{Namespace: imp.Namespace, Name: name}
@@ -114,7 +122,8 @@ func (r *ImageImportReconciler) ensureIngestScratchPVC(ctx context.Context, imp 
 		return nil, fmt.Errorf("imageimport %q: getting ingest scratch PVC %q: %w", imp.Name, name, err)
 	}
 
-	pvc := r.buildIngestScratchPVC(imp, name)
+	sizeBytes := r.ingestScratchSizeBytes(ctx, imp)
+	pvc := r.buildIngestScratchPVC(imp, name, sizeBytes)
 	if err := controllerutil.SetControllerReference(imp, pvc, r.Scheme); err != nil {
 		return nil, fmt.Errorf("imageimport %q: setting ingest scratch PVC %q owner reference: %w", imp.Name, name, err)
 	}
@@ -124,9 +133,29 @@ func (r *ImageImportReconciler) ensureIngestScratchPVC(ctx context.Context, imp 
 	return pvc, nil
 }
 
+// ingestScratchSizeBytes decides how large a new ingest scratch PVC for
+// imp should be requested. imp.Spec.ScratchSize, when set, wins outright
+// - no source size discovery runs, and the floor does not apply. Otherwise
+// it tries to discover imp.Spec.Source.URL's size and feeds it through
+// computeIngestScratchSizeBytes; an undiscoverable size falls back to the
+// floor alone and is reported as a ScratchSizeUnknown Event; r.Recorder
+// may be nil in tests that never reach an undiscoverable source.
+func (r *ImageImportReconciler) ingestScratchSizeBytes(ctx context.Context, imp *keziov1alpha3.ImageImport) int64 {
+	if imp.Spec.ScratchSize != nil {
+		return imp.Spec.ScratchSize.Value()
+	}
+
+	floor := r.Ingest.scratchSizeBytes()
+	sourceSize, known := discoverSourceSizeBytes(ctx, r.Ingest, imp.Spec.Source.URL)
+	if !known && r.Recorder != nil {
+		r.Recorder.Event(imp, corev1.EventTypeWarning, scratchSizeUnknownEventReason, scratchSizeUnknownEventMessage(imp.Spec.Source.URL))
+	}
+	return computeIngestScratchSizeBytes(floor, sourceSize, known)
+}
+
 // buildIngestScratchPVC constructs the (not yet created) PVC backing an
-// import's ingest scratch space.
-func (r *ImageImportReconciler) buildIngestScratchPVC(imp *keziov1alpha3.ImageImport, name string) *corev1.PersistentVolumeClaim {
+// import's ingest scratch space, requesting sizeBytes.
+func (r *ImageImportReconciler) buildIngestScratchPVC(imp *keziov1alpha3.ImageImport, name string, sizeBytes int64) *corev1.PersistentVolumeClaim {
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -140,7 +169,7 @@ func (r *ImageImportReconciler) buildIngestScratchPVC(imp *keziov1alpha3.ImageIm
 			AccessModes: r.Ingest.scratchAccessModes(),
 			Resources: corev1.VolumeResourceRequirements{
 				Requests: corev1.ResourceList{
-					corev1.ResourceStorage: *resource.NewQuantity(r.Ingest.scratchSizeBytes(), resource.BinarySI),
+					corev1.ResourceStorage: *resource.NewQuantity(sizeBytes, resource.BinarySI),
 				},
 			},
 		},

@@ -26,11 +26,9 @@ import (
 const defaultIngestSourceFormat = "qcow2"
 
 // defaultIngestScratchSizeBytes is ImageIngestConfig.ScratchSizeBytes'
-// default (16Gi): the controller cannot know a source image's inflated
-// (converted-to-raw) size ahead of running ingest, so the scratch PVC is
-// sized to a fixed, generous request rather than one derived per import -
-// mirrors legacy's ingest scratch volume being sized for "several GiB
-// once converted to raw".
+// default (16Gi): the floor computeIngestScratchSizeBytes never sizes an
+// ingest scratch PVC below, whether or not the source image's size could
+// be discovered ahead of running ingest.
 const defaultIngestScratchSizeBytes = 16 * 1024 * 1024 * 1024
 
 // defaultIngestScratchAccessModes is ImageIngestConfig.ScratchAccessModes'
@@ -59,7 +57,9 @@ type ImageIngestConfig struct {
 	// cluster default applies. Read from
 	// IMAGE_INGEST_SCRATCH_STORAGE_CLASS.
 	ScratchStorageClassName string
-	// ScratchSizeBytes sizes the ingest scratch PVC. Read from
+	// ScratchSizeBytes is the floor computeIngestScratchSizeBytes never
+	// sizes the ingest scratch PVC below - the discovered source size can
+	// only push the request up from here, never down. Read from
 	// IMAGE_INGEST_SCRATCH_SIZE_BYTES; defaults to
 	// defaultIngestScratchSizeBytes when unset or not a positive integer.
 	ScratchSizeBytes int64
@@ -80,6 +80,17 @@ type ImageIngestConfig struct {
 	// source ingests fine with no staging PVC configured. Read from
 	// IMAGE_INGEST_STAGING_PVC.
 	StagingPVCName string
+	// ImageServiceURL is the base URL of the image-service instance
+	// fronting StagingPVCName's staging volume (see cmd/image-service).
+	// Sizing a kezio-staged:// import's scratch PVC calls its HEAD
+	// /uploads/{name} endpoint; empty leaves that source's size
+	// undiscoverable, and computeIngestScratchSizeBytes falls back to the
+	// floor. Read from IMAGE_INGEST_IMAGE_SERVICE_URL.
+	ImageServiceURL string
+	// ImageServiceToken authenticates the ImageServiceURL call above
+	// (imageservice.Authenticator's bearer token). Read from
+	// IMAGE_INGEST_IMAGE_SERVICE_TOKEN.
+	ImageServiceToken string
 }
 
 // ready reports whether cfg carries enough configuration to dispatch an

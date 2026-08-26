@@ -185,6 +185,7 @@ the spec describes them.
 | `spec.bootable` | Copied onto `Image.spec.bootable`. Default true. |
 | `spec.params` | Copied onto `Image.spec.params`. |
 | `spec.postHookRefs` | Copied onto `Image.spec.postHookRefs`. |
+| `spec.scratchSize` | Overrides the size of the ingest scratch volume. Left unset, the manager sizes it from the source image, with a floor for a source it cannot size. |
 | `status.state` | `Pending`, `Ingesting`, `Ready`, or `Failed`. |
 | `status.imageRef` | The `Image` this import created. |
 | `status.contentRefs` | Every `PartitionContent` this import created, in partition order. |

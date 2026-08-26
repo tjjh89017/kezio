@@ -21,6 +21,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 )
 
 // ChecksumHeader is the request header a client sets to assert the
@@ -72,6 +73,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("PUT /uploads/{name}", requireAuth(s.auth, s.handleUpload))
+	mux.HandleFunc("HEAD /uploads/{name}", requireAuth(s.auth, s.handleUploadStat))
 	return mux
 }
 
@@ -141,6 +143,31 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		Checksum:   result.Checksum,
 		Idempotent: result.Idempotent,
 	})
+}
+
+// handleUploadStat implements HEAD /uploads/{name}: report a completed
+// upload's size as Content-Length with no body, so a caller can learn a
+// staged source's size without downloading it (see Staging.StatUpload).
+// It responds 404 for a name that does not exist or has not finished
+// uploading - the same "not a usable staged reference yet" outcome either
+// way.
+func (s *Server) handleUploadStat(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	size, err := s.staging.StatUpload(name)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidName):
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		case errors.Is(err, ErrUploadNotComplete):
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			s.logger.Error("stat upload failed", "name", name, "remote", r.RemoteAddr, "err", err)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		return
+	}
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.WriteHeader(http.StatusOK)
 }
 
 // writeUploadError maps a Staging.Receive error to a response status. It

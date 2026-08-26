@@ -26,6 +26,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -64,6 +65,10 @@ const imageImportAnnotation = "kezio.kojuro.date/image-import"
 type ImageImportReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// Recorder emits Kubernetes Events on ImageImport, notably when the
+	// ingest scratch PVC could not be sized from its source and fell back
+	// to the configured floor (see discoverSourceSizeBytes). Required.
+	Recorder record.EventRecorder
 	// Ingest configures the ingest Job. The zero value holds every import
 	// at Pending with a condition explaining why - see ImageIngestConfig's
 	// doc comment.

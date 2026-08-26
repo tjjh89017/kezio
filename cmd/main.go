@@ -280,9 +280,10 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.ImageImportReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Ingest: imageIngestConfigFromEnv(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("imageimport-controller"),
+		Ingest:   imageIngestConfigFromEnv(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ImageImport")
 		os.Exit(1)
@@ -483,6 +484,8 @@ func imageIngestConfigFromEnv() controller.ImageIngestConfig {
 		ServiceAccountName:      os.Getenv("IMAGE_INGEST_SERVICE_ACCOUNT"),
 		ScratchStorageClassName: os.Getenv("IMAGE_INGEST_SCRATCH_STORAGE_CLASS"),
 		StagingPVCName:          os.Getenv("IMAGE_INGEST_STAGING_PVC"),
+		ImageServiceURL:         os.Getenv("IMAGE_INGEST_IMAGE_SERVICE_URL"),
+		ImageServiceToken:       os.Getenv("IMAGE_INGEST_IMAGE_SERVICE_TOKEN"),
 	}
 	if v := os.Getenv("IMAGE_INGEST_SCRATCH_SIZE_BYTES"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)

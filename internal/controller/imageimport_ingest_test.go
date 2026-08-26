@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -26,8 +28,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
@@ -442,5 +446,108 @@ var _ = Describe("ImageImport Controller", func() {
 		Expect(got.Status.State).To(Equal(keziov1alpha3.ImageImportStateFailed))
 		readyCond := meta.FindStatusCondition(got.Status.Conditions, keziov1alpha3.ImageImportConditionReady)
 		Expect(readyCond.Message).To(ContainSubstring("partition table dump"))
+	})
+
+	Describe("ingest scratch PVC sizing", func() {
+		// scratchPVCSizeBytes returns imp's ingest scratch PVC's requested
+		// storage size in bytes, after a reconcile has created it.
+		scratchPVCSizeBytes := func(imp *keziov1alpha3.ImageImport) int64 {
+			var pvc corev1.PersistentVolumeClaim
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ingestScratchPVCName(imp.Name), Namespace: imp.Namespace}, &pvc)).To(Succeed())
+			q := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+			return q.Value()
+		}
+
+		It("sizes the scratch PVC from a discoverable http(s) source size", func() {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				w.Header().Set("Content-Length", "21474836480") // 20Gi
+				w.WriteHeader(http.StatusOK)
+			}))
+			DeferCleanup(srv.Close)
+
+			imp := newTestImageImport("import-scratch-http-size", srv.URL+"/disk.img", 20)
+			nn := createImport(imp)
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			want := computeIngestScratchSizeBytes(defaultIngestScratchSizeBytes, 20*gibiByte, true)
+			Expect(scratchPVCSizeBytes(imp)).To(Equal(want))
+			Expect(want).To(BeNumerically(">", int64(defaultIngestScratchSizeBytes)), "20Gi source should scale the scratch PVC past the 16Gi floor")
+		})
+
+		It("sizes the scratch PVC from a staged source size via image-service", func() {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				Expect(req.Method).To(Equal(http.MethodHead))
+				Expect(req.URL.Path).To(Equal("/uploads/golden-scratch"))
+				Expect(req.Header.Get("Authorization")).To(Equal("Bearer test-token"))
+				w.Header().Set("Content-Length", "21474836480") // 20Gi
+				w.WriteHeader(http.StatusOK)
+			}))
+			DeferCleanup(srv.Close)
+
+			imp := newTestImageImport("import-scratch-staged-size", "kezio-staged://golden-scratch", 21)
+			nn := createImport(imp)
+
+			r.Ingest.StagingPVCName = "imageservice-staging"
+			r.Ingest.ImageServiceURL = srv.URL
+			r.Ingest.ImageServiceToken = "test-token"
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			want := computeIngestScratchSizeBytes(defaultIngestScratchSizeBytes, 20*gibiByte, true)
+			Expect(scratchPVCSizeBytes(imp)).To(Equal(want))
+		})
+
+		It("falls back to the floor and records an Event when the source size cannot be discovered", func() {
+			imp := newTestImageImport("import-scratch-unknown-size", "https://example.test/disk.img", 22)
+			nn := createImport(imp)
+
+			recorder := record.NewFakeRecorder(1)
+			r.Recorder = recorder
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(scratchPVCSizeBytes(imp)).To(Equal(int64(defaultIngestScratchSizeBytes)))
+			Eventually(recorder.Events).Should(Receive(ContainSubstring("ScratchSizeUnknown")))
+		})
+
+		It("honors spec.scratchSize over the computed size", func() {
+			imp := newTestImageImport("import-scratch-override", "https://example.test/disk.img", 23)
+			override := resource.MustParse("5Gi")
+			imp.Spec.ScratchSize = &override
+			nn := createImport(imp)
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(scratchPVCSizeBytes(imp)).To(Equal(override.Value()))
+		})
+
+		It("leaves an already-existing scratch PVC's size untouched", func() {
+			imp := newTestImageImport("import-scratch-existing", "https://example.test/disk.img", 24)
+			nn := createImport(imp)
+
+			existing := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      ingestScratchPVCName(imp.Name),
+					Namespace: imp.Namespace,
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, existing)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, existing) })
+
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			oneGi := resource.MustParse("1Gi")
+			Expect(scratchPVCSizeBytes(imp)).To(Equal(oneGi.Value()))
+		})
 	})
 })
