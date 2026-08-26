@@ -70,6 +70,24 @@ spec:
             valueFrom:
               fieldRef:
                 fieldPath: metadata.namespace
+          # image-service's in-cluster Service address (see
+          # config/image-service), for the ImageImport controller to
+          # discover a kezio-staged:// source's size ahead of sizing the
+          # ingest scratch PVC (see internal/controller's
+          # discoverSourceSizeBytes). The token comes from the same
+          # Secret image-service itself reads its bearer token from
+          # (config/image-service/deployment.yaml); optional, so the
+          # manager still starts in a cluster with no image-service
+          # deployed - a source whose size cannot be discovered this way
+          # just falls back to the configured floor.
+          - name: IMAGE_INGEST_IMAGE_SERVICE_URL
+            value: http://kezio-image-service.kezio-system.svc.cluster.local:8080
+          - name: IMAGE_INGEST_IMAGE_SERVICE_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: kezio-image-service-token
+                key: token
+                optional: true
         ports: []
         securityContext:
           allowPrivilegeEscalation: false

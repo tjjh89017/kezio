@@ -655,6 +655,14 @@ ReadWriteMany. The `nfs` StorageClass from section 3.3 satisfies both.
 To change the size, overlay the PVC. Do not change
 `config/image-service` itself.
 
+`config/manager/manager.yaml` already points the manager at this
+Service (`IMAGE_INGEST_IMAGE_SERVICE_URL`) and at this Secret's
+`token` key (`IMAGE_INGEST_IMAGE_SERVICE_TOKEN`), so it can size a
+`kezio-staged://` import's scratch volume from the real upload size.
+Since section 5.2 rolled the manager out before this Secret existed,
+restart it now so the token actually reaches the running container:
+`kubectl -n kezio-system rollout restart deployment/kezio-controller-manager`.
+
 There is no separate kustomization for ingest and no separate
 kustomization for the seeder. The ingest Job, the publish Job and the
 seeder Deployment are all built by controllers, from the images that
