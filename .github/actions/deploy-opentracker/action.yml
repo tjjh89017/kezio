@@ -35,8 +35,8 @@ inputs:
       same namespace. Empty leaves opentracker cluster-internal only.
       Required whenever real machines announce to it: a peer connects to
       the address the tracker hands back, so the tracker must live on the
-      segment those peers are on (docs/physical-lab-deployment.md's
-      no-NAT rule).
+      segment those peers are on (docs/network-model.md's no-NAT
+      rule).
     required: false
     default: ""
   timeout:

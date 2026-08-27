@@ -2,9 +2,8 @@
 
 kezio models an operator's network as two objects: `Site`
 (`api/v1alpha3/site_types.go`) and `Subnet`
-(`api/v1alpha3/subnet_types.go`). Read this document before
-`docs/physical-lab-deployment.md`: every prerequisite in that guide is a
-consequence of the model here.
+(`api/v1alpha3/subnet_types.go`). Every network prerequisite in
+`docs/quick-start.md` is a consequence of the model here.
 
 ## A Site is a maximal routable domain
 
@@ -189,9 +188,9 @@ tracker, and reports OK for a Site that runs one Image.
 
 A seeder network attachment sized for more than one concurrent Image
 needs a range-based IPAM plugin, not static addressing. kezio's own e2e
-lanes and lab guide make that choice with `host-local` and a narrowed
+lanes and quick start make that choice with `host-local` and a narrowed
 range (`.github/actions/create-provisioning-nads`,
-`docs/lab-proxmox-rke2.md`). `whereabouts` is the other supported
+`docs/quick-start.md`). `whereabouts` is the other supported
 choice, and it carries one condition. Deploying
 `whereabouts` without also deploying its `ip-reconciler` CronJob is not a
 supported configuration: `ip-reconciler` reclaims addresses whose pod
@@ -228,7 +227,6 @@ it simply never assumes it.
 
 ## See also
 
-- `docs/physical-lab-deployment.md` - the full operational setup,
-  including the single-subnet and routed multi-subnet cases.
-- `docs/lab-proxmox-rke2.md` - a worked walkthrough that makes one
-  concrete choice at every point this document gives options for.
+- `docs/quick-start.md` - the single-subnet bring-up, one checked step
+  at a time.
+- `docs/crd-reference.md` - every `Site` and `Subnet` field.
