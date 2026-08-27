@@ -44,7 +44,7 @@ jobs:
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             echo "Release $GITHUB_REF_NAME already exists, leaving it as-is."
           else
-            gh release create "$GITHUB_REF_NAME" --verify-tag --draft --generate-notes --title "kezio $GITHUB_REF_NAME"
+            gh release create "$GITHUB_REF_NAME" --verify-tag --draft --generate-notes --title "$GITHUB_REF_NAME"
           fi
 
   # Matrix and steps mirror main.yaml's images job: same composite action
