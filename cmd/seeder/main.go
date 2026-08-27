@@ -77,7 +77,7 @@ func main() {
 
 	idx := newTorrentIndex()
 	httpAddr := envOr("HTTP_ADDR", defaultHTTPAddr)
-	httpSrv := &http.Server{Addr: httpAddr, Handler: torrentMux(idx)}
+	httpSrv := &http.Server{Addr: httpAddr, Handler: torrentMux(idx, cfg.Interface)}
 	go func() {
 		log.Printf("serving .torrent files on %s", httpAddr)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -117,6 +117,7 @@ type config struct {
 	ContentRoot    string
 	EzioTarget     string
 	TrackerURL     string
+	Interface      string
 	Interval       time.Duration
 	MaxUploads     int32
 	MaxConnections int32
@@ -127,6 +128,7 @@ func configFromEnv() (config, error) {
 		ContentRoot:    envOr("CONTENT_ROOT", ingest.ContentMountRoot),
 		EzioTarget:     envOr("EZIO_TARGET", defaultEzioTarget),
 		TrackerURL:     os.Getenv("TRACKER_URL"),
+		Interface:      envOr("SEEDER_INTERFACE", defaultSeederInterface),
 		Interval:       defaultInterval,
 		MaxUploads:     seeder.DefaultMaxUploads,
 		MaxConnections: seeder.DefaultSeederMaxConnections,
@@ -345,9 +347,19 @@ const torrentsPathPrefix = "/torrents/"
 // built and holds in memory, keyed by an exact map lookup on the hash
 // the request names - the same bytes reconcile registered with ezio for
 // that hash.
-func torrentMux(idx *torrentIndex) http.Handler {
+//
+// The seeder Deployment's readiness probe hits
+// seederdeploy.TorrentHealthzPath on this same server, so ifaceName's
+// own IPv4 check (interfaceHasIPv4) gates it directly: a seeder pod
+// whose Multus attachment silently failed must not report Ready with no
+// address any leecher on the seeding Subnet can reach.
+func torrentMux(idx *torrentIndex, ifaceName string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(seederdeploy.TorrentHealthzPath, func(w http.ResponseWriter, r *http.Request) {
+		if err := interfaceHasIPv4(ifaceName, nil); err != nil {
+			http.Error(w, fmt.Sprintf("not ready: %v", err), http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc(torrentsPathPrefix, func(w http.ResponseWriter, r *http.Request) {

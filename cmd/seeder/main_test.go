@@ -571,7 +571,9 @@ func TestTorrentMux_ServesRegisteredHashAndHealthzAnd404sUnknown(t *testing.T) {
 	idx := newTorrentIndex()
 	idx.set([]contentEntry{{dir: t.TempDir(), hash: "deadbeef", torrentBytes: []byte(body)}})
 
-	srv := httptest.NewServer(torrentMux(idx))
+	// "lo" always carries an IPv4 address in a test sandbox, so healthz
+	// stays 200 here; netready_test.go covers the failing case.
+	srv := httptest.NewServer(torrentMux(idx, "lo"))
 	defer srv.Close()
 
 	t.Run("registered hash serves the exact .torrent bytes", func(t *testing.T) {
@@ -603,7 +605,7 @@ func TestTorrentMux_ServesRegisteredHashAndHealthzAnd404sUnknown(t *testing.T) {
 		}
 	})
 
-	t.Run("healthz reports 200 independent of registration", func(t *testing.T) {
+	t.Run("healthz reports 200 independent of registration, once the interface has an address", func(t *testing.T) {
 		resp, err := http.Get(srv.URL + seederdeploy.TorrentHealthzPath)
 		if err != nil {
 			t.Fatalf("GET: %v", err)
