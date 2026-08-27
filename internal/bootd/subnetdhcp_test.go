@@ -86,7 +86,7 @@ func newSubnetDHCPTestScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
-func startSubnetDHCPCache(t *testing.T, subnet *keziov1alpha3.Subnet) (*SubnetDHCPCache, *reservationSinkRecorder, client.Client) {
+func startSubnetDHCPCache(t *testing.T, subnet *keziov1alpha3.Subnet, configure ...func(*SubnetDHCPCache)) (*SubnetDHCPCache, *reservationSinkRecorder, client.Client) {
 	t.Helper()
 	scheme := newSubnetDHCPTestScheme(t)
 	fakeInformers := &informertest.FakeInformers{Scheme: scheme}
@@ -102,6 +102,9 @@ func startSubnetDHCPCache(t *testing.T, subnet *keziov1alpha3.Subnet) (*SubnetDH
 	if err != nil {
 		cancel()
 		t.Fatalf("NewSubnetDHCPCache: %v", err)
+	}
+	for _, fn := range configure {
+		fn(sc)
 	}
 
 	fakeInformer, err := fakeInformers.FakeInformerFor(ctx, &keziov1alpha3.Subnet{})
@@ -235,5 +238,53 @@ func TestSubnetDHCPCache_MarkAppliedDropsStaleRevision(t *testing.T) {
 	}
 	if got.Status.DHCP.AppliedRevision != "" {
 		t.Errorf("AppliedRevision = %q, want unset (stale revision must be dropped)", got.Status.DHCP.AppliedRevision)
+	}
+}
+
+// TestSubnetDHCPCache_ResyncSelfHealsAMissedEvent proves the periodic
+// resync loop, not just onEvent, can pick up a revision - the backstop
+// for a bug in the informer/event path (like the one
+// TestDnsmasq_SetReservationsDoesNotHoldMuAcrossSubnetMember reproduces)
+// that would otherwise stall DHCP until the pod is recreated. The Subnet
+// here is updated directly on the fake client, never through sc.onEvent,
+// so only the resync ticker can be responsible for the second push.
+func TestSubnetDHCPCache_ResyncSelfHealsAMissedEvent(t *testing.T) {
+	subnet := testDHCPSubnet("rack-1", func(s *keziov1alpha3.Subnet) {
+		s.Status.DHCP = &keziov1alpha3.SubnetDHCPStatus{
+			Revision:     "rev-1",
+			Reservations: []keziov1alpha3.DHCPReservation{{Machine: "m1", MAC: "aa:bb:cc:dd:ee:01", Address: "192.0.2.10"}},
+		}
+	})
+	_, sink, c := startSubnetDHCPCache(t, subnet, func(sc *SubnetDHCPCache) {
+		sc.ResyncInterval = 10 * time.Millisecond
+	})
+
+	revision, _, ok := sink.last()
+	if !ok || revision != testDHCPRevision1 {
+		t.Fatalf("initial push = (%q, %v), want %q", revision, ok, testDHCPRevision1)
+	}
+
+	var current keziov1alpha3.Subnet
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(subnet), &current); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	current.Status.DHCP.Revision = "rev-2"
+	current.Status.DHCP.Reservations = []keziov1alpha3.DHCPReservation{
+		{Machine: "m1", MAC: "aa:bb:cc:dd:ee:01", Address: "192.0.2.11"},
+	}
+	if err := c.Status().Update(context.Background(), &current); err != nil {
+		t.Fatalf("Status().Update: %v", err)
+	}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if revision, _, _ := sink.last(); revision == "rev-2" {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("resync loop never picked up rev-2 without an onEvent call")
+		case <-time.After(time.Millisecond):
+		}
 	}
 }

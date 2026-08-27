@@ -74,6 +74,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 }
 
 const testDHCPRevision1 = "rev-1"
+const testDHCPRevision2 = "rev-2"
 
 const longRunningScript = `trap 'exit 0' TERM INT
 echo fake-dnsmasq-started
@@ -222,18 +223,76 @@ while :; do sleep 0.05; done
 	// separately reported applied - the hostsfile reflects it, so a
 	// waiting Machine must not be kept blocked on a revision that in
 	// fact took effect trivially.
-	d.SetReservations("rev-2", map[string]string{
+	d.SetReservations(testDHCPRevision2, map[string]string{
 		"aa:bb:cc:dd:ee:01": "192.0.2.10",
 		"aa:bb:cc:dd:ee:99": "192.0.2.11",
 	})
 	waitFor(t, "OnApplied called with rev-2", func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return len(applied) == 2 && applied[1] == "rev-2"
+		return len(applied) == 2 && applied[1] == testDHCPRevision2
 	})
 
 	cancel()
 	<-done
+}
+
+// TestDnsmasq_SetReservationsDoesNotHoldMuAcrossSubnetMember reproduces
+// the bootd DHCP stall from the lab: MACCache.onUpdate holds MACCache's
+// own mutex while it calls Dnsmasq.SetAllowedMACs (which needs d.mu), so
+// if SetReservations called SubnetMember (MACCache.HasLocalMember, which
+// takes that same MACCache mutex) while still holding d.mu, a Machine
+// informer event landing during that window deadlocks both goroutines
+// permanently - and since hostsfileLoop also needs d.mu on every tick,
+// the whole hostsfile pipeline wedges with no timeout and no error
+// logged, exactly as observed. This never exercises the real MACCache:
+// an external mutex standing in for it is enough to prove d.mu is free
+// while SubnetMember runs.
+func TestDnsmasq_SetReservationsDoesNotHoldMuAcrossSubnetMember(t *testing.T) {
+	d := &Dnsmasq{Config: Config{LeaseMode: true}}
+	d.SetAllowedMACs([]string{"aa:bb:cc:dd:ee:01"})
+	d.SetReservations(testDHCPRevision1, map[string]string{"aa:bb:cc:dd:ee:01": "192.0.2.10"})
+
+	var macCacheMu sync.Mutex
+	insideSubnetMember := make(chan struct{})
+	releaseSubnetMember := make(chan struct{})
+	d.SubnetMember = func(string) bool {
+		macCacheMu.Lock()
+		defer macCacheMu.Unlock()
+		close(insideSubnetMember)
+		<-releaseSubnetMember
+		return true
+	}
+
+	// Drops the only reservation, so SetReservations must consult
+	// SubnetMember for its MAC.
+	reservationsDone := make(chan struct{})
+	go func() {
+		d.SetReservations(testDHCPRevision2, map[string]string{})
+		close(reservationsDone)
+	}()
+	<-insideSubnetMember
+
+	// A concurrent SetAllowedMACs simulates MACCache.onUpdate holding
+	// macCacheMu (as the real HasLocalMember call above would) while it
+	// pushes to dnsmasq. It must complete without waiting for
+	// SubnetMember to return - proving SetReservations released d.mu
+	// before calling SubnetMember, not after.
+	allowedMACsDone := make(chan struct{})
+	go func() {
+		d.SetAllowedMACs([]string{"aa:bb:cc:dd:ee:01"})
+		close(allowedMACsDone)
+	}()
+
+	select {
+	case <-allowedMACsDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SetAllowedMACs blocked while SetReservations was inside SubnetMember: " +
+			"d.mu is held across the callback, which deadlocks against a real MACCache")
+	}
+
+	close(releaseSubnetMember)
+	<-reservationsDone
 }
 
 // TestDnsmasq_OnAppliedWaitsForDnsmasqReloadConfirmation proves OnApplied
@@ -340,7 +399,7 @@ while :; do sleep 0.05; done
 		return len(applied) == 1 && applied[0] == testDHCPRevision1
 	})
 
-	d.SetReservations("rev-2", map[string]string{"aa:bb:cc:dd:ee:01": "192.0.2.11"})
+	d.SetReservations(testDHCPRevision2, map[string]string{"aa:bb:cc:dd:ee:01": "192.0.2.11"})
 	waitFor(t, "hostsfile reflects rev-2", func() bool {
 		got, err := os.ReadFile(HostsfilePath(runDir))
 		return err == nil && strings.Contains(string(got), "192.0.2.11")
