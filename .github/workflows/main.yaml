@@ -1466,7 +1466,10 @@ jobs:
             IMAGE_INGEST_SOURCE_FORMAT=raw
             PARTITIONCONTENT_PUBLISH_IMAGE=example.com/kezio-ingest:e2e
             PARTITIONCONTENT_SEEDER_IMAGE=example.com/kezio-seeder:e2e
-            PARTITIONCONTENT_SEEDER_GRACE_PERIOD=30s
+            # 30m: v0.3.9 ends seed demand at Provisioned, so the grace
+            # countdown starts there - verify-deploy's real reboot (up to 600s
+            # per machine) must not outrun it before the seeder assertions below run.
+            PARTITIONCONTENT_SEEDER_GRACE_PERIOD=30m
             TRACKER_DEPLOYMENT_IMAGE=ghcr.io/tunisiano187/opentracker-docker:master
 
       # Two independently-addressed boot NADs, one per PXE segment.
@@ -2192,7 +2195,10 @@ jobs:
             IMAGE_INGEST_SOURCE_FORMAT=raw
             PARTITIONCONTENT_PUBLISH_IMAGE=example.com/kezio-ingest:e2e
             PARTITIONCONTENT_SEEDER_IMAGE=example.com/kezio-seeder:e2e
-            PARTITIONCONTENT_SEEDER_GRACE_PERIOD=30s
+            # 30m: v0.3.9 ends seed demand at Provisioned, so the grace
+            # countdown starts there - verify-deploy's real reboot (up to 600s
+            # per machine) must not outrun it before the seeder assertions below run.
+            PARTITIONCONTENT_SEEDER_GRACE_PERIOD=30m
             TRACKER_DEPLOYMENT_IMAGE=ghcr.io/tunisiano187/opentracker-docker:master
 
       # Per-Site NADs, not create-provisioning-nads: that action's names
@@ -3312,7 +3318,10 @@ jobs:
             IMAGE_INGEST_SOURCE_FORMAT=raw
             PARTITIONCONTENT_PUBLISH_IMAGE=example.com/kezio-ingest:e2e
             PARTITIONCONTENT_SEEDER_IMAGE=example.com/kezio-seeder:e2e
-            PARTITIONCONTENT_SEEDER_GRACE_PERIOD=30s
+            # 30m: v0.3.9 ends seed demand at Provisioned, so the grace
+            # countdown starts there - verify-deploy's real reboot (up to 600s
+            # per machine) must not outrun it before the seeder assertions below run.
+            PARTITIONCONTENT_SEEDER_GRACE_PERIOD=30m
             TRACKER_DEPLOYMENT_IMAGE=ghcr.io/tunisiano187/opentracker-docker:master
 
       # Segment T's boot NADs, inline rather than through
