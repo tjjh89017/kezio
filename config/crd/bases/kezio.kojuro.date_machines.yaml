@@ -370,6 +370,16 @@ spec:
               poweredOn:
                 description: PoweredOn reports the machine's last observed power state.
                 type: boolean
+              restartCount:
+                description: |-
+                  RestartCount counts consecutive errors with ErrorType Restart since
+                  the last success in the current state - a subset of ErrorCount,
+                  which also counts Transient errors. Once it reaches the controller's
+                  retry limit, the Machine holds for an operator instead of continuing
+                  to retry (see MachineConditionRetryHeld). Reset at the same points as
+                  ErrorCount, and by the clear-error annotation.
+                format: int32
+                type: integer
               state:
                 description: |-
                   State is the machine's position in the state machine.

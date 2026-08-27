@@ -292,6 +292,15 @@ const (
 	// MachineAnnotationReInspect - a stale copy left on the object must
 	// never silently wave through a future, unrelated status loss.
 	MachineAnnotationConfirmStatusLoss = "kezio.kojuro.date/confirm-status-loss"
+	// MachineAnnotationClearError, present with any value, releases the
+	// retry hold (MachineConditionRetryHeld) and clears the current error:
+	// an operator has addressed whatever kept restarting and wants the
+	// state walk to retry now. Consume-then-delete, like
+	// MachineAnnotationReInspect. It is honored whether or not the Machine
+	// is actually held - it always clears operationalStatus/errorType/
+	// errorMessage and both error counters, so it also doubles as a manual
+	// "clear this error and retry immediately" outside the hold.
+	MachineAnnotationClearError = "kezio.kojuro.date/clear-error"
 )
 
 // MachineRebootMode is the JSON "mode" value inside a reboot annotation.
@@ -413,6 +422,12 @@ const (
 	// a deployed workload. Cleared once MachineAnnotationConfirmStatusLoss
 	// is observed.
 	MachineConditionStatusLossHold = "StatusLossHold"
+	// MachineConditionRetryHeld is True while the controller has stopped
+	// retrying a Machine stuck failing the same restart-classified error
+	// (status.restartCount reached the controller's retry limit) in its
+	// current state, instead of continuing to re-arm and power-cycle it
+	// forever. Cleared once MachineAnnotationClearError is observed.
+	MachineConditionRetryHeld = "RetryHeld"
 )
 
 // MachineCredentialsStatus records one BMC Secret observation: the Secret
@@ -488,6 +503,14 @@ type MachineStatus struct {
 	// current state. The controller uses it to compute backoff.
 	// +optional
 	ErrorCount int32 `json:"errorCount,omitempty"`
+	// RestartCount counts consecutive errors with ErrorType Restart since
+	// the last success in the current state - a subset of ErrorCount,
+	// which also counts Transient errors. Once it reaches the controller's
+	// retry limit, the Machine holds for an operator instead of continuing
+	// to retry (see MachineConditionRetryHeld). Reset at the same points as
+	// ErrorCount, and by the clear-error annotation.
+	// +optional
+	RestartCount int32 `json:"restartCount,omitempty"`
 	// ErrorMessage describes the most recent error, when OperationalStatus
 	// is "error".
 	// +optional

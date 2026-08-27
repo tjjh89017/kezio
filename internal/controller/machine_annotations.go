@@ -48,6 +48,13 @@ func reInspectRequested(machine *keziov1alpha3.Machine) bool {
 	return ok
 }
 
+// clearErrorRequested reports whether machine carries the clear-error
+// annotation, mirroring reInspectRequested.
+func clearErrorRequested(machine *keziov1alpha3.Machine) bool {
+	_, ok := machine.Annotations[keziov1alpha3.MachineAnnotationClearError]
+	return ok
+}
+
 // inspectDisabled reports whether machine carries the inspect-disable
 // annotation with exactly the value the webhook requires ("true"). A stale
 // or malformed value never reaches here on a webhook-admitted Machine, but

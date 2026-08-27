@@ -88,6 +88,14 @@ var jitter = func(d time.Duration) time.Duration {
 // BMC.
 const deleteStageMaxErrorCount = 3
 
+// maxRestartFailures is the forward walk's give-up threshold: once
+// status.restartCount reaches this value, recordFailure holds the Machine
+// (MachineConditionRetryHeld) instead of requeuing for another attempt,
+// so a payload that can never succeed does not re-arm PXE and power-cycle
+// the machine forever. Only errors classified MachineErrorTypeRestart
+// count toward it - see MachineStatus.RestartCount's own doc comment.
+const maxRestartFailures = 3
+
 // machineDeleteStageGiveUpTotal counts every time a Machine delete stage
 // gave up after exceeding deleteStageMaxErrorCount and advanced anyway,
 // labeled by stage name. Registered once at package load: safe against the
@@ -334,6 +342,17 @@ func (r *MachineReconciler) onChange(ctx context.Context, machine *keziov1alpha3
 		return r.reconcileReInspect(ctx, machine)
 	}
 
+	if clearErrorRequested(machine) {
+		return r.reconcileClearError(ctx, machine)
+	}
+	if retryHeld(machine) {
+		// Held: the deployer is not called again until the clear-error
+		// annotation above lifts it. Nothing here re-triggers the watch, so
+		// no requeue - the annotation edit that lifts the hold is what
+		// brings this Machine back through Reconcile.
+		return ctrl.Result{}, nil
+	}
+
 	if hasUnknownErrorType(machine) {
 		// A live currentRunRef only makes sense during an active
 		// Provisioning walk; re-enrolling abandons that walk, so the ref
@@ -437,17 +456,23 @@ func (r *MachineReconciler) applyMachineStatus(ctx context.Context, machine *kez
 
 // setState patches machine.status.state and clears any error, leaving every
 // other status field untouched. It also clears MachineConditionStatusLossHold
-// if present: any forward move out of the empty state means the hold (if any)
-// has already been resolved by reconcileEmptyStatus/reconcileStatusLossHold.
-// The status write itself does not re-trigger the watch (the Machine update
-// predicate ignores status-only changes), so this requeues explicitly to run
-// the next walk step. onSuccess callbacks (an event, typically) run only
-// after the write succeeds - see applyMachineStatus.
+// and MachineConditionRetryHeld if present: any forward move out of the
+// empty state means the status-loss hold (if any) has already been resolved
+// by reconcileEmptyStatus/reconcileStatusLossHold, and any forward move at
+// all means the retry hold (if any) has already been resolved by
+// reconcileClearError - the state walk itself never reaches setState while
+// held (see onChange's retryHeld gate). The status write itself does not
+// re-trigger the watch (the Machine update predicate ignores status-only
+// changes), so this requeues explicitly to run the next walk step.
+// onSuccess callbacks (an event, typically) run only after the write
+// succeeds - see applyMachineStatus.
 func (r *MachineReconciler) setState(ctx context.Context, machine *keziov1alpha3.Machine, state string, onSuccess ...func()) (ctrl.Result, error) {
 	machine.Status.State = state
 	markOperational(machine)
 	machine.Status.ErrorCount = 0
+	machine.Status.RestartCount = 0
 	meta.RemoveStatusCondition(&machine.Status.Conditions, keziov1alpha3.MachineConditionStatusLossHold)
+	meta.RemoveStatusCondition(&machine.Status.Conditions, keziov1alpha3.MachineConditionRetryHeld)
 	stampLastUpdated(machine)
 	if err := r.applyMachineStatus(ctx, machine, onSuccess...); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: setting status.state to %q: %w", machine.Name, state, err)
@@ -565,6 +590,51 @@ func (r *MachineReconciler) consumeConfirmStatusLossAnnotation(ctx context.Conte
 	delete(machine.Annotations, keziov1alpha3.MachineAnnotationConfirmStatusLoss)
 	if err := r.Patch(ctx, machine, patch); err != nil {
 		return fmt.Errorf("machine %q: consuming confirm-status-loss annotation: %w", machine.Name, err)
+	}
+	return nil
+}
+
+// retryHeld reports whether machine currently carries an active retry
+// hold, mirroring statusLossHeld.
+func retryHeld(machine *keziov1alpha3.Machine) bool {
+	return meta.IsStatusConditionTrue(machine.Status.Conditions, keziov1alpha3.MachineConditionRetryHeld)
+}
+
+// reconcileClearError handles the clear-error annotation: consume-then-
+// delete, with a Kubernetes Event, mirroring reconcileStatusLossHold. Unlike
+// the status-loss hold, this is honored whether or not the Machine is
+// actually retryHeld - it always clears the current error and both error
+// counters and requeues immediately, so it doubles as a manual "clear this
+// error and retry now" outside the hold. It never touches state,
+// currentRunRef, the DHCP reservation, or the bound claim: only the error
+// axis and the retry-held condition.
+func (r *MachineReconciler) reconcileClearError(ctx context.Context, machine *keziov1alpha3.Machine) (ctrl.Result, error) {
+	if err := r.consumeClearErrorAnnotation(ctx, machine); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	markOperational(machine)
+	machine.Status.ErrorCount = 0
+	machine.Status.RestartCount = 0
+	meta.RemoveStatusCondition(&machine.Status.Conditions, keziov1alpha3.MachineConditionRetryHeld)
+	stampLastUpdated(machine)
+	onSuccess := func() {
+		r.Recorder.Event(machine, corev1.EventTypeNormal, "ErrorCleared",
+			"clear-error annotation accepted: error and retry counters reset, resuming the state walk")
+	}
+	if err := r.applyMachineStatus(ctx, machine, onSuccess); err != nil {
+		return ctrl.Result{}, fmt.Errorf("machine %q: clearing error: %w", machine.Name, err)
+	}
+	return ctrl.Result{Requeue: true}, nil
+}
+
+// consumeClearErrorAnnotation removes MachineAnnotationClearError from
+// machine, mirroring consumeConfirmStatusLossAnnotation.
+func (r *MachineReconciler) consumeClearErrorAnnotation(ctx context.Context, machine *keziov1alpha3.Machine) error {
+	patch := client.MergeFrom(machine.DeepCopy())
+	delete(machine.Annotations, keziov1alpha3.MachineAnnotationClearError)
+	if err := r.Patch(ctx, machine, patch); err != nil {
+		return fmt.Errorf("machine %q: consuming clear-error annotation: %w", machine.Name, err)
 	}
 	return nil
 }
@@ -881,6 +951,7 @@ func (r *MachineReconciler) startProvisioningRun(ctx context.Context, machine *k
 	machine.Status.CurrentRunRef = &keziov1alpha3.NameRef{Name: run.Name}
 	markOperational(machine)
 	machine.Status.ErrorCount = 0
+	machine.Status.RestartCount = 0
 	stampLastUpdated(machine)
 	if err := r.applyMachineStatus(ctx, machine); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: setting status.state to Provisioning: %w", machine.Name, err)
@@ -944,6 +1015,7 @@ func (r *MachineReconciler) reconcileProvisioning(ctx context.Context, machine *
 	machine.Status.LastAttemptedRunRef = &keziov1alpha3.NameRef{Name: run.Name}
 	markOperational(machine)
 	machine.Status.ErrorCount = 0
+	machine.Status.RestartCount = 0
 	stampLastUpdated(machine)
 	if err := r.applyMachineStatus(ctx, machine); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: setting status.state to Provisioned: %w", machine.Name, err)
@@ -1129,23 +1201,70 @@ func (r *MachineReconciler) clearRetryStatus(ctx context.Context, machine *kezio
 	return result, nil
 }
 
+// recordFailure records result as today's failure (operationalStatus,
+// errorType, errorMessage, both counters), and normally requeues after
+// failedRequeueInterval to retry. Once a Restart-classified failure pushes
+// status.restartCount to maxRestartFailures, it instead holds the Machine
+// for an operator (holdForRetry): the walk cannot make progress restarting
+// the same step forever, so requeuing again would only re-arm PXE and
+// power-cycle the machine on an unbounded loop.
 func (r *MachineReconciler) recordFailure(ctx context.Context, machine *keziov1alpha3.Machine, result deployer.Result) (ctrl.Result, error) {
 	applyFailure(machine, result.ErrorType, result.ErrorMessage)
 	stampLastUpdated(machine)
+
+	if result.ErrorType == keziov1alpha3.MachineErrorTypeRestart && machine.Status.RestartCount >= maxRestartFailures {
+		return r.holdForRetry(ctx, machine)
+	}
+
 	if err := r.applyMachineStatus(ctx, machine); err != nil {
 		return ctrl.Result{}, fmt.Errorf("machine %q: recording deployer failure: %w", machine.Name, err)
 	}
 	return ctrl.Result{RequeueAfter: failedRequeueInterval}, nil
 }
 
+// holdForRetry is recordFailure's give-up branch: it sets
+// MachineConditionRetryHeld, emits a Warning Event pointing at
+// MachineAnnotationClearError, and returns no requeue - onChange's
+// retryHeld gate stops the walk from calling the deployer again until an
+// operator clears the annotation (reconcileClearError). The Machine keeps
+// its DHCP reservation and its bound claim untouched while held: nothing
+// here releases either, the same as any other Failed outcome.
+func (r *MachineReconciler) holdForRetry(ctx context.Context, machine *keziov1alpha3.Machine) (ctrl.Result, error) {
+	meta.SetStatusCondition(&machine.Status.Conditions, metav1.Condition{
+		Type:   keziov1alpha3.MachineConditionRetryHeld,
+		Status: metav1.ConditionTrue,
+		Reason: "BootRetryExhausted",
+		Message: fmt.Sprintf(
+			"%d consecutive restart failures in state %q: %s; set the %q annotation to clear and retry",
+			machine.Status.RestartCount, machine.Status.State, machine.Status.ErrorMessage, keziov1alpha3.MachineAnnotationClearError,
+		),
+	})
+	onSuccess := func() {
+		r.Recorder.Eventf(machine, corev1.EventTypeWarning, "BootRetryExhausted",
+			"%d consecutive restart failures in state %q: holding until the %q annotation is set",
+			machine.Status.RestartCount, machine.Status.State, keziov1alpha3.MachineAnnotationClearError)
+	}
+	if err := r.applyMachineStatus(ctx, machine, onSuccess); err != nil {
+		return ctrl.Result{}, fmt.Errorf("machine %q: entering retry hold: %w", machine.Name, err)
+	}
+	return ctrl.Result{}, nil
+}
+
 // applyFailure applies the two-axis error semantics shared by every failure
 // path: state is left untouched, only operationalStatus/errorType/
-// errorMessage/errorCount change.
+// errorMessage/errorCount/restartCount change. restartCount only ever
+// increments here (see MachineStatus.RestartCount's own doc comment for
+// where it resets) - a Transient failure leaves it unchanged rather than
+// resetting it, so a Transient error in between two Restart failures does
+// not buy the Machine a fresh three attempts.
 func applyFailure(machine *keziov1alpha3.Machine, errorType keziov1alpha3.MachineErrorType, errorMessage string) {
 	machine.Status.OperationalStatus = keziov1alpha3.MachineOperationalStatusError
 	machine.Status.ErrorType = errorType
 	machine.Status.ErrorMessage = errorMessage
 	machine.Status.ErrorCount++
+	if errorType == keziov1alpha3.MachineErrorTypeRestart {
+		machine.Status.RestartCount++
+	}
 }
 
 // markOperational is applyFailure's inverse and the single place
@@ -1170,22 +1289,21 @@ func markOperational(machine *keziov1alpha3.Machine) {
 // out from under a Provisioning machine - GC or an operator deleting it
 // mid-run, which internal/agentserver's POST /agent/progress handler
 // (see NewAbortDecider) also uses to make the live kezio-agent stop and
-// report its own attempt failed before this ever runs. This is reported
-// through the same recordFailure semantics as any other phase failure
-// (state unchanged, operationalStatus=error) rather than a parallel error
-// path, and currentRunRef is cleared in the same patch so the next
-// Provisioning reconcile's nil-ref branch starts a fresh run.
+// report its own attempt failed before this ever runs. currentRunRef is
+// cleared first so the next Provisioning reconcile's nil-ref branch starts
+// a fresh run, then this is reported through recordFailure - the same
+// path, and the same retry-hold threshold, as any other Restart failure.
 func (r *MachineReconciler) recordCurrentRunDeleted(ctx context.Context, machine *keziov1alpha3.Machine) (ctrl.Result, error) {
+	runName := machine.Status.CurrentRunRef.Name
+	machine.Status.CurrentRunRef = nil
 	// MachineErrorTypeRestart: the run this errorType would ask to resume no
 	// longer exists, so the only meaningful next step is starting over, not
 	// resuming in-progress step state.
-	applyFailure(machine, keziov1alpha3.MachineErrorTypeRestart, fmt.Sprintf("current DeployRun %q no longer exists", machine.Status.CurrentRunRef.Name))
-	machine.Status.CurrentRunRef = nil
-	stampLastUpdated(machine)
-	if err := r.applyMachineStatus(ctx, machine); err != nil {
-		return ctrl.Result{}, fmt.Errorf("machine %q: recording current-run-deleted failure: %w", machine.Name, err)
-	}
-	return ctrl.Result{RequeueAfter: failedRequeueInterval}, nil
+	return r.recordFailure(ctx, machine, deployer.Result{
+		Outcome:      deployer.Failed,
+		ErrorType:    keziov1alpha3.MachineErrorTypeRestart,
+		ErrorMessage: fmt.Sprintf("current DeployRun %q no longer exists", runName),
+	})
 }
 
 // createDeployRun creates the DeployRun for one provisioning pass, copying
