@@ -250,6 +250,15 @@ type trackerNetworkStatusEntry struct {
 	IPs  []string `json:"ips,omitempty"`
 }
 
+// trackerNetworkMissingReason and trackerNetworkIPMismatchReason are the
+// Site Ready reasons trackerPodNetworkIssue reports; named as constants
+// since both are compared against in tests and reused across the
+// annotation-missing, unparseable, and no-matching-entry cases below.
+const (
+	trackerNetworkMissingReason    = "TrackerNetworkMissing"
+	trackerNetworkIPMismatchReason = "TrackerNetworkIPMismatch"
+)
+
 // trackerPodNetworkIssue reports why pod's tracker NAD attachment does
 // not carry wantIP, or "" (with an empty message) when it does.
 // nadNamespace/nadName name the seeding Subnet's SeederNetworkRef,
@@ -265,14 +274,14 @@ type trackerNetworkStatusEntry struct {
 func trackerPodNetworkIssue(pod *corev1.Pod, nadNamespace, nadName, wantIP string) (reason, message string) {
 	raw := pod.Annotations[trackerNetworkStatusAnnotation]
 	if raw == "" {
-		return "TrackerNetworkMissing", fmt.Sprintf(
+		return trackerNetworkMissingReason, fmt.Sprintf(
 			"tracker pod %s/%s carries no %s annotation; its Multus attachment cannot be confirmed",
 			pod.Namespace, pod.Name, trackerNetworkStatusAnnotation)
 	}
 
 	var entries []trackerNetworkStatusEntry
 	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
-		return "TrackerNetworkMissing", fmt.Sprintf(
+		return trackerNetworkMissingReason, fmt.Sprintf(
 			"tracker pod %s/%s carries an unparseable %s annotation: %v",
 			pod.Namespace, pod.Name, trackerNetworkStatusAnnotation, err)
 	}
@@ -287,11 +296,11 @@ func trackerPodNetworkIssue(pod *corev1.Pod, nadNamespace, nadName, wantIP strin
 				return "", ""
 			}
 		}
-		return "TrackerNetworkIPMismatch", fmt.Sprintf(
+		return trackerNetworkIPMismatchReason, fmt.Sprintf(
 			"tracker pod %s/%s is attached to NAD %s but holds %v, not spec.tracker.ip %q",
 			pod.Namespace, pod.Name, want, entry.IPs, wantIP)
 	}
-	return "TrackerNetworkMissing", fmt.Sprintf(
+	return trackerNetworkMissingReason, fmt.Sprintf(
 		"tracker pod %s/%s carries no %s entry for NAD %s; Multus may have failed to attach it",
 		pod.Namespace, pod.Name, trackerNetworkStatusAnnotation, want)
 }

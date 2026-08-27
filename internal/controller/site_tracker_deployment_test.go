@@ -69,8 +69,8 @@ func TestTrackerPodNetworkIssue_NoAnnotationReportsMissing(t *testing.T) {
 	pod := trackerTestPod(nil)
 
 	reason, message := trackerPodNetworkIssue(pod, "site-hq", "seeder-nad", "192.0.2.60")
-	if reason != "TrackerNetworkMissing" {
-		t.Errorf("reason = %q, want TrackerNetworkMissing", reason)
+	if reason != trackerNetworkMissingReason {
+		t.Errorf("reason = %q, want %s", reason, trackerNetworkMissingReason)
 	}
 	if message == "" {
 		t.Error("message = \"\", want a non-empty explanation")
@@ -81,8 +81,8 @@ func TestTrackerPodNetworkIssue_UnparseableAnnotationReportsMissing(t *testing.T
 	pod := trackerTestPod(map[string]string{trackerNetworkStatusAnnotation: "not json"})
 
 	reason, _ := trackerPodNetworkIssue(pod, "site-hq", "seeder-nad", "192.0.2.60")
-	if reason != "TrackerNetworkMissing" {
-		t.Errorf("reason = %q, want TrackerNetworkMissing", reason)
+	if reason != trackerNetworkMissingReason {
+		t.Errorf("reason = %q, want %s", reason, trackerNetworkMissingReason)
 	}
 }
 
@@ -92,8 +92,8 @@ func TestTrackerPodNetworkIssue_NoMatchingNADEntryReportsMissing(t *testing.T) {
 	})
 
 	reason, _ := trackerPodNetworkIssue(pod, "site-hq", "seeder-nad", "192.0.2.60")
-	if reason != "TrackerNetworkMissing" {
-		t.Errorf("reason = %q, want TrackerNetworkMissing", reason)
+	if reason != trackerNetworkMissingReason {
+		t.Errorf("reason = %q, want %s", reason, trackerNetworkMissingReason)
 	}
 }
 
@@ -103,8 +103,8 @@ func TestTrackerPodNetworkIssue_WrongIPReportsMismatch(t *testing.T) {
 	})
 
 	reason, message := trackerPodNetworkIssue(pod, "site-hq", "seeder-nad", "192.0.2.60")
-	if reason != "TrackerNetworkIPMismatch" {
-		t.Errorf("reason = %q, want TrackerNetworkIPMismatch", reason)
+	if reason != trackerNetworkIPMismatchReason {
+		t.Errorf("reason = %q, want %s", reason, trackerNetworkIPMismatchReason)
 	}
 	if message == "" {
 		t.Error("message = \"\", want a non-empty explanation")
