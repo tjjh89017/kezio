@@ -21,7 +21,9 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
+	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	toolscache "k8s.io/client-go/tools/cache"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
@@ -31,6 +33,13 @@ import (
 
 	keziov1alpha3 "github.com/tjjh89017/kezio/api/v1alpha3"
 )
+
+// DefaultResyncInterval is how often Start's self-heal loop re-Gets the
+// Subnet and re-pushes it to the sink when SubnetDHCPCache.ResyncInterval
+// is left zero - a periodic backstop independent of the informer's own
+// event delivery, so a single missed or mishandled event can never stall
+// DHCP reservations until the next pod restart.
+const DefaultResyncInterval = 2 * time.Minute
 
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=subnets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=subnets/status,verbs=get;patch
@@ -67,6 +76,10 @@ type SubnetDHCPCache struct {
 
 	informers ctrlcache.Informers
 	sink      ReservationSink
+
+	// ResyncInterval overrides DefaultResyncInterval; a test seam. Never
+	// zero once Start has run.
+	ResyncInterval time.Duration
 
 	synced atomic.Bool
 	mu     sync.Mutex
@@ -112,7 +125,16 @@ func NewSubnetDHCPCache(ctx context.Context, informers ctrlcache.Informers, c cl
 // initial sync, pushes the first snapshot (a direct Get, since the
 // informer's own add event for a single already-existing object may have
 // already been delivered and dropped before synced flips true), then
-// blocks until ctx is cancelled.
+// re-Gets and re-pushes on ResyncInterval until ctx is cancelled.
+//
+// The periodic resync is a self-heal backstop, not the primary delivery
+// path: the informer's onEvent is expected to push every real change
+// promptly, but a bootd instance that misses one - a watch that silently
+// stopped delivering, or any other bug in that path - would otherwise
+// serve a stale hostsfile until its pod is recreated. A revision the sink
+// already has is a no-op push (Dnsmasq.SetReservations dedups on
+// byte-identical hostsfile content), so this costs one Subnet Get per
+// interval and nothing when nothing changed.
 func (sc *SubnetDHCPCache) Start(ctx context.Context) error {
 	log := logf.FromContext(ctx).WithName("bootd-subnet-dhcp")
 	if !sc.informers.WaitForCacheSync(ctx) {
@@ -121,6 +143,36 @@ func (sc *SubnetDHCPCache) Start(ctx context.Context) error {
 		return nil
 	}
 
+	sc.getAndPush(ctx, log)
+
+	// Flip synced only after the initial snapshot push above, so that by
+	// the time an observer sees synced true, the initial push (if any) has
+	// already reached the sink - the informer's own onEvent stays gated on
+	// synced until this point, matching the fail-secure doc comment.
+	sc.synced.Store(true)
+
+	log.Info("Subnet DHCP cache ready")
+
+	interval := sc.ResyncInterval
+	if interval == 0 {
+		interval = DefaultResyncInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			sc.getAndPush(ctx, log)
+		}
+	}
+}
+
+// getAndPush Gets this cache's own Subnet and pushes its current
+// reservation snapshot, logging (rather than failing) any error - both
+// Start's initial push and its periodic self-heal resync use it.
+func (sc *SubnetDHCPCache) getAndPush(ctx context.Context, log logr.Logger) {
 	var subnet keziov1alpha3.Subnet
 	key := client.ObjectKey{Namespace: sc.SubnetNamespace, Name: sc.SubnetName}
 	switch err := sc.Client.Get(ctx, key, &subnet); {
@@ -130,18 +182,8 @@ func (sc *SubnetDHCPCache) Start(ctx context.Context) error {
 		// Nothing to push yet; the informer's own add event will arrive
 		// once the Subnet exists.
 	default:
-		log.Error(err, "getting Subnet for initial DHCP reservation snapshot")
+		log.Error(err, "getting Subnet for DHCP reservation snapshot")
 	}
-
-	// Flip synced only after the initial snapshot push above, so that by
-	// the time an observer sees synced true, the initial push (if any) has
-	// already reached the sink - the informer's own onEvent stays gated on
-	// synced until this point, matching the fail-secure doc comment.
-	sc.synced.Store(true)
-
-	log.Info("Subnet DHCP cache ready")
-	<-ctx.Done()
-	return nil
 }
 
 func (sc *SubnetDHCPCache) onEvent(obj any) {

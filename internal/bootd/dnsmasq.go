@@ -312,7 +312,19 @@ func (d *Dnsmasq) SetReservations(revision string, reservations map[string]strin
 	d.reservations = maps.Clone(reservations)
 	d.revision = revision
 	d.revSet = true
+	d.mu.Unlock()
+
+	// SubnetMember (MACCache.HasLocalMember) takes MACCache's own mutex.
+	// A concurrent Machine informer event can be holding that mutex
+	// while it calls back into SetAllowedMACs, which needs d.mu - so
+	// SubnetMember must never be called with d.mu held, or the two
+	// goroutines deadlock against each other (MACCache.mu waiting on
+	// d.mu here, d.mu waiting on MACCache.mu there). Reading the state
+	// SubnetMember's candidates depend on above, then releasing d.mu
+	// before calling it, keeps the two mutexes' lock order
+	// one-directional.
 	if d.Config.LeaseMode && d.SubnetMember != nil {
+		var toRelease []string
 		for mac := range old {
 			if _, stillReserved := reservations[mac]; stillReserved {
 				continue
@@ -321,11 +333,16 @@ func (d *Dnsmasq) SetReservations(revision string, reservations map[string]strin
 				continue
 			}
 			if !d.SubnetMember(mac) {
-				d.pendingReleases = append(d.pendingReleases, mac)
+				toRelease = append(toRelease, mac)
 			}
 		}
+		if len(toRelease) > 0 {
+			d.mu.Lock()
+			d.pendingReleases = append(d.pendingReleases, toRelease...)
+			d.mu.Unlock()
+		}
 	}
-	d.mu.Unlock()
+
 	select {
 	case d.dirtyCh() <- struct{}{}:
 	default:
