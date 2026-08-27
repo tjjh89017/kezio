@@ -197,6 +197,41 @@ func (r *ImageReconciler) mapPartitionContentToImages(ctx context.Context, obj c
 	return requests
 }
 
+// machineProvisionedTransitionPredicate reports true only on an Update
+// event where a Machine's status.state newly entered or left Provisioned
+// - the one status-only write (machineUpdatePredicate ignores every
+// other kind) that can flip a Machine's own contribution to seed demand:
+// see machinesReferencingImage. Neither direction bumps generation, so
+// machineUpdatePredicate alone never sees it; without this, a Machine
+// finishing its deploy never re-triggers the reconcile that would notice
+// its seeder demand just dropped, and the seeder is only reaped on the
+// next unrelated Image reconcile.
+var machineProvisionedTransitionPredicate = predicate.Funcs{
+	UpdateFunc: func(e event.UpdateEvent) bool {
+		oldMachine, ok := e.ObjectOld.(*keziov1alpha3.Machine)
+		if !ok {
+			return true
+		}
+		newMachine, ok := e.ObjectNew.(*keziov1alpha3.Machine)
+		if !ok {
+			return true
+		}
+		oldProvisioned := oldMachine.Status.State == keziov1alpha3.MachineStateProvisioned
+		newProvisioned := newMachine.Status.State == keziov1alpha3.MachineStateProvisioned
+		return oldProvisioned != newProvisioned
+	},
+}
+
+// machineImageDemandPredicate restricts ImageReconciler's Machine watch to
+// every event machineUpdatePredicate already lets through, plus a
+// status.state transition into or out of Provisioned
+// (machineProvisionedTransitionPredicate) - the only additional axis
+// Image seed-demand depends on.
+var machineImageDemandPredicate = predicate.Or(
+	machineUpdatePredicate,
+	machineProvisionedTransitionPredicate,
+)
+
 // mapMachineToImages maps a Machine event to a reconcile request per
 // Image its bound MachineClaim (if any) is now (or, for a Delete event,
 // was) a demand source for - see machineClaimImageRefs' doc comment for
@@ -261,7 +296,7 @@ func (r *ImageReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&appsv1.Deployment{}).
 		Watches(&keziov1alpha3.PartitionContent{}, handler.EnqueueRequestsFromMapFunc(r.mapPartitionContentToImages), builder.WithPredicates(partitionContentStatusChangedPredicate)).
-		Watches(&keziov1alpha3.Machine{}, handler.EnqueueRequestsFromMapFunc(r.mapMachineToImages), builder.WithPredicates(machineUpdatePredicate)).
+		Watches(&keziov1alpha3.Machine{}, handler.EnqueueRequestsFromMapFunc(r.mapMachineToImages), builder.WithPredicates(machineImageDemandPredicate)).
 		Watches(&keziov1alpha3.MachineClaim{}, handler.EnqueueRequestsFromMapFunc(r.mapMachineClaimToImages), builder.WithPredicates(claimDemandPredicate)).
 		Watches(&keziov1alpha3.DeployRun{}, handler.EnqueueRequestsFromMapFunc(r.mapDeployRunToImages), builder.WithPredicates(deployRunDemandPredicate)).
 		Named("image").

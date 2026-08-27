@@ -18,8 +18,10 @@ package controller
 
 import (
 	"context"
+	"reflect"
 	"sort"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -39,9 +41,10 @@ type seederSiteDemand struct {
 
 // machinesReferencingImage returns the live (not being deleted) Machines
 // in image's own namespace whose bound MachineClaim's
-// spec.imageRef/dataImages names image, via a client-side filter
-// (resolveClaimIntent, claimImageRefs) rather than claimImageRefIndex:
-// unlike PartitionContentReconciler's own resolveSeedDemand path, this is
+// spec.imageRef/dataImages names image and whose deploy of it has not
+// finished yet, via a client-side filter (resolveClaimIntent,
+// claimImageRefs) rather than claimImageRefIndex: unlike
+// PartitionContentReconciler's own resolveSeedDemand path, this is
 // reachable from an ImageReconciler built directly against a plain,
 // uncached client with no field indexer registered (see
 // image_controller_test.go/image_ingest_test.go), so it must not depend
@@ -49,6 +52,11 @@ type seederSiteDemand struct {
 // cannot be resolved, contributes no demand: seeder placement is a
 // property of a bound machine's Site, and an unbound machine names no
 // intent at all.
+//
+// A Provisioned Machine's deploy has already finished, so it stops
+// counting - see machineDeployPending. Every other state a bound claim
+// can be observed in (Enrolling, Inspecting, Available, Provisioning)
+// still counts: the deploy has not started yet, or is in flight.
 func machinesReferencingImage(ctx context.Context, c client.Client, image client.ObjectKey) ([]keziov1alpha3.Machine, error) {
 	var list keziov1alpha3.MachineList
 	if err := c.List(ctx, &list, client.InNamespace(image.Namespace)); err != nil {
@@ -67,14 +75,65 @@ func machinesReferencingImage(ctx context.Context, c client.Client, image client
 		if claim == nil {
 			continue
 		}
+		named := false
 		for _, ref := range claimImageRefs(claim) {
 			if ref == image {
-				live = append(live, *m)
+				named = true
 				break
 			}
 		}
+		if !named {
+			continue
+		}
+		if m.Status.State == keziov1alpha3.MachineStateProvisioned {
+			pending, err := machineDeployPending(ctx, c, m, claim)
+			if err != nil {
+				return nil, err
+			}
+			if !pending {
+				continue
+			}
+		}
+		live = append(live, *m)
 	}
 	return live, nil
+}
+
+// machineDeployPending reports whether a Provisioned machine still has a
+// re-provision pending: shouldProvision's own trigger (machine_controller.go)
+// would fire again the next time reconcileIdle runs, because claim's intent
+// no longer matches the last successful run's recorded spec, or no
+// successful run is recorded at all. Such a Machine must keep counting as
+// seed demand - its next reconcile starts a fresh Provisioning run against
+// the very Image this checks.
+//
+// This mirrors shouldProvision/intentSubsetEqual's imageRef/dataImages
+// comparison only, not hooksHash: seed-demand computation has no
+// planbuild.Builder to resolve one. A hooks-only redeploy trigger (a
+// PostHook/postHookRefs edit with the same imageRef/dataImages) is
+// therefore invisible here, and such a Machine stops counting once
+// Provisioned until its hooks-only run actually starts and moves it to
+// Provisioning.
+func machineDeployPending(ctx context.Context, c client.Client, machine *keziov1alpha3.Machine, claim *keziov1alpha3.MachineClaim) (bool, error) {
+	if isEmptyDeployPayload(claim) {
+		return false, nil
+	}
+	ref := machine.Status.LastSuccessfulRunRef
+	if ref == nil {
+		return true, nil
+	}
+	ns := ref.Namespace
+	if ns == "" {
+		ns = machine.Namespace
+	}
+	var run keziov1alpha3.DeployRun
+	if err := c.Get(ctx, client.ObjectKey{Namespace: ns, Name: ref.Name}, &run); err != nil {
+		if apierrors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	return !nameRefEqual(claim.Spec.ImageRef, run.Spec.ImageRef) || !reflect.DeepEqual(claim.Spec.DataImages, run.Spec.DataImages), nil
 }
 
 // seederDemandBySite resolves every Machine in machines to its seeder
