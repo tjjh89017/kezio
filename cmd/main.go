@@ -651,11 +651,18 @@ func leecherEzioConfigFromEnv() planbuild.LeecherEzioConfig {
 // bootServerConfigFromEnv builds the boot config server's
 // bootserver.Config from the environment. Leaving BOOT_SERVER_ADDR unset
 // returns a nil Config, and main does not add the server to the manager.
-// Setting it opts in; BOOT_ARTIFACTS_DIR and BOOT_SERVER_URL must then
-// also be set. BOOT_AGENT_SERVER_URL is ordinarily a different address
-// from BOOT_SERVER_URL (a different Service/port fronting the same Pod);
-// left unset it falls back to BOOT_SERVER_URL, correct only when both
-// servers truly share one address. BOOT_KERNEL_PATH, BOOT_INITRD_PATH,
+// Setting it opts in; BOOT_ARTIFACTS_DIR must then also be set.
+// BOOT_SERVER_URL and BOOT_AGENT_SERVER_URL are both optional: each
+// netbooting Machine's own Subnet (bootserver.subnetBootBaseURL) is the
+// primary source of the boot server's externally reachable address, so
+// these env vars are only a fallback for a Machine whose Subnet cannot be
+// resolved or declares no boot half. Left unset, that fallback is empty
+// and such a Machine boots local disk instead of a half-rendered config
+// (see bootserver.Server.handleGrubConfig). BOOT_AGENT_SERVER_URL is
+// ordinarily a different address from BOOT_SERVER_URL (a different
+// Service/port fronting the same Pod); left unset it falls back to
+// BOOT_SERVER_URL, correct only when both servers truly share one
+// address. BOOT_KERNEL_PATH, BOOT_INITRD_PATH,
 // and BOOT_SQUASHFS_PATH each default to their bootserver.Default* name.
 // BOOT_EFI_DIR defaults to BOOT_ARTIFACTS_DIR. BOOT_DEFAULT_CONSOLE is a
 // whitespace-separated list of kernel console= values, for example
@@ -676,15 +683,10 @@ func bootServerConfigFromEnv() (*bootserver.Config, error) {
 	if artifactsDir == "" {
 		return nil, fmt.Errorf("BOOT_SERVER_ADDR is set but BOOT_ARTIFACTS_DIR is not")
 	}
-	serverURL := os.Getenv("BOOT_SERVER_URL")
-	if serverURL == "" {
-		return nil, fmt.Errorf("BOOT_SERVER_ADDR is set but BOOT_SERVER_URL is not")
-	}
-
 	cfg := &bootserver.Config{
 		Addr:           addr,
 		ArtifactsDir:   artifactsDir,
-		ServerURL:      serverURL,
+		ServerURL:      os.Getenv("BOOT_SERVER_URL"),
 		AgentServerURL: os.Getenv("BOOT_AGENT_SERVER_URL"),
 		KernelPath:     os.Getenv("BOOT_KERNEL_PATH"),
 		InitrdPath:     os.Getenv("BOOT_INITRD_PATH"),

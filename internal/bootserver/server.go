@@ -249,16 +249,28 @@ func (s *Server) handleGrubConfig(w http.ResponseWriter, r *http.Request, rawMAC
 	renderCfg := s.Config
 	subnet, err := s.resolveSubnet(ctx, machine)
 	if err != nil {
-		// Not fail-secure territory: the Subnet only selects which base
-		// URL to embed, never whether to net boot at all. Falling back to
-		// the manager-wide Config.ServerURL/AgentServerURL keeps a
-		// dangling or absent SubnetRef working exactly as before this
-		// override existed.
+		// Not fail-secure territory by itself: the Subnet only selects
+		// which base URL to embed, never whether to net boot at all.
+		// Falling back to the manager-wide Config.ServerURL/
+		// AgentServerURL keeps a dangling or absent SubnetRef working
+		// exactly as before this override existed - unless that fallback
+		// is also empty, checked below.
 		log.Info("resolving machine's Subnet failed; using the manager-wide boot server URL",
 			"machine", machine.Name, "subnetRef", machine.Spec.SubnetRef, "error", err.Error())
 	} else if base, ok := subnetBootBaseURL(subnet); ok {
 		renderCfg.ServerURL = base
 		renderCfg.AgentServerURL = base
+	}
+
+	if renderCfg.ServerURL == "" {
+		// Fail secure: neither the Subnet nor the manager-wide fallback
+		// names a boot server URL, so there is nothing correct to embed -
+		// render anyway and every GRUB/agent URL in the config is
+		// malformed.
+		log.Info("no boot server URL available for this machine; boot local disk",
+			"machine", machine.Name, "subnetRef", machine.Spec.SubnetRef)
+		writeBootLocal(w)
+		return
 	}
 
 	config, err := renderNetBootConfig(renderCfg, token, resolveConsole(machine.Spec.Console, renderCfg.DefaultConsole))

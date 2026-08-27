@@ -61,12 +61,17 @@ type Config struct {
 	// package only reads from it.
 	ArtifactsDir string
 	// ServerURL is this server's own externally reachable base URL, for
-	// example "http://10.0.0.5:8090". It is used to build the
+	// example "http://10.0.0.5:8090", used to build the
 	// kernel/initrd/squashfs HTTP URLs GRUB and live-boot's initrd fetch.
-	// A netbooting machine whose Subnet declares a boot half
-	// (SubnetSpec.HasBootPlane) gets that Subnet's own bootd address
-	// instead (see subnetBootBaseURL); ServerURL is the fallback for a
-	// dangling/absent SubnetRef or a Subnet with no boot half.
+	// The primary source of that base URL is per-Machine, not this field:
+	// a netbooting machine whose Subnet declares a boot half
+	// (SubnetSpec.HasBootPlane) always gets that Subnet's own bootd
+	// address instead (see subnetBootBaseURL), regardless of what
+	// ServerURL holds. ServerURL only takes effect as a fallback, for a
+	// Machine whose SubnetRef is dangling/absent or whose Subnet has no
+	// boot half; left empty, such a Machine gets no net boot config at
+	// all and boots local disk instead (fail secure - see
+	// Server.handleGrubConfig).
 	ServerURL string
 	// AgentServerURL is the agent registration server's externally
 	// reachable base URL, used as the kezio.server= cmdline value the
@@ -75,7 +80,8 @@ type Config struct {
 	// otherwise it silently sends every agent registration to a server
 	// that never mounts the agent server's routes, failing without a
 	// server-side error (see renderNetBootConfig's doc comment). Subject
-	// to the same per-Subnet override as ServerURL.
+	// to the same per-Subnet override as ServerURL, and the same
+	// fallback-only role once that override does not apply.
 	AgentServerURL string
 	// KernelPath, InitrdPath, and SquashfsPath name the live boot
 	// artifacts under ArtifactsDir. Empty means DefaultKernelPath /

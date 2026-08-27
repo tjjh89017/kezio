@@ -314,6 +314,89 @@ func newTestServerUnarmed(t *testing.T, artifactsDir string, machines ...*keziov
 	return s, c
 }
 
+// newTestServerNoServerURL builds a Server like newTestServer, except
+// Config.ServerURL is left empty - for tests exercising the fail-secure
+// boundary when neither a Subnet override nor a manager-wide fallback
+// names a boot server URL.
+func newTestServerNoServerURL(t *testing.T, artifactsDir string, machines ...*keziov1alpha3.Machine) *Server {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	if err := keziov1alpha3.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+
+	tokens := NewTokenStore()
+	for _, m := range machines {
+		if mac, ok := NormalizeMAC(m.Spec.BootMACAddress); ok {
+			_, status, err := tokens.Issue(mac, time.Now(), time.Hour)
+			if err != nil {
+				t.Fatalf("Issue: %v", err)
+			}
+			m.Status.NetBoot = &status
+		}
+	}
+
+	builder := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&keziov1alpha3.Machine{}, MachineBootMACIndexField, IndexMachineBootMAC).
+		WithStatusSubresource(&keziov1alpha3.Machine{})
+	for _, m := range machines {
+		builder = builder.WithObjects(m)
+	}
+	c := builder.Build()
+
+	s := New(c, Config{ArtifactsDir: artifactsDir})
+	s.Tokens = tokens
+	return s
+}
+
+// TestHandleGrubConfig_SubnetWithBootPlaneRendersWithNoManagerWideURL
+// proves the Subnet is the primary source of the boot server URL, not
+// merely a fallback for an unset Config.ServerURL: a machine whose Subnet
+// declares a boot half still gets a live net-boot config even when no
+// manager-wide BOOT_SERVER_URL is configured at all.
+func TestHandleGrubConfig_SubnetWithBootPlaneRendersWithNoManagerWideURL(t *testing.T) {
+	machine := newTestMachine(keziov1alpha3.MachineStateInspecting)
+	subnet := newTestSubnetWithBootPlane("192.0.2.2")
+	s := newTestServerNoServerURL(t, t.TempDir(), machine)
+	if err := s.Client.Create(context.Background(), subnet); err != nil {
+		t.Fatalf("Create Subnet: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/boot/grub.cfg-"+testMAC, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if !containsAll(body,
+		"linux (http,192.0.2.2:80)/boot/artifacts/vmlinuz",
+		"fetch=http://192.0.2.2:80/boot/artifacts/filesystem.squashfs",
+		"kezio.server=http://192.0.2.2:80") {
+		t.Fatalf("net-boot config did not use the Subnet's own bootd address: %q", body)
+	}
+}
+
+// TestHandleGrubConfig_NoSubnetURLAndNoManagerWideURLBootsLocal covers the
+// fail-secure boundary this override introduces: when the per-Subnet base
+// URL cannot be derived (here, a dangling SubnetRef) and Config.ServerURL
+// is also empty, there is no correct URL to embed, so the handler must
+// boot local rather than render a config with empty/malformed URLs.
+func TestHandleGrubConfig_NoSubnetURLAndNoManagerWideURLBootsLocal(t *testing.T) {
+	machine := newTestMachine(keziov1alpha3.MachineStateInspecting)
+	s := newTestServerNoServerURL(t, "", machine)
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/boot/grub.cfg-"+testMAC, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if body := rec.Body.String(); body != bootLocalConfig {
+		t.Fatalf("body = %q, want the fixed bootLocalConfig", body)
+	}
+}
+
 // TestHandleGrubConfig_NoPendingBootOmitsToken covers a Machine that
 // needs to net boot (State Inspecting/Provisioning) but has no token
 // armed yet - nothing has called TokenStore.Issue for its MAC in this
