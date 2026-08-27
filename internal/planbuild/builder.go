@@ -143,6 +143,9 @@ func (b *Builder) Build(ctx context.Context, machine *keziov1alpha3.Machine, cla
 		AfterDeploy:    effectiveAfterDeploy(claim),
 		MaxUploads:     seeder.ResolveMaxUploads(b.LeecherEzio.MaxUploads, claimEzioMaxUploads(claim)),
 		MaxConnections: seeder.ResolveMaxConnections(b.LeecherEzio.MaxConnections, claimEzioMaxConnections(claim)),
+		CacheSizeMB:    claimEzioCacheSizeMB(claim),
+		AioThreads:     claimEzioAioThreads(claim),
+		Port:           claimEzioPort(claim),
 	}
 	if osImage != nil {
 		plan.TargetDisk = osImage.targetDisk
@@ -344,6 +347,34 @@ func claimEzioMaxConnections(claim *keziov1alpha3.MachineClaim) *int32 {
 		return nil
 	}
 	return claim.Spec.Ezio.MaxConnections
+}
+
+// claimEzioCacheSizeMB, claimEzioAioThreads, and claimEzioPort read
+// machine.spec.ezio's daemon-launch overrides straight through to the
+// plan: unlike MaxUploads/MaxConnections, these three have no
+// cluster-wide operator default layer, so an unset claim override
+// carries as nil all the way to the agent, which falls back to an
+// auto-computed value (CacheSizeMB) or ezio's own built-in default
+// (AioThreads, Port).
+func claimEzioCacheSizeMB(claim *keziov1alpha3.MachineClaim) *int32 {
+	if claim.Spec.Ezio == nil {
+		return nil
+	}
+	return claim.Spec.Ezio.CacheSizeMB
+}
+
+func claimEzioAioThreads(claim *keziov1alpha3.MachineClaim) *int32 {
+	if claim.Spec.Ezio == nil {
+		return nil
+	}
+	return claim.Spec.Ezio.AioThreads
+}
+
+func claimEzioPort(claim *keziov1alpha3.MachineClaim) *int32 {
+	if claim.Spec.Ezio == nil {
+		return nil
+	}
+	return claim.Spec.Ezio.Port
 }
 
 // effectiveAfterDeploy returns claim's AfterDeploy, treating an unset

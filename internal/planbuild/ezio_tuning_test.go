@@ -52,6 +52,40 @@ func TestClaimEzioOverrides_PartialOverrideLeavesOtherFieldNil(t *testing.T) {
 	}
 }
 
+func TestClaimEzioLaunchOverrides_NilWhenEzioUnset(t *testing.T) {
+	c := &keziov1alpha3.MachineClaim{}
+	if got := claimEzioCacheSizeMB(c); got != nil {
+		t.Errorf("claimEzioCacheSizeMB = %v, want nil", got)
+	}
+	if got := claimEzioAioThreads(c); got != nil {
+		t.Errorf("claimEzioAioThreads = %v, want nil", got)
+	}
+	if got := claimEzioPort(c); got != nil {
+		t.Errorf("claimEzioPort = %v, want nil", got)
+	}
+}
+
+func TestClaimEzioLaunchOverrides_PassThroughWhenSet(t *testing.T) {
+	c := &keziov1alpha3.MachineClaim{
+		Spec: keziov1alpha3.MachineClaimSpec{
+			Ezio: &keziov1alpha3.MachineEzioTuning{
+				CacheSizeMB: int32ptr(2048),
+				AioThreads:  int32ptr(8),
+				Port:        int32ptr(6890),
+			},
+		},
+	}
+	if got := claimEzioCacheSizeMB(c); got == nil || *got != 2048 {
+		t.Errorf("claimEzioCacheSizeMB = %v, want 2048", got)
+	}
+	if got := claimEzioAioThreads(c); got == nil || *got != 8 {
+		t.Errorf("claimEzioAioThreads = %v, want 8", got)
+	}
+	if got := claimEzioPort(c); got == nil || *got != 6890 {
+		t.Errorf("claimEzioPort = %v, want 6890", got)
+	}
+}
+
 // TestLeecherTuningChain_ThreeLayers exercises the full precedence chain
 // through seeder.ResolveMaxUploads/ResolveMaxConnections the same way
 // Builder.Build wires it, without needing a full envtest Machine/DeployRun
