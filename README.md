@@ -121,12 +121,14 @@ the full operational setup, including both DHCP scenarios.
 ### Install a release
 
 Each [GitHub Release](https://github.com/tjjh89017/kezio/releases) ships
-an `install.yaml` asset. It carries the CRDs, RBAC, and the controller
-manager Deployment (`config/default`, with cert-manager as a
-prerequisite for the webhooks):
+an `install.yaml` asset built from `config/default` and pinned to that
+release's manager image. It carries the CRDs, RBAC, the webhook
+configuration, and the controller manager Deployment; cert-manager must
+already be installed, since the webhooks take their certificate from
+it. To install a specific version, replace `latest` with its tag:
 
 ```sh
-kubectl apply -f https://github.com/tjjh89017/kezio/releases/download/v0.3.8/install.yaml
+kubectl apply -f https://github.com/tjjh89017/kezio/releases/latest/download/install.yaml
 ```
 
 This alone does not network boot a machine. Also apply
@@ -203,11 +205,19 @@ the release's `kezioctl-SHA256SUMS` file before running it.
 ## Continuous integration
 
 `main.yaml` builds, lints, tests, and runs e2e checks on every push to
-`main` and on every pull request. `release.yaml` publishes container
-images and boot artifacts on `v*` tags. Several KubeVirt-based e2e lanes
-verify the deploy chain end to end, from ingest through BitTorrent leech
-to a booted disk, including a routed multi-segment lane, a two-site
-concurrent lane, and a three-machine concurrent lane.
+`main` and on every pull request; a push to `main` that passes every
+lane also publishes the `:main` tag of each container image. KubeVirt
+lanes verify the deploy chain end to end, from ingest through BitTorrent
+leech to a booted disk: a deploy lane run once per DHCP scenario
+(proxyDHCP against an existing DHCP server, and bootd as the segment's
+own lease authority), a routed multi-segment lane, a two-site concurrent
+lane, and a three-machine concurrent lane.
+
+`release.yaml` runs on `v*` tags. It publishes the container images
+(manager, ingest, seeder, image-service, bootd) and the live boot
+artifacts image to ghcr.io, then attaches `install.yaml`, the `kezioctl`
+archives, and `kezioctl-SHA256SUMS` to a GitHub Release named after the
+tag.
 
 ## License
 
