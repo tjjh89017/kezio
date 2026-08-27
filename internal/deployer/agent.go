@@ -525,9 +525,9 @@ func (d *AgentDeployer) Inspect(ctx context.Context, machine *keziov1alpha3.Mach
 // irreversible happened yet. If SetOneTimePXEBoot or the power call
 // itself then fails, the marker is cleared again (disarmPXE) rather than
 // left "armed" for a boot that never actually got a power command:
-// leaving it set would make pollAgentRegistration wait out
-// agentDeployerInspectDeadline believing a boot is already under way,
-// instead of retrying immediately on the next reconcile.
+// leaving it set would make pollAgentRegistration wait out the boot
+// token's whole lifetime believing a boot is already under way, instead
+// of retrying immediately on the next reconcile.
 func (d *AgentDeployer) armPXEAndPowerOn(ctx context.Context, machine *keziov1alpha3.Machine, forceFreshToken bool) (Result, error) {
 	bmcClient, err := d.connectBMC(ctx, machine)
 	if err != nil {

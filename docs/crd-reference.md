@@ -511,6 +511,12 @@ its own in-memory copy is missing - after a manager restart, for
 example - so a machine that starts its boot before the restart can still
 register afterward, instead of waiting out the full inspection timeout.
 
+kezio mints the boot token only once a lease-mode Subnet's DHCP
+reservation for the machine has been acknowledged (`status.dhcp.
+appliedRevision` catching up to `status.dhcp.revision`); until then, and
+on every reconcile after that while the token stays unexpired and
+unconsumed, the same token is reused rather than replaced.
+
 `status.netBoot.expiresAt` is also the only clock kezio waits on for a
 machine to boot into the agent: inspection and provisioning both give up
 once the boot token they minted for the current attempt expires, rather
