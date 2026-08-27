@@ -862,20 +862,23 @@ func classifyPlanBuildError(err error) (notReady, failed bool) {
 // currentHooksHash resolves the hooksHash the provisioning trigger
 // compares against lastRun's recorded snapshot: empty (ok) when r.Builder
 // is nil (the pre-snapshot fast lane - see Builder's own doc comment), or
-// whatever r.Builder.Build resolves right now otherwise. ok is false when
-// the caller must return (result, err) as-is instead of continuing the
-// walk: a NotReadyError delays without touching error state, a
-// DiskSelectionError/ValidationError records a Failed provision step
-// (the same shape a Deployer.Provision failure would), and any other
-// error is transient and returned unchanged. The DeployRun passed to
-// Build is a throwaway (never created): only its resolved Snapshot is
-// used here, not the DeployPlan Build also returns.
+// whatever r.Builder.BuildSnapshot resolves right now otherwise. ok is
+// false when the caller must return (result, err) as-is instead of
+// continuing the walk: a NotReadyError delays without touching error
+// state, a DiskSelectionError/ValidationError records a Failed provision
+// step (the same shape a Deployer.Provision failure would), and any other
+// error is transient and returned unchanged. BuildSnapshot, not Build, is
+// deliberate: this runs on every idle reconcile of a Machine regardless
+// of whether it is actually about to (re)provision, and Build's full
+// DeployPlan resolution requires a live seeder Deployment - torn down on
+// a grace period once a Machine stops demanding it - that hooksHash never
+// depends on (see resolveImage's withSlots doc comment).
 func (r *MachineReconciler) currentHooksHash(ctx context.Context, machine *keziov1alpha3.Machine, claim *keziov1alpha3.MachineClaim) (hooksHash string, ok bool, result ctrl.Result, err error) {
 	if r.Builder == nil {
 		return "", true, ctrl.Result{}, nil
 	}
 
-	_, snapshot, buildErr := r.Builder.Build(ctx, machine, claim, &keziov1alpha3.DeployRun{})
+	snapshot, buildErr := r.Builder.BuildSnapshot(ctx, machine, claim)
 	if buildErr == nil {
 		return snapshot.HooksHash, true, ctrl.Result{}, nil
 	}

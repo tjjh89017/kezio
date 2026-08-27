@@ -107,7 +107,7 @@ func (b *Builder) Build(ctx context.Context, machine *keziov1alpha3.Machine, cla
 	selections := make([]diskmatch.Selection, 0, 1+len(claim.Spec.DataImages))
 	var osImage *resolvedImage
 	if claim.Spec.ImageRef != nil {
-		osImage, err = b.resolveImage(ctx, machine.Namespace, *claim.Spec.ImageRef, claim.Spec.TargetDisk, hardware.Spec.Disks, "OS image", site)
+		osImage, err = b.resolveImage(ctx, machine.Namespace, *claim.Spec.ImageRef, claim.Spec.TargetDisk, hardware.Spec.Disks, "OS image", site, true)
 		if err != nil {
 			return nil, Snapshot{}, err
 		}
@@ -117,7 +117,7 @@ func (b *Builder) Build(ctx context.Context, machine *keziov1alpha3.Machine, cla
 	dataImages := make([]*resolvedImage, len(claim.Spec.DataImages))
 	for i, di := range claim.Spec.DataImages {
 		label := fmt.Sprintf("dataImages[%d]", i)
-		resolved, err := b.resolveImage(ctx, machine.Namespace, di.ImageRef, di.TargetDisk, hardware.Spec.Disks, label, site)
+		resolved, err := b.resolveImage(ctx, machine.Namespace, di.ImageRef, di.TargetDisk, hardware.Spec.Disks, label, site, true)
 		if err != nil {
 			return nil, Snapshot{}, err
 		}
@@ -188,10 +188,19 @@ func (b *Builder) getMachineHardware(ctx context.Context, machine *keziov1alpha3
 }
 
 // resolveImage fetches ref's Image, resolves its target disk from hints
-// against disks, and builds its DeploySlot list. site lazily resolves the
-// deploying Machine's own seeder placement, threaded through to every
-// content slot this Image builds.
-func (b *Builder) resolveImage(ctx context.Context, defaultNS string, ref keziov1alpha3.NameRef, hints *keziov1alpha3.TargetDiskHints, disks []keziov1alpha3.MachineHardwareDisk, label string, site *lazySiteResolution) (*resolvedImage, error) {
+// against disks, and - when withSlots is true - builds its DeploySlot
+// list. site lazily resolves the deploying Machine's own seeder
+// placement, threaded through to every content slot this Image builds.
+//
+// withSlots is false for BuildSnapshot's hooksHash-only resolution: a
+// slot's torrent needs a live seeder Deployment (buildTorrent ->
+// resolveTorrentURL), which is only ever created on demand and torn down
+// after Provisioning finishes - both facts irrelevant to hooksHash, which
+// buildSnapshot never reads slots for. Requiring a seeder there would
+// make every idle reconcile of an already-Provisioned machine (see
+// MachineReconciler.currentHooksHash) flap Delayed for as long as the
+// seeder happens to be shut down between deploys.
+func (b *Builder) resolveImage(ctx context.Context, defaultNS string, ref keziov1alpha3.NameRef, hints *keziov1alpha3.TargetDiskHints, disks []keziov1alpha3.MachineHardwareDisk, label string, site *lazySiteResolution, withSlots bool) (*resolvedImage, error) {
 	ns := resolveNamespace(ref, defaultNS)
 
 	image := &keziov1alpha3.Image{}
@@ -210,12 +219,60 @@ func (b *Builder) resolveImage(ctx context.Context, defaultNS string, ref keziov
 		return nil, err
 	}
 
-	slots, err := b.buildSlots(ctx, image, disk.DeviceName, site)
-	if err != nil {
-		return nil, err
+	var slots []agentapi.DeploySlot
+	if withSlots {
+		slots, err = b.buildSlots(ctx, image, disk.DeviceName, site)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return &resolvedImage{ref: ref, image: image, targetDisk: disk.DeviceName, slots: slots}, nil
+}
+
+// BuildSnapshot resolves claim's deploy intent for machine into the same
+// Snapshot Build returns (ResolvedDisks/HooksHash), without requiring
+// anything Build needs only to assemble the agent-facing DeployPlan: a
+// seeder Deployment need not be running anywhere (see resolveImage's
+// withSlots doc comment), and the OS image's own layout slots are never
+// resolved. Callers that only need to detect a hooks-only redeploy
+// trigger - the provisioning walk's own currentHooksHash, run against a
+// Machine regardless of whether it is actually about to (re)provision -
+// must use this instead of Build.
+func (b *Builder) BuildSnapshot(ctx context.Context, machine *keziov1alpha3.Machine, claim *keziov1alpha3.MachineClaim) (Snapshot, error) {
+	if claim == nil || (claim.Spec.ImageRef == nil && len(claim.Spec.DataImages) == 0) {
+		return Snapshot{}, &ValidationError{Reason: "machine has no bound claim with an OS image or data images to deploy"}
+	}
+
+	hardware, err := b.getMachineHardware(ctx, machine)
+	if err != nil {
+		return Snapshot{}, err
+	}
+
+	var osImage *resolvedImage
+	if claim.Spec.ImageRef != nil {
+		osImage, err = b.resolveImage(ctx, machine.Namespace, *claim.Spec.ImageRef, claim.Spec.TargetDisk, hardware.Spec.Disks, "OS image", nil, false)
+		if err != nil {
+			return Snapshot{}, err
+		}
+	}
+
+	dataImages := make([]*resolvedImage, len(claim.Spec.DataImages))
+	for i, di := range claim.Spec.DataImages {
+		label := fmt.Sprintf("dataImages[%d]", i)
+		resolved, err := b.resolveImage(ctx, machine.Namespace, di.ImageRef, di.TargetDisk, hardware.Spec.Disks, label, nil, false)
+		if err != nil {
+			return Snapshot{}, err
+		}
+		dataImages[i] = resolved
+	}
+
+	hooks, err := b.resolveMachineHooks(ctx, machine, claim, osImage)
+	if err != nil {
+		return Snapshot{}, err
+	}
+
+	return b.buildSnapshot(osImage, dataImages, hooks)
 }
 
 // diskForSelection returns the disk matching deviceName, for
