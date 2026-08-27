@@ -521,7 +521,23 @@ hardware needs longer, for example slow POST or firmware initialization
 on the way to a net boot.
 
 Conditions: `Ready`, `Progressing`, `AgentCompatible`,
-`AgentRegistered`, and `StatusLossHold`.
+`AgentRegistered`, `StatusLossHold`, and `RetryHeld`.
+
+A Machine stops retrying and holds for an operator once it hits 3
+consecutive failures with `errorType: Restart` in its current state
+(`status.restartCount`, a subset of `status.errorCount` that only ever
+counts `Restart` failures - a `Transient` failure in between does not
+consume one of the three). A held machine shows `operationalStatus:
+error`, condition `RetryHeld: True`, and a Warning Event (reason
+`BootRetryExhausted`); the controller stops calling the deployer
+entirely, so it never re-arms PXE, never power-cycles the machine again,
+and never touches the machine's DHCP reservation or its bound claim -
+both stay exactly as they were at the moment of the 3rd failure. Set
+`kezio.kojuro.date/clear-error` to release the hold: the controller
+clears `operationalStatus`/`errorType`/`errorMessage`, zeroes both error
+counters, and resumes the state walk immediately. The annotation is
+consumed whether or not the machine was actually held - outside a hold it
+is a plain "clear this error and retry now".
 
 Annotations, read directly off the object:
 
@@ -534,6 +550,7 @@ Annotations, read directly off the object:
 | `kezio.kojuro.date/re-inspect` | Asks for a new inspection. The controller consumes the annotation, deletes the existing `MachineHardware`, and emits an Event. |
 | `kezio.kojuro.date/confirm-status-loss` | Releases the `StatusLossHold` condition. The controller consumes the annotation. |
 | `kezio.kojuro.date/bmc-insecure-skip-verify` | Set to exactly `true`, the BMC connection does not verify the TLS certificate. `false` means verify. The webhook refuses every other value. |
+| `kezio.kojuro.date/clear-error` | Releases the `RetryHeld` condition (if present) and clears the current error: `operationalStatus`, `errorType`, `errorMessage`, `errorCount`, and `restartCount` all reset, and the walk resumes at once. The controller consumes the annotation. |
 
 ### MachineClaim
 
