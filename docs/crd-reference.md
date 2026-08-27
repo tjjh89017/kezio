@@ -697,9 +697,8 @@ The boot entry that `efibootmgr` writes points only at the
 removable-media fallback path: `\EFI\BOOT\BOOTX64.EFI` on x86_64, and
 `\EFI\BOOT\BOOTAA64.EFI` on aarch64. kezio selects the path from the
 architecture of the machine, and never examines the loader path of a
-distribution. The image must supply the fallback file. See the
-boot-entry contract section of
-[`docs/physical-lab-deployment.md`](physical-lab-deployment.md).
+distribution. The image must supply the fallback file. See
+[`docs/image-boot-contract.md`](image-boot-contract.md).
 
 A script step takes its content from exactly one of `script` (inline),
 `configMapRef`, or `secretRef`. The manager fetches and templates the
@@ -840,7 +839,7 @@ default-network annotation for the same reason. See
 - [`docs/network-model.md`](network-model.md): what a `Site`
   guarantees and does not guarantee, the no-NAT rule, and the
   address-pool sizing rule.
-- [`docs/physical-lab-deployment.md`](physical-lab-deployment.md): the
-  operational setup, including both DHCP scenarios.
+- [`docs/quick-start.md`](quick-start.md): the step-by-step bring-up
+  of one cluster and one machine.
 - The types themselves, in `api/v1alpha3/`. Their doc comments are the
   authority for anything this document does not cover.

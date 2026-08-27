@@ -149,7 +149,7 @@ the fixed, fail-secure `bootLocalConfig` that chainloads the local disk
 to run the boot L2 segment as a controlled network, not an open,
 untrusted one: target machines attach only to the provisioning bridge,
 and they do not share it with unrelated cluster or data-plane traffic
-(`docs/physical-lab-deployment.md`, section 2.2).
+(`docs/network-model.md`).
 
 ## CI does not exercise Secure Boot
 
