@@ -66,10 +66,13 @@ intent; binding a `MachineClaim` is what starts a provision.
 4. A `MachineClaim` bound to the `Machine` carries the deploy intent -
    which `Image`, which data images, which disk, which hooks. Binding
    it starts a provision.
-5. When a `Machine` needs an `Image`, the operator starts one seeder
-   Deployment for that `Image` at that `Machine`'s `Site` - one process
-   serving every `PartitionContent` the `Image` references. The seeder
-   stops after a grace period once no machine at that `Site` needs it.
+5. Once a `MachineClaim` bound to a `Machine` names an `Image`, the
+   operator starts one seeder Deployment for that `Image` at that
+   `Machine`'s `Site` - one process serving every `PartitionContent`
+   the `Image` references. The seeder stops after a grace period once
+   every deploy of that `Image` at that `Site` has finished - no
+   Machine there is still enrolling, inspecting, available, or
+   provisioning, and no active `DeployRun` there names it either.
 6. The network-booted agent asks the operator for its deploy plan. It
    fetches each partition's `.torrent` over HTTP from the seeder pod,
    leeches the content over BitTorrent, writes each partition with

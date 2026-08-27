@@ -440,6 +440,14 @@ therefore never reference content that does not exist.
 The Image reconciler is thin. It aggregates the readiness of the
 referenced content, and it drives the per-Site seeder Deployments.
 
+A Site's seeder Deployment for this Image starts once any `Machine`
+there has a bound `MachineClaim` naming it. It stops, after the grace
+period, once every deploy of it at that Site has finished: no bound
+Machine there is still `Enrolling`, `Inspecting`, `Available`, or
+`Provisioning`, no `Provisioned` Machine there still has a pending
+re-provision (a claim edit or hook change the provisioning trigger has
+not yet acted on), and no active `DeployRun` there names it either.
+
 Conditions: `Ready`, `Valid` (every referenced content resolves, and
 its `lastExtentEnd` fits the slot), and `SeederDegraded`.
 
