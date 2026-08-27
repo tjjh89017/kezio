@@ -177,15 +177,18 @@ spec:
                   the bound machine's leecher.
                 properties:
                   aioThreads:
-                    description: AioThreads overrides the EZIO daemon's async I/O
-                      thread count.
+                    description: |-
+                      AioThreads overrides the EZIO daemon's async I/O thread count.
+                      Absent means ezio's own built-in default.
                     format: int32
                     minimum: 1
                     type: integer
                   cacheSizeMB:
                     description: |-
                       CacheSizeMB overrides the EZIO daemon's unified cache size, in
-                      megabytes.
+                      megabytes. Absent means the agent computes a size from the
+                      machine's own memory instead of falling back to ezio's fixed
+                      built-in default - see docs/crd-reference.md for the formula.
                     format: int32
                     minimum: 1
                     type: integer
@@ -206,7 +209,9 @@ spec:
                     minimum: 1
                     type: integer
                   port:
-                    description: Port overrides the EZIO daemon's listen port.
+                    description: |-
+                      Port overrides the EZIO daemon's BitTorrent peer listen port.
+                      Absent means ezio's own built-in default.
                     format: int32
                     maximum: 65535
                     minimum: 1

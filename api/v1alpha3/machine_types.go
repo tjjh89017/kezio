@@ -109,11 +109,14 @@ type MachineDataImage struct {
 // field falls back to the operator default.
 type MachineEzioTuning struct {
 	// CacheSizeMB overrides the EZIO daemon's unified cache size, in
-	// megabytes.
+	// megabytes. Absent means the agent computes a size from the
+	// machine's own memory instead of falling back to ezio's fixed
+	// built-in default - see docs/crd-reference.md for the formula.
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	CacheSizeMB *int32 `json:"cacheSizeMB,omitempty"`
 	// AioThreads overrides the EZIO daemon's async I/O thread count.
+	// Absent means ezio's own built-in default.
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	AioThreads *int32 `json:"aioThreads,omitempty"`
@@ -129,7 +132,8 @@ type MachineEzioTuning struct {
 	// +kubebuilder:validation:Maximum=1024
 	// +optional
 	MaxConnections *int32 `json:"maxConnections,omitempty"`
-	// Port overrides the EZIO daemon's listen port.
+	// Port overrides the EZIO daemon's BitTorrent peer listen port.
+	// Absent means ezio's own built-in default.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=65535
 	// +optional
