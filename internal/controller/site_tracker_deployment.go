@@ -232,6 +232,70 @@ func buildTrackerDeployment(site *keziov1alpha3.Site, seedingSubnet *keziov1alph
 	}, nil
 }
 
+// trackerNetworkStatusAnnotation is the Multus CNI pod annotation
+// listing every network interface actually attached to a pod, keyed by
+// the NetworkAttachmentDefinition each came from. It is the only place
+// that confirms a Multus attachment actually took - the pod can still
+// report Kubernetes-Ready off its cluster (Calico) interface alone if
+// the tracker NAD's CNI plugin silently failed to attach, which is
+// exactly the outage trackerPodNetworkIssue guards against.
+const trackerNetworkStatusAnnotation = "k8s.v1.cni.cncf.io/network-status"
+
+// trackerNetworkStatusEntry is the subset of one k8s.v1.cni.cncf.io/
+// network-status entry this package reads: the NetworkAttachmentDefinition
+// each interface came from ("<namespace>/<name>", Multus's own format)
+// and the addresses that interface actually holds.
+type trackerNetworkStatusEntry struct {
+	Name string   `json:"name"`
+	IPs  []string `json:"ips,omitempty"`
+}
+
+// trackerPodNetworkIssue reports why pod's tracker NAD attachment does
+// not carry wantIP, or "" (with an empty message) when it does.
+// nadNamespace/nadName name the seeding Subnet's SeederNetworkRef,
+// resolved the same way trackerPodAnnotations resolves it.
+//
+// A missing or unparseable network-status annotation and a missing NAD
+// entry both report reason TrackerNetworkMissing: from a Site's point
+// of view both mean "cannot confirm this pod is on its pinned address"
+// - the exact gap a tracker pod recreated with only its cluster IP,
+// and reported Ready, fell through. An entry that names the NAD but
+// not wantIP among its addresses reports TrackerNetworkIPMismatch
+// instead, since some other address got attached, not none at all.
+func trackerPodNetworkIssue(pod *corev1.Pod, nadNamespace, nadName, wantIP string) (reason, message string) {
+	raw := pod.Annotations[trackerNetworkStatusAnnotation]
+	if raw == "" {
+		return "TrackerNetworkMissing", fmt.Sprintf(
+			"tracker pod %s/%s carries no %s annotation; its Multus attachment cannot be confirmed",
+			pod.Namespace, pod.Name, trackerNetworkStatusAnnotation)
+	}
+
+	var entries []trackerNetworkStatusEntry
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		return "TrackerNetworkMissing", fmt.Sprintf(
+			"tracker pod %s/%s carries an unparseable %s annotation: %v",
+			pod.Namespace, pod.Name, trackerNetworkStatusAnnotation, err)
+	}
+
+	want := nadNamespace + "/" + nadName
+	for _, entry := range entries {
+		if entry.Name != want {
+			continue
+		}
+		for _, ip := range entry.IPs {
+			if ip == wantIP {
+				return "", ""
+			}
+		}
+		return "TrackerNetworkIPMismatch", fmt.Sprintf(
+			"tracker pod %s/%s is attached to NAD %s but holds %v, not spec.tracker.ip %q",
+			pod.Namespace, pod.Name, want, entry.IPs, wantIP)
+	}
+	return "TrackerNetworkMissing", fmt.Sprintf(
+		"tracker pod %s/%s carries no %s entry for NAD %s; Multus may have failed to attach it",
+		pod.Namespace, pod.Name, trackerNetworkStatusAnnotation, want)
+}
+
 // trackerAnnounceURL builds the announce URL Site.Status.TrackerURL
 // carries for a Site running its own tracker Deployment, bound to ip on
 // trackerAnnouncePort.

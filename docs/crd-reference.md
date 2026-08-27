@@ -88,9 +88,19 @@ Site serve. The address must stay the same across tracker pod
 restarts.
 
 Conditions: `Valid` (schema checks, plus the checks of the Site
-reconciler against `seederSubnetRef`) and `Ready` (the tracker
-Deployment is available). A Site with no tracker Deployment of its own
-is Ready as soon as it is Valid.
+reconciler against `seederSubnetRef`), `Ready` (the tracker Deployment
+is available, and its pod's Multus attachment matches `tracker.ip` -
+see `TrackerNetworkReady` below), and `TrackerNetworkReady`. A Site
+with no tracker Deployment of its own is Ready as soon as it is Valid.
+
+`TrackerNetworkReady` is False when the tracker pod's own
+`k8s.v1.cni.cncf.io/network-status` annotation carries no entry for the
+seeding Subnet's `seederNetworkRef`, or that entry's address does not
+match `tracker.ip` - a pod can pass Kubernetes' own readiness with a
+Multus attachment that silently failed, leaving it reachable only on
+the cluster network. A Warning Event is recorded on the Site when this
+happens. Unknown until the tracker Deployment is Available; True for a
+Site with no tracker Deployment of its own.
 
 ### Subnet
 

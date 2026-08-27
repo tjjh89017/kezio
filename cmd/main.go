@@ -408,6 +408,7 @@ func main() {
 	if err := (&controller.SiteReconciler{
 		Client:            mgr.GetClient(),
 		Scheme:            mgr.GetScheme(),
+		Recorder:          mgr.GetEventRecorderFor("site-controller"),
 		TrackerDeployment: trackerDeploymentConfigFromEnv(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Site")

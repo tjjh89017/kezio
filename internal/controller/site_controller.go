@@ -24,11 +24,13 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -56,6 +58,11 @@ type SiteReconciler struct {
 	// entirely (see TrackerDeploymentConfig); status and conditions are
 	// still computed and written regardless.
 	TrackerDeployment TrackerDeploymentConfig
+	// Recorder emits a Warning Event on a Site whose tracker pod is
+	// Available but not actually attached to its pinned tracker address
+	// (see trackerPodNetworkCheck). May be nil in tests that never reach
+	// that path.
+	Recorder record.EventRecorder
 }
 
 // siteValidationFailure names the first SiteReconciler-side check that
@@ -72,6 +79,7 @@ type siteValidationFailure struct {
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=sites/finalizers,verbs=update
 // +kubebuilder:rbac:groups=kezio.kojuro.date,resources=subnets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 
 // Reconcile fetches the Site, dispatches to onDelete if it is being
 // deleted, and otherwise dispatches to onChange.
@@ -116,7 +124,7 @@ func (r *SiteReconciler) onChange(ctx context.Context, site *keziov1alpha3.Site)
 		// (SiteSpec.SeederSubnetRef's own doc comment).
 		site.Status.SeederReady = false
 		site.Status.TrackerURL = ""
-		return ctrl.Result{}, r.updateSiteConditions(ctx, site, nil, nil, false, false, false, "", "")
+		return ctrl.Result{}, r.updateSiteConditions(ctx, site, nil, nil, false, false, false, "", "", nil)
 	}
 
 	subnet, invalid, err := r.resolveSeedingSubnet(ctx, site)
@@ -126,7 +134,7 @@ func (r *SiteReconciler) onChange(ctx context.Context, site *keziov1alpha3.Site)
 	if invalid != nil {
 		site.Status.SeederReady = false
 		site.Status.TrackerURL = ""
-		return ctrl.Result{}, r.updateSiteConditions(ctx, site, invalid, nil, false, false, false, "", "")
+		return ctrl.Result{}, r.updateSiteConditions(ctx, site, invalid, nil, false, false, false, "", "", nil)
 	}
 
 	seederReady, err := r.seederPlacementReady(ctx, subnet)
@@ -139,7 +147,7 @@ func (r *SiteReconciler) onChange(ctx context.Context, site *keziov1alpha3.Site)
 		// The operator already runs this tracker: kezio creates nothing
 		// and checks nothing about its reachability.
 		site.Status.TrackerURL = site.Spec.Tracker.ExternalURL
-		return ctrl.Result{}, r.updateSiteConditions(ctx, site, nil, nil, false, false, false, "", "")
+		return ctrl.Result{}, r.updateSiteConditions(ctx, site, nil, nil, false, false, false, "", "", nil)
 	}
 
 	site.Status.TrackerURL = trackerAnnounceURL(site.Spec.Tracker.IP)
@@ -152,7 +160,7 @@ func (r *SiteReconciler) onChange(ctx context.Context, site *keziov1alpha3.Site)
 			reason:  "SeederNetworkRefMissing",
 			message: fmt.Sprintf("seeding Subnet %s/%s has no seederNetworkRef, so this Site's tracker cannot be single-homed on a pinned address", subnet.Namespace, subnet.Name),
 		}
-		return ctrl.Result{}, r.updateSiteConditions(ctx, site, invalid, nil, false, false, false, "", "")
+		return ctrl.Result{}, r.updateSiteConditions(ctx, site, invalid, nil, false, false, false, "", "", nil)
 	}
 
 	checks, err := r.runTrackerAddressCheck(ctx, site, subnet)
@@ -163,7 +171,7 @@ func (r *SiteReconciler) onChange(ctx context.Context, site *keziov1alpha3.Site)
 	if !r.TrackerDeployment.enabled() {
 		return ctrl.Result{}, r.updateSiteConditions(ctx, site, nil, checks, true, false, false,
 			"SiteTrackerDeploymentImageUnconfigured",
-			"no tracker Deployment image is configured on the manager (TRACKER_DEPLOYMENT_IMAGE); the tracker is not reconciled for this Site")
+			"no tracker Deployment image is configured on the manager (TRACKER_DEPLOYMENT_IMAGE); the tracker is not reconciled for this Site", nil)
 	}
 
 	dep, unowned, invalid, err := r.reconcileTrackerDeployment(ctx, site, subnet)
@@ -171,7 +179,7 @@ func (r *SiteReconciler) onChange(ctx context.Context, site *keziov1alpha3.Site)
 		return ctrl.Result{}, err
 	}
 	if invalid != nil {
-		return ctrl.Result{}, r.updateSiteConditions(ctx, site, invalid, checks, false, false, false, "", "")
+		return ctrl.Result{}, r.updateSiteConditions(ctx, site, invalid, checks, false, false, false, "", "", nil)
 	}
 
 	var requeueAfter time.Duration
@@ -188,10 +196,77 @@ func (r *SiteReconciler) onChange(ctx context.Context, site *keziov1alpha3.Site)
 		depReason, depMessage = trackerDeploymentUnavailableReason(dep)
 	}
 
-	if err := r.updateSiteConditions(ctx, site, nil, checks, true, true, depAvailable, depReason, depMessage); err != nil {
+	var netFailure *siteValidationFailure
+	if !unowned && depAvailable {
+		netFailure, err = r.trackerPodNetworkCheck(ctx, site, subnet)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	if err := r.updateSiteConditions(ctx, site, nil, checks, true, true, depAvailable, depReason, depMessage, netFailure); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// trackerPodNetworkCheck confirms that site's tracker pod - the one its
+// (already Available) tracker Deployment currently runs - is actually
+// attached to seedingSubnet's SeederNetworkRef at site.Spec.Tracker.IP,
+// not just reporting Kubernetes-Ready off its cluster interface alone
+// (see trackerPodNetworkIssue's doc comment for the outage this guards
+// against). Called only once the tracker Deployment is Available.
+//
+// Returns nil when no live tracker pod is found (a brief race right
+// after the Deployment reports Available) or when the found pod's
+// attachment matches; a non-nil failure means it does not, and a
+// Warning Event is recorded on site as a side effect.
+func (r *SiteReconciler) trackerPodNetworkCheck(ctx context.Context, site *keziov1alpha3.Site, seedingSubnet *keziov1alpha3.Subnet) (*siteValidationFailure, error) {
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods, client.InNamespace(site.Namespace), client.MatchingLabels{
+		trackerAppNameLabel:        trackerAppNameValue,
+		trackerAppComponentLabel:   trackerComponentValue,
+		trackerDeploymentSiteLabel: site.Name,
+	}); err != nil {
+		return nil, fmt.Errorf("list tracker pods: %w", err)
+	}
+	pod := selectTrackerPod(pods.Items)
+	if pod == nil {
+		return nil, nil
+	}
+
+	ref := *seedingSubnet.Spec.SeederNetworkRef
+	ns := resolveNamespace(ref, seedingSubnet.Namespace)
+	reason, message := trackerPodNetworkIssue(pod, ns, ref.Name, site.Spec.Tracker.IP)
+	if reason == "" {
+		return nil, nil
+	}
+	if r.Recorder != nil {
+		r.Recorder.Event(site, corev1.EventTypeWarning, reason, message)
+	}
+	return &siteValidationFailure{reason: reason, message: message}, nil
+}
+
+// selectTrackerPod picks the pod trackerPodNetworkCheck should inspect
+// out of pods: a live (not terminating) Running pod when one exists,
+// falling back to any other live pod, and nil when none is live. The
+// tracker Deployment runs one replica, so more than one live pod here
+// is transient - a Recreate rollout mid-flight.
+func selectTrackerPod(pods []corev1.Pod) *corev1.Pod {
+	var fallback *corev1.Pod
+	for i := range pods {
+		pod := &pods[i]
+		if !pod.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if pod.Status.Phase == corev1.PodRunning {
+			return pod
+		}
+		if fallback == nil {
+			fallback = pod
+		}
+	}
+	return fallback
 }
 
 // runTrackerAddressCheck fetches seedingSubnet's SeederNetworkRef config
@@ -355,12 +430,20 @@ func (r *SiteReconciler) reconcileTrackerDeployment(ctx context.Context, site *k
 // checks Violation, always win (Ready can never be True on top of either);
 // otherwise, when a tracker Deployment is wanted (trackerWanted - site
 // declares a seeding Subnet and Tracker.IP, not ExternalURL), Ready
-// additionally requires depConfigured and depAvailable; then a checks
+// additionally requires depConfigured, depAvailable, and netFailure nil
+// (trackerPodNetworkCheck's result - a Deployment can be Available with a
+// pod whose Multus attachment silently failed); then a checks
 // Indeterminate goes Unknown. A Site with no tracker Deployment of its own
 // (trackerWanted false: no seederSubnetRef, or Tracker.ExternalURL) is
 // Ready once Valid, exactly as SiteConditionReady's own doc comment
 // states.
-func (r *SiteReconciler) updateSiteConditions(ctx context.Context, site *keziov1alpha3.Site, invalid *siteValidationFailure, checks []nadvalidate.CheckResult, trackerWanted, depConfigured, depAvailable bool, depReason, depMessage string) error {
+//
+// netFailure also drives SiteConditionTrackerNetworkReady directly: False
+// when non-nil, True once the tracker Deployment is Available and
+// netFailure is nil, Unknown before that (or when invalid/a checks
+// Violation blocks the check from ever running), and True with a
+// not-applicable reason for a Site with no tracker Deployment of its own.
+func (r *SiteReconciler) updateSiteConditions(ctx context.Context, site *keziov1alpha3.Site, invalid *siteValidationFailure, checks []nadvalidate.CheckResult, trackerWanted, depConfigured, depAvailable bool, depReason, depMessage string, netFailure *siteValidationFailure) error {
 	var violation, indeterminate *nadvalidate.CheckResult
 	for i := range checks {
 		c := &checks[i]
@@ -401,6 +484,8 @@ func (r *SiteReconciler) updateSiteConditions(ctx context.Context, site *keziov1
 		readyStatus, readyReason, readyMessage = metav1.ConditionFalse, violation.Reason, violation.Message
 	case trackerWanted && (!depConfigured || !depAvailable):
 		readyStatus, readyReason, readyMessage = metav1.ConditionFalse, depReason, depMessage
+	case netFailure != nil:
+		readyStatus, readyReason, readyMessage = metav1.ConditionFalse, netFailure.reason, netFailure.message
 	case indeterminate != nil:
 		readyStatus, readyReason, readyMessage = metav1.ConditionUnknown, indeterminate.Reason, indeterminate.Message
 	case trackerWanted:
@@ -411,6 +496,27 @@ func (r *SiteReconciler) updateSiteConditions(ctx context.Context, site *keziov1
 		Status:             readyStatus,
 		Reason:             readyReason,
 		Message:            readyMessage,
+		ObservedGeneration: site.Generation,
+	})
+
+	netStatus, netReason, netMessage := metav1.ConditionTrue, "SiteTrackerNetworkNotApplicable", "this Site carries no tracker Deployment of its own"
+	switch {
+	case !trackerWanted:
+		// Keep the defaults above.
+	case invalid != nil || violation != nil:
+		netStatus, netReason, netMessage = metav1.ConditionUnknown, "SiteTrackerNetworkUnchecked", "the tracker address check did not run because of a blocking validation issue"
+	case netFailure != nil:
+		netStatus, netReason, netMessage = metav1.ConditionFalse, netFailure.reason, netFailure.message
+	case !depConfigured || !depAvailable:
+		netStatus, netReason, netMessage = metav1.ConditionUnknown, "SiteTrackerNetworkUnchecked", "tracker Deployment is not Available yet; its Multus attachment has not been checked"
+	default:
+		netReason, netMessage = "SiteTrackerNetworkReady", "tracker pod's Multus attachment matches spec.tracker.ip"
+	}
+	apimeta.SetStatusCondition(&site.Status.Conditions, metav1.Condition{
+		Type:               keziov1alpha3.SiteConditionTrackerNetworkReady,
+		Status:             netStatus,
+		Reason:             netReason,
+		Message:            netMessage,
 		ObservedGeneration: site.Generation,
 	})
 
@@ -454,18 +560,39 @@ func (r *SiteReconciler) mapSeederDeploymentToSite(_ context.Context, obj client
 	return []reconcile.Request{{NamespacedName: client.ObjectKey{Namespace: ns, Name: name}}}
 }
 
+// mapTrackerPodToSite requeues the Site named in a tracker pod's own
+// trackerDeploymentSiteLabel. A tracker pod is controlled by its
+// Deployment, not the Site, and its network-status annotation can
+// change (Multus attaching late, or a kubelet resync rewriting it)
+// without the Deployment itself changing - without this mapping
+// trackerPodNetworkCheck's result would only ever be re-evaluated on
+// the next unrelated Site reconcile.
+func (r *SiteReconciler) mapTrackerPodToSite(_ context.Context, obj client.Object) []reconcile.Request {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok || pod.Labels[trackerAppComponentLabel] != trackerComponentValue {
+		return nil
+	}
+	site := pod.Labels[trackerDeploymentSiteLabel]
+	if site == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: client.ObjectKey{Namespace: pod.Namespace, Name: site}}}
+}
+
 // SetupWithManager sets up the controller with the Manager. Owns
 // requeues a Site whenever a tracker Deployment it controls changes,
 // Watches Subnet requeues it when a Subnet's own siteRef affects this
-// Site's status (see mapSubnetToSite), and Watches Deployment requeues it
+// Site's status (see mapSubnetToSite), Watches Deployment requeues it
 // when a seeder Deployment it does not control changes (see
-// mapSeederDeploymentToSite).
+// mapSeederDeploymentToSite), and Watches Pod requeues it when its own
+// tracker pod changes (see mapTrackerPodToSite).
 func (r *SiteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&keziov1alpha3.Site{}).
 		Owns(&appsv1.Deployment{}).
 		Watches(&keziov1alpha3.Subnet{}, handler.EnqueueRequestsFromMapFunc(r.mapSubnetToSite)).
 		Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(r.mapSeederDeploymentToSite)).
+		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.mapTrackerPodToSite)).
 		Named("site").
 		Complete(r)
 }

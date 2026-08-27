@@ -78,6 +78,14 @@ const (
 	// referenced SeederSubnetRef. False names the first failing check as
 	// Reason.
 	SiteConditionValid = "Valid"
+	// SiteConditionTrackerNetworkReady reports whether this Site's
+	// tracker pod (when Tracker.IP is set) is actually attached to
+	// SeederSubnetRef's seeder NAD at Tracker.IP, not just reporting
+	// Kubernetes-Ready off its cluster interface alone - a pod can pass
+	// that check with a Multus attachment that silently failed to come
+	// up. Unknown until the tracker Deployment is Available; True for a
+	// Site with no tracker Deployment of its own.
+	SiteConditionTrackerNetworkReady = "TrackerNetworkReady"
 )
 
 // SiteStatus defines the observed state of Site.
