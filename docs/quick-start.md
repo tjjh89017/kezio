@@ -39,7 +39,7 @@ Pick the kezio release to install and keep it in a variable for every
 later command:
 
 ```sh
-export KEZIO_VERSION=v0.3.12
+export KEZIO_VERSION=v0.3.13
 ```
 
 The addresses in this guide, on the provisioning segment
@@ -173,15 +173,14 @@ provide `ReadWriteMany`.
 ## 6. Configure the manager
 
 Every net boot feature is off until an environment variable turns it on.
-`192.0.2.2` is bootd's address on the segment; a machine reaches the
-boot API and the agent API through bootd's proxy at that one address.
+A machine reaches the boot API and the agent API through its own
+Subnet's bootd (the `bootdServerIP` of step 8), so no address of the
+cluster appears here.
 
 ```sh
 kubectl -n kezio-system set env deployment/kezio-controller-manager \
   DEPLOYER=agent \
   BOOT_SERVER_ADDR=:8090 \
-  BOOT_SERVER_URL="http://192.0.2.2" \
-  BOOT_AGENT_SERVER_URL="http://192.0.2.2" \
   AGENT_SERVER_ADDR=:8091 \
   BOOTD_DEPLOYMENT_IMAGE="ghcr.io/tjjh89017/kezio-bootd:${KEZIO_VERSION}" \
   BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE="ghcr.io/tjjh89017/kezio-boot-artifacts:${KEZIO_VERSION}" \
@@ -196,13 +195,9 @@ kubectl -n kezio-system set env deployment/kezio-controller-manager \
 kubectl -n kezio-system rollout status deployment/kezio-controller-manager --timeout=180s
 ```
 
-Two of these deserve a note:
-
-- `DEPLOYER=agent` selects the deployer that drives real hardware. Unset,
-  kezio uses a fake deployer that never touches a machine.
-- `BOOT_AGENT_SERVER_URL` must be set. Without it the agent's
-  registration fails with 404 and the machine waits in `Inspecting`
-  with nothing in the manager log to explain it.
+One of these deserves a note: `DEPLOYER=agent` selects the deployer
+that drives real hardware. Unset, kezio uses a fake deployer that never
+touches a machine.
 
 The import Job expects a `qcow2` source. If you import raw disk images,
 also set `IMAGE_INGEST_SOURCE_FORMAT=raw`.
