@@ -465,6 +465,7 @@ A `Machine` is one bare-metal machine.
 | `spec.bootMACAddress` | The MAC address of the NIC that network boots. The MAC gate (bootd's dnsmasq hostsfile) answers only an enrolled MAC, so this field must normally already be set before a Machine can PXE-boot at all - inspection cannot discover a MAC it needs the MAC gate open to reach. The one exception is a Subnet whose bootd runs with the MAC gate disabled (`BOOTD_ANSWER_ALL`, an answer-all Subnet, for a deliberately inventory-only lab): there, any machine boots and inspection discovers the MAC from the agent's own registration. It is mandatory (schema-enforced) only when the inspect-disable annotation skips inspection outright. |
 | `spec.claimRef` | The `MachineClaim` bound to this machine. Written only by the claim controller. |
 | `spec.console` | Kernel `console=` values for the live environment, in order, for example `["ttyS0,115200n8", "tty0"]`. The last value is the primary console. A hardware attribute, like BMC - not deploy intent. Empty falls back to the boot server's default. Optional, up to 4 entries. |
+| `spec.bootTimeout` | The longest time kezio waits from power-on until the agent registers, for this Machine only. It sets the boot token lifetime (see below). It can only extend the operator-wide default; a shorter value has no effect. Optional. |
 
 A `Machine` carries no deploy intent: no image, no disk hint, no
 hooks. That intent lives on a `MachineClaim` bound to it - see
@@ -509,6 +510,15 @@ Machine is removed. The boot config server reads this Secret only when
 its own in-memory copy is missing - after a manager restart, for
 example - so a machine that starts its boot before the restart can still
 register afterward, instead of waiting out the full inspection timeout.
+
+`status.netBoot.expiresAt` is also the only clock kezio waits on for a
+machine to boot into the agent: inspection and provisioning both give up
+once the boot token they minted for the current attempt expires, rather
+than tracking a second, independent deadline. The token's lifetime
+defaults to one hour (`BOOT_TOKEN_TTL` on the manager raises it for every
+Machine); `spec.bootTimeout` raises it further for one Machine whose
+hardware needs longer, for example slow POST or firmware initialization
+on the way to a net boot.
 
 Conditions: `Ready`, `Progressing`, `AgentCompatible`,
 `AgentRegistered`, and `StatusLossHold`.

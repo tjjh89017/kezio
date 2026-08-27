@@ -41,7 +41,14 @@ const (
 // download, and the live OS booting far enough to run the agent's
 // registration - without staying valid so long that an unused token sits
 // as a live credential.
-const DefaultTokenTTL = 30 * time.Minute
+//
+// This is also the longest kezio waits for a machine to boot into the
+// agent: internal/deployer.AgentDeployer's Inspect and Provision give up
+// once the boot token minted for the current attempt expires, rather than
+// keeping their own separate deadline. Raise it (BOOT_TOKEN_TTL) for
+// hardware whose POST or firmware initialization is slow enough to eat
+// into that window.
+const DefaultTokenTTL = time.Hour
 
 // Config configures a Server.
 type Config struct {

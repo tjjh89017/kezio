@@ -269,6 +269,57 @@ func TestAgentDeployerInspectSkipsMintingWithNoTokenStore(t *testing.T) {
 	}
 }
 
+// TestAgentDeployerTokenTTL pins tokenTTL's precedence: d.TokenTTL (or
+// bootserver.DefaultTokenTTL when unset) is the floor, and
+// machine.Spec.BootTimeout only ever raises it, never lowers it.
+func TestAgentDeployerTokenTTL(t *testing.T) {
+	tests := []struct {
+		name        string
+		deployerTTL time.Duration
+		bootTimeout *metav1.Duration
+		want        time.Duration
+	}{
+		{
+			name: "unset deployer TTL and no BootTimeout uses the package default",
+			want: bootserver.DefaultTokenTTL,
+		},
+		{
+			name:        "BootTimeout larger than the default extends it",
+			bootTimeout: &metav1.Duration{Duration: bootserver.DefaultTokenTTL + time.Hour},
+			want:        bootserver.DefaultTokenTTL + time.Hour,
+		},
+		{
+			name:        "BootTimeout smaller than the default has no effect",
+			bootTimeout: &metav1.Duration{Duration: time.Minute},
+			want:        bootserver.DefaultTokenTTL,
+		},
+		{
+			name:        "BootTimeout larger than a configured deployer TTL extends it",
+			deployerTTL: 10 * time.Minute,
+			bootTimeout: &metav1.Duration{Duration: 20 * time.Minute},
+			want:        20 * time.Minute,
+		},
+		{
+			name:        "BootTimeout smaller than a configured deployer TTL has no effect",
+			deployerTTL: 20 * time.Minute,
+			bootTimeout: &metav1.Duration{Duration: 10 * time.Minute},
+			want:        20 * time.Minute,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			machine := agentTestMachine(t)
+			machine.Spec.BootTimeout = tt.bootTimeout
+			d := &AgentDeployer{TokenTTL: tt.deployerTTL}
+
+			if got := d.tokenTTL(machine); got != tt.want {
+				t.Errorf("tokenTTL() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 // newAgentTestClientMachineStatusConflictOnce builds a fake client exactly
 // like newAgentTestClient, except the first Machine status subresource
 // Update call fails with an apiserver conflict - reproducing the observed
@@ -533,13 +584,20 @@ func TestAgentDeployerInspectCompleteOnceRegisteredAndHardwarePresent(t *testing
 	}
 }
 
-func TestAgentDeployerInspectDeadlineExceededFailsRestart(t *testing.T) {
+// TestAgentDeployerInspectBootTokenExpiredFailsRestart pins that Inspect's
+// later-pass poll bounds itself by the armed boot token's own expiry
+// (status.netBoot.expiresAt), not by a second, independent deadline.
+func TestAgentDeployerInspectBootTokenExpiredFailsRestart(t *testing.T) {
 	machine := agentTestMachine(t)
 	c := newAgentTestClient(t, machine, agentTestBMCSecret())
-	d := &AgentDeployer{Client: c}
+	d := &AgentDeployer{Client: c, Tokens: bootserver.NewTokenStore()}
 
 	machine.Annotations = map[string]string{
-		agentDeployerPXEArmedAnnotation: time.Now().Add(-2 * agentDeployerInspectDeadline).UTC().Format(time.RFC3339),
+		agentDeployerPXEArmedAnnotation: time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+	}
+	machine.Status.NetBoot = &keziov1alpha3.MachineNetBootStatus{
+		TokenHash: "deadbeef",
+		ExpiresAt: metav1.NewTime(time.Now().Add(-time.Minute)),
 	}
 
 	result, err := d.Inspect(context.Background(), machine, false)
@@ -557,13 +615,38 @@ func TestAgentDeployerInspectDeadlineExceededFailsRestart(t *testing.T) {
 	}
 }
 
+// TestAgentDeployerInspectBootTokenNotYetExpiredContinues pins the other
+// side of the same check: a boot token that has not yet expired keeps
+// Inspect polling instead of failing.
+func TestAgentDeployerInspectBootTokenNotYetExpiredContinues(t *testing.T) {
+	machine := agentTestMachine(t)
+	c := newAgentTestClient(t, machine, agentTestBMCSecret())
+	d := &AgentDeployer{Client: c, Tokens: bootserver.NewTokenStore()}
+
+	machine.Annotations = map[string]string{
+		agentDeployerPXEArmedAnnotation: time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+	}
+	machine.Status.NetBoot = &keziov1alpha3.MachineNetBootStatus{
+		TokenHash: "deadbeef",
+		ExpiresAt: metav1.NewTime(time.Now().Add(time.Hour)),
+	}
+
+	result, err := d.Inspect(context.Background(), machine, false)
+	if err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+	if result.Outcome != Continuing {
+		t.Fatalf("Inspect() outcome = %v, want Continuing (boot token not yet expired)", result.Outcome)
+	}
+}
+
 func TestAgentDeployerInspectRestartOnFailureReArms(t *testing.T) {
 	machine := agentTestMachine(t)
 	c := newAgentTestClient(t, machine, agentTestBMCSecret())
 	d := &AgentDeployer{Client: c}
 
 	machine.Annotations = map[string]string{
-		agentDeployerPXEArmedAnnotation: time.Now().Add(-2 * agentDeployerInspectDeadline).UTC().Format(time.RFC3339),
+		agentDeployerPXEArmedAnnotation: time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
 	}
 
 	result, err := d.Inspect(context.Background(), machine, true)
@@ -850,18 +933,25 @@ func TestAgentDeployerProvisionStalePriorSessionDoesNotCountAsBooted(t *testing.
 	}
 }
 
-func TestAgentDeployerProvisionBootDeadlineExceededFailsRestart(t *testing.T) {
+// TestAgentDeployerProvisionBootTokenExpiredFailsRestart pins that
+// pollAgentBoot bounds itself by the armed boot token's own expiry
+// (status.netBoot.expiresAt), not by a second, independent deadline.
+func TestAgentDeployerProvisionBootTokenExpiredFailsRestart(t *testing.T) {
 	machine := agentTestMachine(t)
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
 	c := newAgentTestClient(t, machine, agentTestBMCSecret())
-	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
+	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}, Tokens: bootserver.NewTokenStore()}
 
-	marker := agentDeployerProvisionBootMarker{ArmedAt: time.Now().Add(-2 * agentDeployerProvisionBootDeadline)}
+	marker := agentDeployerProvisionBootMarker{ArmedAt: time.Now().Add(-time.Hour)}
 	data, err := json.Marshal(marker)
 	if err != nil {
 		t.Fatalf("marshal marker: %v", err)
 	}
 	machine.Annotations = map[string]string{agentDeployerProvisionBootAnnotation: string(data)}
+	machine.Status.NetBoot = &keziov1alpha3.MachineNetBootStatus{
+		TokenHash: "deadbeef",
+		ExpiresAt: metav1.NewTime(time.Now().Add(-time.Minute)),
+	}
 
 	result, err := d.Provision(context.Background(), machine, run, false)
 	if err != nil {
@@ -878,13 +968,42 @@ func TestAgentDeployerProvisionBootDeadlineExceededFailsRestart(t *testing.T) {
 	}
 }
 
+// TestAgentDeployerProvisionBootTokenNotYetExpiredContinues pins the
+// other side of the same check: a boot token that has not yet expired
+// keeps pollAgentBoot polling instead of failing.
+func TestAgentDeployerProvisionBootTokenNotYetExpiredContinues(t *testing.T) {
+	machine := agentTestMachine(t)
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	c := newAgentTestClient(t, machine, agentTestBMCSecret())
+	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}, Tokens: bootserver.NewTokenStore()}
+
+	marker := agentDeployerProvisionBootMarker{ArmedAt: time.Now().Add(-time.Minute)}
+	data, err := json.Marshal(marker)
+	if err != nil {
+		t.Fatalf("marshal marker: %v", err)
+	}
+	machine.Annotations = map[string]string{agentDeployerProvisionBootAnnotation: string(data)}
+	machine.Status.NetBoot = &keziov1alpha3.MachineNetBootStatus{
+		TokenHash: "deadbeef",
+		ExpiresAt: metav1.NewTime(time.Now().Add(time.Hour)),
+	}
+
+	result, err := d.Provision(context.Background(), machine, run, false)
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	if result.Outcome != Continuing {
+		t.Fatalf("Provision() outcome = %v, want Continuing (boot token not yet expired)", result.Outcome)
+	}
+}
+
 func TestAgentDeployerProvisionBootDeadlineExceededRestartOnFailureReArms(t *testing.T) {
 	machine := agentTestMachine(t)
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
 	c := newAgentTestClient(t, machine, agentTestBMCSecret())
 	d := &AgentDeployer{Client: c, PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace}}
 
-	marker := agentDeployerProvisionBootMarker{ArmedAt: time.Now().Add(-2 * agentDeployerProvisionBootDeadline)}
+	marker := agentDeployerProvisionBootMarker{ArmedAt: time.Now().Add(-time.Hour)}
 	data, err := json.Marshal(marker)
 	if err != nil {
 		t.Fatalf("marshal marker: %v", err)

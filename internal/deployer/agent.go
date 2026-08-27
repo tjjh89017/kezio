@@ -47,14 +47,6 @@ import (
 // cannot live in memory - it is read back from this annotation instead.
 const agentDeployerPXEArmedAnnotation = "kezio.kojuro.date/agent-pxe-armed-at"
 
-// agentDeployerInspectDeadline bounds how long Inspect waits for
-// kezio-agent to register (internal/agentserver) after arming PXE boot.
-// Past this, Inspect reports Failed with ErrorType Restart so the
-// controller's restartOnFailure re-arms PXE and power-cycles the machine
-// on the next attempt, instead of waiting forever on a machine that never
-// net-booted.
-const agentDeployerInspectDeadline = 5 * time.Minute
-
 // agentDeployerProvisionBootAnnotation records, as JSON
 // (agentDeployerProvisionBootMarker), the marker Provision's boot-into-
 // agent step needs to survive a manager restart: when it last armed
@@ -84,14 +76,6 @@ type agentDeployerProvisionBootMarker struct {
 	// observed at ArmedAt, or empty when no session existed yet.
 	BaselineSessionHash string `json:"baselineSessionHash,omitempty"`
 }
-
-// agentDeployerProvisionBootDeadline bounds how long Provision's
-// boot-into-agent step waits for kezio-agent to register a fresh session
-// after arming PXE boot. Past this, it reports Failed with ErrorType
-// Restart so the controller's restartOnFailure re-arms PXE and
-// power-cycles the machine on the next attempt, the same reasoning as
-// agentDeployerInspectDeadline.
-const agentDeployerProvisionBootDeadline = 5 * time.Minute
 
 // agentDeployerProvisionStallDeadline bounds how long Provision keeps
 // reporting Continuing for a non-terminal DeployRun phase with no new
@@ -223,13 +207,45 @@ func isNetworkUnreachable(err error) bool {
 	return errors.As(err, &netErr)
 }
 
-// tokenTTL returns d.TokenTTL, or bootserver.DefaultTokenTTL when it is
-// unset.
-func (d *AgentDeployer) tokenTTL() time.Duration {
-	if d.TokenTTL > 0 {
-		return d.TokenTTL
+// tokenTTL returns the boot token lifetime for machine: d.TokenTTL, or
+// bootserver.DefaultTokenTTL when that is unset, extended to
+// machine.Spec.BootTimeout when the latter asks for more - see
+// MachineSpec.BootTimeout's doc comment for why it can only extend, never
+// shorten, the operator-wide default.
+func (d *AgentDeployer) tokenTTL(machine *keziov1alpha3.Machine) time.Duration {
+	ttl := d.TokenTTL
+	if ttl <= 0 {
+		ttl = bootserver.DefaultTokenTTL
 	}
-	return bootserver.DefaultTokenTTL
+	if machine.Spec.BootTimeout != nil {
+		ttl = max(ttl, machine.Spec.BootTimeout.Duration)
+	}
+	return ttl
+}
+
+// bootTokenExpired reports whether machine's current boot token
+// (status.netBoot, minted by issueBootToken when PXE was last armed) has
+// passed its expiry. This is the only clock pollAgentRegistration and
+// pollAgentBoot wait against: an agent that registers after expiry is
+// rejected at registration anyway (401), so no second, independent
+// deadline is kept alongside it.
+//
+// A nil d.Tokens never mints a token at all (issueBootToken's own doc
+// comment) - a Deployer run this way has no boot-token clock to expire,
+// so this reports false unconditionally rather than failing every
+// Machine on its very next reconcile. Once Tokens is configured, arming
+// always sets status.netBoot; a nil or zero-valued NetBoot afterward
+// means persisting it failed or was skipped, and is treated as already
+// expired rather than as "not yet waiting", so a Machine can never be
+// stuck polling a clock that was never actually started.
+func (d *AgentDeployer) bootTokenExpired(machine *keziov1alpha3.Machine) bool {
+	if d.Tokens == nil {
+		return false
+	}
+	if machine.Status.NetBoot == nil || machine.Status.NetBoot.ExpiresAt.IsZero() {
+		return true
+	}
+	return !time.Now().Before(machine.Status.NetBoot.ExpiresAt.Time)
 }
 
 // issueBootToken mints and persists the registration token for the net
@@ -251,7 +267,7 @@ func (d *AgentDeployer) issueBootToken(ctx context.Context, machine *keziov1alph
 		return nil
 	}
 
-	token, status, err := d.Tokens.Issue(mac, time.Now(), d.tokenTTL())
+	token, status, err := d.Tokens.Issue(mac, time.Now(), d.tokenTTL(machine))
 	if err != nil {
 		return fmt.Errorf("agent deployer: minting boot token: %w", err)
 	}
@@ -339,7 +355,9 @@ func (d *AgentDeployer) updateMachineStatusRetryOnConflict(ctx context.Context, 
 
 // pxeArmedAt reads agentDeployerPXEArmedAnnotation off machine. The second
 // return is false when the annotation is absent or fails to parse - both
-// treated as "not armed yet", never as an error.
+// treated as "not armed yet", never as an error. The timestamp itself is
+// no longer consulted for a deadline: pollAgentRegistration bounds the
+// wait by the boot token's own expiry (status.netBoot) instead.
 func pxeArmedAt(machine *keziov1alpha3.Machine) (time.Time, bool) {
 	raw, ok := machine.Annotations[agentDeployerPXEArmedAnnotation]
 	if !ok {
@@ -463,11 +481,11 @@ func agentSessionFresh(machine *keziov1alpha3.Machine, baseline string) bool {
 // internal/agentserver once kezio-agent boots and registers; Inspect
 // itself never talks to the agent.
 func (d *AgentDeployer) Inspect(ctx context.Context, machine *keziov1alpha3.Machine, restartOnFailure bool) (Result, error) {
-	armedAt, armed := pxeArmedAt(machine)
+	_, armed := pxeArmedAt(machine)
 	if !armed || restartOnFailure {
 		return d.armPXEAndPowerOn(ctx, machine)
 	}
-	return d.pollAgentRegistration(ctx, machine, armedAt)
+	return d.pollAgentRegistration(ctx, machine)
 }
 
 // armPXEAndPowerOn is Inspect's first-pass branch: see Inspect's doc
@@ -542,9 +560,8 @@ func (d *AgentDeployer) powerOnForNetBoot(ctx context.Context, bmcClient bmc.BMC
 }
 
 // pollAgentRegistration is Inspect's later-pass branch: see Inspect's doc
-// comment. armedAt is when armPXEAndPowerOn last ran, read back from
-// agentDeployerPXEArmedAnnotation.
-func (d *AgentDeployer) pollAgentRegistration(ctx context.Context, machine *keziov1alpha3.Machine, armedAt time.Time) (Result, error) {
+// comment.
+func (d *AgentDeployer) pollAgentRegistration(ctx context.Context, machine *keziov1alpha3.Machine) (Result, error) {
 	if apimeta.IsStatusConditionTrue(machine.Status.Conditions, keziov1alpha3.MachineConditionAgentRegistered) {
 		var hw keziov1alpha3.MachineHardware
 		key := client.ObjectKey{Namespace: machine.Namespace, Name: machine.Name}
@@ -562,11 +579,11 @@ func (d *AgentDeployer) pollAgentRegistration(ctx context.Context, machine *kezi
 		}
 	}
 
-	if time.Since(armedAt) > agentDeployerInspectDeadline {
+	if d.bootTokenExpired(machine) {
 		return Result{
 			Outcome:      Failed,
 			ErrorType:    keziov1alpha3.MachineErrorTypeRestart,
-			ErrorMessage: fmt.Sprintf("agent deployer: no agent registration observed within %s of arming PXE boot", agentDeployerInspectDeadline),
+			ErrorMessage: fmt.Sprintf("agent deployer: no agent registration before the boot token expired (%s)", d.tokenTTL(machine)),
 		}, nil
 	}
 	return Result{Outcome: Continuing}, nil
@@ -667,7 +684,7 @@ func (d *AgentDeployer) startProvision(ctx context.Context, machine *keziov1alph
 // doc comment. marker is armProvisionBootAndPowerOn's last recorded
 // marker, read back from agentDeployerProvisionBootAnnotation. A fresh
 // registration proceeds to validate the plan and commit run to Pending;
-// otherwise this waits, or gives up past the deadline.
+// otherwise this waits, or gives up once the boot token has expired.
 func (d *AgentDeployer) pollAgentBoot(ctx context.Context, machine *keziov1alpha3.Machine, run *keziov1alpha3.DeployRun, marker agentDeployerProvisionBootMarker) (Result, error) {
 	if agentSessionFresh(machine, marker.BaselineSessionHash) {
 		result, err := d.commitProvisionPending(ctx, machine, run)
@@ -686,11 +703,11 @@ func (d *AgentDeployer) pollAgentBoot(ctx context.Context, machine *keziov1alpha
 		return result, nil
 	}
 
-	if time.Since(marker.ArmedAt) > agentDeployerProvisionBootDeadline {
+	if d.bootTokenExpired(machine) {
 		return Result{
 			Outcome:      Failed,
 			ErrorType:    keziov1alpha3.MachineErrorTypeRestart,
-			ErrorMessage: fmt.Sprintf("agent deployer: no agent registration observed within %s of arming PXE boot for provisioning", agentDeployerProvisionBootDeadline),
+			ErrorMessage: fmt.Sprintf("agent deployer: no agent registration before the boot token expired (%s)", d.tokenTTL(machine)),
 		}, nil
 	}
 	return Result{Outcome: Continuing}, nil
