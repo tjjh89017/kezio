@@ -542,6 +542,20 @@ The controller matches the hints against the reported disk inventory,
 and needs exactly one match before it writes anything. All disks
 resolved for one claim must be different from each other.
 
+`spec.ezio.maxUploads` and `spec.ezio.maxConnections` override the
+operator's cluster-wide leecher default. `spec.ezio.cacheSizeMB`,
+`spec.ezio.aioThreads`, and `spec.ezio.port` have no cluster-wide
+default: they pass straight through to the agent's local ezio daemon as
+`--cache-size`, `--aio-threads`, and `--port`, and an absent field
+omits its flag. An absent `cacheSizeMB` does not fall back to ezio's own
+built-in cache size. Instead, the agent computes one from the machine's
+own memory, right before it execs ezio: it holds back 2 GiB (1 GiB for
+the OS, the agent, and the live image, plus 1 GiB for ezio's own fixed
+buffer pools), then uses half of what remains, in megabytes, clamped to
+64-8192 MiB. The other half stays free for the kernel page cache. A
+machine that reports no readable memory total gets no `--cache-size`
+flag at all, and ezio's own built-in default applies.
+
 The claim controller binds a `Pending` claim to a `Machine` (by
 `spec.machineName`, or by resolving `spec.selector` against candidate
 Machines), then writes `Machine.spec.claimRef` back and sets
