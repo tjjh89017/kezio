@@ -1,8 +1,8 @@
 # kezio
 
-> **This tree is being rebuilt from scratch.** The description below
-> documents the current rebuild. An earlier implementation lives on the
-> [`legacy`](https://github.com/tjjh89017/kezio/tree/legacy) branch.
+> An earlier implementation of kezio lives on the
+> [`legacy`](https://github.com/tjjh89017/kezio/tree/legacy) branch. This
+> tree replaced it and is the one to use.
 
 > **Proof of concept. Do not deploy machines you care about.**
 >
@@ -32,14 +32,15 @@ kezio defines these CRDs under the `kezio.kojuro.date/v1alpha3` group:
 | Kind | Purpose |
 |---|---|
 | `Site` | A maximal routable domain: every `Subnet` in one `Site` can reach every other. Owns this Site's tracker (a pinned IP, or a reference to one the operator already runs). |
-| `Subnet` | One broadcast domain. Carries an optional boot half (bootd's address, its network attachment, and DHCP mode) and an optional seeder network reference. A `Subnet` names its `Site` through `spec.siteRef`. |
-| `Machine` | One bare-metal machine: BMC address and credentials, boot MAC, the `Subnet` it network boots through, the image(s) to deploy, and its own state (Enrolling, Inspecting, Available, Provisioning, Provisioned). |
+| `Subnet` | One broadcast domain. Carries an optional boot half (bootd's address, its network attachment, and DHCP mode) and an optional seeder network reference. A `Subnet` names its `Site` through `spec.siteRef`. In lease mode it also holds the boot-scoped DHCP reservation table in `status.dhcp.reservations`. |
+| `Machine` | One bare-metal machine: BMC address and credentials, boot MAC, and the `Subnet` it network boots through. It carries no deploy intent of its own; its own state moves through Enrolling, Inspecting, Available, Provisioning, Provisioned. |
 | `MachineHardware` | The disk/NIC/CPU/memory inventory a `Machine` reports at inspection. |
+| `MachineClaim` | The deploy intent for one `Machine`: which `Image`, which data images, which disk, which hooks, and per-machine ezio tuning. Binding a claim to a `Machine` (by `spec.machineName` or `spec.selector`) is what starts a deploy. |
 | `Image` | A disk layout: an ordered list of partition slots, each optionally bound to a `PartitionContent`. Immutable once created, and always created over content that already exists. |
 | `ImageImport` | One request to turn a source disk image into content plus the `Image` that binds it. It runs partclone exactly once, in the cluster, then creates one `PartitionContent` per non-swap partition and the `Image` over them. |
 | `PartitionContent` | One partition's immutable data set (a partclone data set plus its torrent). Named by the user: an import names partition N `<spec.contentPrefix>-p<N>`. Its BitTorrent info hash is reported in `status.infoHash` once it publishes. |
 | `DeployRun` | The resolved, immutable snapshot of one deployment attempt: which images, which disks, which hooks, and its phase (Partitioning, WritingContent, RunningPostHook, Finalizing, ...). |
-| `PostHook` | A named, reusable, ordered sequence of steps (builtins or scripts) that a `Machine` or `Image` can attach to run after content is written. A script step runs in the live environment, not in the deployed OS: no deployed file system is mounted for it, the plan's device paths come to it in the environment (`KEZIO_TARGET_DISK`, `KEZIO_PARTITIONS`, `KEZIO_PART_<number>`, and the `KEZIO_DATA_DISK_*` set), and a script that mounts a device must unmount it before it ends. |
+| `PostHook` | A named, reusable, ordered sequence of steps (builtins or scripts) that a `MachineClaim` or `Image` can attach to run after content is written. A script step runs in the live environment, not in the deployed OS: no deployed file system is mounted for it, the plan's device paths come to it in the environment (`KEZIO_TARGET_DISK`, `KEZIO_PARTITIONS`, `KEZIO_PART_<number>`, and the `KEZIO_DATA_DISK_*` set), and a script that mounts a device must unmount it before it ends. |
 
 See [`docs/crd-reference.md`](docs/crd-reference.md) for every field of
 each kind, the references between them, and the rules the schema
@@ -47,23 +48,36 @@ enforces.
 
 ## How a deploy works
 
+A `Machine` moves through Enrolling, Inspecting, Available,
+Provisioning, and Provisioned. Enroll and inspect need no deploy
+intent; binding a `MachineClaim` is what starts a provision.
+
 1. An `ImageImport`'s ingest Job reads a source disk image, slices every
    partition once with partclone, and reports the disk layout it found.
    The operator then creates one immutable `PartitionContent` per
    non-swap partition and the `Image` whose layout binds them. An import
    fails rather than write over a name that already exists.
 2. A publish step builds a `.torrent` file for each `PartitionContent`.
-3. When a `Machine` needs an `Image`, the operator starts one seeder
+3. Each time the operator arms a net boot (for inspect or for provision),
+   it powers the machine on and, on a lease-mode `Subnet`, reserves a
+   fixed DHCP address for it in `status.dhcp.reservations`. The
+   reservation releases again once that step completes, the `Machine` is
+   deleted, or its boot MAC or `Subnet` changes.
+4. A `MachineClaim` bound to the `Machine` carries the deploy intent -
+   which `Image`, which data images, which disk, which hooks. Binding
+   it starts a provision.
+5. When a `Machine` needs an `Image`, the operator starts one seeder
    Deployment for that `Image` at that `Machine`'s `Site` - one process
    serving every `PartitionContent` the `Image` references. The seeder
    stops after a grace period once no machine at that `Site` needs it.
-4. The network-booted agent asks the operator for its deploy plan. It
+6. The network-booted agent asks the operator for its deploy plan. It
    fetches each partition's `.torrent` over HTTP from the seeder pod,
    leeches the content over BitTorrent, writes each partition with
    partclone, replays the disk layout, runs any `PostHook` steps, and
    points the UEFI boot entry at the new disk.
-5. The operator power-cycles the machine through its BMC. The machine
-   boots into the deployed disk.
+7. The operator power-cycles the machine through its BMC. The machine
+   boots into the deployed disk. The DHCP reservation from step 3
+   releases now that the provision has completed.
 
 ## Network boot
 
@@ -81,6 +95,32 @@ and the tracker/seeder connectivity rules. See
 the full operational setup, including both DHCP scenarios.
 
 ## Getting started
+
+### Install a release
+
+Each [GitHub Release](https://github.com/tjjh89017/kezio/releases) ships
+an `install.yaml` asset. It carries the CRDs, RBAC, and the controller
+manager Deployment (`config/default`, with cert-manager as a
+prerequisite for the webhooks):
+
+```sh
+kubectl apply -f https://github.com/tjjh89017/kezio/releases/download/v0.3.8/install.yaml
+```
+
+This alone does not network boot a machine. Also apply
+`config/bootd` for the `bootd` ServiceAccount and RBAC that every
+bootd Deployment needs:
+
+```sh
+kustomize build config/bootd | kubectl apply -f -
+```
+
+See [`docs/physical-lab-deployment.md`](docs/physical-lab-deployment.md)
+for the rest of the bring-up: the boot-server and agent-server
+components, the namespace's Pod Security Admission label, and the
+Site/Subnet objects a network boot needs.
+
+### Build from source
 
 Prerequisites:
 
