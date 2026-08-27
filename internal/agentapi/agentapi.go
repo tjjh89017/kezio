@@ -289,6 +289,20 @@ type DeployPlan struct {
 	MaxUploads int32 `json:"maxUploads,omitempty"`
 	// MaxConnections is MaxUploads's max_connections counterpart.
 	MaxConnections int32 `json:"maxConnections,omitempty"`
+	// CacheSizeMB is machine.spec.ezio's CacheSizeMB override, in
+	// megabytes, passed to the agent's local ezio daemon as --cache-size.
+	// Nil means no override: the agent computes an automatic value from
+	// the machine's own memory instead of falling back to ezio's fixed
+	// built-in default.
+	CacheSizeMB *int32 `json:"cacheSizeMB,omitempty"`
+	// AioThreads is machine.spec.ezio's AioThreads override, passed to
+	// the agent's local ezio daemon as --aio-threads. Nil means the flag
+	// is omitted and ezio's own built-in default applies.
+	AioThreads *int32 `json:"aioThreads,omitempty"`
+	// Port is machine.spec.ezio's Port override, passed to the agent's
+	// local ezio daemon as --port (its BitTorrent peer listen port). Nil
+	// means the flag is omitted and ezio's own built-in default applies.
+	Port *int32 `json:"port,omitempty"`
 }
 
 // Validate checks p's structural invariants: it never reaches into the

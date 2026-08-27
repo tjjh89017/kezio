@@ -223,6 +223,49 @@ func TestDeployPlanRoundTripPreservesFieldNames(t *testing.T) {
 	}
 }
 
+func TestDeployPlanRoundTrip_EzioLaunchOverrides(t *testing.T) {
+	cacheSizeMB := int32(1024)
+	aioThreads := int32(8)
+	port := int32(6890)
+	want := validDeployPlan()
+	want.CacheSizeMB = &cacheSizeMB
+	want.AioThreads = &aioThreads
+	want.Port = &port
+
+	raw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var got DeployPlan
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got.CacheSizeMB == nil || *got.CacheSizeMB != cacheSizeMB {
+		t.Errorf("CacheSizeMB = %v, want %d", got.CacheSizeMB, cacheSizeMB)
+	}
+	if got.AioThreads == nil || *got.AioThreads != aioThreads {
+		t.Errorf("AioThreads = %v, want %d", got.AioThreads, aioThreads)
+	}
+	if got.Port == nil || *got.Port != port {
+		t.Errorf("Port = %v, want %d", got.Port, port)
+	}
+
+	plain := validDeployPlan()
+	raw, err = json.Marshal(plain)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("Unmarshal into map: %v", err)
+	}
+	for _, key := range []string{"cacheSizeMB", "aioThreads", "port"} {
+		if _, ok := m[key]; ok {
+			t.Errorf("unset %q must be omitted, got: %s", key, raw)
+		}
+	}
+}
+
 func TestDeployPlanValidate_Valid(t *testing.T) {
 	if err := validDeployPlan().Validate(); err != nil {
 		t.Fatalf("Validate() = %v, want nil for a well-formed plan", err)
