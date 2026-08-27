@@ -6,7 +6,7 @@ and boots it. The lab uses Proxmox VMs in place of real servers, and a
 Redfish shim in front of the Proxmox API in place of a real BMC.
 
 Read [`docs/crd-reference.md`](crd-reference.md) first. It describes the
-nine custom resources and how they refer to each other. Read
+ten custom resources and how they refer to each other. Read
 [`docs/network-model.md`](network-model.md) for the Site/Subnet model.
 [`docs/physical-lab-deployment.md`](physical-lab-deployment.md) is the
 reference guide: it gives every option and every port. This guide is
@@ -495,12 +495,11 @@ comes from the same commit, because `.github/workflows/main.yaml` pushes
 only after each e2e lane has passed. Tags before `v0.3.2` were published
 without the leading `v` (e.g. `0.1.8`).
 
-**The most recent release tag is older than the current tree.** The
-repository was rebuilt on a new operator-sdk scaffold after the last
-release, so the CRDs, the kustomizations, and the environment variables
-that this guide describes do not agree with a released image. Use the
-`main` tag, or build your own images from the checkout that you follow
-this guide with.
+Each release tag matches its own checkout: the CRDs, the
+kustomizations, and the environment variables that this guide describes
+agree with the images published for that tag. Use `main` for the latest
+unreleased state, or pin a release tag such as `v0.3.8` for a reproducible
+build.
 
 Clone the repository on the node. The steps below apply kustomizations
 from the working tree:
