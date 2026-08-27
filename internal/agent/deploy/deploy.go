@@ -59,7 +59,28 @@ type EzioHandle struct {
 // save_path targets a partition device directly, never a -F content
 // directory) and returns a handle to it.
 type EzioLauncher interface {
-	Launch(ctx context.Context) (EzioHandle, error)
+	Launch(ctx context.Context, cfg EzioLaunchConfig) (EzioHandle, error)
+}
+
+// EzioLaunchConfig carries a DeployPlan's per-machine ezio daemon-launch
+// overrides (machine.spec.ezio's CacheSizeMB/AioThreads/Port) through to
+// EzioLauncher.Launch, decoupling the launcher from the full DeployPlan
+// shape. A nil field means no override: see agentapi.DeployPlan's own
+// CacheSizeMB/AioThreads/Port doc comments for what each falls back to.
+type EzioLaunchConfig struct {
+	CacheSizeMB *int32
+	AioThreads  *int32
+	Port        *int32
+}
+
+// ezioLaunchConfigFromPlan builds the EzioLaunchConfig for plan's launch,
+// so Execute never hands the launcher the whole DeployPlan.
+func ezioLaunchConfigFromPlan(plan *agentapi.DeployPlan) EzioLaunchConfig {
+	return EzioLaunchConfig{
+		CacheSizeMB: plan.CacheSizeMB,
+		AioThreads:  plan.AioThreads,
+		Port:        plan.Port,
+	}
 }
 
 // TorrentFetcher fetches a torrent slot's .torrent file bytes from a
@@ -195,7 +216,7 @@ func (e *Executor) Execute(ctx context.Context, plan *agentapi.DeployPlan) (err 
 	hasTorrent := hasTorrentSlot(plans)
 	var handle EzioHandle
 	if hasTorrent {
-		handle, err = e.Ezio.Launch(ctx)
+		handle, err = e.Ezio.Launch(ctx, ezioLaunchConfigFromPlan(plan))
 		if err != nil {
 			return fmt.Errorf("launching local ezio daemon: %w", err)
 		}

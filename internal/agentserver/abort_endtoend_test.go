@@ -103,7 +103,7 @@ type abortE2ELauncher struct {
 	stopCalled bool
 }
 
-func (l *abortE2ELauncher) Launch(context.Context) (deploy.EzioHandle, error) {
+func (l *abortE2ELauncher) Launch(context.Context, deploy.EzioLaunchConfig) (deploy.EzioHandle, error) {
 	return deploy.EzioHandle{Client: l.client, Stop: func() error {
 		l.mu.Lock()
 		defer l.mu.Unlock()

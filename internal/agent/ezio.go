@@ -21,7 +21,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"strconv"
 	"sync"
 	"time"
 
@@ -44,6 +46,10 @@ const DefaultEzioListenAddress = "127.0.0.1:9001"
 // up.
 const DefaultEzioReadyTimeout = 10 * time.Second
 
+// DefaultMeminfoPath is where Launch reads MemTotal from to compute the
+// automatic cache size, when the launch config's CacheSizeMB is unset.
+const DefaultMeminfoPath = "/proc/meminfo"
+
 // ExecEzioLauncher is the production deploy.EzioLauncher: it spawns the
 // local ezio binary in raw-device mode and dials its gRPC control plane.
 type ExecEzioLauncher struct {
@@ -55,6 +61,10 @@ type ExecEzioLauncher struct {
 	// ReadyTimeout bounds the wait for the daemon to answer its health
 	// check. Zero means DefaultEzioReadyTimeout.
 	ReadyTimeout time.Duration
+	// MeminfoPath is read to compute the automatic --cache-size value
+	// when Launch's EzioLaunchConfig.CacheSizeMB is nil. Empty means
+	// DefaultMeminfoPath; tests point it at a fixture file.
+	MeminfoPath string
 	// Logf receives ezio's own stdout and stderr, one call per line, in
 	// fmt.Printf style, so `journalctl -u kezio-agent` shows ezio's
 	// output alongside the agent's own. Nil discards it.
@@ -64,7 +74,7 @@ type ExecEzioLauncher struct {
 var _ deploy.EzioLauncher = ExecEzioLauncher{}
 
 // Launch implements deploy.EzioLauncher.
-func (l ExecEzioLauncher) Launch(ctx context.Context) (deploy.EzioHandle, error) {
+func (l ExecEzioLauncher) Launch(ctx context.Context, cfg deploy.EzioLaunchConfig) (deploy.EzioHandle, error) {
 	binary := l.Binary
 	if binary == "" {
 		binary = DefaultEzioBinary
@@ -83,7 +93,18 @@ func (l ExecEzioLauncher) Launch(ctx context.Context) (deploy.EzioHandle, error)
 		logf = func(string, ...any) {}
 	}
 
-	cmd := exec.CommandContext(ctx, binary, "--listen", addr)
+	args := []string{"--listen", addr}
+	if cacheSizeMB := l.resolveCacheSizeMB(cfg, logf); cacheSizeMB != nil {
+		args = append(args, "--cache-size", strconv.Itoa(int(*cacheSizeMB)))
+	}
+	if cfg.AioThreads != nil {
+		args = append(args, "--aio-threads", strconv.Itoa(int(*cfg.AioThreads)))
+	}
+	if cfg.Port != nil {
+		args = append(args, "--port", strconv.Itoa(int(*cfg.Port)))
+	}
+
+	cmd := exec.CommandContext(ctx, binary, args...)
 	stop, err := startWithLoggedOutput(cmd, logf)
 	if err != nil {
 		return deploy.EzioHandle{}, fmt.Errorf("starting %s: %w", binary, err)
@@ -101,6 +122,78 @@ func (l ExecEzioLauncher) Launch(ctx context.Context) (deploy.EzioHandle, error)
 	}
 
 	return deploy.EzioHandle{Client: client, Stop: stop}, nil
+}
+
+// resolveCacheSizeMB returns the --cache-size value Launch should pass,
+// logging whether it came from cfg (an explicit machine.spec.ezio
+// override) or was computed automatically from this machine's own
+// memory. A nil return means no flag at all: neither an override was set
+// nor could MemTotal be read, so ezio's own fixed built-in default cache
+// size applies.
+func (l ExecEzioLauncher) resolveCacheSizeMB(cfg deploy.EzioLaunchConfig, logf func(format string, args ...any)) *int32 {
+	if cfg.CacheSizeMB != nil {
+		logf("ezio: cache size %d MB (override)", *cfg.CacheSizeMB)
+		return cfg.CacheSizeMB
+	}
+
+	path := l.MeminfoPath
+	if path == "" {
+		path = DefaultMeminfoPath
+	}
+	memTotal, err := readMemTotalBytes(path)
+	if err != nil {
+		logf("ezio: reading %s to compute an automatic cache size: %v; using ezio's own default", path, err)
+		return nil
+	}
+	auto := AutoCacheSizeMB(memTotal)
+	logf("ezio: cache size %d MB (auto, MemTotal %d bytes)", auto, memTotal)
+	return &auto
+}
+
+// readMemTotalBytes reads path (normally /proc/meminfo) and returns its
+// MemTotal value in bytes.
+func readMemTotalBytes(path string) (uint64, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	m := meminfoTotalPattern.FindSubmatch(data)
+	if m == nil {
+		return 0, fmt.Errorf("MemTotal not found in %s", path)
+	}
+	kb, err := strconv.ParseUint(string(m[1]), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parsing MemTotal in %s: %w", path, err)
+	}
+	return kb * 1024, nil
+}
+
+// autoCacheReserveBytes is held back from the automatic cache-size
+// calculation: 1 GiB for the OS, the agent, and the live image, plus 1
+// GiB for ezio's own fixed buffer pools (outside the unified cache this
+// flag sizes).
+const autoCacheReserveBytes = 2 << 30
+
+// autoCacheMinMB and autoCacheMaxMB bound AutoCacheSizeMB's result: a
+// small DUT still gets a usable cache, and a huge one does not hand ezio
+// more than it needs.
+const (
+	autoCacheMinMB = 64
+	autoCacheMaxMB = 8192
+)
+
+// AutoCacheSizeMB computes the automatic --cache-size value for a DUT
+// reporting memTotalBytes total memory: half of whatever remains after
+// autoCacheReserveBytes is held back, in megabytes, clamped to
+// [autoCacheMinMB, autoCacheMaxMB]. The other half of the remainder stays
+// available for the kernel page cache. memTotalBytes at or below the
+// reserve clamps to autoCacheMinMB rather than going negative.
+func AutoCacheSizeMB(memTotalBytes uint64) int32 {
+	if memTotalBytes <= autoCacheReserveBytes {
+		return autoCacheMinMB
+	}
+	cacheMB := (memTotalBytes - autoCacheReserveBytes) / 2 / (1 << 20)
+	return int32(min(max(cacheMB, autoCacheMinMB), autoCacheMaxMB))
 }
 
 // startWithLoggedOutput starts cmd with its stdout and stderr streamed

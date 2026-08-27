@@ -169,7 +169,7 @@ type fakeEzioLauncher struct {
 	launched   bool
 }
 
-func (f *fakeEzioLauncher) Launch(context.Context) (EzioHandle, error) {
+func (f *fakeEzioLauncher) Launch(context.Context, EzioLaunchConfig) (EzioHandle, error) {
 	f.launched = true
 	if f.launchErr != nil {
 		return EzioHandle{}, f.launchErr

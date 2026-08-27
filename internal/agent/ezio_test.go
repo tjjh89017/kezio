@@ -17,6 +17,7 @@ limitations under the License.
 package agent
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -26,6 +27,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/tjjh89017/kezio/internal/agent/deploy"
 )
 
 // captureLogf returns a Logf-compatible function that records every
@@ -137,4 +140,152 @@ func containsAll(lines []string, want ...string) bool {
 		}
 	}
 	return true
+}
+
+func int32ptr(v int32) *int32 { return &v }
+
+func writeFakeMeminfo(t *testing.T, memTotalKB uint64) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "meminfo")
+	content := fmt.Sprintf("MemTotal:       %d kB\nMemFree:        1024 kB\n", memTotalKB)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("writing fake meminfo: %v", err)
+	}
+	return path
+}
+
+func TestAutoCacheSizeMB(t *testing.T) {
+	const gib = uint64(1) << 30
+	cases := []struct {
+		name          string
+		memTotalBytes uint64
+		want          int32
+	}{
+		{"2GiB", 2 * gib, 64},
+		{"4GiB", 4 * gib, 1024},
+		{"8GiB", 8 * gib, 3072},
+		{"16GiB", 16 * gib, 7168},
+		{"64GiB", 64 * gib, 8192},
+		{"4GiB plus 1000kB rounds down", 4*gib + 1000*1024, 1024},
+		{"below reserve clamps to minimum", gib, 64},
+		{"zero clamps to minimum", 0, 64},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := AutoCacheSizeMB(c.memTotalBytes); got != c.want {
+				t.Errorf("AutoCacheSizeMB(%d) = %d, want %d", c.memTotalBytes, got, c.want)
+			}
+		})
+	}
+}
+
+// TestLaunch_PassesOverrideFlags exercises Launch's flag-building end to
+// end against a fake binary that echoes its own argv, asserting
+// --cache-size/--aio-threads/--port are passed verbatim when the launch
+// config sets them, and that an explicit CacheSizeMB is logged as an
+// override rather than computed automatically.
+func TestLaunch_PassesOverrideFlags(t *testing.T) {
+	path := writeFakeBinary(t, "#!/bin/sh\n"+
+		"echo args: \"$@\"\n"+
+		"sleep 1\n")
+	logf, lines := captureLogf()
+
+	l := ExecEzioLauncher{
+		Binary:       path,
+		ReadyTimeout: 150 * time.Millisecond,
+		Logf:         logf,
+	}
+	cfg := deploy.EzioLaunchConfig{
+		CacheSizeMB: int32ptr(777),
+		AioThreads:  int32ptr(4),
+		Port:        int32ptr(6890),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	handle, err := l.Launch(ctx, cfg)
+	if err == nil {
+		// The fake binary is not a real ezio daemon, so Launch always
+		// fails its health check; Launch has already stopped the process
+		// by the time it returns an error, so Stop here only guards
+		// against a future change making Launch succeed unexpectedly.
+		_ = handle.Stop()
+	}
+
+	want := "ezio: args: --listen " + DefaultEzioListenAddress + " --cache-size 777 --aio-threads 4 --port 6890"
+	if !containsAll(lines(), want) {
+		t.Fatalf("exec args line %q not found, got: %v", want, lines())
+	}
+	if !containsAll(lines(), "ezio: cache size 777 MB (override)") {
+		t.Errorf("expected an override cache-size log line, got: %v", lines())
+	}
+}
+
+// TestLaunch_AutoCacheSizeFromMeminfo asserts that an unset CacheSizeMB
+// makes Launch compute one from MeminfoPath and pass it as --cache-size,
+// while AioThreads/Port stay omitted since the launch config leaves them
+// unset.
+func TestLaunch_AutoCacheSizeFromMeminfo(t *testing.T) {
+	path := writeFakeBinary(t, "#!/bin/sh\n"+
+		"echo args: \"$@\"\n"+
+		"sleep 1\n")
+	meminfoPath := writeFakeMeminfo(t, 4*1024*1024) // 4 GiB
+	logf, lines := captureLogf()
+
+	l := ExecEzioLauncher{
+		Binary:       path,
+		ReadyTimeout: 150 * time.Millisecond,
+		MeminfoPath:  meminfoPath,
+		Logf:         logf,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	handle, err := l.Launch(ctx, deploy.EzioLaunchConfig{})
+	if err == nil {
+		_ = handle.Stop()
+	}
+
+	want := "ezio: args: --listen " + DefaultEzioListenAddress + " --cache-size 1024"
+	if !containsAll(lines(), want) {
+		t.Fatalf("exec args line %q not found, got: %v", want, lines())
+	}
+	if !containsAll(lines(), "ezio: cache size 1024 MB (auto, MemTotal 4294967296 bytes)") {
+		t.Errorf("expected an auto cache-size log line, got: %v", lines())
+	}
+}
+
+// TestLaunch_NoMeminfoOmitsCacheFlag asserts that an unreadable
+// MeminfoPath falls back to omitting --cache-size entirely (ezio's own
+// built-in default) rather than failing the launch outright.
+func TestLaunch_NoMeminfoOmitsCacheFlag(t *testing.T) {
+	path := writeFakeBinary(t, "#!/bin/sh\n"+
+		"echo args: \"$@\"\n"+
+		"sleep 1\n")
+	logf, lines := captureLogf()
+
+	l := ExecEzioLauncher{
+		Binary:       path,
+		ReadyTimeout: 150 * time.Millisecond,
+		MeminfoPath:  filepath.Join(t.TempDir(), "does-not-exist"),
+		Logf:         logf,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	handle, err := l.Launch(ctx, deploy.EzioLaunchConfig{})
+	if err == nil {
+		_ = handle.Stop()
+	}
+
+	want := "ezio: args: --listen " + DefaultEzioListenAddress
+	if !containsAll(lines(), want) {
+		t.Fatalf("exec args line %q not found, got: %v", want, lines())
+	}
+	for _, l := range lines() {
+		if strings.Contains(l, "args:") && strings.Contains(l, "--cache-size") {
+			t.Errorf("expected no --cache-size flag, got args line: %q", l)
+		}
+	}
 }
