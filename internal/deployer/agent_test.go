@@ -455,6 +455,198 @@ func TestAgentDeployerProvisionFirstPassSurvivesStatusConflictAndPowersOnOnce(t 
 	}
 }
 
+// TestAgentDeployerInspectDoesNotMintWhileAwaitingDHCPAck pins the fix for
+// the confirmed lab bug: while a lease-mode Subnet has not yet acked the
+// DHCP reservation revision, repeated Inspect calls must not touch
+// status.netBoot at all - reserveAndAwaitDHCP's Busy gate now runs before
+// issueBootToken, so no token is minted (and no PXE marker written) until
+// bootd has actually applied the reservation.
+func TestAgentDeployerInspectDoesNotMintWhileAwaitingDHCPAck(t *testing.T) {
+	machine := agentTestMachine(t)
+	c := newAgentTestClient(t, machine, agentTestBMCSecret(), agentTestLeaseSubnet())
+	d := &AgentDeployer{Client: c, Tokens: bootserver.NewTokenStore()}
+
+	for i := range 3 {
+		result, err := d.Inspect(context.Background(), machine, false)
+		if err != nil {
+			t.Fatalf("Inspect() call %d error = %v", i+1, err)
+		}
+		if result.Outcome != Busy {
+			t.Fatalf("Inspect() call %d outcome = %v, want Busy (awaiting bootd's ack)", i+1, result.Outcome)
+		}
+		if machine.Status.NetBoot != nil {
+			t.Fatalf("Inspect() call %d minted a boot token before the DHCP ack: %+v", i+1, machine.Status.NetBoot)
+		}
+		if _, armed := pxeArmedAt(machine); armed {
+			t.Fatalf("Inspect() call %d armed PXE before the DHCP ack", i+1)
+		}
+	}
+
+	f := fakeBMCForAddress(machine.Spec.BMC.Address)
+	setPXE, powerOn, _, _, powerCycle, _ := f.calls()
+	if setPXE != 0 || powerOn != 0 || powerCycle != 0 {
+		t.Errorf("BMC calls = setPXE:%d powerOn:%d powerCycle:%d, want all 0 before the DHCP ack", setPXE, powerOn, powerCycle)
+	}
+}
+
+// TestAgentDeployerInspectMintsOnceDHCPAckLands is
+// TestAgentDeployerInspectDoesNotMintWhileAwaitingDHCPAck's other half:
+// once bootd's ack lands, the very next Inspect call mints the token,
+// arms PXE, and powers the machine on.
+func TestAgentDeployerInspectMintsOnceDHCPAckLands(t *testing.T) {
+	machine := agentTestMachine(t)
+	c := newAgentTestClient(t, machine, agentTestBMCSecret(), agentTestLeaseSubnet())
+	d := &AgentDeployer{Client: c, Tokens: bootserver.NewTokenStore()}
+
+	if _, err := d.Inspect(context.Background(), machine, false); err != nil {
+		t.Fatalf("first Inspect() error = %v", err)
+	}
+	applyDHCPRevision(t, c)
+
+	result, err := d.Inspect(context.Background(), machine, false)
+	if err != nil {
+		t.Fatalf("second Inspect() error = %v", err)
+	}
+	if result.Outcome != Continuing {
+		t.Fatalf("second Inspect() outcome = %v, want Continuing", result.Outcome)
+	}
+	if machine.Status.NetBoot == nil || machine.Status.NetBoot.TokenHash == "" {
+		t.Fatalf("machine.Status.NetBoot was not minted once the ack landed: %+v", machine.Status.NetBoot)
+	}
+	if _, armed := pxeArmedAt(machine); !armed {
+		t.Error("machine has no PXE-armed marker after the ack and power-on")
+	}
+
+	f := fakeBMCForAddress(machine.Spec.BMC.Address)
+	setPXE, powerOn, _, _, _, _ := f.calls()
+	if setPXE != 1 || powerOn != 1 {
+		t.Errorf("SetOneTimePXEBoot/PowerOn calls = %d/%d, want 1/1", setPXE, powerOn)
+	}
+}
+
+// TestAgentDeployerInspectRestartOnFailureMintsFreshTokenDespiteUnexpired
+// pins issueBootToken's forceFresh override: an explicit restartOnFailure
+// re-arm must mint a brand new token even though the previous one is
+// still unexpired and unconsumed - a power-cycle puts a new boot in
+// flight that must not be satisfiable by replaying the abandoned boot's
+// token.
+func TestAgentDeployerInspectRestartOnFailureMintsFreshTokenDespiteUnexpired(t *testing.T) {
+	machine := agentTestMachine(t)
+	c := newAgentTestClient(t, machine, agentTestBMCSecret())
+	d := &AgentDeployer{Client: c, Tokens: bootserver.NewTokenStore()}
+
+	if _, err := d.Inspect(context.Background(), machine, false); err != nil {
+		t.Fatalf("first Inspect() error = %v", err)
+	}
+	firstHash := machine.Status.NetBoot.TokenHash
+
+	result, err := d.Inspect(context.Background(), machine, true)
+	if err != nil {
+		t.Fatalf("restart Inspect() error = %v", err)
+	}
+	if result.Outcome != Continuing {
+		t.Fatalf("restart Inspect() outcome = %v, want Continuing", result.Outcome)
+	}
+	if machine.Status.NetBoot.TokenHash == firstHash {
+		t.Fatal("restartOnFailure reused the existing unexpired token, want a fresh mint")
+	}
+}
+
+// TestAgentDeployerProvisionRestartOnFailureMintsFreshTokenDespiteUnexpired
+// is TestAgentDeployerInspectRestartOnFailureMintsFreshTokenDespiteUnexpired
+// for Provision's own boot-into-agent arm.
+func TestAgentDeployerProvisionRestartOnFailureMintsFreshTokenDespiteUnexpired(t *testing.T) {
+	machine := agentTestMachine(t)
+	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
+	c := newAgentTestClient(t, machine, agentTestBMCSecret())
+	d := &AgentDeployer{
+		Client:      c,
+		PlanBuilder: &planbuild.Builder{Client: c, ManagerNamespace: agentProvisionTestManagerNamespace},
+		Tokens:      bootserver.NewTokenStore(),
+	}
+
+	if _, err := d.Provision(context.Background(), machine, run, false); err != nil {
+		t.Fatalf("first Provision() error = %v", err)
+	}
+	firstHash := machine.Status.NetBoot.TokenHash
+
+	result, err := d.Provision(context.Background(), machine, run, true)
+	if err != nil {
+		t.Fatalf("restart Provision() error = %v", err)
+	}
+	if result.Outcome != Continuing {
+		t.Fatalf("restart Provision() outcome = %v, want Continuing", result.Outcome)
+	}
+	if machine.Status.NetBoot.TokenHash == firstHash {
+		t.Fatal("restartOnFailure reused the existing unexpired token, want a fresh mint")
+	}
+}
+
+// TestAgentDeployerInspectMintsFreshWhenPriorTokenConsumed pins
+// issueBootToken's other reuse boundary: a consumed token (TokenHash
+// cleared to "" by a successful registration - see ingestRegistration)
+// must never be "reused" as a token no machine can present any more; the
+// next arm mints a fresh one.
+func TestAgentDeployerInspectMintsFreshWhenPriorTokenConsumed(t *testing.T) {
+	machine := agentTestMachine(t)
+	c := newAgentTestClient(t, machine, agentTestBMCSecret())
+	d := &AgentDeployer{Client: c, Tokens: bootserver.NewTokenStore()}
+
+	machine.Status.NetBoot = &keziov1alpha3.MachineNetBootStatus{
+		TokenHash: "",
+		ExpiresAt: metav1.NewTime(time.Now().Add(time.Hour)),
+	}
+
+	result, err := d.Inspect(context.Background(), machine, false)
+	if err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+	if result.Outcome != Continuing {
+		t.Fatalf("Inspect() outcome = %v, want Continuing", result.Outcome)
+	}
+	if machine.Status.NetBoot == nil || machine.Status.NetBoot.TokenHash == "" {
+		t.Fatalf("Inspect() did not mint a fresh token for a consumed prior one: %+v", machine.Status.NetBoot)
+	}
+}
+
+// TestAgentDeployerInspectReusesTokenAfterFailedPowerOnRetry covers
+// issueBootToken's reuse path outside the DHCP-ack gate: a token already
+// minted and persisted, whose boot never actually got a power command
+// (PowerOn failed, so armPXEAndPowerOn disarmed the PXE marker again),
+// must be reused on the retry rather than re-minted - the retry is still
+// the same boot attempt, and re-minting here would invalidate a token the
+// machine could plausibly already be about to receive.
+func TestAgentDeployerInspectReusesTokenAfterFailedPowerOnRetry(t *testing.T) {
+	machine := agentTestMachine(t)
+	c := newAgentTestClient(t, machine, agentTestBMCSecret())
+	d := &AgentDeployer{Client: c, Tokens: bootserver.NewTokenStore()}
+	f := fakeBMCForAddress(machine.Spec.BMC.Address)
+	f.powerOnErr = errTestBMCRejected
+
+	if _, err := d.Inspect(context.Background(), machine, false); err != nil {
+		t.Fatalf("first Inspect() error = %v", err)
+	}
+	if machine.Status.NetBoot == nil || machine.Status.NetBoot.TokenHash == "" {
+		t.Fatalf("token was not minted despite the later PowerOn failure: %+v", machine.Status.NetBoot)
+	}
+	firstHash := machine.Status.NetBoot.TokenHash
+	if _, armed := pxeArmedAt(machine); armed {
+		t.Fatal("PXE marker still set after PowerOn failed, want it disarmed")
+	}
+
+	f.powerOnErr = nil
+	result, err := d.Inspect(context.Background(), machine, false)
+	if err != nil {
+		t.Fatalf("second Inspect() error = %v", err)
+	}
+	if result.Outcome != Continuing {
+		t.Fatalf("second Inspect() outcome = %v, want Continuing", result.Outcome)
+	}
+	if machine.Status.NetBoot.TokenHash != firstHash {
+		t.Errorf("token hash = %q, want the same %q reused across the retry", machine.Status.NetBoot.TokenHash, firstHash)
+	}
+}
+
 func TestAgentDeployerConnectBMCInsecureSkipVerifyAnnotation(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -805,10 +997,12 @@ func TestAgentDeployerProvisionFirstPassArmsPXEAndPowersOn(t *testing.T) {
 
 // TestAgentDeployerProvisionFirstPassIssuesFreshBootToken covers "a new
 // DeployRun boot mints a new token": a Provision boot armed after an
-// earlier Inspect boot already had one outstanding must mint its own,
-// distinct token, and TokenStore's single-outstanding-token-per-MAC
-// invariant (see its doc comment) means the earlier one stops resolving
-// at all once the new one is armed - superseded, not merely shadowed.
+// earlier Inspect boot's token was already consumed (kezio-agent
+// registered, clearing status.netBoot.tokenHash - see issueBootToken's
+// forceFresh doc comment) must mint its own, distinct token, and
+// TokenStore's single-outstanding-token-per-MAC invariant (see its doc
+// comment) means the earlier one stops resolving at all once the new one
+// is armed - superseded, not merely shadowed.
 func TestAgentDeployerProvisionFirstPassIssuesFreshBootToken(t *testing.T) {
 	machine := agentTestMachine(t)
 	run := &keziov1alpha3.DeployRun{ObjectMeta: metav1.ObjectMeta{Name: "m1-run1", Namespace: "default"}}
@@ -833,6 +1027,12 @@ func TestAgentDeployerProvisionFirstPassIssuesFreshBootToken(t *testing.T) {
 	if !ok {
 		t.Fatalf("first (Inspect) token not found in the TokenStore")
 	}
+	// A registration consumes the token: ingestRegistration clears
+	// status.netBoot.tokenHash to "" on success. Without this, Provision's
+	// own boot would find Inspect's token still unexpired and unconsumed
+	// and correctly reuse it instead of minting - not what this test means
+	// to cover.
+	machine.Status.NetBoot.TokenHash = ""
 
 	if _, err := d.Provision(context.Background(), machine, run, false); err != nil {
 		t.Fatalf("Provision() error = %v", err)

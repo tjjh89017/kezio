@@ -108,13 +108,16 @@ const agentDeployerProvisionStallDeadline = 30 * time.Minute
 // respectively, rather than kept in this struct.
 //
 // armPXEAndPowerOn and armProvisionBootAndPowerOn also mint that boot's
-// registration token, through Tokens, at the same moment they set one-time
-// PXE and power the machine on: a token belongs to the boot the arm call
-// just triggered, not to however many times internal/bootserver's
-// grub.cfg handler ends up being fetched before the machine's kernel
-// actually boots (see bootserver.TokenStore's doc comment) - that handler
-// only ever reads back what was minted here, off the same status.netBoot
-// this struct writes.
+// registration token, through Tokens, right before they set one-time PXE
+// and power the machine on - after reserveAndAwaitDHCP's gate has already
+// cleared, so a lease-mode Subnet still waiting on bootd's ack never sees
+// a fresh mint on every retry (see issueBootToken's forceFresh doc
+// comment): a token belongs to the boot the arm call is actually about to
+// trigger, not to however many times internal/bootserver's grub.cfg
+// handler ends up being fetched before the machine's kernel actually
+// boots (see bootserver.TokenStore's doc comment) - that handler only
+// ever reads back what was minted here, off the same status.netBoot this
+// struct writes.
 type AgentDeployer struct {
 	// Client reads and writes Machine, MachineHardware, DeployRun, and the
 	// BMC credentials Secret. Required.
@@ -258,12 +261,28 @@ func (d *AgentDeployer) bootTokenExpired(machine *keziov1alpha3.Machine) bool {
 // a Machine deployer wiring or MAC validation problem is diagnosable from
 // the resulting "agent never registered" deadline failure without also
 // blocking the machine from powering on at all.
-func (d *AgentDeployer) issueBootToken(ctx context.Context, machine *keziov1alpha3.Machine) error {
+//
+// forceFresh false reuses machine's current status.netBoot token instead
+// of minting a new one, provided it is still unexpired and unconsumed
+// (TokenHash != "", the state ingestRegistration's success path clears to
+// ""): this call site is reached again, before the caller's own armed
+// marker is ever written, whenever the arm sequence has to retry - most
+// commonly reserveAndAwaitDHCP still waiting on bootd's ack, driven by
+// dhcpAckRequeueInterval every couple seconds - and re-minting on every
+// such retry would invalidate a token a machine may already be about to
+// present (see the AgentDeployer doc comment's bug history). forceFresh
+// true (an explicit restartOnFailure re-arm) always mints: a power-cycle
+// puts a new boot in flight that must not be satisfiable by replaying
+// whatever token an earlier, abandoned boot already received.
+func (d *AgentDeployer) issueBootToken(ctx context.Context, machine *keziov1alpha3.Machine, forceFresh bool) error {
 	if d.Tokens == nil {
 		return nil
 	}
 	mac, ok := bootserver.NormalizeMAC(machine.Spec.BootMACAddress)
 	if !ok {
+		return nil
+	}
+	if !forceFresh && machine.Status.NetBoot != nil && machine.Status.NetBoot.TokenHash != "" && !d.bootTokenExpired(machine) {
 		return nil
 	}
 
@@ -483,39 +502,45 @@ func agentSessionFresh(machine *keziov1alpha3.Machine, baseline string) bool {
 func (d *AgentDeployer) Inspect(ctx context.Context, machine *keziov1alpha3.Machine, restartOnFailure bool) (Result, error) {
 	_, armed := pxeArmedAt(machine)
 	if !armed || restartOnFailure {
-		return d.armPXEAndPowerOn(ctx, machine)
+		return d.armPXEAndPowerOn(ctx, machine, restartOnFailure)
 	}
 	return d.pollAgentRegistration(ctx, machine)
 }
 
 // armPXEAndPowerOn is Inspect's first-pass branch: see Inspect's doc
-// comment.
+// comment. forceFreshToken is restartOnFailure, passed straight through
+// to issueBootToken: see its doc comment for why an explicit restart must
+// bypass token reuse.
 //
-// Persistence (the boot token and the PXE-armed marker) is committed
-// before either BMC call: a BMC action cannot be retried safely (a
-// second PowerCycle is a second, physically observable reboot), while a
-// failed status/annotation write is - retried here on a conflict
-// (updateMachineStatusRetryOnConflict), or simply by this same function
-// running again on the next reconcile, since nothing irreversible
-// happened yet. If SetOneTimePXEBoot or the power call itself then
-// fails, the marker is cleared again (disarmPXE) rather than left
-// "armed" for a boot that never actually got a power command: leaving it
-// set would make pollAgentRegistration wait out
+// reserveAndAwaitDHCP runs before issueBootToken: a lease-mode Subnet
+// gates every call here on bootd's ack (Busy, requeuing every
+// dhcpAckRequeueInterval), and minting must not happen until that gate
+// actually clears - see issueBootToken's forceFresh doc comment for the
+// bug this ordering fixes. Persistence (the boot token and the PXE-armed
+// marker) is then committed before either BMC call: a BMC action cannot
+// be retried safely (a second PowerCycle is a second, physically
+// observable reboot), while a failed status/annotation write is - retried
+// here on a conflict (updateMachineStatusRetryOnConflict), or simply by
+// this same function running again on the next reconcile, since nothing
+// irreversible happened yet. If SetOneTimePXEBoot or the power call
+// itself then fails, the marker is cleared again (disarmPXE) rather than
+// left "armed" for a boot that never actually got a power command:
+// leaving it set would make pollAgentRegistration wait out
 // agentDeployerInspectDeadline believing a boot is already under way,
 // instead of retrying immediately on the next reconcile.
-func (d *AgentDeployer) armPXEAndPowerOn(ctx context.Context, machine *keziov1alpha3.Machine) (Result, error) {
+func (d *AgentDeployer) armPXEAndPowerOn(ctx context.Context, machine *keziov1alpha3.Machine, forceFreshToken bool) (Result, error) {
 	bmcClient, err := d.connectBMC(ctx, machine)
 	if err != nil {
 		return classifyBMCError(err), nil
 	}
 
-	if err := d.issueBootToken(ctx, machine); err != nil {
-		return Result{}, err
-	}
 	if result, proceed, err := d.reserveAndAwaitDHCP(ctx, machine); err != nil {
 		return Result{}, err
 	} else if !proceed {
 		return result, nil
+	}
+	if err := d.issueBootToken(ctx, machine, forceFreshToken); err != nil {
+		return Result{}, err
 	}
 	if err := d.armPXE(ctx, machine); err != nil {
 		return Result{}, err
@@ -675,7 +700,7 @@ func (d *AgentDeployer) resetProvisionAttempt(ctx context.Context, run *keziov1a
 func (d *AgentDeployer) startProvision(ctx context.Context, machine *keziov1alpha3.Machine, run *keziov1alpha3.DeployRun, restartOnFailure bool) (Result, error) {
 	marker, armed := provisionBootMarker(machine)
 	if !armed || restartOnFailure {
-		return d.armProvisionBootAndPowerOn(ctx, machine)
+		return d.armProvisionBootAndPowerOn(ctx, machine, restartOnFailure)
 	}
 	return d.pollAgentBoot(ctx, machine, run, marker)
 }
@@ -719,23 +744,26 @@ func (d *AgentDeployer) pollAgentBoot(ctx context.Context, machine *keziov1alpha
 // armPXEAndPowerOn's reasoning: a machine stuck in an old OS (or the OS
 // this same deploy just wrote on a prior attempt) must actually reboot
 // into the PXE override, not merely be told it is already running.
+// forceFreshToken is restartOnFailure, passed straight through to
+// issueBootToken.
 //
-// Persistence and BMC-failure handling mirror armPXEAndPowerOn's own doc
-// comment exactly, substituting the provision-boot marker
-// (armProvisionBoot/disarmProvisionBoot) for the PXE-armed annotation.
-func (d *AgentDeployer) armProvisionBootAndPowerOn(ctx context.Context, machine *keziov1alpha3.Machine) (Result, error) {
+// Ordering, persistence, and BMC-failure handling mirror
+// armPXEAndPowerOn's own doc comment exactly, substituting the
+// provision-boot marker (armProvisionBoot/disarmProvisionBoot) for the
+// PXE-armed annotation.
+func (d *AgentDeployer) armProvisionBootAndPowerOn(ctx context.Context, machine *keziov1alpha3.Machine, forceFreshToken bool) (Result, error) {
 	bmcClient, err := d.connectBMC(ctx, machine)
 	if err != nil {
 		return classifyBMCError(err), nil
 	}
 
-	if err := d.issueBootToken(ctx, machine); err != nil {
-		return Result{}, err
-	}
 	if result, proceed, err := d.reserveAndAwaitDHCP(ctx, machine); err != nil {
 		return Result{}, err
 	} else if !proceed {
 		return result, nil
+	}
+	if err := d.issueBootToken(ctx, machine, forceFreshToken); err != nil {
+		return Result{}, err
 	}
 	if err := d.armProvisionBoot(ctx, machine); err != nil {
 		return Result{}, err
