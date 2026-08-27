@@ -160,6 +160,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// A bootd pod recreated without its Multus provisioning attachment
+	// (only the cluster/Calico interface present) still starts dnsmasq
+	// and would otherwise report ready with no address anything on the
+	// provisioning segment can reach - see
+	// bootd.ProvisioningInterfaceReady's own doc comment.
+	if err := mgr.AddReadyzCheck("provisioning-interface", func(_ *http.Request) error {
+		return bootd.ProvisioningInterfaceReady(cfg.Server.Interface, cfg.Server.ProvisioningNet, nil)
+	}); err != nil {
+		setupLog.Error(err, "unable to set up provisioning interface readiness check")
+		os.Exit(1)
+	}
+
 	if cfg.Proxy.Enabled() {
 		proxy, err := bootd.NewProxyServer(cfg.Proxy)
 		if err != nil {
@@ -181,16 +193,6 @@ func main() {
 			return nil
 		}); err != nil {
 			setupLog.Error(err, "unable to set up proxy readiness check")
-			os.Exit(1)
-		}
-	} else {
-		// No proxy configured: readiness has nothing proxy-side to
-		// reflect, so fall back to the same trivial check healthz uses -
-		// the bootd container's readinessProbe targets /readyz
-		// unconditionally, so it must exist even with no registered
-		// check.
-		if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-			setupLog.Error(err, "unable to set up readiness check")
 			os.Exit(1)
 		}
 	}
