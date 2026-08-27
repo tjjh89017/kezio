@@ -15,6 +15,10 @@
 > Expect to hit problems the documentation does not cover, and to read
 > the code when you do.
 
+**New here? Start with [`docs/quick-start.md`](docs/quick-start.md)** -
+it takes an empty cluster and one machine to a deployed OS, one checked
+step at a time.
+
 kezio is a Kubernetes operator. It orchestrates bare-metal OS deployment.
 It uses [ezio](https://github.com/tjjh89017/ezio) as the deploy engine.
 ezio writes disk partitions over BitTorrent, with partclone images as
@@ -180,6 +184,8 @@ the release's `kezioctl-SHA256SUMS` file before running it.
 
 ## Documentation
 
+- [`docs/quick-start.md`](docs/quick-start.md): the step-by-step
+  bring-up from an empty cluster to one deployed machine.
 - [`docs/crd-reference.md`](docs/crd-reference.md): every custom
   resource and how they relate - the network model, the content
   model, and the machine and deploy model, with the rules that are
