@@ -208,21 +208,30 @@ Deployment to those two Services' in-cluster cluster-DNS URLs
 (`http://boot-server.kezio-system.svc.cluster.local:8090` and
 `http://agent-server.kezio-system.svc.cluster.local:8091`, for a
 deployment that keeps `config/default`'s own `kezio-system`
-namespace). Every `Subnet`'s bootd then proxies every `/boot/...` and `/agent/...`
-request it receives to the matching Service. Point `BOOT_SERVER_URL`
-and `BOOT_AGENT_SERVER_URL` (also on the controller-manager Deployment)
-at each `Subnet`'s own `bootdServerIP` instead of a separately exposed
-Service - a single manager-wide value, so a lab with more than one
-`Subnet` must pick one `Subnet`'s bootd as the address every other
-segment routes to for boot config and agent registration (this is the
-shape the routed multi-subnet case in section 2.7 uses). With this in
-place, a machine on any provisioning segment needs exactly one
-reachable address for the whole boot-to-registration flow: bootd's own.
+namespace). Every `Subnet`'s bootd then proxies every `/boot/...` and
+`/agent/...` request it receives to the matching Service. Nothing else
+is required per `Subnet`: `internal/bootserver` already renders each
+netbooting machine's grub.cfg with its own `Subnet`'s `bootdServerIP` as
+the base URL for the kernel/initrd/squashfs fetch and agent
+registration, so a lab with more than one `Subnet` needs no
+manager-wide address at all - each segment's machines are routed
+through their own bootd (this is the shape the routed multi-subnet case
+in section 2.7 uses). With this in place, a machine on any provisioning
+segment needs exactly one reachable address for the whole
+boot-to-registration flow: its own `Subnet`'s bootd.
 
-A site that does not use bootd's proxy must expose the boot config and
-agent servers itself (a NodePort, a LoadBalancer, or `hostNetwork`) and
-point `BOOT_SERVER_URL` / `BOOT_AGENT_SERVER_URL` at that address
-instead. bootd's proxy is the default path, not the only one.
+`BOOT_SERVER_URL` / `BOOT_AGENT_SERVER_URL` (also on the
+controller-manager Deployment) are optional and only take effect as a
+fallback, for a `Machine` whose `SubnetRef` is dangling or whose
+`Subnet` declares no boot half (`spec.bootdServerIP` unset) - they are
+never consulted for a `Machine` on a `Subnet` with a boot half. A site
+that does not use bootd's proxy at all - every `Subnet` has no boot
+half - must expose the boot config and agent servers itself (a
+NodePort, a LoadBalancer, or `hostNetwork`) and set `BOOT_SERVER_URL` /
+`BOOT_AGENT_SERVER_URL` at that address so those `Machine`s still get a
+working fallback; leaving them unset there means every `Machine`
+without a `Subnet` boot half never gets a net-boot config and always
+boots local disk instead.
 
 ### 2.5 BMC network reachability
 
@@ -332,10 +341,11 @@ the objects above:
   torrent from the seeder one segment away. A single-segment `Site` says
   `gateway: ""` instead; a `Site` with more than one segment needs a
   real address here.
-- One `BOOT_SERVER_URL` / `BOOT_AGENT_SERVER_URL` pair on the
-  controller-manager, pointed at whichever boot `Subnet`'s bootd fronts
-  the reverse proxy (section 2.4) - a routed segment's machines reach it
-  over the same L3 hop their own bootd already assumes exists.
+
+No manager-wide `BOOT_SERVER_URL` / `BOOT_AGENT_SERVER_URL` is needed
+for this shape: each boot `Subnet` declares its own `bootdServerIP`, so
+`internal/bootserver` already routes each segment's machines to their
+own bootd (section 2.4).
 
 This exact shape - two boot segments plus one data-plane segment, one
 Site - is what kezio's own `e2e-routed-site` GitHub Actions lane builds
@@ -539,9 +549,10 @@ each BMC's actual listening port against its own documentation.
    namespace. `config/netboot-e2e` composes exactly this set, but it
    pins its boot-artifacts image to a CI-only tag; copy its shape into
    an overlay of your own.
-2. Set `BOOT_SERVER_ADDR`, `AGENT_SERVER_ADDR`, `BOOT_SERVER_URL`,
-   `BOOT_AGENT_SERVER_URL`, and `DEPLOYER=agent` on the
-   controller-manager Deployment.
+2. Set `BOOT_SERVER_ADDR`, `AGENT_SERVER_ADDR`, and `DEPLOYER=agent` on
+   the controller-manager Deployment. `BOOT_SERVER_URL` /
+   `BOOT_AGENT_SERVER_URL` are optional - set them only as a fallback
+   for a `Machine` whose `Subnet` has no boot half (section 2.4).
 3. Set `TRACKER_DEPLOYMENT_IMAGE` on the controller-manager to enable
    per-Site tracker Deployment reconciliation, and
    `PARTITIONCONTENT_SEEDER_IMAGE` to enable per-`(Image, Site)` seeder

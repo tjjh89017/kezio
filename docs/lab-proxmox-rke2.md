@@ -680,16 +680,16 @@ Each optional feature is off until an environment variable turns it on.
 The set below is the set that `.github/workflows/main.yaml` gives to
 `deploy-kezio` for its deploy lane.
 
-`192.0.2.2` is the address of bootd. Each machine on the segment reaches
-the boot API and the agent API through the reverse proxy of bootd, so it
-is the only address that the target VM ever needs.
+`192.0.2.2` is the address of bootd - the Subnet's own `bootdServerIP`
+(section 6). Each machine on the segment reaches the boot API and the
+agent API through the reverse proxy of bootd, so it is the only address
+that the target VM ever needs; the manager derives it from the Subnet
+itself, so no `BOOT_SERVER_URL` / `BOOT_AGENT_SERVER_URL` is set below.
 
 ```sh
 kubectl -n kezio-system set env deployment/kezio-controller-manager \
   DEPLOYER=agent \
   BOOT_SERVER_ADDR=:8090 \
-  BOOT_SERVER_URL="http://192.0.2.2" \
-  BOOT_AGENT_SERVER_URL="http://192.0.2.2" \
   AGENT_SERVER_ADDR=:8091 \
   BOOTD_DEPLOYMENT_IMAGE="${BOOTD_IMG}" \
   BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE="${BOOT_ARTIFACTS_IMG}" \
@@ -713,11 +713,15 @@ What each group does, and where it is easy to make an error:
 - **`BOOT_SERVER_ADDR` and `AGENT_SERVER_ADDR`** start the two servers
   inside the manager process. `BOOT_ARTIFACTS_DIR` comes from the
   boot-artifacts component in your overlay, so do not set it here.
-- **`BOOT_AGENT_SERVER_URL` must be set.** If it is unset, it falls back
-  to `BOOT_SERVER_URL`. The two front different container ports. When it
-  is incorrect, the registration POST of the agent gets 404 for ever,
-  and the Machine stays in Inspecting with nothing in the log of the
-  manager to explain it.
+- **`BOOT_SERVER_URL` / `BOOT_AGENT_SERVER_URL` are not set above.** The
+  boot config server derives each Machine's boot server address from its
+  own Subnet's `bootdServerIP` (section 6), so these two env vars are
+  needed only as a manager-wide fallback, for a Machine whose Subnet
+  declares no boot half. `BOOT_AGENT_SERVER_URL` falls back to
+  `BOOT_SERVER_URL` when unset, and the two front different container
+  ports; if a fallback is set incorrectly, the registration POST of the
+  agent gets 404 for ever, and the Machine stays in Inspecting with
+  nothing in the log of the manager to explain it.
 - **`BOOTD_DEPLOYMENT_*_UPSTREAM_URL`** are ClusterIP Services, and they
   are correct as such. Only bootd calls them, from inside the cluster.
 - **`PARTITIONCONTENT_PUBLISH_IMAGE` is the ingest image**, not the
@@ -1337,8 +1341,8 @@ have content needs a `seederSubnetRef`, or its Machines wait for ever.
 | `Valid=Unknown` on the Subnet or the Site | Expected with the `host-local` seeder NAD above. See section 6.3. |
 | The VM shows PXE-E16 or PXE-E18 and never boots | The FORWARD accept and the checksum rule in section 3.4. Then confirm that the `k8s.v1.cni.cncf.io/network-status` annotation of the bootd pod really lists `kezio-boot-network`. |
 | The VM gets no DHCP answer at all | The MAC gate. `spec.bootMACAddress` must be exactly the MAC of the NIC. The log of bootd names each MAC that it refuses. |
-| GRUB loads, then nothing | `curl http://192.0.2.2:80/boot/artifacts/manifest.json` from the node. A failure there is the proxy of bootd or `BOOT_SERVER_URL`. |
-| The Machine stays in Inspecting | `BOOT_AGENT_SERVER_URL` and `DEPLOYER=agent` (section 5.4). |
+| GRUB loads, then nothing | `curl http://192.0.2.2:80/boot/artifacts/manifest.json` from the node. A failure there is the proxy of bootd, or the Subnet's `bootdServerIP`. |
+| The Machine stays in Inspecting | The Subnet's `bootdServerIP` (or `BOOT_AGENT_SERVER_URL` if its Subnet has no boot half) and `DEPLOYER=agent` (section 5.4). |
 | The ImageImport stays at Pending | `IMAGE_INGEST_IMAGE` and `IMAGE_INGEST_STAGING_PVC`. The conditions of the import name which one is unset. |
 | The ingest Job fails on the format | `IMAGE_INGEST_SOURCE_FORMAT` must match the real format of the source. It defaults to `qcow2`. |
 | The ingest Job fails naming `/dev/nbd0` or a missing partition device | The node's `nbd` kernel module is not loaded (or lacks partition support): `sudo modprobe nbd max_part=16`. Or set `IMAGE_INGEST_UNPRIVILEGED=true` to fall back to the unprivileged copy path. |
