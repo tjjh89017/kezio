@@ -78,6 +78,16 @@ spec:
                   webhook enforces.
                 pattern: ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$
                 type: string
+              bootTimeout:
+                description: |-
+                  BootTimeout is the longest time kezio waits from power-on until the
+                  agent registers. It sets the boot token lifetime for this Machine. It
+                  can only extend the operator default; a shorter value has no effect.
+                format: duration
+                type: string
+                x-kubernetes-validations:
+                - message: bootTimeout must be a positive duration
+                  rule: self > duration('0s')
               claimRef:
                 description: |-
                   ClaimRef binds this machine to exactly one MachineClaim. The claim

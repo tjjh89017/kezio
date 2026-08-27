@@ -190,6 +190,13 @@ type MachineSpec struct {
 	// +listType=atomic
 	// +optional
 	Console []string `json:"console,omitempty"`
+	// BootTimeout is the longest time kezio waits from power-on until the
+	// agent registers. It sets the boot token lifetime for this Machine. It
+	// can only extend the operator default; a shorter value has no effect.
+	// +kubebuilder:validation:Format=duration
+	// +kubebuilder:validation:XValidation:rule="self > duration('0s')",message="bootTimeout must be a positive duration"
+	// +optional
+	BootTimeout *metav1.Duration `json:"bootTimeout,omitempty"`
 }
 
 // MachineClaimReference binds a Machine to the MachineClaim that holds
