@@ -768,10 +768,12 @@ jobs:
         with:
           version: "v0.9.0"
 
-      # BOOT_SERVER_URL/BOOT_AGENT_SERVER_URL point at bootd's own
-      # provisioning-network address: bootd's reverse proxy is what a
-      # net-booting machine can actually reach, not the ClusterIP
-      # Services BOOTD_DEPLOYMENT_*_UPSTREAM_URL name.
+      # No BOOT_SERVER_URL/BOOT_AGENT_SERVER_URL below: the Subnet
+      # created later in this lane declares a boot half
+      # (bootd-server-ip: BOOTD_SERVER_IP), so internal/bootserver
+      # already derives bootd's own provisioning-network address from
+      # it - the manager-wide fallback is never consulted, and leaving
+      # it unset here proves that Subnet-derived path in CI.
       #
       # The IMAGE_INGEST_*/PARTITIONCONTENT_SEEDER_* vars below are the
       # same ones the image-path lane sets, wiring this one
@@ -792,8 +794,6 @@ jobs:
           extra-env: |
             DEPLOYER=agent
             BOOT_SERVER_ADDR=:8090
-            BOOT_SERVER_URL=http://${{ env.BOOTD_SERVER_IP }}
-            BOOT_AGENT_SERVER_URL=http://${{ env.BOOTD_SERVER_IP }}
             AGENT_SERVER_ADDR=:8091
             BOOTD_DEPLOYMENT_IMAGE=example.com/kezio-bootd:e2e
             BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE=${{ env.BOOT_ARTIFACTS_IMG }}
@@ -1278,15 +1278,11 @@ jobs:
   # one seeder.
   #
   # What this lane does NOT claim: nothing about latency, bandwidth, or
-  # WAN copy counts - one runner cannot produce those. It also does not
-  # claim per-Subnet boot-server isolation: BOOT_SERVER_URL/
-  # BOOT_AGENT_SERVER_URL (below) are one manager-wide static value, so
-  # both machines' kernel/initrd fetch and agent traffic are addressed at
-  # segment A's bootd even for the machine on segment B - correct here
-  # only because A and B are routable to each other inside this one Site,
-  # the same routed hop the seeder/tracker assertions below exercise. A
-  # lane whose segments must NOT route to each other (the two-site lane)
-  # cannot reuse this shortcut; it needs its own boot server per Site.
+  # WAN copy counts - one runner cannot produce those. Both Subnet A and
+  # Subnet B declare their own bootd-server-ip below, so
+  # internal/bootserver already addresses each machine's kernel/initrd
+  # fetch and agent traffic at its own segment's bootd - no manager-wide
+  # BOOT_SERVER_URL/BOOT_AGENT_SERVER_URL is set for this lane at all.
   #
   # Heaviest lane so far: two full boot-and-deploy chains plus the
   # KubeVirt stack on one runner. check-runner-resources below uses the
@@ -1440,12 +1436,13 @@ jobs:
           version: "v0.9.0"
 
       # One controller-manager for the whole lane, same as the
-      # single-segment deploy lane. BOOT_SERVER_URL/BOOT_AGENT_SERVER_URL
-      # are a single manager-wide value (internal/bootserver.Config, set
-      # once at manager startup - see this job's own top comment): pointed
-      # at segment A's bootd, which segment B's machine reaches over the
-      # same routed hop this lane's Site provides. TRACKER_DEPLOYMENT_IMAGE
-      # backs the one Site-managed tracker Deployment created below.
+      # single-segment deploy lane. No BOOT_SERVER_URL/
+      # BOOT_AGENT_SERVER_URL below: Subnet A and Subnet B (created later
+      # in this job) each declare their own bootd-server-ip, so
+      # internal/bootserver derives each machine's boot server address
+      # from its own Subnet - segment B's machine is never addressed at
+      # segment A's bootd. TRACKER_DEPLOYMENT_IMAGE backs the one
+      # Site-managed tracker Deployment created below.
       - name: Deploy kezio CRDs and controller-manager
         uses: ./.github/actions/deploy-kezio
         with:
@@ -1454,8 +1451,6 @@ jobs:
           extra-env: |
             DEPLOYER=agent
             BOOT_SERVER_ADDR=:8090
-            BOOT_SERVER_URL=http://${{ env.BOOTD_A_IP }}
-            BOOT_AGENT_SERVER_URL=http://${{ env.BOOTD_A_IP }}
             AGENT_SERVER_ADDR=:8091
             BOOTD_DEPLOYMENT_IMAGE=example.com/kezio-bootd:e2e
             BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE=${{ env.BOOT_ARTIFACTS_IMG }}
@@ -2169,12 +2164,14 @@ jobs:
           version: "v0.9.0"
 
       # One controller-manager for the whole lane, same as every other
-      # e2e lane. BOOT_SERVER_URL/BOOT_AGENT_SERVER_URL are the
-      # manager-wide fallback only: both Subnets below carry their own
-      # bootdServerIP, so each Machine's kernel/initrd/squashfs and
-      # kezio.server= URLs are built from its own Subnet, never this
-      # fallback - see this job's own top comment. TRACKER_DEPLOYMENT_IMAGE
-      # backs both Sites' tracker Deployments; each Site creates its own.
+      # e2e lane. No BOOT_SERVER_URL/BOOT_AGENT_SERVER_URL below: both
+      # Subnets carry their own bootdServerIP, so each Machine's
+      # kernel/initrd/squashfs and kezio.server= URLs are built from its
+      # own Subnet - the manager-wide fallback is never consulted, and
+      # leaving it unset proves that per-Subnet isolation across two
+      # Sites that cannot route to each other (see this job's own top
+      # comment). TRACKER_DEPLOYMENT_IMAGE backs both Sites' tracker
+      # Deployments; each Site creates its own.
       - name: Deploy kezio CRDs and controller-manager
         uses: ./.github/actions/deploy-kezio
         with:
@@ -2183,8 +2180,6 @@ jobs:
           extra-env: |
             DEPLOYER=agent
             BOOT_SERVER_ADDR=:8090
-            BOOT_SERVER_URL=http://${{ env.BOOTD_X_IP }}
-            BOOT_AGENT_SERVER_URL=http://${{ env.BOOTD_X_IP }}
             AGENT_SERVER_ADDR=:8091
             BOOTD_DEPLOYMENT_IMAGE=example.com/kezio-bootd:e2e
             BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE=${{ env.BOOT_ARTIFACTS_IMG }}
@@ -3138,8 +3133,9 @@ jobs:
   # What this lane does NOT claim: nothing about latency, bandwidth, or
   # per-peer fairness - one runner cannot produce those. It also does not
   # re-prove cross-Site isolation (the two-site lane's job) or per-Subnet
-  # boot-server isolation: all three machines share one boot Subnet, so
-  # the manager-wide BOOT_SERVER_URL below is that Subnet's own bootd.
+  # boot-server isolation: all three machines share one boot Subnet with
+  # its own bootd-server-ip, so no manager-wide BOOT_SERVER_URL is set
+  # for this lane at all.
   #
   # Heaviest lane in this workflow by machine count: three full
   # boot-and-deploy chains plus the KubeVirt stack on one runner, at 2Gi
@@ -3292,12 +3288,11 @@ jobs:
           version: "v0.9.0"
 
       # One controller-manager for the whole lane, same as every other
-      # e2e lane. BOOT_SERVER_URL/BOOT_AGENT_SERVER_URL are one
-      # manager-wide value (internal/bootserver.Config, set once at
-      # manager startup) and all three machines share the one boot
-      # Subnet, so that value is simply this lane's own bootd - no
-      # cross-segment caveat applies here. TRACKER_DEPLOYMENT_IMAGE backs
-      # the one Site-managed tracker Deployment created below.
+      # e2e lane. No BOOT_SERVER_URL/BOOT_AGENT_SERVER_URL below: all
+      # three machines share the one boot Subnet (created later in this
+      # job) with its own bootd-server-ip, so internal/bootserver derives
+      # every machine's boot server address from it. TRACKER_DEPLOYMENT_IMAGE
+      # backs the one Site-managed tracker Deployment created below.
       - name: Deploy kezio CRDs and controller-manager
         uses: ./.github/actions/deploy-kezio
         with:
@@ -3306,8 +3301,6 @@ jobs:
           extra-env: |
             DEPLOYER=agent
             BOOT_SERVER_ADDR=:8090
-            BOOT_SERVER_URL=http://${{ env.BOOTD_T_IP }}
-            BOOT_AGENT_SERVER_URL=http://${{ env.BOOTD_T_IP }}
             AGENT_SERVER_ADDR=:8091
             BOOTD_DEPLOYMENT_IMAGE=example.com/kezio-bootd:e2e
             BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE=${{ env.BOOT_ARTIFACTS_IMG }}
