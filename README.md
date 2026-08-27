@@ -58,28 +58,37 @@ intent; binding a `MachineClaim` is what starts a provision.
    non-swap partition and the `Image` whose layout binds them. An import
    fails rather than write over a name that already exists.
 2. A publish step builds a `.torrent` file for each `PartitionContent`.
-3. Each time the operator arms a net boot (for inspect or for provision),
+3. A new `Machine` first network boots the agent once only to inspect
+   itself: the agent registers and reports the inventory that becomes
+   its `MachineHardware`, and the `Machine` becomes Available. That
+   inventory is what resolves a claim's target-disk hints and hardware
+   selectors before any deploy starts, so the inspect boot is kept
+   separate from the provision boot by design. A `Machine` whose
+   inventory is already known can skip it with the
+   `kezio.kojuro.date/inspect-disable` annotation.
+4. Each time the operator arms a net boot (for inspect or for provision),
    it powers the machine on and, on a lease-mode `Subnet`, reserves a
    fixed DHCP address for it in `status.dhcp.reservations`. The
    reservation releases again once that step completes, the `Machine` is
    deleted, or its boot MAC or `Subnet` changes.
-4. A `MachineClaim` bound to the `Machine` carries the deploy intent -
+5. A `MachineClaim` bound to the `Machine` carries the deploy intent -
    which `Image`, which data images, which disk, which hooks. Binding
    it starts a provision.
-5. Once a `MachineClaim` bound to a `Machine` names an `Image`, the
+6. Once a `MachineClaim` bound to a `Machine` names an `Image`, the
    operator starts one seeder Deployment for that `Image` at that
    `Machine`'s `Site` - one process serving every `PartitionContent`
-   the `Image` references. The seeder stops after a grace period once
-   every deploy of that `Image` at that `Site` has finished - no
-   Machine there is still enrolling, inspecting, available, or
-   provisioning, and no active `DeployRun` there names it either.
-6. The network-booted agent asks the operator for its deploy plan. It
+   the `Image` references. The seeder stops after a grace period
+   (`PARTITIONCONTENT_SEEDER_GRACE_PERIOD`, default 5 minutes) once no
+   deploy of that `Image` at that `Site` is pending or in progress: a
+   `Machine` that reached Provisioned no longer counts, so the seeder is
+   recycled as soon as the last deploy of a batch finishes.
+7. The network-booted agent asks the operator for its deploy plan. It
    fetches each partition's `.torrent` over HTTP from the seeder pod,
    leeches the content over BitTorrent, writes each partition with
    partclone, replays the disk layout, runs any `PostHook` steps, and
    points the UEFI boot entry at the new disk.
-7. The operator power-cycles the machine through its BMC. The machine
-   boots into the deployed disk. The DHCP reservation from step 3
+8. The operator power-cycles the machine through its BMC. The machine
+   boots into the deployed disk. The DHCP reservation from step 4
    releases now that the provision has completed.
 
 ## Network boot
@@ -90,6 +99,16 @@ that segment's own DHCP lease authority), and it serves the boot loader
 over TFTP. The controller manager serves boot configuration and live
 boot artifacts (kernel, initrd, squashfs) over HTTP; `bootd` proxies
 these onward to the booting machine.
+
+Every component on the provisioning network reports ready only once its
+own attachment is actually there: `bootd`'s readiness probe fails until
+its DHCP interface holds an IPv4 address inside the `Subnet`'s
+provisioning range, the seeder's health probe fails until its seeding
+interface holds an IPv4 address, and a `Site` reports
+`TrackerNetworkReady=False` (and `Ready=False`) when the tracker pod's
+network attachment does not carry `spec.tracker.ip`. A pod that lost its
+Multus attachment therefore shows up in `kubectl get site` and in pod
+readiness instead of as deploys that stall at 0%.
 
 See [`docs/network-model.md`](docs/network-model.md) for what a `Site`
 guarantees, how the boot and data planes split across `Subnet` objects,
