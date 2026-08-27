@@ -55,22 +55,27 @@ func TestShouldPauseTorrent(t *testing.T) {
 		},
 		{
 			name: "finished long enough and idle long enough",
-			t:    seeder.Torrent{IsFinished: true, TotalDone: 100, TotalPayloadUpload: 0, FinishedTime: 16, LastUpload: 16},
+			t:    seeder.Torrent{IsFinished: true, TotalDone: 100, TotalPayloadUpload: 0, FinishedTime: 61, LastUpload: 61},
 			want: true,
 		},
 		{
+			name: "finished exactly at threshold does not trigger (boundary is exclusive)",
+			t:    seeder.Torrent{IsFinished: true, TotalDone: 100, TotalPayloadUpload: 0, FinishedTime: 60, LastUpload: 61},
+			want: false,
+		},
+		{
 			name: "finished long enough but still uploading recently",
-			t:    seeder.Torrent{IsFinished: true, TotalDone: 100, TotalPayloadUpload: 0, FinishedTime: 16, LastUpload: 5},
+			t:    seeder.Torrent{IsFinished: true, TotalDone: 100, TotalPayloadUpload: 0, FinishedTime: 61, LastUpload: 5},
 			want: false,
 		},
 		{
 			name: "finished long enough and never uploaded (sentinel -1)",
-			t:    seeder.Torrent{IsFinished: true, TotalDone: 100, TotalPayloadUpload: 0, FinishedTime: 16, LastUpload: -1},
+			t:    seeder.Torrent{IsFinished: true, TotalDone: 100, TotalPayloadUpload: 0, FinishedTime: 61, LastUpload: -1},
 			want: true,
 		},
 		{
 			name: "finished but not long enough yet, even if idle",
-			t:    seeder.Torrent{IsFinished: true, TotalDone: 100, TotalPayloadUpload: 0, FinishedTime: 10, LastUpload: 100},
+			t:    seeder.Torrent{IsFinished: true, TotalDone: 100, TotalPayloadUpload: 0, FinishedTime: 59, LastUpload: 100},
 			want: false,
 		},
 	}

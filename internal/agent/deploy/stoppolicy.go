@@ -19,14 +19,13 @@ package deploy
 import "github.com/tjjh89017/kezio/internal/seeder"
 
 // minFinishedSeconds and minIdleUploadSeconds are the two halves of the
-// "finished and idle" pause condition, both fixed at 15 seconds -
-// matching ezio's own reference client's finished/idle timeout defaults,
-// since the target machine seeding to other leechers during a fleet
-// deploy is the same situation ezio's own reference client already
-// handles this way.
+// "finished and idle" pause condition, both fixed at 60 seconds: a
+// leecher that leaves the swarm right after finishing stops
+// contributing upload to the DUTs still writing, and a minute is cheap
+// next to the deploy itself.
 const (
-	minFinishedSeconds   = 15
-	minIdleUploadSeconds = 15
+	minFinishedSeconds   = 60
+	minIdleUploadSeconds = 60
 	// uploadRatioLimit is the "upload > N x size" pause threshold.
 	uploadRatioLimit = 3
 )
