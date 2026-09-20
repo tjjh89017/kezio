@@ -40,7 +40,10 @@ later command:
 
 ```sh
 export KEZIO_VERSION=v0.3.13
+export KEZIO_IMAGE_TAG="${KEZIO_VERSION#v}"
 ```
+
+The images on ghcr.io use the version without the leading "v".
 
 The addresses in this guide, on the provisioning segment
 `192.0.2.0/24`:
@@ -109,9 +112,9 @@ patches:
       name: kezio-system
 EOF
 
-(cd config/manager && kustomize edit set image "controller=ghcr.io/tjjh89017/kezio:${KEZIO_VERSION}")
+(cd config/manager && kustomize edit set image "controller=ghcr.io/tjjh89017/kezio:${KEZIO_IMAGE_TAG}")
 (cd config/quickstart && kustomize edit set image \
-  "ghcr.io/tjjh89017/kezio-boot-artifacts=ghcr.io/tjjh89017/kezio-boot-artifacts:${KEZIO_VERSION}")
+  "ghcr.io/tjjh89017/kezio-boot-artifacts=ghcr.io/tjjh89017/kezio-boot-artifacts:${KEZIO_IMAGE_TAG}")
 
 kustomize build config/crd | kubectl apply --server-side -f -
 kustomize build config/quickstart | kubectl apply -f -
@@ -150,7 +153,7 @@ export IMAGE_SERVICE_TOKEN="$(openssl rand -hex 32)"
 kubectl -n kezio-system create secret generic kezio-image-service-token \
   --from-literal=token="${IMAGE_SERVICE_TOKEN}"
 
-(cd config/image-service && kustomize edit set image "image-service=ghcr.io/tjjh89017/kezio-image-service:${KEZIO_VERSION}")
+(cd config/image-service && kustomize edit set image "image-service=ghcr.io/tjjh89017/kezio-image-service:${KEZIO_IMAGE_TAG}")
 kustomize build config/image-service | kubectl apply -f -
 kubectl -n kezio-system rollout status deployment/kezio-image-service --timeout=180s
 ```
@@ -182,14 +185,14 @@ kubectl -n kezio-system set env deployment/kezio-controller-manager \
   DEPLOYER=agent \
   BOOT_SERVER_ADDR=:8090 \
   AGENT_SERVER_ADDR=:8091 \
-  BOOTD_DEPLOYMENT_IMAGE="ghcr.io/tjjh89017/kezio-bootd:${KEZIO_VERSION}" \
-  BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE="ghcr.io/tjjh89017/kezio-boot-artifacts:${KEZIO_VERSION}" \
+  BOOTD_DEPLOYMENT_IMAGE="ghcr.io/tjjh89017/kezio-bootd:${KEZIO_IMAGE_TAG}" \
+  BOOTD_DEPLOYMENT_BOOT_ARTIFACTS_IMAGE="ghcr.io/tjjh89017/kezio-boot-artifacts:${KEZIO_IMAGE_TAG}" \
   BOOTD_DEPLOYMENT_BOOT_UPSTREAM_URL="http://boot-server.kezio-system.svc.cluster.local:8090" \
   BOOTD_DEPLOYMENT_AGENT_UPSTREAM_URL="http://agent-server.kezio-system.svc.cluster.local:8091" \
-  IMAGE_INGEST_IMAGE="ghcr.io/tjjh89017/kezio-ingest:${KEZIO_VERSION}" \
+  IMAGE_INGEST_IMAGE="ghcr.io/tjjh89017/kezio-ingest:${KEZIO_IMAGE_TAG}" \
   IMAGE_INGEST_STAGING_PVC=kezio-image-service-staging \
-  PARTITIONCONTENT_PUBLISH_IMAGE="ghcr.io/tjjh89017/kezio-ingest:${KEZIO_VERSION}" \
-  PARTITIONCONTENT_SEEDER_IMAGE="ghcr.io/tjjh89017/kezio-seeder:${KEZIO_VERSION}" \
+  PARTITIONCONTENT_PUBLISH_IMAGE="ghcr.io/tjjh89017/kezio-ingest:${KEZIO_IMAGE_TAG}" \
+  PARTITIONCONTENT_SEEDER_IMAGE="ghcr.io/tjjh89017/kezio-seeder:${KEZIO_IMAGE_TAG}" \
   TRACKER_DEPLOYMENT_IMAGE=ghcr.io/tunisiano187/opentracker-docker:master
 
 kubectl -n kezio-system rollout status deployment/kezio-controller-manager --timeout=180s

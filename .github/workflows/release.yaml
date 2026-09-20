@@ -96,11 +96,12 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}
-          # The tag pushed to ghcr.io is the git tag verbatim (with its
-          # leading "v"), not a semver-derived rewrite - v0.3.2 stays
-          # v0.3.2 on ghcr.io.
+          # The image tags on ghcr.io are the semver form, without the
+          # leading "v" - v0.3.13 gives 0.3.13, 0.3, and latest. The git
+          # tag and the Release keep the "v".
           tags-spec: |
-            type=raw,value=${{ github.ref_name }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
           dockerfile: ${{ matrix.dockerfile }}
           platforms: ${{ matrix.platforms }}
           cache-scope: ${{ matrix.name }}
@@ -140,7 +141,8 @@ jobs:
           registry: ${{ env.REGISTRY }}
           image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/kezio-boot-artifacts
           tags-spec: |
-            type=raw,value=${{ github.ref_name }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
           dockerfile: docker/boot-artifacts/Dockerfile
           platforms: linux/amd64
           cache-scope: boot-artifacts
@@ -236,8 +238,8 @@ jobs:
       - name: Point the installer manifest at this tag's manager image and build it
         run: |
           make kustomize
-          (cd config/manager && ../../bin/kustomize edit set image "controller=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/kezio:${{ github.ref_name }}")
-          make build-installer
+          VERSION="${GITHUB_REF_NAME#v}"
+          make build-installer IMG="${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/kezio:${VERSION}"
 
       - name: Download the kezioctl archives
         uses: actions/download-artifact@v8
