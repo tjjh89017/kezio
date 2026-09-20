@@ -39,7 +39,7 @@ Pick the kezio release to install and keep it in a variable for every
 later command:
 
 ```sh
-export KEZIO_VERSION=v0.3.13
+export KEZIO_VERSION=v0.3.14
 export KEZIO_IMAGE_TAG="${KEZIO_VERSION#v}"
 ```
 
